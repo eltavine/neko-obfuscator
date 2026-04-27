@@ -49,7 +49,7 @@ public final class NativeBuildEngine {
                 List<String> cmd = new ArrayList<>(List.of(
                     zigPath, "cc",
                     "-shared",
-                    debugBuild ? "-O1" : "-Oz",
+                    debugBuild ? "-O1" : "-O2",
                     "-std=c11", "-Wall", "-Wextra",
                     "-target", zigTarget,
                     "-I", jniInclude.toString()

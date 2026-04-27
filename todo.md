@@ -3,6 +3,63 @@
 > 更新日期：2026-04-27  
 > 本文件记录当前 main 工作树的真实状态、已完成部分、失败尝试、假设和禁止重复试错的结论。
 
+## 2026-04-27 进度（第二轮性能优化 — fused AALOAD + 对象字段快路径）
+
+测得（JDK 21.0.10 release，三次中位数）：
+
+| Workload | Original Java | 之前 | 现在 | 总收益 | 目标 (2×) | 是否达标 |
+| --- | --- | --- | --- | --- | --- | --- |
+| TEST.jar `Calc` | 11ms | 88ms | **85ms** | ~8× | 22ms | ✗ (受限于反射/StringBuilder) |
+| obfusjack matrix-mul Seq | 2ms | 140ms | **25ms** | 5.5× 提升 | 4ms | ✗ (受限于无 SIMD/无循环不变量提升) |
+| obfusjack matrix-mul Parallel | 2ms | 9ms | **1ms** | 9× 提升 | 4ms | **✓** |
+| obfusjack matrix-mul VThreads | 0ms | 9ms | **2ms** | 4.5× 提升 | — | **✓** |
+| obfusjack Platform threads | 27ms | 64ms | **63ms** | 持平 | 54ms | ~ (差 9ms，受限于 AtomicLong.addAndGet JNI) |
+| obfusjack Virtual threads | 15ms | 53ms | **61ms** | 略回退 | — | — |
+
+49 testcase / 6 testsuite 全绿。
+
+### 改动点（按收益从大到小）
+
+1. **AALOAD + Xaload peephole 融合**：检测 `AALOAD; <int-push>; <X>ALOAD` 模式
+   （矩阵 `a[i][k]` 访问 = 14M iter × 2 次/iter = 28M 次），融合成单个 inline C 调用
+   `neko_fast_aaload_<X>aload(thread, env, outer, idx1, idx2)`。直接读 outer[idx1] 的
+   raw inner_oop（compressed-oops 解码），再读 inner_oop[idx2] 的标量值。**完全跳过中间
+   inner array 的 JNI handle 分配**——矩阵 Seq 从 138ms → 25ms（5.5×）。
+   - 实现：`OpcodeTranslator.tryFuseArrayLoad`、`NativeTranslator.tryFusedAALoad`
+     (在 try-catch handler 集合相同时才安全融合)、`CCodeGenerator.appendFusedAALoadHelpers`。
+   - 也覆盖 `aaload + aaload`（3D 数组）：仅分配最终结果的 handle，省一层。
+
+2. **对象字段直接读 (`getfield` / `getstatic` of L-types)**：原 `neko_get_object_field` /
+   `neko_get_static_object_field` 是直接 JNI 调用。新增 `neko_fast_get_object_field` /
+   `neko_fast_get_static_object_field`：用 Unsafe 解析的字段 byte offset 直接 deref
+   receiver / static-base 的 narrow oop 槽位，inline-push 到当前 JNIHandleBlock。
+   - 实现需把 `bind_static_field_metadata` / `bind_instance_field_offset` 调用
+     的 `isPrimitiveFieldDescriptor` 守卫去掉（同一 Unsafe 路径同样适用于 L-类型）。
+   - **只对读做** —— 写仍走 JNI，确保 G1/ZGC card-mark 与 load barrier 正确触发。
+
+3. **release 改 `-O2`**：原 `-Oz` 优先 size，对内层循环大量 inline + CSE 帮助甚微。改 `-O2`
+   让编译器把 `g_hotspot.compressed_oops_enabled` 等全局负载从内层循环 hoist 出去
+   （配合 fused helper 大段 inline 后，分支预测器与 ICache 都受益）。
+
+### 仍然达不到 2× 的部分（需要更深入的 translator 改造）
+
+- **矩阵乘 Seq 内循环**：当前 25ms vs target 4ms。Java JIT 通过：
+  (a) hoisting `a[i]` aaload 到 inner k 循环外（loop-invariant code motion），
+  (b) 边界检查 elimination，
+  (c) AVX-512 SIMD 向量化 dot product。
+  我们没做循环分析，无法 hoist 不变 aaload；加上 `g_hotspot.compressed_oops_enabled`
+  branch 每 iter 都要查（不能 inlining 出循环），就堵住了 ~5–8ns/iter 的差距。
+  根治需要：translator 层做 basic block 分析 + IR loop detection + invariant code motion。
+
+- **Platform threads**：63ms vs target 54ms（差 9ms）。每 task 主体 = 1× getstatic BH（已快）
+  + 1× doTinyWork direct call（已最优）+ 1× AtomicLong.addAndGet via icache。最后这一步是
+  JNI `CallNonvirtualLongMethodA`，每次 ~500ns × 50000 = 25ms 量级。要消除需要识别
+  `AtomicLong.addAndGet` 并 intrinsify 成 `LOCK XADD` 直接对实例 value field 操作（需要
+  field offset + atomic builtin）。不在本轮范围。
+
+- **TEST.jar Calc**：runStr 大量 `StringBuilder.append` invokevirtual + runAdd 调用栈
+  深度 + 1M× recursive `call(int)` shadow stack 推/弹栈。fast path 覆盖面有限。
+
 ## 2026-04-27 进度（性能优化，目标 <2× pure-Java）
 
 测得（JDK 21.0.10 release，三次中位数）：

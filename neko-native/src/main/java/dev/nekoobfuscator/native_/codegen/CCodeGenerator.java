@@ -755,26 +755,28 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                     .append(c(fieldRef.name())).append("\", \"")
                     .append(c(fieldRef.desc())).append("\", ")
                     .append(fieldRef.isStatic() ? "JNI_TRUE" : "JNI_FALSE").append(");\n");
-                if (isPrimitiveFieldDescriptor(fieldRef.desc())) {
-                    if (fieldRef.isStatic()) {
-                        sb.append("    neko_bind_static_field_metadata(env, &")
-                            .append(staticFieldBaseSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), true))
-                            .append(", &")
-                            .append(staticFieldOffsetSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), true))
-                            .append(", ")
-                            .append(classSlotName(fieldRef.owner()))
-                            .append(", \"")
-                            .append(c(fieldRef.name()))
-                            .append("\");\n");
-                    } else {
-                        sb.append("    neko_bind_instance_field_offset(env, &")
-                            .append(fieldOffsetSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), false))
-                            .append(", ")
-                            .append(classSlotName(fieldRef.owner()))
-                            .append(", \"")
-                            .append(c(fieldRef.name()))
-                            .append("\");\n");
-                    }
+                /* Resolve byte-offset metadata for both primitive AND object
+                 * fields. The Unsafe-based resolution path works for either,
+                 * and the resulting offset feeds the fast oop-deref reads in
+                 * neko_fast_get_*_field. */
+                if (fieldRef.isStatic()) {
+                    sb.append("    neko_bind_static_field_metadata(env, &")
+                        .append(staticFieldBaseSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), true))
+                        .append(", &")
+                        .append(staticFieldOffsetSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), true))
+                        .append(", ")
+                        .append(classSlotName(fieldRef.owner()))
+                        .append(", \"")
+                        .append(c(fieldRef.name()))
+                        .append("\");\n");
+                } else {
+                    sb.append("    neko_bind_instance_field_offset(env, &")
+                        .append(fieldOffsetSlotName(fieldRef.owner(), fieldRef.name(), fieldRef.desc(), false))
+                        .append(", ")
+                        .append(classSlotName(fieldRef.owner()))
+                        .append(", \"")
+                        .append(c(fieldRef.name()))
+                        .append("\");\n");
                 }
             }
             for (StringRef stringRef : resolution.strings) {
@@ -2209,6 +2211,16 @@ NEKO_FAST_INLINE void* neko_decode_narrow_oop(uint32_t narrow) {
                    + (uintptr_t)g_hotspot.compressed_oops_base);
 }
 
+NEKO_FAST_INLINE char *neko_inner_oop_from_outer(char *outer_oop, jint idx1, jint outer_len) {
+    if (idx1 < 0 || idx1 >= outer_len) return NULL;
+    if (g_hotspot.compressed_oops_enabled) {
+        char *addr = outer_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] + ((jlong)idx1 * 4);
+        return (char*)neko_decode_narrow_oop(*(uint32_t*)addr);
+    }
+    char *addr = outer_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] + ((jlong)idx1 * 8);
+    return *(char**)addr;
+}
+
 NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx) {
     /* The fast path is only valid when:
      *   - VMStructs published the basic array layout (we reuse the int-array
@@ -2268,6 +2280,190 @@ NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArra
 }
 
 """);
+        appendFusedAALoadHelpers(sb);
+        appendObjectFieldFastHelpers(sb);
+    }
+
+    /**
+     * Fast paths for object field reads (GETFIELD / GETSTATIC of L-types).
+     * Skips the per-call JNI GetObjectField / GetStaticObjectField round-trip
+     * by reading the field's narrow / wide oop slot directly off the receiver
+     * (or static-base mirror) and inline-pushing the raw oop into the active
+     * JNIHandleBlock — same trick the AALOAD fast path uses.
+     *
+     * Read-only: object writes still go through the JNI setter so HotSpot's
+     * G1 / ZGC card-mark / load-barrier code paths fire correctly.
+     */
+    private void appendObjectFieldFastHelpers(StringBuilder sb) {
+        sb.append("""
+NEKO_FAST_INLINE jobject neko_fast_get_object_field(void *thread, JNIEnv *env, jobject obj, jfieldID fid, jlong offset) {
+    if (g_hotspot.initialized
+        && g_neko_handle_push_ready
+        && offset > 0
+        && thread != NULL
+        && obj != NULL) {
+        void *block = *(void**)((char*)thread + g_neko_off_thread_active_handles);
+        if (block != NULL) {
+            int32_t *top_ptr = (int32_t*)((char*)block + g_neko_off_jnih_block_top);
+            int32_t top = *top_ptr;
+            if (top < g_neko_jnih_block_capacity) {
+                char *receiver_oop = (char*)neko_handle_oop(obj);
+                if (receiver_oop != NULL) {
+                    void *element_oop;
+                    if (g_hotspot.compressed_oops_enabled) {
+                        element_oop = neko_decode_narrow_oop(*(uint32_t*)(receiver_oop + offset));
+                    } else {
+                        element_oop = *(void**)(receiver_oop + offset);
+                    }
+                    if (element_oop == NULL) return NULL;
+                    void **handles = (void**)((char*)block + g_neko_off_jnih_block_handles);
+                    handles[top] = element_oop;
+                    *top_ptr = top + 1;
+                    if (g_neko_method_layout.off_jnih_block_next > 0) {
+                        ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
+                        *(void**)((char*)block + off_last) = block;
+                    }
+                    return (jobject)&handles[top];
+                }
+            }
+        }
+    }
+    return neko_get_object_field(env, obj, fid);
+}
+
+NEKO_FAST_INLINE jobject neko_fast_get_static_object_field(void *thread, JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset) {
+    if (g_hotspot.initialized
+        && g_neko_handle_push_ready
+        && offset > 0
+        && thread != NULL
+        && staticBase != NULL) {
+        void *block = *(void**)((char*)thread + g_neko_off_thread_active_handles);
+        if (block != NULL) {
+            int32_t *top_ptr = (int32_t*)((char*)block + g_neko_off_jnih_block_top);
+            int32_t top = *top_ptr;
+            if (top < g_neko_jnih_block_capacity) {
+                char *base_oop = (char*)neko_handle_oop(staticBase);
+                if (base_oop != NULL) {
+                    void *element_oop;
+                    if (g_hotspot.compressed_oops_enabled) {
+                        element_oop = neko_decode_narrow_oop(*(uint32_t*)(base_oop + offset));
+                    } else {
+                        element_oop = *(void**)(base_oop + offset);
+                    }
+                    if (element_oop == NULL) return NULL;
+                    void **handles = (void**)((char*)block + g_neko_off_jnih_block_handles);
+                    handles[top] = element_oop;
+                    *top_ptr = top + 1;
+                    if (g_neko_method_layout.off_jnih_block_next > 0) {
+                        ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
+                        *(void**)((char*)block + off_last) = block;
+                    }
+                    return (jobject)&handles[top];
+                }
+            }
+        }
+    }
+    return neko_get_static_object_field(env, cls, fid);
+}
+
+""");
+    }
+
+    /**
+     * Fused AALOAD + primitive *ALOAD helper: skips the JNIHandle allocation
+     * for the intermediate inner-array reference, since the inner oop is only
+     * used immediately within this single inline function.
+     *
+     * Hot path for matrix-style nested arrays (a[i][k]) — eliminates 100% of
+     * per-iteration handle allocs in the inner loop.
+     */
+    private void appendFusedAALoadHelpers(StringBuilder sb) {
+        appendFusedAALoadPrim(sb, "b", "jbyte",  "NEKO_PRIM_B", "byte",   "jbyteArray");
+        appendFusedAALoadPrim(sb, "c", "jchar",  "NEKO_PRIM_C", "char",   "jcharArray");
+        appendFusedAALoadPrim(sb, "s", "jshort", "NEKO_PRIM_S", "short",  "jshortArray");
+        appendFusedAALoadPrim(sb, "i", "jint",   "NEKO_PRIM_I", "int",    "jintArray");
+        appendFusedAALoadPrim(sb, "l", "jlong",  "NEKO_PRIM_J", "long",   "jlongArray");
+        appendFusedAALoadPrim(sb, "f", "jfloat", "NEKO_PRIM_F", "float",  "jfloatArray");
+        appendFusedAALoadPrim(sb, "d", "jdouble","NEKO_PRIM_D", "double", "jdoubleArray");
+        sb.append("""
+NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2) {
+    if (g_hotspot.initialized
+        && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0
+        && g_neko_handle_push_ready
+        && thread != NULL && outer != NULL) {
+        void *block = *(void**)((char*)thread + g_neko_off_thread_active_handles);
+        if (block != NULL) {
+            int32_t *top_ptr = (int32_t*)((char*)block + g_neko_off_jnih_block_top);
+            int32_t top = *top_ptr;
+            if (top < g_neko_jnih_block_capacity) {
+                char *outer_oop = (char*)neko_handle_oop((jobject)outer);
+                if (outer_oop != NULL) {
+                    jint outer_len = *(jint*)(outer_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
+                    char *inner_oop = neko_inner_oop_from_outer(outer_oop, idx1, outer_len);
+                    if (inner_oop != NULL) {
+                        jint inner_len = *(jint*)(inner_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
+                        if (idx2 >= 0 && idx2 < inner_len) {
+                            void *element_oop;
+                            if (g_hotspot.compressed_oops_enabled) {
+                                char *addr = inner_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] + ((jlong)idx2 * 4);
+                                element_oop = neko_decode_narrow_oop(*(uint32_t*)addr);
+                            } else {
+                                char *addr = inner_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] + ((jlong)idx2 * 8);
+                                element_oop = *(void**)addr;
+                            }
+                            if (element_oop == NULL) return NULL;
+                            void **handles = (void**)((char*)block + g_neko_off_jnih_block_handles);
+                            handles[top] = element_oop;
+                            *top_ptr = top + 1;
+                            if (g_neko_method_layout.off_jnih_block_next > 0) {
+                                ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
+                                *(void**)((char*)block + off_last) = block;
+                            }
+                            return (jobject)&handles[top];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    jobject inner_handle = neko_get_object_array_element(env, outer, idx1);
+    if (inner_handle == NULL) return NULL;
+    return neko_get_object_array_element(env, (jobjectArray)inner_handle, idx2);
+}
+
+""");
+    }
+
+    private void appendFusedAALoadPrim(
+        StringBuilder sb, String prefix, String cType, String elemKind, String wrapperStem, String jArrayType
+    ) {
+        sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_aaload_").append(prefix)
+            .append("aload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2) {\n")
+            .append("    (void)thread;\n")
+            .append("    if (g_hotspot.initialized\n")
+            .append("        && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0\n")
+            .append("        && outer != NULL) {\n")
+            .append("        char *outer_oop = (char*)neko_handle_oop((jobject)outer);\n")
+            .append("        if (outer_oop != NULL) {\n")
+            .append("            jint outer_len = *(jint*)(outer_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);\n")
+            .append("            char *inner_oop = neko_inner_oop_from_outer(outer_oop, idx1, outer_len);\n")
+            .append("            if (inner_oop != NULL) {\n")
+            .append("                jint inner_len = *(jint*)(inner_oop + g_hotspot.primitive_array_base_offsets[").append(elemKind).append("] - 4);\n")
+            .append("                if (idx2 >= 0 && idx2 < inner_len) {\n")
+            .append("                    char *addr = inner_oop + g_hotspot.primitive_array_base_offsets[").append(elemKind).append("] + ((jlong)idx2 * g_hotspot.primitive_array_index_scales[").append(elemKind).append("]);\n")
+            .append("                    return *(").append(cType).append("*)addr;\n")
+            .append("                }\n")
+            .append("            }\n")
+            .append("        }\n")
+            .append("    }\n")
+            .append("    {\n")
+            .append("        jobject inner_handle = neko_get_object_array_element(env, outer, idx1);\n")
+            .append("        if (inner_handle == NULL) return (").append(cType).append(")0;\n")
+            .append("        ").append(cType).append(" value = (").append(cType).append(")0;\n")
+            .append("        neko_get_").append(wrapperStem).append("_array_region(env, (").append(jArrayType).append(")inner_handle, idx2, 1, &value);\n")
+            .append("        return value;\n")
+            .append("    }\n")
+            .append("}\n\n");
     }
 
     private void appendPrimitiveFieldHelpers(StringBuilder sb, char desc, String cType, String wrapperStem) {

@@ -135,6 +135,7 @@ public final class NativeTranslator {
                 continue;
             }
             StringConcatPattern concatPattern = renderedStringConcatPattern(insn);
+            OpcodeTranslator.FusedTranslation fused = (concatPattern == null) ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap) : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
                 fn.addStatement(opcodes.translateJump(jumpInsn, labelMap.get(jumpInsn.label)));
             } else if (insn instanceof TableSwitchInsnNode tableSwitchInsn) {
@@ -144,6 +145,9 @@ public final class NativeTranslator {
             } else if (concatPattern != null) {
                 fn.addStatement(new CStatement.RawC(concatPattern.code));
                 insn = concatPattern.lastInsn;
+            } else if (fused != null) {
+                fn.addStatement(new CStatement.RawC(fused.code()));
+                insn = fused.lastInsn();
             } else {
                 for (CStatement statement : opcodes.translate(insn)) {
                     fn.addStatement(statement);
@@ -277,6 +281,24 @@ public final class NativeTranslator {
             }
             bridge.visibleAnnotations.add(new AnnotationNode(descriptor));
         }
+    }
+
+    private OpcodeTranslator.FusedTranslation tryFusedAALoad(
+        OpcodeTranslator opcodes,
+        AbstractInsnNode insn,
+        Map<Integer, List<TryHandler>> activeHandlers,
+        Map<AbstractInsnNode, Integer> pcMap
+    ) {
+        if (insn.getOpcode() != Opcodes.AALOAD) return null;
+        OpcodeTranslator.FusedTranslation candidate = opcodes.tryFuseArrayLoad(insn);
+        if (candidate == null) return null;
+        Integer aaloadPc = pcMap.get(insn);
+        Integer lastPc = pcMap.get(candidate.lastInsn());
+        if (aaloadPc == null || lastPc == null) return null;
+        List<TryHandler> aaloadHandlers = activeHandlers.getOrDefault(aaloadPc, List.of());
+        List<TryHandler> lastHandlers = activeHandlers.getOrDefault(lastPc, List.of());
+        if (!aaloadHandlers.equals(lastHandlers)) return null;
+        return candidate;
     }
 
     private StringConcatPattern renderedStringConcatPattern(AbstractInsnNode start) {

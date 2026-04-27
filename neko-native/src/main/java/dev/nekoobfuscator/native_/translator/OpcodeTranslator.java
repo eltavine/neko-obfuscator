@@ -9,11 +9,14 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.FrameNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MultiANewArrayInsnNode;
 import org.objectweb.asm.tree.TypeInsnNode;
@@ -69,6 +72,65 @@ public final class OpcodeTranslator {
 
     public int stringCacheCount() {
         return stringCacheVars.size();
+    }
+
+    public record FusedTranslation(String code, AbstractInsnNode lastInsn) {}
+
+    /**
+     * Peephole-fuse {@code AALOAD; <int-push>; XALOAD} into a single C
+     * statement that reads the inner element directly off the outer array's
+     * raw oop slot — eliminating the JNI handle allocation that the
+     * standalone AALOAD would otherwise emit. Hot path for nested-array
+     * patterns like matrix multiply ({@code a[i][k]}).
+     *
+     * Returns null when the pattern does not apply; in that case the caller
+     * should fall back to the regular {@link #translate} path.
+     */
+    public FusedTranslation tryFuseArrayLoad(AbstractInsnNode insn) {
+        if (insn.getOpcode() != Opcodes.AALOAD) return null;
+        AbstractInsnNode n1 = nextNonMetaInsn(insn);
+        if (!isStraightLineFusable(n1)) return null;
+        String idx2Expr = intPushExpression(n1);
+        if (idx2Expr == null) return null;
+        AbstractInsnNode n2 = nextNonMetaInsn(n1);
+        if (!isStraightLineFusable(n2)) return null;
+        return buildFusedAALoad(idx2Expr, n2);
+    }
+
+    private boolean isStraightLineFusable(AbstractInsnNode n) {
+        return n != null && !(n instanceof LabelNode);
+    }
+
+    private AbstractInsnNode nextNonMetaInsn(AbstractInsnNode from) {
+        AbstractInsnNode n = from.getNext();
+        while (n != null && (n instanceof LineNumberNode || n instanceof FrameNode)) {
+            n = n.getNext();
+        }
+        return n;
+    }
+
+    private String intPushExpression(AbstractInsnNode insn) {
+        int op = insn.getOpcode();
+        if (op == Opcodes.ICONST_M1) return "-1";
+        if (op >= Opcodes.ICONST_0 && op <= Opcodes.ICONST_5) return String.valueOf(op - Opcodes.ICONST_0);
+        if (op == Opcodes.BIPUSH || op == Opcodes.SIPUSH) return String.valueOf(((IntInsnNode) insn).operand);
+        if (op == Opcodes.ILOAD) return "locals[" + ((VarInsnNode) insn).var + "].i";
+        return null;
+    }
+
+    private FusedTranslation buildFusedAALoad(String idx2Expr, AbstractInsnNode loadInsn) {
+        String prelude = "{ jint __idx2 = " + idx2Expr + "; jint __idx1 = POP_I(); jobjectArray __outer = (jobjectArray)POP_O(); ";
+        return switch (loadInsn.getOpcode()) {
+            case Opcodes.BALOAD -> new FusedTranslation(prelude + "PUSH_I((jint)neko_fast_aaload_baload(thread, env, __outer, __idx1, __idx2)); }", loadInsn);
+            case Opcodes.CALOAD -> new FusedTranslation(prelude + "PUSH_I((jint)neko_fast_aaload_caload(thread, env, __outer, __idx1, __idx2)); }", loadInsn);
+            case Opcodes.SALOAD -> new FusedTranslation(prelude + "PUSH_I((jint)neko_fast_aaload_saload(thread, env, __outer, __idx1, __idx2)); }", loadInsn);
+            case Opcodes.IALOAD -> new FusedTranslation(prelude + "PUSH_I(neko_fast_aaload_iaload(thread, env, __outer, __idx1, __idx2)); }", loadInsn);
+            case Opcodes.LALOAD -> new FusedTranslation(prelude + "PUSH_L(neko_fast_aaload_laload(thread, env, __outer, __idx1, __idx2)); }", loadInsn);
+            case Opcodes.FALOAD -> new FusedTranslation(prelude + "PUSH_F(neko_fast_aaload_faload(thread, env, __outer, __idx1, __idx2)); }", loadInsn);
+            case Opcodes.DALOAD -> new FusedTranslation(prelude + "PUSH_D(neko_fast_aaload_daload(thread, env, __outer, __idx1, __idx2)); }", loadInsn);
+            case Opcodes.AALOAD -> new FusedTranslation(prelude + "PUSH_O(neko_fast_aaload_aaload(thread, env, __outer, __idx1, __idx2)); }", loadInsn);
+            default -> null;
+        };
     }
 
     public List<CStatement> translate(AbstractInsnNode insn) {
@@ -592,11 +654,18 @@ public final class OpcodeTranslator {
         if (isStatic) {
             sb.append("jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
             sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, true)).append("; ");
-            sb.append("if (cls != NULL && fid != NULL) { ").append(pushForType(Type.getType(fi.desc), staticFieldGetter(fi.desc) + "(env, cls, fid)")).append(" } ");
+            sb.append("if (cls != NULL && fid != NULL) { ").append(pushForType(Type.getType(fi.desc),
+                "neko_fast_get_static_object_field(thread, env, cls, fid, "
+                    + codeGenerator.staticFieldBaseSlotName(fi.owner, fi.name, fi.desc, true) + ", "
+                    + codeGenerator.staticFieldOffsetSlotName(fi.owner, fi.name, fi.desc, true) + ")"
+            )).append(" } ");
         } else {
             sb.append("jobject obj = POP_O(); jclass cls = ").append(cachedClassExpression(fi.owner)).append("; ");
             sb.append("jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
-            sb.append("if (cls != NULL && fid != NULL) { ").append(pushForType(Type.getType(fi.desc), fieldGetter(fi.desc) + "(env, obj, fid)")).append(" } ");
+            sb.append("if (cls != NULL && fid != NULL) { ").append(pushForType(Type.getType(fi.desc),
+                "neko_fast_get_object_field(thread, env, obj, fid, "
+                    + codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false) + ")"
+            )).append(" } ");
         }
         sb.append("}");
         return sb.toString();
