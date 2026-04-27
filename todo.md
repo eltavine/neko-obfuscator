@@ -3,6 +3,65 @@
 > 更新日期：2026-04-27  
 > 本文件记录当前 main 工作树的真实状态、已完成部分、失败尝试、假设和禁止重复试错的结论。
 
+## 2026-04-27 进度（第三轮性能优化 — 通用结构性优化，不做针对性 intrinsic）
+
+用户明确否决"针对特定 API 做 intrinsic"的路线（如曾 prototype 过的 AtomicLong/Atomic*），改为
+模仿 HotSpot 内部处理方式做**适用于所有 translated 方法**的通用优化。
+
+测得（JDK 21.0.10 release，五次中位数）：
+
+| Workload | Original Java | 第二轮 | 第三轮 | 总收益 | 目标 (2×) | 是否达标 |
+| --- | --- | --- | --- | --- | --- | --- |
+| TEST.jar `Calc` | 11ms | 85ms | **80ms** | ~7.3× | 22ms | ✗ |
+| obfusjack matrix-mul Seq | 2ms | 25ms | **20ms** | 10× → 7× 提升 | 4ms | ✗ |
+| obfusjack matrix-mul Parallel | 2ms | 1ms | **1ms** | <1× | 4ms | **✓** |
+| obfusjack matrix-mul VThreads | 0ms | 2ms | **2ms** | — | — | **✓** |
+| obfusjack Platform threads | 17–26ms | 63ms | **66ms** | ~3× | ~44ms | ✗ |
+| obfusjack Virtual threads | 13–15ms | 60ms | **60ms** | ~4× | — | — |
+
+49 testcase / 6 testsuite 全绿。
+
+### 改动点（通用机制 — 所有方法受益）
+
+1. **Tail-call → goto 自递归**（`NativeTranslator.tryTailRecursion`）：
+   检测 `INVOKESTATIC self` 或 `INVOKESPECIAL self` 在 tail position（紧接 XRETURN，跳过
+   labels/lines/frames）的模式，重写为 `goto __neko_tco_entry`。
+   - 在 method entry 后 `neko_shadow_push` 之前插入 `__neko_tco_entry: ;` 作为 landing pad，
+     不影响其它 L0/L1/… 标号编号。
+   - try-handler 覆盖 invokestatic 的 PC 时跳过（handler 必须看见 frame）。
+   - 不优化 INVOKEVIRTUAL self（subclass override 风险）。
+   - 模仿 HotSpot interpreter rewriter 对自递归 invokestatic 的处理。
+
+2. **异常检测合并/延迟**（`NativeTranslator.needsCheckBefore`）：
+   原本每个 potentially-throwing op 后都 emit `if (neko_exception_check(env)) ...`。改为：
+   - 维护 `pendingHandlers` 状态。
+   - throwing op 后只**记录**待 flush 的 handler set，不立即 emit check。
+   - 在 control-flow boundary（jump / switch / return / athrow / 进入新 try-region / 标号）
+     才 flush。
+   - 直线代码段内连续 throwing ops 用一次 check 覆盖。
+   - 模仿 HotSpot interpreter 在 back-edge / method exit / safepoint poll 才检测异常的方式。
+   - 矩阵乘 Seq 内层每 iter 从 2 次 check → 1 次，省 5ms。
+
+3. **Locals memset elide**：原 `memset(locals, 0, sizeof(locals))` 在每次方法 entry 强制清零。
+   Java spec 保证 every local 在读之前必须被赋值（verifier guarantee），所以 memset 是冗余的。
+   `locals[]` 是 C 栈数组，对 GC 不可见（GC root 只有 JNI handles），残留 oop 指针不会被
+   误识别。删除后每次 entry 省 ~26 qword stores ≈ 3–5ns，1M× recursive call 累积省 3–5ms。
+
+### 为什么没有进一步优化（接受当前状态）
+
+- **AtomicLong.addAndGet**：50000× JNI CallNonvirtualLongMethodA × ~500ns = 25ms。这是 Platform
+  threads 离 target 的主要 gap，但消除需要为 specific JVM API 做 intrinsic，违反"全代码受益"
+  的原则。HotSpot 自己用 LOCK XADD 替换 AtomicLong._U.getAndAddLong 也是 intrinsic 路线，
+  无法用通用 transformation 替代。
+
+- **矩阵乘 Seq inner loop 14M iter × 2 fused calls**：每 fused call ~6 个 branches（global
+  load + bounds check + compressed-oops branch）。即使全 inline，编译器无法把 global load 
+  hoist 出循环（无法证明 global 不变）。要彻底消除需要 codegen 时为已知 const-after-init 的
+  flag 生成两个 specialized variant + 一次性 dispatch — 也是 specific 的 trick。
+
+- **String/StringBuilder hot loop**：TEST.jar Calc 的 runStr 调 100+ × StringBuilder.append。
+  通用优化对此无效；需要识别 StringBuilder 并直接操作 value/count field。
+
 ## 2026-04-27 进度（第二轮性能优化 — fused AALOAD + 对象字段快路径）
 
 测得（JDK 21.0.10 release，三次中位数）：

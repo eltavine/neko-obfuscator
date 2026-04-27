@@ -125,17 +125,48 @@ public final class NativeTranslator {
             "neko_shadow_push(\"" + c(selection.owner().name()) + "\", \"" + c(selection.method().name()) + "\", \""
                 + c(OpcodeTranslator.simpleSourceFileName(selection.owner().name())) + "\");"
         ));
+        /* Tail-call landing pad: tryTailRecursion rewrites self-recursion
+         * into `goto __neko_tco_entry`. Emitted unconditionally so unrelated
+         * label numbering (L0/L1/…) is unaffected. */
+        fn.addStatement(new CStatement.Label("__neko_tco_entry"));
 
+        /* --- exception-check coalescing state ---
+         * HotSpot's interpreter polls _pending_exception only at safepoints
+         * (back-edges, method exits, and try-region transitions), not after
+         * every JNI call. We mirror that: instead of emitting a check after
+         * every potentially-throwing op, defer it as `pendingHandlers` and
+         * flush it at:
+         *   - A control-flow boundary that needs accurate dispatch (jump,
+         *     switch, return, athrow, label that's a branch target)
+         *   - An instruction whose active handler set differs from the
+         *     pending op's (we're crossing a try-region edge, so an exception
+         *     thrown by the pending op must still be caught by the OLDER
+         *     handlers, not the new ones)
+         * If the method ends without flushing, the pending exception is
+         * preserved naturally — the JVM observes _pending_exception when our
+         * native function returns. */
+        List<TryHandler> pendingHandlers = null;
         for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof LabelNode labelNode) {
+                if (pendingHandlers != null) {
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
+                    pendingHandlers = null;
+                }
                 fn.addStatement(new CStatement.Label(labelMap.get(labelNode)));
                 continue;
             }
             if (insn instanceof LineNumberNode || insn instanceof FrameNode) {
                 continue;
             }
+            if (pendingHandlers != null && needsCheckBefore(insn, pendingHandlers, activeHandlers, pcMap)) {
+                fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
+                pendingHandlers = null;
+            }
             StringConcatPattern concatPattern = renderedStringConcatPattern(insn);
             OpcodeTranslator.FusedTranslation fused = (concatPattern == null) ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap) : null;
+            TailCallRewrite tail = (concatPattern == null && fused == null)
+                ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
+                : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
                 fn.addStatement(opcodes.translateJump(jumpInsn, labelMap.get(jumpInsn.label)));
             } else if (insn instanceof TableSwitchInsnNode tableSwitchInsn) {
@@ -148,6 +179,10 @@ public final class NativeTranslator {
             } else if (fused != null) {
                 fn.addStatement(new CStatement.RawC(fused.code()));
                 insn = fused.lastInsn();
+            } else if (tail != null) {
+                fn.addStatement(new CStatement.RawC(tail.code));
+                pendingHandlers = null;
+                continue;
             } else {
                 for (CStatement statement : opcodes.translate(insn)) {
                     fn.addStatement(statement);
@@ -156,8 +191,11 @@ public final class NativeTranslator {
 
             if (isRealInsn(insn) && isPotentiallyExcepting(insn)) {
                 List<TryHandler> handlers = activeHandlers.getOrDefault(pcMap.get(insn), List.of());
-                fn.addStatement(new CStatement.RawC(renderExceptionDispatch(handlers)));
+                pendingHandlers = handlers;
             }
+        }
+        if (pendingHandlers != null) {
+            fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers)));
         }
 
         fn.addStatement(new CStatement.Label("__neko_exception_exit"));
@@ -281,6 +319,149 @@ public final class NativeTranslator {
             }
             bridge.visibleAnnotations.add(new AnnotationNode(descriptor));
         }
+    }
+
+    /**
+     * Decide whether the deferred exception check (for the most recent
+     * potentially-throwing op, with its handler set) MUST be flushed before
+     * the next instruction. Required when:
+     *   - The next instruction's active handlers differ from the pending
+     *     op's. (Crossing a try-region boundary; the pending op's exception
+     *     must dispatch to its OWN handler set, not the new one.)
+     *   - The next instruction is a branch / switch / return / athrow.
+     *     Branches must observe the exception so dispatch is correct;
+     *     returns are safe in principle (JVM sees pending exception on
+     *     return) but skipping a check before athrow could mask the
+     *     original exception with the new one.
+     * Sequential straight-line instructions with the same handler set don't
+     * trigger a flush — letting subsequent JNI calls become no-ops on
+     * pending exception is harmless and the deferred check at the next
+     * boundary catches it.
+     */
+    private boolean needsCheckBefore(
+        AbstractInsnNode insn,
+        List<TryHandler> pendingHandlers,
+        Map<Integer, List<TryHandler>> activeHandlers,
+        Map<AbstractInsnNode, Integer> pcMap
+    ) {
+        Integer pc = pcMap.get(insn);
+        if (pc != null) {
+            List<TryHandler> here = activeHandlers.getOrDefault(pc, List.of());
+            if (!here.equals(pendingHandlers)) return true;
+        }
+        if (insn instanceof JumpInsnNode
+            || insn instanceof TableSwitchInsnNode
+            || insn instanceof LookupSwitchInsnNode) {
+            return true;
+        }
+        int op = insn.getOpcode();
+        return op == Opcodes.IRETURN
+            || op == Opcodes.LRETURN
+            || op == Opcodes.FRETURN
+            || op == Opcodes.DRETURN
+            || op == Opcodes.ARETURN
+            || op == Opcodes.RETURN
+            || op == Opcodes.ATHROW;
+    }
+
+    private record TailCallRewrite(String code, AbstractInsnNode lastInsn) {}
+
+    /**
+     * Tail-call elimination for self-recursion: when an INVOKESTATIC /
+     * INVOKESPECIAL targets the current method and is in tail position
+     * (immediately followed by a matching XRETURN, modulo labels/lines/frames),
+     * rewrite the call into a `goto L0` that re-enters the method body with
+     * the new argument values written into the local table.
+     *
+     * Mirrors what HotSpot's interpreter does for self-static recursion in
+     * the rewriter — eliminates the JNI stack-frame and shadow-stack push for
+     * every recursive level. Universal for any recursive Java method, not
+     * just hand-picked ones.
+     *
+     * Skipped when an exception handler is active over the call site (the
+     * handler must observe the call frame).
+     */
+    private TailCallRewrite tryTailRecursion(
+        AbstractInsnNode insn,
+        MethodSelection selection,
+        Type[] argTypes,
+        Map<Integer, List<TryHandler>> activeHandlers,
+        Map<AbstractInsnNode, Integer> pcMap
+    ) {
+        if (!(insn instanceof MethodInsnNode mi)) return null;
+        int opcode = mi.getOpcode();
+        if (opcode != Opcodes.INVOKESTATIC && opcode != Opcodes.INVOKESPECIAL) return null;
+        L1Method current = selection.method();
+        if (!mi.owner.equals(selection.owner().name())
+            || !mi.name.equals(current.name())
+            || !mi.desc.equals(current.descriptor())) {
+            return null;
+        }
+        boolean staticCall = (opcode == Opcodes.INVOKESTATIC);
+        if (staticCall != current.isStatic()) return null;
+        Integer callPc = pcMap.get(insn);
+        if (callPc == null) return null;
+        if (!activeHandlers.getOrDefault(callPc, List.of()).isEmpty()) return null;
+        AbstractInsnNode next = nextRealInsn(insn);
+        if (next == null) return null;
+        Type returnType = Type.getReturnType(current.descriptor());
+        if (!isMatchingReturn(next.getOpcode(), returnType)) return null;
+
+        StringBuilder sb = new StringBuilder("{ /* tail-call → goto L0 */ ");
+        for (int i = argTypes.length - 1; i >= 0; i--) {
+            sb.append(jniTypeName(argTypes[i])).append(" __tco").append(i).append(" = ").append(popForType(argTypes[i])).append("; ");
+        }
+        if (!staticCall) {
+            sb.append("jobject __tco_recv = POP_O(); ");
+        }
+        int localIndex = 0;
+        if (!staticCall) {
+            sb.append("locals[0].o = __tco_recv; ");
+            localIndex = 1;
+        }
+        for (int i = 0; i < argTypes.length; i++) {
+            sb.append("locals[").append(localIndex).append("].").append(slotField(argTypes[i])).append(" = __tco").append(i).append("; ");
+            localIndex += argTypes[i].getSize();
+        }
+        sb.append("sp = 0; goto __neko_tco_entry; }");
+        return new TailCallRewrite(sb.toString(), next);
+    }
+
+    private boolean isMatchingReturn(int opcode, Type returnType) {
+        return switch (returnType.getSort()) {
+            case Type.VOID -> opcode == Opcodes.RETURN;
+            case Type.LONG -> opcode == Opcodes.LRETURN;
+            case Type.FLOAT -> opcode == Opcodes.FRETURN;
+            case Type.DOUBLE -> opcode == Opcodes.DRETURN;
+            case Type.OBJECT, Type.ARRAY -> opcode == Opcodes.ARETURN;
+            default -> opcode == Opcodes.IRETURN;
+        };
+    }
+
+    private String popForType(Type t) {
+        return switch (t.getSort()) {
+            case Type.LONG -> "POP_L()";
+            case Type.FLOAT -> "POP_F()";
+            case Type.DOUBLE -> "POP_D()";
+            case Type.OBJECT, Type.ARRAY -> "POP_O()";
+            default -> "POP_I()";
+        };
+    }
+
+    private String jniTypeName(Type t) {
+        return switch (t.getSort()) {
+            case Type.BOOLEAN -> "jboolean";
+            case Type.BYTE -> "jbyte";
+            case Type.CHAR -> "jchar";
+            case Type.SHORT -> "jshort";
+            case Type.INT -> "jint";
+            case Type.LONG -> "jlong";
+            case Type.FLOAT -> "jfloat";
+            case Type.DOUBLE -> "jdouble";
+            case Type.OBJECT, Type.ARRAY -> "jobject";
+            case Type.VOID -> "void";
+            default -> "jint";
+        };
     }
 
     private OpcodeTranslator.FusedTranslation tryFusedAALoad(

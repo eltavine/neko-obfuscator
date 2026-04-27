@@ -284,8 +284,12 @@ public final class CCodeGenerator {
         }
         sb.append("    neko_slot stack[").append(fn.maxStack() + 16).append("];\n");
         sb.append("    int sp = 0;\n");
+        /* Locals are uninitialized at function entry (Java spec requires
+         * every local be assigned before read). Skipping the memset saves
+         * 26+ qword-stores per call on every translated method. The stack
+         * slots are also uninitialized — POP only ever returns previously
+         * PUSH'd values per JVM verifier guarantees. */
         sb.append("    neko_slot locals[").append(fn.maxLocals() + 8).append("];\n");
-        sb.append("    memset(locals, 0, sizeof(locals));\n");
         for (CStatement statement : fn.body()) {
             sb.append(renderStatement(statement));
         }
