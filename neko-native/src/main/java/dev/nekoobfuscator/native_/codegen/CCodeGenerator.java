@@ -1011,6 +1011,10 @@ static inline void neko_set_double_array_region(JNIEnv *env, jdoubleArray arr, j
 static inline jint neko_register_natives(JNIEnv *env, jclass cls, const JNINativeMethod *methods, jint count) { return NEKO_JNI_FN_PTR(env, 215, jint, jclass, const JNINativeMethod*, jint)(env, cls, methods, count); }
 static inline jint neko_monitor_enter(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 217, jint, jobject)(env, obj); }
 static inline jint neko_monitor_exit(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 218, jint, jobject)(env, obj); }
+/* Some HotSpot helper blocks use `neko_handle_oop` before the fast-access
+ * section is emitted in the final C file. Declare it here so C99 does not
+ * infer an implicit int-returning prototype on first use. */
+static inline void* neko_handle_oop(jobject handle);
 /* Forward decl + helper: read JavaThread::_pending_exception directly. The
  * field offset is recovered by VMStructs (g_neko_off_thread_pending_exception)
  * and the JNIEnv->JavaThread distance is recovered by the patcher init

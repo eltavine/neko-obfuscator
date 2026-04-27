@@ -47,28 +47,40 @@ public final class NativeTranslator {
         Map<String, NativeMethodBinding> bindingMap = new HashMap<>();
         Map<String, L1Class> ownersByName = new HashMap<>();
         Map<String, Integer> overloadCounts = new HashMap<>();
+        Map<String, Integer> exportedNameCounts = new HashMap<>();
         for (MethodSelection selection : selectedMethods) {
             overloadCounts.merge(selection.owner().name() + '#' + selection.method().name(), 1, Integer::sum);
             ownersByName.putIfAbsent(selection.owner().name(), selection.owner());
         }
         for (int i = 0; i < selectedMethods.size(); i++) {
             MethodSelection selection = selectedMethods.get(i);
+            String standardName = jniFunctionName(
+                selection.owner().name(),
+                selection.method().name(),
+                selection.method().descriptor(),
+                overloadCounts.getOrDefault(selection.owner().name() + '#' + selection.method().name(), 0) > 1
+            );
+            exportedNameCounts.merge(standardName, 1, Integer::sum);
+        }
+        for (int i = 0; i < selectedMethods.size(); i++) {
+            MethodSelection selection = selectedMethods.get(i);
+            String standardName = jniFunctionName(
+                selection.owner().name(),
+                selection.method().name(),
+                selection.method().descriptor(),
+                overloadCounts.getOrDefault(selection.owner().name() + '#' + selection.method().name(), 0) > 1
+            );
+            String cFunctionName = uniqueExportedFunctionName(
+                standardName,
+                selection.method().descriptor(),
+                exportedNameCounts.getOrDefault(standardName, 0)
+            );
             NativeMethodBinding binding = new NativeMethodBinding(
                 selection.owner().name(),
                 selection.method().name(),
                 selection.method().descriptor(),
-                jniFunctionName(
-                    selection.owner().name(),
-                    selection.method().name(),
-                    selection.method().descriptor(),
-                    overloadCounts.getOrDefault(selection.owner().name() + '#' + selection.method().name(), 0) > 1
-                ),
-                jniFunctionName(
-                    selection.owner().name(),
-                    selection.method().name(),
-                    selection.method().descriptor(),
-                    overloadCounts.getOrDefault(selection.owner().name() + '#' + selection.method().name(), 0) > 1
-                ) + "__neko_raw",
+                cFunctionName,
+                cFunctionName + "__neko_raw",
                 null,
                 null,
                 selection.method().isStatic(),
@@ -719,6 +731,13 @@ public final class NativeTranslator {
             out.append("__").append(jniMangle(params.toString()));
         }
         return out.toString();
+    }
+
+    private String uniqueExportedFunctionName(String baseName, String descriptor, int collisionCount) {
+        if (collisionCount <= 1) {
+            return baseName;
+        }
+        return baseName + "__ret_" + jniMangle(Type.getReturnType(descriptor).getDescriptor());
     }
 
     private String jniMangle(String value) {
