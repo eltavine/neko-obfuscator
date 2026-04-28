@@ -130,14 +130,14 @@ typedef struct {
      * platform MXBean registry isn't fully wired up yet). */
     void *addr_compressed_oops_base;
     void *addr_compressed_oops_shift;
+    ptrdiff_t off_jcw_anchor;
+    size_t    sizeof_JavaCallWrapper;
     /* === Native→Java direct invoke ===
-     * StubRoutines::_call_stub_entry is the per-arch HotSpot stub that
-     * transfers control from C/C++ into compiled or interpreted Java. It is
-     * what JavaCalls::call_helper invokes after constructing a
-     * JavaCallWrapper. We harvest the static *address slot* (so we can read
-     * the current entry pointer at call time) plus the BasicType enum
-     * values needed for its result_type argument. */
-    void *addr_call_stub_entry;            /* address of StubRoutines::_call_stub_entry slot (pointer-to-pointer) */
+     * HotSpot does not publish StubRoutines::_call_stub_entry through
+     * VMStructs, but it does publish _call_stub_return_address. We find the
+     * owning initial-stubs CodeBlob and scan backward to the call_stub prologue.
+     * The BasicType enum values feed call_stub's result_type argument. */
+    void *addr_call_stub_return_address;   /* address of StubRoutines::_call_stub_return_address slot */
     int32_t basictype_void;
     int32_t basictype_boolean;
     int32_t basictype_byte;
@@ -191,6 +191,8 @@ __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_jni_environmen
  * pointer — it is loaded once at OnLoad time from the StubRoutines static slot
  * (HotSpot doesn't repatch this pointer post-init in production builds). */
 __attribute__((visibility("hidden"))) void *g_neko_call_stub_entry = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_call_stub_return_address = NULL;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_jcw_anchor = 0;
 __attribute__((visibility("hidden"))) jboolean g_neko_direct_invoke_ready = JNI_FALSE;
 __attribute__((visibility("hidden"))) int32_t g_neko_basictype_void    = 0;
 __attribute__((visibility("hidden"))) int32_t g_neko_basictype_boolean = 0;
@@ -426,6 +428,14 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             } else if (neko_streq_safe(field_name, "_last_Java_pc")) {
                 g_neko_method_layout.off_frame_anchor_pc = (ptrdiff_t)off_value;
             }
+        } else if (neko_streq_safe(type_name, "JavaCallWrapper")) {
+            if (neko_streq_safe(field_name, "_anchor")) {
+                g_neko_method_layout.off_jcw_anchor = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "StubRoutines")) {
+            if (is_static && neko_streq_safe(field_name, "_call_stub_return_address")) {
+                g_neko_method_layout.addr_call_stub_return_address = static_addr;
+            }
         } else if (neko_streq_safe(type_name, "CodeCache")) {
             if (neko_streq_safe(field_name, "_heaps") && is_static) {
                 g_neko_method_layout.addr_codecache_heaps = static_addr;
@@ -485,6 +495,7 @@ static jboolean neko_walk_vm_types(void *jvm) {
         else if (neko_streq_safe(type_name, "BufferBlob")) g_neko_method_layout.sizeof_BufferBlob = (size_t)sz;
         else if (neko_streq_safe(type_name, "VirtualSpace")) g_neko_method_layout.sizeof_VirtualSpace = (size_t)sz;
         else if (neko_streq_safe(type_name, "JNIHandleBlock")) g_neko_method_layout.sizeof_JNIHandleBlock = (size_t)sz;
+        else if (neko_streq_safe(type_name, "JavaCallWrapper")) g_neko_method_layout.sizeof_JavaCallWrapper = (size_t)sz;
     }
     return JNI_TRUE;
 }
@@ -621,6 +632,10 @@ static void* neko_codeblob_code_begin(void *blob) {
     if (blob == NULL) return NULL;
     return *(void**)((char*)blob + g_neko_method_layout.off_codeblob_code_begin);
 }
+static void* neko_codeblob_code_end(void *blob) {
+    if (blob == NULL || g_neko_method_layout.off_codeblob_code_end <= 0) return NULL;
+    return *(void**)((char*)blob + g_neko_method_layout.off_codeblob_code_end);
+}
 
 /* Walk one CodeHeap's blocks. Each block starts with a HeapBlock header
  * (16 bytes on x86_64) followed by a CodeBlob (if used). Block size is
@@ -662,8 +677,27 @@ static void neko_walk_codeheap(void *heap, void (*visitor)(void *blob, const cha
 
 typedef struct {
     void *target_vtable;
+    void *call_stub_return_pc;
+    void *call_stub_entry;
     int   limit_logged;
 } neko_blob_visit_ctx_t;
+
+static void *neko_find_call_stub_entry(void *code_begin, void *return_pc) {
+    if (code_begin == NULL || return_pc == NULL || code_begin >= return_pc) return NULL;
+    const unsigned char *begin = (const unsigned char*)code_begin;
+    const unsigned char *ret = (const unsigned char*)return_pc;
+    const unsigned char pattern[] = {0x55, 0x48, 0x8b, 0xec, 0x48, 0x83, 0xec, 0x60};
+    const size_t pattern_len = sizeof(pattern);
+    const unsigned char *scan = ret;
+    size_t max_back = (size_t)(ret - begin);
+    if (max_back > 512u) max_back = 512u;
+    for (size_t back = 0; back + pattern_len <= max_back; back++) {
+        const unsigned char *p = ret - back;
+        if (p < begin || p + pattern_len > ret) continue;
+        if (memcmp(p, pattern, pattern_len) == 0) return (void*)p;
+    }
+    return NULL;
+}
 
 static void neko_blob_visit_log(void *blob, const char *name, void *cookie) {
     neko_blob_visit_ctx_t *ctx = (neko_blob_visit_ctx_t*)cookie;
@@ -680,6 +714,18 @@ static void neko_blob_visit_log(void *blob, const char *name, void *cookie) {
         fprintf(stderr, "[neko-patch] blob %p name=%s size=%d code=%p\\n",
             blob, name ? name : "?", neko_codeblob_size(blob), neko_codeblob_code_begin(blob));
         ctx->limit_logged++;
+    }
+    if (ctx->call_stub_entry == NULL && ctx->call_stub_return_pc != NULL) {
+        void *code_begin = neko_codeblob_code_begin(blob);
+        void *code_end = neko_codeblob_code_end(blob);
+        if (code_begin != NULL && code_end != NULL
+            && code_begin <= ctx->call_stub_return_pc && ctx->call_stub_return_pc < code_end) {
+            ctx->call_stub_entry = neko_find_call_stub_entry(code_begin, ctx->call_stub_return_pc);
+            if (NEKO_PATCH_DEBUG) {
+                fprintf(stderr, "[neko-patch] call_stub blob=%p name=%s ret=%p entry=%p code=[%p..%p)\\n",
+                    blob, name ? name : "?", ctx->call_stub_return_pc, ctx->call_stub_entry, code_begin, code_end);
+            }
+        }
     }
     /* Harvest vtable from the first BufferBlob/AdapterBlob we see. Adapter
      * blobs are created at JVM startup so they always exist by JNI_OnLoad. */
@@ -1109,35 +1155,32 @@ static void *neko_priv_get_thunk(void *real_trampoline, int frame_size_words, vo
 
 /* === Native→Java trampoline CodeBlob registration ===
  *
- * Allocates a thin wrapper in the private CodeHeap that just calls the
- * real libneko trampoline for the given shape. Critical for HotSpot's
- * stack walker: when GC/fillInStackTrace walks back from a compiled
- * callee, it needs to recognize the frame above it as a known CodeBlob.
- * A naked function in libneko isn't in any CodeBlob, so the walker
- * fails to traverse it. Routing through a priv-heap wrapper makes the
- * top non-Java frame a recognized BufferBlob, after which the walker
- * uses rbp chain + frame metadata to traverse our C call chain back up
- * to the outer JNI native_wrapper. */
-
-#define NEKO_PRIV_NJX_WRAPPER_BYTES 32
+ * Copy each generated native→Java trampoline into the private CodeHeap and
+ * wrap the copied bytes in a synthetic BufferBlob. The copied code contains
+ * the `call *Method::_from_compiled_entry` instruction, so a Java callee's
+ * sender PC is inside a HotSpot-recognized CodeBlob instead of libneko text.
+ * That is the property fillInStackTrace/GC stack walks need. */
 
 typedef struct {
-    void *real_tramp;
+    void *code_start;
+    void *code_end;
     void *wrapper_pc;
 } neko_priv_njx_wrapper_slot_t;
 
 static neko_priv_njx_wrapper_slot_t g_neko_priv_njx_wrappers[256] = {0};
 static uint32_t g_neko_priv_njx_wrapper_count = 0;
 
-static void *neko_priv_alloc_njx_wrapper(void *real_tramp) {
+static void *neko_priv_alloc_njx_trampoline(void *code_start_src, void *code_end_src, int frame_size_words) {
     if (g_neko_priv_heap.codeheap == NULL || !g_neko_priv_heap.registered) return NULL;
-    if (real_tramp == NULL) return NULL;
+    if (code_start_src == NULL || code_end_src == NULL || (char*)code_end_src <= (char*)code_start_src) return NULL;
+    if (frame_size_words <= 0) return NULL;
     if (g_neko_method_layout.bufferblob_vtable == NULL) return NULL;
     if (g_neko_method_layout.sizeof_BufferBlob == 0) return NULL;
 
     /* Dedup. */
     for (uint32_t i = 0; i < g_neko_priv_njx_wrapper_count; i++) {
-        if (g_neko_priv_njx_wrappers[i].real_tramp == real_tramp) {
+        if (g_neko_priv_njx_wrappers[i].code_start == code_start_src
+            && g_neko_priv_njx_wrappers[i].code_end == code_end_src) {
             return g_neko_priv_njx_wrappers[i].wrapper_pc;
         }
     }
@@ -1145,8 +1188,9 @@ static void *neko_priv_alloc_njx_wrapper(void *real_tramp) {
 
     const size_t header_bytes = 16;
     const size_t blob_bytes   = g_neko_method_layout.sizeof_BufferBlob;
-    const size_t code_bytes   = NEKO_PRIV_NJX_WRAPPER_BYTES;
-    size_t total = header_bytes + blob_bytes + code_bytes;
+    const size_t code_bytes   = (size_t)((char*)code_end_src - (char*)code_start_src);
+    const size_t code_alloc_bytes = (code_bytes + 15u) & ~(size_t)15u;
+    size_t total = header_bytes + blob_bytes + code_alloc_bytes;
     size_t seg_bytes = g_neko_priv_heap.segment_size;
     size_t segments  = (total + seg_bytes - 1u) / seg_bytes;
     size_t block_bytes = segments * seg_bytes;
@@ -1165,7 +1209,7 @@ static void *neko_priv_alloc_njx_wrapper(void *real_tramp) {
     memset(blob, 0, blob_bytes);
     *(void**)blob = g_neko_method_layout.bufferblob_vtable;
     if (g_neko_method_layout.off_codeblob_name > 0) {
-        *(const char**)(blob + g_neko_method_layout.off_codeblob_name) = "neko_njx_wrapper";
+        *(const char**)(blob + g_neko_method_layout.off_codeblob_name) = "neko_njx_trampoline";
     }
     if (g_neko_method_layout.off_codeblob_size > 0) {
         *(int*)(blob + g_neko_method_layout.off_codeblob_size) = (int)block_bytes;
@@ -1185,40 +1229,21 @@ static void *neko_priv_alloc_njx_wrapper(void *real_tramp) {
         *(void**)(blob + g_neko_method_layout.off_codeblob_content_begin) = code_begin;
     }
     if (g_neko_method_layout.off_codeblob_data_end > 0) {
-        *(void**)(blob + g_neko_method_layout.off_codeblob_data_end) = code_end;
+        *(void**)(blob + g_neko_method_layout.off_codeblob_data_end) = code_begin + code_alloc_bytes;
     }
     if (g_neko_method_layout.off_codeblob_data_offset > 0) {
-        *(int*)(blob + g_neko_method_layout.off_codeblob_data_offset) = (int)(blob_bytes + code_bytes);
+        *(int*)(blob + g_neko_method_layout.off_codeblob_data_offset) = (int)(blob_bytes + code_alloc_bytes);
     }
     if (g_neko_method_layout.off_codeblob_frame_complete_offset > 0) {
         *(int*)(blob + g_neko_method_layout.off_codeblob_frame_complete_offset) = 4;
     }
     if (g_neko_method_layout.off_codeblob_frame_size > 0) {
-        /* frame_size = 1 word (just the dispatcher's return PC pushed by
-         * the call instruction). The wrapper does NOT push rbp / set up
-         * its own frame — it tail-jumps to the trampoline. */
-        *(int*)(blob + g_neko_method_layout.off_codeblob_frame_size) = 1;
+        *(int*)(blob + g_neko_method_layout.off_codeblob_frame_size) = frame_size_words;
     }
 
-    /* Code bytes — TAIL JUMP, no own frame:
-     *   movabs $real_tramp,%r10    ; 0x49 0xBA imm64       [10]
-     *   jmp   *%r10                ; 0x41 0xFF 0xE2        [3]
-     *
-     * Args (rdi/rsi/rdx/rcx/r8/r9 + stack) flow through unchanged. The
-     * trampoline sees the wrapper's caller's return PC at [rsp+0] just
-     * as if it were called directly. The wrapper exists purely so
-     * HotSpot's stack walker sees a registered BufferBlob immediately
-     * above the compiled callee — frame_size=1 (just the return PC,
-     * no separate saved-rbp slot).
-     *
-     * NOTE: the trampoline does its own `push rbp; mov rsp,rbp` so the
-     * stack-arg offsets relative to its rbp remain at the standard
-     * SysV positions ([rbp+16] = arg7, [rbp+24] = arg8, etc.). */
-    char *code = code_begin;
-    code[0] = (char)0x49; code[1] = (char)0xBA;
-    memcpy(code + 2, &real_tramp, sizeof(void*));
-    code[10] = (char)0x41; code[11] = (char)0xFF; code[12] = (char)0xE2;
-    for (size_t i = 13; i < code_bytes; i++) code[i] = (char)0xCC;
+    memcpy(code_begin, code_start_src, code_bytes);
+    for (size_t i = code_bytes; i < code_alloc_bytes; i++) code_begin[i] = (char)0xCC;
+    __builtin___clear_cache(code_begin, code_begin + code_alloc_bytes);
 
     /* Segmap. */
     char *segmap = (char*)g_neko_priv_heap.segmap_region;
@@ -1228,12 +1253,13 @@ static void *neko_priv_alloc_njx_wrapper(void *real_tramp) {
     ptrdiff_t off_log2 = g_neko_method_layout.off_codeheap_log2_segment_size;
     *(size_t*)((char*)g_neko_priv_heap.codeheap + off_log2 + 8) = base_segment + segments;
 
-    g_neko_priv_njx_wrappers[g_neko_priv_njx_wrapper_count].real_tramp = real_tramp;
+    g_neko_priv_njx_wrappers[g_neko_priv_njx_wrapper_count].code_start = code_start_src;
+    g_neko_priv_njx_wrappers[g_neko_priv_njx_wrapper_count].code_end = code_end_src;
     g_neko_priv_njx_wrappers[g_neko_priv_njx_wrapper_count].wrapper_pc = code_begin;
     g_neko_priv_njx_wrapper_count++;
 
-    NEKO_PATCH_LOG("[neko-direct] njx wrapper allocated real=%p wrapper=%p",
-        real_tramp, code_begin);
+    NEKO_PATCH_LOG("[neko-direct] njx trampoline copied src=[%p..%p) dst=%p bytes=%zu frame=%d",
+        code_start_src, code_end_src, code_begin, code_bytes, frame_size_words);
     return code_begin;
 }
 
@@ -1252,6 +1278,9 @@ static jboolean neko_codecache_walk(void) {
     NEKO_PATCH_LOG("codecache walk: heaps=%p len=%d data=%p", heaps_array, len, data);
     if (data == NULL || len <= 0) return JNI_FALSE;
     neko_blob_visit_ctx_t ctx = {0};
+    if (g_neko_method_layout.addr_call_stub_return_address != NULL) {
+        ctx.call_stub_return_pc = *(void**)g_neko_method_layout.addr_call_stub_return_address;
+    }
     for (int i = 0; i < len; i++) {
         void *heap = data[i];
         if (heap == NULL) continue;
@@ -1262,8 +1291,13 @@ static jboolean neko_codecache_walk(void) {
         neko_walk_codeheap(heap, neko_blob_visit_log, &ctx);
     }
     g_neko_method_layout.bufferblob_vtable = ctx.target_vtable;
-    NEKO_PATCH_LOG("codecache walk: harvested vtable=%p sizeof(CodeHeap)=%zu sizeof(BufferBlob)=%zu sizeof(VirtualSpace)=%zu",
-        ctx.target_vtable, g_neko_method_layout.sizeof_CodeHeap,
+    if (ctx.call_stub_entry != NULL) {
+        g_neko_call_stub_return_address = ctx.call_stub_return_pc;
+        g_neko_call_stub_entry = ctx.call_stub_entry;
+    }
+    NEKO_PATCH_LOG("codecache walk: harvested vtable=%p call_stub=%p ret=%p sizeof(CodeHeap)=%zu sizeof(BufferBlob)=%zu sizeof(VirtualSpace)=%zu",
+        ctx.target_vtable, g_neko_call_stub_entry, g_neko_call_stub_return_address,
+        g_neko_method_layout.sizeof_CodeHeap,
         g_neko_method_layout.sizeof_BufferBlob, g_neko_method_layout.sizeof_VirtualSpace);
     return ctx.target_vtable != NULL ? JNI_TRUE : JNI_FALSE;
 }
@@ -1280,6 +1314,10 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_method_flags_status = -1;
     g_neko_method_layout.off_method_intrinsic_id = -1;
     g_neko_method_layout.off_method_vtable_index = -1;
+    g_neko_method_layout.off_frame_anchor_sp = -1;
+    g_neko_method_layout.off_frame_anchor_fp = -1;
+    g_neko_method_layout.off_frame_anchor_pc = -1;
+    g_neko_method_layout.off_jcw_anchor = -1;
     g_neko_method_layout.java_spec_version = neko_detect_java_spec_version_from_env(env);
     void *jvm = neko_resolve_libjvm_handle();
     NEKO_PATCH_LOG("layout_init: jdk=%d libjvm=%p", g_neko_method_layout.java_spec_version, jvm);
@@ -1297,6 +1335,18 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     if (g_neko_method_layout.method_flag_not_c1_compilable == 0u)  g_neko_method_layout.method_flag_not_c1_compilable  = 0x1u;
     if (g_neko_method_layout.method_flag_not_c2_compilable == 0u)  g_neko_method_layout.method_flag_not_c2_compilable  = 0x2u;
     if (g_neko_method_layout.method_flag_not_osr_compilable == 0u) g_neko_method_layout.method_flag_not_osr_compilable = 0x4u | 0x8u;
+    if (g_neko_method_layout.off_frame_anchor_sp < 0
+        && g_neko_method_layout.off_frame_anchor_pc == 8) {
+        g_neko_method_layout.off_frame_anchor_sp = 0;
+    }
+    if (g_neko_method_layout.off_frame_anchor_fp < 0
+        && g_neko_method_layout.off_frame_anchor_sp == 0
+        && g_neko_method_layout.off_frame_anchor_pc == 8) {
+        g_neko_method_layout.off_frame_anchor_fp = 16;
+    }
+    if (g_neko_method_layout.off_jcw_anchor < 0) {
+        g_neko_method_layout.off_jcw_anchor = 32;
+    }
     /* JDK 21+ does not expose Method::_flags via VMStructs. The actual layout
      * (verified against openjdk-21.0.10 method.hpp) is:
      *   ... _access_flags (u4) | _vtable_index (i4) | _intrinsic_id (u2) | _flags (u2) ...
@@ -1387,6 +1437,13 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     NEKO_PATCH_LOG("anchor: sp=%td fp=%td pc=%td ready=%d",
         g_neko_off_last_Java_sp, g_neko_off_last_Java_fp, g_neko_off_last_Java_pc,
         (int)g_neko_frame_anchor_ready);
+    g_neko_off_jcw_anchor = g_neko_method_layout.off_jcw_anchor;
+    NEKO_PATCH_LOG("call_stub: entry=%p ret_slot=%p ret=%p jcw_anchor=%td jcw_size=%zu",
+        g_neko_call_stub_entry,
+        g_neko_method_layout.addr_call_stub_return_address,
+        g_neko_call_stub_return_address,
+        g_neko_off_jcw_anchor,
+        g_neko_method_layout.sizeof_JavaCallWrapper);
     g_neko_off_thread_active_handles = g_neko_method_layout.off_thread_active_handles;
     g_neko_off_jnih_block_top        = g_neko_method_layout.off_jnih_block_top;
     g_neko_off_jnih_block_handles    = g_neko_method_layout.off_jnih_block_handles;
@@ -1444,10 +1501,6 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_off_thread_jni_environment_for_check =
             g_neko_method_layout.off_thread_jni_environment;
     }
-    /* call_stub_entry is no longer used — we maintain HotSpot's compiled-Java
-     * calling convention ourselves and jump directly to _from_compiled_entry
-     * via the per-shape naked trampolines emitted by NativeToJavaInvokeEmitter.
-     * The slot is left here as a NULL placeholder for future use. */
     g_neko_basictype_void    = g_neko_method_layout.basictype_void;
     g_neko_basictype_boolean = g_neko_method_layout.basictype_boolean;
     g_neko_basictype_byte    = g_neko_method_layout.basictype_byte;
@@ -1477,16 +1530,20 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
      * the frame-anchor offsets (for GC stack walking), and the
      * active-handles slot (for ref arg/return marshalling). */
     g_neko_direct_invoke_ready =
-        (g_neko_method_layout.off_method_from_compiled_entry > 0
+        (g_neko_method_layout.off_method_from_interpreted_entry > 0
          && g_neko_thread_state_ready
          && g_neko_off_last_Java_sp > 0
          && g_neko_off_last_Java_fp > 0
          && g_neko_off_last_Java_pc > 0
-         && g_neko_off_thread_active_handles > 0)
+         && g_neko_off_thread_active_handles > 0
+         && g_neko_call_stub_entry != NULL
+         && g_neko_off_jcw_anchor > 0)
         ? JNI_TRUE : JNI_FALSE;
-    NEKO_PATCH_LOG("direct invoke: centry_off=%td thread_ready=%d anchor_ok=%d ready=%d",
+    NEKO_PATCH_LOG("direct invoke: centry_off=%td ientry_off=%td thread_ready=%d anchor_ok=%d call_stub=%p ready=%d",
         g_neko_method_layout.off_method_from_compiled_entry,
+        g_neko_method_layout.off_method_from_interpreted_entry,
         (int)g_neko_thread_state_ready, (int)(g_neko_off_last_Java_sp > 0),
+        g_neko_call_stub_entry,
         (int)g_neko_direct_invoke_ready);
     /* Pull compressed-oops state directly from VMStructs. The MXBean probe
      * via HotSpotDiagnosticMXBean.getVMOption() runs in renderHotSpotSupport

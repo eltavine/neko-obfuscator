@@ -7,11 +7,10 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Emits per-shape native→Java direct-call dispatchers. JDK 21+ doesn't
- * publish {@code StubRoutines::_call_stub_entry} via VMStructs and we don't
- * want to dlsym mangled C++ symbols from libjvm — so we maintain HotSpot's
- * own Java calling convention ourselves and jump straight to
- * {@code Method::_from_compiled_entry}.
+ * Emits per-shape native→Java direct-call dispatchers. The hot path enters
+ * Java through HotSpot's shared {@code StubRoutines::call_stub} with a
+ * stack-local JavaCallWrapper mirror, so HotSpot's stack walker sees a real
+ * entry frame and can jump back to the outer native-wrapper anchor.
  *
  * <h2>HotSpot's compiled-Java calling convention (x86-64 SysV)</h2>
  *
@@ -100,21 +99,43 @@ public final class NativeToJavaInvokeEmitter {
     public static String trampolineSymbol(String key) {
         return "neko_njx_tramp_" + key.replace(':', '_');
     }
+    public static String trampolineBeginSymbol(String key) {
+        return trampolineSymbol(key) + "_begin";
+    }
+    public static String trampolineEndSymbol(String key) {
+        return trampolineSymbol(key) + "_end";
+    }
 
     public String renderPrelude() {
         if (shapes.isEmpty()) return "";
         StringBuilder sb = new StringBuilder();
         sb.append("/* === Native→Java direct invoke (forward decls) === */\n");
+        sb.append("typedef struct neko_njx_runtime {\n")
+          .append("    ptrdiff_t off_last_Java_fp;\n")
+          .append("    ptrdiff_t off_last_Java_pc;\n")
+          .append("    ptrdiff_t off_last_Java_sp;\n")
+          .append("    ptrdiff_t off_thread_state;\n")
+          .append("    ptrdiff_t off_thread_polling_word;\n")
+          .append("    int32_t state_in_native_trans;\n")
+          .append("    int32_t state_in_java;\n")
+          .append("    int32_t state_in_native;\n")
+          .append("    int32_t _pad;\n")
+          .append("    void *heap_base;\n")
+          .append("} neko_njx_runtime_t;\n");
         sb.append("typedef jvalue (*neko_njx_dispatcher_t)(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args);\n");
+        sb.append("typedef void (*neko_call_stub_t)(void*, intptr_t*, int32_t, void*, void*, intptr_t*, int32_t, void*);\n");
+        sb.append("extern void *g_neko_call_stub_entry;\n");
+        sb.append("extern ptrdiff_t g_neko_off_jcw_anchor;\n");
         /* Forward declare the priv-heap allocator from MethodPatcherEmitter. */
-        sb.append("static void *neko_priv_alloc_njx_wrapper(void *real_tramp);\n");
+        sb.append("static void *neko_priv_alloc_njx_trampoline(void *code_start, void *code_end, int frame_size_words);\n");
         for (Map.Entry<String, SignaturePlan.Shape> e : shapes.entrySet()) {
+            String key = e.getKey();
             sb.append("static jvalue ").append(dispatcherSymbol(e.getKey()))
               .append("(void *thread, JNIEnv *env, void *method_ptr, void *entry_point, jobject receiver, const jvalue *args);\n");
-            /* Per-shape wrapper PC, populated at OnLoad time. NULL until
-             * priv heap is set up; falls back to libneko trampoline directly
-             * when NULL (which is fine for first calls before init). */
-            sb.append("static void *").append(wrapperGlobalName(e.getKey())).append(" = NULL;\n");
+            sb.append("extern char ").append(trampolineBeginSymbol(key)).append("[];\n");
+            sb.append("extern char ").append(trampolineEndSymbol(key)).append("[];\n");
+            /* Per-shape priv-heap trampoline PC, populated at OnLoad time. */
+            sb.append("static void *").append(wrapperGlobalName(key)).append(" = NULL;\n");
         }
         sb.append('\n');
         return sb.toString();
@@ -134,8 +155,11 @@ public final class NativeToJavaInvokeEmitter {
         sb.append("static void neko_njx_init_wrappers(void) {\n");
         for (Map.Entry<String, SignaturePlan.Shape> e : shapes.entrySet()) {
             String key = e.getKey();
+            int frameSize = njxFrameSizeWords(computeLayout(e.getValue()).stackArgs());
             sb.append("    ").append(wrapperGlobalName(key))
-              .append(" = neko_priv_alloc_njx_wrapper((void*)&").append(trampolineSymbol(key)).append(");\n");
+              .append(" = neko_priv_alloc_njx_trampoline((void*)").append(trampolineBeginSymbol(key))
+              .append(", (void*)").append(trampolineEndSymbol(key)).append(", ")
+              .append(frameSize).append(");\n");
         }
         sb.append("    NEKO_DIRECT_LOG(\"njx wrappers initialized: ").append(shapes.size()).append(" shapes\");\n");
         sb.append("}\n\n");
@@ -177,9 +201,10 @@ NEKO_FAST_INLINE jobject neko_njx_oop_to_handle(void *thread, void *oop) {
     return neko_direct_oop_to_handle(thread, oop);
 }
 
-/* Resolve Method* + _from_compiled_entry from a runtime jmethodID. The
+/* Resolve Method* + _from_interpreted_entry from a runtime jmethodID. The
  * Method* is *(Method**)mid (HotSpot stores jmethodIDs as indirection
- * cells); the entry pointer is at the published VMStructs offset. */
+ * cells); HotSpot's call_stub builds an interpreter-shaped argument stack,
+ * so it must enter through Method::_from_interpreted_entry. */
 static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_entry) {
     if (mid == NULL || out_method == NULL || out_entry == NULL) return 0;
     if (!g_neko_method_layout.initialized || !g_neko_method_layout.usable) {
@@ -187,8 +212,8 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
             (int)g_neko_method_layout.initialized, (int)g_neko_method_layout.usable);
         return 0;
     }
-    if (g_neko_method_layout.off_method_from_compiled_entry <= 0) {
-        NEKO_DIRECT_LOG("resolve_entry: compiled-entry offset unresolved");
+    if (g_neko_method_layout.off_method_from_interpreted_entry <= 0) {
+        NEKO_DIRECT_LOG("resolve_entry: interpreted-entry offset unresolved");
         return 0;
     }
     void *m = *(void**)mid;
@@ -196,9 +221,9 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         NEKO_DIRECT_LOG("resolve_entry: jmethodID %p deref to NULL Method*", mid);
         return 0;
     }
-    void *e = *(void**)((char*)m + g_neko_method_layout.off_method_from_compiled_entry);
+    void *e = *(void**)((char*)m + g_neko_method_layout.off_method_from_interpreted_entry);
     if (e == NULL) {
-        NEKO_DIRECT_LOG("resolve_entry: Method* %p has NULL _from_compiled_entry", m);
+        NEKO_DIRECT_LOG("resolve_entry: Method* %p has NULL _from_interpreted_entry", m);
         return 0;
     }
     *out_method = m;
@@ -207,6 +232,43 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
 }
 
 """;
+    }
+
+    private record X86Layout(int gpCount, int xmmCount, int stackArgs, int[] argLoc, int[] argRegIdx, int[] argStackIdx) {}
+
+    private static X86Layout computeLayout(SignaturePlan.Shape shape) {
+        char[] args = shape.argKinds();
+        int gpCount = shape.isStatic() ? 0 : 1;
+        int xmmCount = 0;
+        int stackArgs = 0;
+        int[] argLoc = new int[args.length];
+        int[] argRegIdx = new int[args.length];
+        int[] argStackIdx = new int[args.length];
+        for (int i = 0; i < args.length; i++) {
+            char a = args[i];
+            if (a == 'F' || a == 'D') {
+                if (xmmCount < 8) { argLoc[i] = 1; argRegIdx[i] = xmmCount++; }
+                else              { argLoc[i] = 2; argStackIdx[i] = stackArgs++; }
+            } else {
+                if (gpCount < 6)  { argLoc[i] = 0; argRegIdx[i] = gpCount++; }
+                else              { argLoc[i] = 2; argStackIdx[i] = stackArgs++; }
+            }
+        }
+        return new X86Layout(gpCount, xmmCount, stackArgs, argLoc, argRegIdx, argStackIdx);
+    }
+
+    private static int njxFrameSizeWords(int stackArgs) {
+        return 8 + stackArgs + ((stackArgs & 1) == 0 ? 0 : 1);
+    }
+
+    private static String resultBasicTypeExpr(char ret) {
+        return switch (ret) {
+            case 'J' -> "g_neko_basictype_long";
+            case 'F' -> "g_neko_basictype_float";
+            case 'D' -> "g_neko_basictype_double";
+            case 'L' -> "g_neko_basictype_object";
+            default -> "g_neko_basictype_int";
+        };
     }
 
     /* ----------------------------------------------------------------
@@ -237,6 +299,8 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         boolean isStatic = shape.isStatic();
         String fn = dispatcherSymbol(key);
         String tramp = trampolineSymbol(key);
+        String trampBegin = trampolineBeginSymbol(key);
+        String trampEnd = trampolineEndSymbol(key);
 
         /* Java calling convention split:
          *   - receiver (if instance) goes to j_rarg0 first
@@ -246,22 +310,15 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
          *     (we compress to 1 slot here since both ABI lanes pass them
          *     in 8-byte slots)
          */
-        int gpCount = isStatic ? 0 : 1;          // total GP args (receiver counts)
-        int xmmCount = 0;
-        int stackArgs = 0;
-        int[] argLoc = new int[args.length];      // 0=GP, 1=XMM, 2=stack
-        int[] argRegIdx = new int[args.length];
-        int[] argStackIdx = new int[args.length];
-        for (int i = 0; i < args.length; i++) {
-            char a = args[i];
-            if (a == 'F' || a == 'D') {
-                if (xmmCount < 8) { argLoc[i] = 1; argRegIdx[i] = xmmCount++; }
-                else              { argLoc[i] = 2; argStackIdx[i] = stackArgs++; }
-            } else {
-                if (gpCount < 6)  { argLoc[i] = 0; argRegIdx[i] = gpCount++; }
-                else              { argLoc[i] = 2; argStackIdx[i] = stackArgs++; }
-            }
-        }
+        X86Layout layout = computeLayout(shape);
+        int gpCount = layout.gpCount();
+        int xmmCount = layout.xmmCount();
+        int stackArgs = layout.stackArgs();
+        int javaSlots = isStatic ? 0 : 1;
+        for (char a : args) javaSlots += (a == 'J' || a == 'D') ? 2 : 1;
+        int[] argLoc = layout.argLoc();      // 0=GP, 1=XMM, 2=stack
+        int[] argRegIdx = layout.argRegIdx();
+        int[] argStackIdx = layout.argStackIdx();
 
         StringBuilder sb = new StringBuilder();
         sb.append("/* shape ").append(key).append(" — ");
@@ -276,13 +333,16 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
           .append("(void *thread, void *method_ptr, void *entry_point,\n")
           .append("             const int64_t *gp_args, const double *fp_args,\n")
           .append("             const int64_t *stack_args, int n_stack_args,\n")
-          .append("             int64_t *out_rax, double *out_xmm0) {\n");
+          .append("             int64_t *out_rax, double *out_xmm0,\n")
+          .append("             const neko_njx_runtime_t *rt) {\n");
         sb.append("    __asm__ volatile (\n");
+        sb.append("        \".globl ").append(trampBegin).append("\\n\"\n");
+        sb.append("        \"").append(trampBegin).append(":\\n\"\n");
         /* SysV C ABI on entry to this naked function:
          *   rdi=thread, rsi=method_ptr, rdx=entry_point,
          *   rcx=gp_args, r8=fp_args, r9=stack_args,
          *   [rbp+16]=n_stack_args (after pushq rbp; mov rsp,rbp),
-         *   [rbp+24]=out_rax, [rbp+32]=out_xmm0
+         *   [rbp+24]=out_rax, [rbp+32]=out_xmm0, [rbp+40]=rt
          *
          * CRITICAL: HotSpot uses %r12 as r12_heapbase when compressed oops
          * are enabled. Compiled Java code does narrow-oop decode as
@@ -306,13 +366,14 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("        \"pushq %%r13\\n\"\n");
         sb.append("        \"pushq %%r14\\n\"\n");
         sb.append("        \"pushq %%r15\\n\"\n");
+        sb.append("        \"pushq 40(%%rbp)\\n\"     /* rt spill copied with the frame */\n");
         /* Stash incoming args into callee-saved regs so they survive the
          * call:
          *   r15 = thread (HotSpot's thread register; also our scratch)
          *   r13 = entry_point
          *   r14 = out_rax
          *   rbx = method_ptr (HotSpot's method receiver register)
-         * out_xmm0 we leave on stack — read it post-call.
+         * out_xmm0 and rt we leave on stack — read them as needed.
          *
          * NOTE: We do NOT touch %r12. It already holds HotSpot's heap base
          * from when we entered our JNI native body. Compiled Java code we
@@ -344,7 +405,8 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
          *   [rbp-24]   saved r13
          *   [rbp-32]   saved r14
          *   [rbp-40]   saved r15
-         *   ... pad to 16 if odd # of stack args ...
+         *   [rbp-48]   rt pointer
+         *   ... pad to 16 if stack arg count is odd ...
          *   stk[N-1]
          *   ...
          *   stk[0]     <- rsp at the moment of `call *r13`
@@ -354,10 +416,8 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
          * reverse so stk[0] ends at the lowest rsp.
          */
         if (stackArgs > 0) {
-            sb.append("        /* Pre-align: 5 callee-save pushes (rbx,r12-r15) + saved rbp = -40\n");
-            sb.append("           from rbp. -40 mod 16 = -8 → 8-misaligned, so even-stackArgs\n");
-            sb.append("           after pushes ends 8-misaligned (bad), odd ends 16-aligned. */\n");
-            if ((stackArgs & 1) == 0) {
+            sb.append("        /* rbp-48 is 16-aligned; odd stack arg counts need one pad word. */\n");
+            if ((stackArgs & 1) != 0) {
                 sb.append("        \"subq  $8, %%rsp\\n\"\n");
             }
             /* Push stack args in reverse: stk[N-1] first, stk[0] last. */
@@ -366,9 +426,7 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
                 sb.append("        \"pushq %%rax\\n\"\n");
             }
         } else {
-            /* No stack args. rsp = rbp - 40 ≡ -8 mod 16. Pad by 8 so rsp
-             * is 16-aligned at the call site (compiled entry expectation). */
-            sb.append("        \"subq  $8, %%rsp\\n\"\n");
+            /* No stack args. rsp = rbp - 48 is already 16-aligned. */
         }
 
         /* Load FP args from fp_args[] into xmm0..xmm(xmmCount-1). */
@@ -400,21 +458,22 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
          * prior anchor (set by HotSpot's outer JNI native_wrapper for the
          * translated body's caller) before invoking the trampoline and
          * RESTORES it after. */
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq -48(%%rbp), %%r11\\n\" /* rt */\n");
+        sb.append("        \"movq 0(%%r11), %%rax\\n\"\n");
         sb.append("        \"movq %%rbp, (%%r15, %%rax)\\n\"\n");
         sb.append("        \"leaq 4f(%%rip), %%rax\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%rcx\\n\"\n");
+        sb.append("        \"movq 8(%%r11), %%rcx\\n\"\n");
         sb.append("        \"movq %%rax, (%%r15, %%rcx)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq 16(%%r11), %%rax\\n\"\n");
         sb.append("        \"movq %%rsp, (%%r15, %%rax)\\n\"\n");
 
         /* State transition: _thread_in_native -> _thread_in_native_trans
          * (mfence) -> polling check -> _thread_in_Java. */
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%rax\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native_trans(%%rip), %%ecx\\n\"\n");
+        sb.append("        \"movq 24(%%r11), %%rax\\n\"\n");
+        sb.append("        \"movl 40(%%r11), %%ecx\\n\"\n");
         sb.append("        \"movl %%ecx, (%%r15, %%rax)\\n\"\n");
         sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_polling_word(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq 32(%%r11), %%rax\\n\"\n");
         sb.append("        \"testq %%rax, %%rax\\n\"\n");
         sb.append("        \"je   5f\\n\"\n");
         sb.append("        \"movq (%%r15, %%rax), %%rcx\\n\"\n");
@@ -422,8 +481,8 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("        \"je   5f\\n\"\n");
         /* skipping neko_handle_safepoint_poll for now — to be revisited */
         sb.append("        \"5:\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%rax\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_java(%%rip), %%ecx\\n\"\n");
+        sb.append("        \"movq 24(%%r11), %%rax\\n\"\n");
+        sb.append("        \"movl 44(%%r11), %%ecx\\n\"\n");
         sb.append("        \"movl %%ecx, (%%r15, %%rax)\\n\"\n");
 
         /* Set %r12 to the heap base. HotSpot compiled code uses %r12 as
@@ -433,7 +492,7 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
          * We MUST do this even though %r12 is callee-save: HotSpot's
          * convention requires it for compiled methods to function. Our
          * caller restores their %r12 from our stack push when we return. */
-        sb.append("        \"movq g_neko_heap_base(%%rip), %%r12\\n\"\n");
+        sb.append("        \"movq 56(%%r11), %%r12\\n\"\n");
 
         /* Call compiled entry. Method* in rbx, args in their slots. */
         sb.append("        \"call *%%r13\\n\"\n");
@@ -443,14 +502,15 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("        \"movq %%rax, (%%r14)\\n\"\n");
         sb.append("        \"movq 32(%%rbp), %%r14\\n\"\n");
         sb.append("        \"movsd %%xmm0, (%%r14)\\n\"\n");
+        sb.append("        \"movq -48(%%rbp), %%r11\\n\" /* reload rt after Java clobbers */\n");
 
         /* Reverse transition: _thread_in_Java -> _thread_in_native_trans
          * (mfence) -> polling check -> _thread_in_native. */
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%rax\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native_trans(%%rip), %%ecx\\n\"\n");
+        sb.append("        \"movq 24(%%r11), %%rax\\n\"\n");
+        sb.append("        \"movl 40(%%r11), %%ecx\\n\"\n");
         sb.append("        \"movl %%ecx, (%%r15, %%rax)\\n\"\n");
         sb.append("        \"mfence\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_polling_word(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq 32(%%r11), %%rax\\n\"\n");
         sb.append("        \"testq %%rax, %%rax\\n\"\n");
         sb.append("        \"je   6f\\n\"\n");
         sb.append("        \"movq (%%r15, %%rax), %%rcx\\n\"\n");
@@ -458,25 +518,26 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("        \"je   6f\\n\"\n");
         /* skipping neko_handle_safepoint_poll for now — to be revisited */
         sb.append("        \"6:\\n\"\n");
-        sb.append("        \"movq g_neko_off_thread_state(%%rip), %%rax\\n\"\n");
-        sb.append("        \"movl g_neko_thread_state_in_native(%%rip), %%ecx\\n\"\n");
+        sb.append("        \"movq 24(%%r11), %%rax\\n\"\n");
+        sb.append("        \"movl 48(%%r11), %%ecx\\n\"\n");
         sb.append("        \"movl %%ecx, (%%r15, %%rax)\\n\"\n");
 
         /* Clear the anchor we set up before the call. The C dispatcher
          * around us will subsequently restore the OUTER anchor (the one
          * HotSpot's native_wrapper had set on entry to the translated
          * body) — we just clear ours so it doesn't bleed past return. */
-        sb.append("        \"movq g_neko_off_last_Java_sp(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq 16(%%r11), %%rax\\n\"\n");
         sb.append("        \"movq $0, (%%r15, %%rax)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_fp(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq 0(%%r11), %%rax\\n\"\n");
         sb.append("        \"movq $0, (%%r15, %%rax)\\n\"\n");
-        sb.append("        \"movq g_neko_off_last_Java_pc(%%rip), %%rax\\n\"\n");
+        sb.append("        \"movq 8(%%r11), %%rax\\n\"\n");
         sb.append("        \"movq $0, (%%r15, %%rax)\\n\"\n");
 
         /* Epilogue: lea rsp back to right after the 5 callee-save pushes
-         * (rbx, r12, r13, r14, r15 = 40 bytes), pop them, return. The leaq
+         * plus the rt spill (48 bytes), discard the spill, pop regs, return. The leaq
          * folds back over any stack args + pad. */
-        sb.append("        \"leaq -40(%%rbp), %%rsp\\n\"\n");
+        sb.append("        \"leaq -48(%%rbp), %%rsp\\n\"\n");
+        sb.append("        \"addq $8, %%rsp\\n\"\n");
         sb.append("        \"popq %%r15\\n\"\n");
         sb.append("        \"popq %%r14\\n\"\n");
         sb.append("        \"popq %%r13\\n\"\n");
@@ -484,6 +545,8 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("        \"popq %%rbx\\n\"\n");
         sb.append("        \"popq %%rbp\\n\"\n");
         sb.append("        \"ret\\n\"\n");
+        sb.append("        \".globl ").append(trampEnd).append("\\n\"\n");
+        sb.append("        \"").append(trampEnd).append(":\\n\"\n");
         sb.append("        :\n");
         sb.append("        :\n");
         sb.append("        : \"memory\"\n");
@@ -528,6 +591,21 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
             }
         }
 
+        sb.append("    intptr_t call_params[").append(Math.max(javaSlots, 1)).append("]; memset(call_params, 0, sizeof(call_params));\n");
+        sb.append("    int __njx_pos = 0;\n");
+        if (!isStatic) {
+            sb.append("    call_params[__njx_pos++] = (intptr_t)(uintptr_t)neko_njx_handle_to_oop(receiver);\n");
+        }
+        for (int i = 0; i < args.length; i++) {
+            switch (args[i]) {
+                case 'L' -> sb.append("    call_params[__njx_pos++] = (intptr_t)(uintptr_t)neko_njx_handle_to_oop(args[").append(i).append("].l);\n");
+                case 'J' -> sb.append("    *(jlong*)(call_params + 1 + __njx_pos) = args[").append(i).append("].j; __njx_pos += 2;\n");
+                case 'F' -> sb.append("    *(jfloat*)(call_params + __njx_pos) = args[").append(i).append("].f; __njx_pos++;\n");
+                case 'D' -> sb.append("    *(jdouble*)(call_params + 1 + __njx_pos) = args[").append(i).append("].d; __njx_pos += 2;\n");
+                default -> sb.append("    *(jint*)(call_params + __njx_pos) = args[").append(i).append("].i; __njx_pos++;\n");
+            }
+        }
+
         sb.append("    int64_t out_rax = 0;\n");
         sb.append("    double  out_xmm0 = 0.0;\n");
         /* Save handle-block top so any handles created by Java code during
@@ -541,20 +619,31 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("    void *saved_sp = (g_neko_off_last_Java_sp > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_sp) : NULL;\n");
         sb.append("    void *saved_pc = (g_neko_off_last_Java_pc > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_pc) : NULL;\n");
         sb.append("    void *saved_fp = (g_neko_off_last_Java_fp > 0) ? *(void**)((char*)thread + g_neko_off_last_Java_fp) : NULL;\n");
-        sb.append("    NEKO_DIRECT_LOG(\"  -> tramp shape=").append(key).append(" gp=").append(gpCount)
-          .append(" xmm=").append(xmmCount).append(" stk=").append(stackArgs).append(" saved_sp=%p\", saved_sp);\n");
-        /* Route through priv-heap wrapper when available — that wrapper is a
-         * registered BufferBlob, giving HotSpot's stack walker a frame it
-         * recognizes immediately above the compiled callee. Falls through
-         * to direct libneko call when the wrapper isn't yet allocated
-         * (e.g. before priv heap init runs). */
-        sb.append("    typedef void (*").append(tramp).append("_t)(void*, void*, void*, const int64_t*, const double*, const int64_t*, int, int64_t*, double*);\n");
-        sb.append("    ").append(tramp).append("_t __tramp_pc = (").append(tramp).append("_t)(")
-          .append(wrapperGlobalName(key)).append(" != NULL ? ").append(wrapperGlobalName(key))
-          .append(" : (void*)&").append(tramp).append(");\n");
-        sb.append("    __tramp_pc(thread, method_ptr, entry_point, gp_args, fp_args, stack_args, ")
-          .append(stackArgs).append(", &out_rax, &out_xmm0);\n");
-        sb.append("    NEKO_DIRECT_LOG(\"  <- tramp shape=").append(key).append(" rax=0x%llx xmm0=%g\", (unsigned long long)out_rax, out_xmm0);\n");
+        sb.append("    uint8_t __jcw_buf[256] __attribute__((aligned(16))); memset(__jcw_buf, 0, sizeof(__jcw_buf));\n");
+        sb.append("    if (g_neko_call_stub_entry == NULL || g_neko_off_jcw_anchor <= 0\n")
+          .append("        || g_neko_method_layout.off_frame_anchor_sp < 0\n")
+          .append("        || g_neko_method_layout.off_frame_anchor_pc < 0\n")
+          .append("        || g_neko_method_layout.off_frame_anchor_fp < 0\n")
+          .append("        || (size_t)(g_neko_off_jcw_anchor + g_neko_method_layout.off_frame_anchor_fp + (ptrdiff_t)sizeof(void*)) > sizeof(__jcw_buf)) {\n")
+          .append("        fprintf(stderr, \"[neko-direct] call_stub precondition failed shape=").append(key).append(" entry=%p jcw_anchor=%td\\n\", g_neko_call_stub_entry, g_neko_off_jcw_anchor); abort();\n")
+          .append("    }\n");
+        sb.append("    *(void**)(__jcw_buf + 0) = thread;\n");
+        sb.append("    *(void**)(__jcw_buf + 8) = __njx_hsave.block;\n");
+        sb.append("    *(void**)(__jcw_buf + 16) = method_ptr;\n");
+        sb.append("    *(void**)(__jcw_buf + 24) = ").append(isStatic ? "NULL" : "(void*)(uintptr_t)call_params[0]").append(";\n");
+        sb.append("    char *__jcw_anchor = (char*)__jcw_buf + g_neko_off_jcw_anchor;\n");
+        sb.append("    *(void**)(__jcw_anchor + g_neko_method_layout.off_frame_anchor_sp) = saved_sp;\n");
+        sb.append("    *(void**)(__jcw_anchor + g_neko_method_layout.off_frame_anchor_pc) = saved_pc;\n");
+        sb.append("    *(void**)(__jcw_anchor + g_neko_method_layout.off_frame_anchor_fp) = saved_fp;\n");
+        sb.append("    intptr_t __call_result[2]; __call_result[0] = 0; __call_result[1] = 0;\n");
+        sb.append("    NEKO_DIRECT_LOG(\"  -> call_stub shape=").append(key).append(" slots=").append(javaSlots).append(" saved_sp=%p\", saved_sp);\n");
+        sb.append("    if (g_neko_off_thread_state > 0) { *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_native_trans; __sync_synchronize(); *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_java; }\n");
+        sb.append("    ((neko_call_stub_t)g_neko_call_stub_entry)((void*)__jcw_buf, __call_result, ")
+          .append(resultBasicTypeExpr(ret)).append(", method_ptr, entry_point, call_params, ")
+          .append(javaSlots).append(", thread);\n");
+        sb.append("    if (g_neko_off_thread_state > 0) { *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_native_trans; __sync_synchronize(); *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_native; }\n");
+        sb.append("    out_rax = (int64_t)__call_result[0]; memcpy(&out_xmm0, __call_result, sizeof(out_xmm0));\n");
+        sb.append("    NEKO_DIRECT_LOG(\"  <- call_stub shape=").append(key).append(" r=0x%llx xmm0=%g\", (unsigned long long)out_rax, out_xmm0);\n");
         /* Restore outer anchor */
         sb.append("    if (g_neko_off_last_Java_sp > 0) *(void**)((char*)thread + g_neko_off_last_Java_sp) = saved_sp;\n");
         sb.append("    if (g_neko_off_last_Java_pc > 0) *(void**)((char*)thread + g_neko_off_last_Java_pc) = saved_pc;\n");
