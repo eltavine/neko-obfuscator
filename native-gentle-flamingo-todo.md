@@ -39,7 +39,7 @@ Status legend:
 - [x] T1.2 Rewrite `X86_64WindowsTrampoline` to Java ABI entry with no JavaFrameAnchor/thread-state transition.
 - [x] T1.3 Rewrite `X86_64SysVTrampoline` and `Aarch64SysVTrampoline` the same way.
 - [x] T1.4 Patch `_from_compiled_entry` and `_from_interpreted_entry` to the new stubs / adapter path.
-- [ ] T1.5 Remove `NEKO_DISABLE_CODEBLOB` escape hatch; private CodeHeap init/register failure must fail native entry setup.
+- [x] T1.5 Remove `NEKO_DISABLE_CODEBLOB` escape hatch; private CodeHeap init/register failure must fail native entry setup.
 - [ ] T1.6 Validate `obfusjack-test21` and thread state staying `_thread_in_java`.
 
 ## Stage 2: Bind-Time Native Resolution

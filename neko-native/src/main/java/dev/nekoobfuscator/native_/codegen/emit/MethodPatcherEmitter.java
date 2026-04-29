@@ -1203,14 +1203,6 @@ typedef struct {
 
 static neko_priv_codeheap_t g_neko_priv_heap = {0};
 
-/* Phase 2/3 default: ON. Set NEKO_DISABLE_CODEBLOB=1 to fall back to the
- * libneko-only trampoline path (no private CodeHeap, no relocated thunks).
- * The disabled path is kept as an escape hatch for diagnosing layout-walk
- * regressions on a new JDK release. */
-static int neko_priv_use_enabled(void) {
-    return getenv("NEKO_DISABLE_CODEBLOB") == NULL;
-}
-
 static void *neko_alloc_exec_pages(size_t size) {
 #if defined(__linux__) || defined(__APPLE__)
     void *p = mmap(NULL, size, PROT_READ|PROT_WRITE|PROT_EXEC,
@@ -2001,19 +1993,21 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_method_layout.off_codeblob_name,
         g_neko_method_layout.off_codeblob_size,
         g_neko_method_layout.off_codeblob_code_begin);
-    /* Phase 1 (codecache walk) runs whenever NEKO_PATCH_DEBUG=1 OR
-     * NEKO_USE_CODEBLOB=1 — Phase 2 needs the harvested vtable. The walk
-     * itself uses initialized==JNI_TRUE to short-circuit on later calls. */
-    if (NEKO_PATCH_DEBUG || neko_priv_use_enabled()) {
-        (void)neko_codecache_walk();
+    /* Private CodeHeap entry is mandatory. The codecache walk harvests the
+     * AdapterBlob/BufferBlob vtable used by our synthetic blobs; if any part
+     * of that setup fails, native entry patching must fail instead of leaving
+     * the original JVM entry active. */
+    if (!neko_codecache_walk()) {
+        NEKO_PATCH_LOG("private CodeHeap setup failed: codecache walk did not harvest a vtable");
+        return JNI_FALSE;
     }
-    /* Phase 2 (allocate + register own CodeHeap) only fires when
-     * NEKO_USE_CODEBLOB=1. Init+register happens at most once per process —
-     * neko_priv_heap.codeheap != NULL on the second call short-circuits. */
-    if (neko_priv_use_enabled()) {
-        if (neko_priv_heap_init()) {
-            (void)neko_priv_heap_register();
-        }
+    if (!neko_priv_heap_init()) {
+        NEKO_PATCH_LOG("private CodeHeap setup failed: init failed");
+        return JNI_FALSE;
+    }
+    if (!neko_priv_heap_register()) {
+        NEKO_PATCH_LOG("private CodeHeap setup failed: registration failed");
+        return JNI_FALSE;
     }
     /* Native→Java direct invoke now enters through HotSpot call_stub. */
     neko_njx_init_wrappers();
