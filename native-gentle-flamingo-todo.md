@@ -11,13 +11,19 @@ Status legend:
 - Do not mark any task complete unless the exact requested artifact is regenerated and run.
 - After any TODO sub-step is completed and verified, commit that completed slice before continuing.
 - No targeted implementations for a specific benchmark, class, method, owner/name pair, or crash site. Fixes must be general architectural changes that satisfy the plan.
+- No bug-specific, sample-specific, benchmark-specific, class-specific, method-specific, owner/name-specific, descriptor-specific, or crash-site-specific repair is allowed. If a proposed change only explains one observed failure instead of a whole plan-level category, stop and redesign it as a generic mechanism.
+- Every implementation subtask must start by rereading the full source plan `~/.claude/plans/native-gentle-flamingo.md` and this todo file, then explicitly checking the intended change against the plan's current stage and dependency order before editing.
+- Do not implement a later-stage workaround to make a validation jar pass while an earlier-stage architectural prerequisite is still open. Follow the plan order unless the todo is first updated with a plan-level dependency reason.
 - No JNI fallback, soft fallback, skip-on-error success, or "fast path unavailable -> slow JNI path".
+- No direct or indirect JNI fallback is allowed: no `NEKO_JNI_FN_PTR`, no `(*env)->...`, no `env->...`, no `Call*Method`, no `Get*Field`, no `FindClass`, no `NewStringUTF`, no `NewObject*`, no `Throw*`, no monitor or array JNI calls outside the explicitly allowed minimal `JNI_OnLoad` `GetEnv` bootstrap.
+- Failure to resolve a required VMStruct, JVM symbol, class, method, field, string, GC barrier, CodeHeap entry, or call stub is a hard abort/error, never a fallback path and never a reason to leave original bytecode/JVM execution in place.
 - No JVMTI.
 - No new JVM runtime helper layer outside the planned native/bootstrap mechanism.
 - Keep `JNI_OnLoad` as the minimal bootstrap only: `GetEnv`, capture needed VM/JNI anchors, initialize native metadata, then stop using JNI function-table calls.
 - Do not add `<clinit>` or Java-side bootstrap beyond the existing native-loader entry requirement.
 - ZGC and Shenandoah must not be bypassed by skipping classes or methods. Missing required barrier support must abort, not fallback.
 - `obfusjack-test21` is a required validation target; Calc-only success is not enough.
+- Generated C inspection is mandatory before claiming a no-JNI subtask: grep for `NEKO_JNI_FN_PTR`, `(*env)->`, `env->`, and JNI wrapper names must match the subtask's allowed surface.
 - Use the repository/system `./gradlew`; do not create or use temporary `gradlew`.
 - `test-jars/oouput/` is pre-existing untracked output and must not be staged unless explicitly requested.
 - Existing unrelated worktree changes, especially `X86_64WindowsTrampoline.java`, must not be reverted or staged accidentally.
