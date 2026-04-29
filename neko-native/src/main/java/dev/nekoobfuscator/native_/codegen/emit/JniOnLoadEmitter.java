@@ -46,7 +46,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 
 static void neko_bootstrap_owner_discovery(JNIEnv *env) {
     if (env == NULL) return;
-    neko_manifest_discover_and_patch(env);
+    if (!neko_manifest_discover_and_patch(env)) abort();
     if (neko_exception_check(env)) neko_exception_clear(env);
 }
 

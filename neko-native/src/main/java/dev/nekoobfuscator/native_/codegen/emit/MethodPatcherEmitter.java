@@ -2487,28 +2487,19 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
             entry->signature_id, entry->owner_internal, entry->method_name, entry->method_desc);
         return JNI_FALSE;
     }
-    /* Three Method entry-point fields, three thunks:
-     *   _from_interpreted_entry  -> t_i2i_interp (BB-anchor, BufferBlob
-     *       walker visits our trampoline frame; works because interpreter
-     *       does not shift rsp before the jmp).
-     *   _from_compiled_entry     -> t_c2i (BB-anchor, frame_size=3; reached
-     *       only by direct-resolve callers, never by HotSpot's shared c2i
-     *       adapter, so no extraspace concern).
-     *   _i2i_entry               -> t_i2i_path2 (direct-anchor naked) when
-     *       the signature has args; otherwise reuses t_i2i_interp.
+    /* Three Method entry-point fields, three private-CodeHeap thunks:
+     *   _from_compiled_entry     -> t_c2i, the Java-ABI compiled-entry stub.
+     *   _from_interpreted_entry  -> t_i2i_interp, the interpreter-entry stub
+     *       that consumes HotSpot's interpreter stack layout and returns by
+     *       the normal interpreter protocol.
+     *   _i2i_entry               -> t_i2i_path2 when HotSpot's shared c2i
+     *       adapter tail-jumps to _i2i_entry after reserving extraspace;
+     *       otherwise it reuses the normal interpreted-entry thunk.
      *
-     * The Path 2 hazard: HotSpot's c2i adapter at
-     *   sharedRuntime_x86_64.cpp::gen_c2i_adapter
-     * `pop rax; sub rsp, extraspace; push rax` then `jmp _i2i_entry` for
-     * IC-resolved stale call sites. The BB-anchor scheme cannot reconcile
-     * accept._sp (needs sender_sp = caller_pre_call_rsp) and accept._fp
-     * (needs saved_fp_addr = thunk's saved-rbp slot) simultaneously since
-     * sender_sp - saved_fp_addr is fixed at 16 but the slots differ by
-     * 16 + extraspace. The path2 naked therefore publishes a DIRECT
-     * caller-frame anchor (last_Java_pc = post_call_pc, last_Java_fp =
-     * caller's saved rbp value, last_Java_sp = caller_pre_call_rsp) so
-     * call_stub's saved JavaCallWrapper anchor jumps the GC walker
-     * straight to accept's real frame, bypassing our BufferBlob.
+     * The shared c2i adapter path is still an adapter connection into our
+     * native method entry, but the installed target must be one of our new
+     * Java-thread-in-java stubs. Missing a required path2 variant is a patch
+     * failure, not permission to keep the original JVM entry active.
      */
     if (!g_neko_priv_heap.registered) {
         NEKO_PATCH_LOG("patch refused: private CodeHeap not registered for %s.%s%s",
@@ -2517,6 +2508,12 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
     }
     int extraspace_words = (int)g_neko_sig_extraspace_words[entry->signature_id];
     void *real_i2i_path2 = (extraspace_words > 0) ? g_neko_sig_i2i_path2[entry->signature_id] : NULL;
+    if (extraspace_words > 0 && real_i2i_path2 == NULL) {
+        NEKO_PATCH_LOG("patch refused: missing i2i path2 trampoline for sig=%u extraspace=%d %s.%s%s",
+            entry->signature_id, extraspace_words,
+            entry->owner_internal, entry->method_name, entry->method_desc);
+        return JNI_FALSE;
+    }
     /* Per-method thunks: the entry pointer is baked into each thunk's r10
      * preload so the per-signature naked function does not need to scan the
      * manifest. Three thunk variants per Method* (interp i2i, path-2 i2i, c2i)
@@ -2524,7 +2521,7 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
      * is unique to its Method* the only meaningful dedup is for re-entrant
      * patching from defineClass alias resolution. */
     void *t_i2i_interp = neko_priv_get_thunk(real_i2i, 3, entry);
-    void *t_i2i_path2  = (real_i2i_path2 != NULL)
+    void *t_i2i_path2  = (extraspace_words > 0)
         ? neko_priv_get_thunk(real_i2i_path2, 3 + extraspace_words, entry)
         : t_i2i_interp;
     void *t_c2i        = neko_priv_get_thunk(real_c2i, 3, entry);
@@ -2536,9 +2533,10 @@ static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry)
     __atomic_store_n((void**)((uint8_t*)method_star + g_neko_method_layout.off_method_i2i_entry), t_i2i_path2, __ATOMIC_RELEASE);
     __atomic_store_n((void**)((uint8_t*)method_star + g_neko_method_layout.off_method_from_interpreted_entry), t_i2i_interp, __ATOMIC_RELEASE);
     __atomic_store_n((void**)((uint8_t*)method_star + g_neko_method_layout.off_method_from_compiled_entry), t_c2i, __ATOMIC_RELEASE);
-    NEKO_PATCH_LOG("patched %s.%s%s sig=%u method=%p extraspace_words=%d path2=%p",
+    NEKO_PATCH_LOG("patched %s.%s%s sig=%u method=%p from_compiled=%p from_interpreted=%p i2i=%p extraspace_words=%d path2=%p",
         entry->owner_internal, entry->method_name, entry->method_desc,
-        entry->signature_id, method_star, extraspace_words, real_i2i_path2);
+        entry->signature_id, method_star, t_c2i, t_i2i_interp, t_i2i_path2,
+        extraspace_words, real_i2i_path2);
     return JNI_TRUE;
 }
 
