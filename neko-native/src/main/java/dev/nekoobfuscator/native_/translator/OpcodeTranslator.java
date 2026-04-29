@@ -375,8 +375,6 @@ public final class OpcodeTranslator {
 
         Type[] args = Type.getArgumentTypes(mi.desc);
         Type ret = Type.getReturnType(mi.desc);
-        /* Instance-method fallback path: register shape for direct-invoke
-         * dispatcher emission so it's available when this site wires over. */
         codeGenerator.registerInvokeShape(false, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
         StringBuilder sb = new StringBuilder("{ ");
         sb.append(declarePoppedArgs(args));
@@ -617,8 +615,6 @@ public final class OpcodeTranslator {
 
         Type[] args = Type.getArgumentTypes(mi.desc);
         Type ret = Type.getReturnType(mi.desc);
-        /* Register the static-callee shape with the native→Java direct-invoke
-         * emitter so its dispatcher is available when the icache wires over. */
         codeGenerator.registerInvokeShape(true, SignaturePlan.collapseKind(ret), collapseArgKinds(args));
         StringBuilder sb = new StringBuilder("{ ");
         sb.append(declarePoppedArgs(args));

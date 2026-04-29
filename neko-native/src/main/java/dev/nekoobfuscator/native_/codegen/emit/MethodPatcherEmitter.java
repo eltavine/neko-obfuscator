@@ -1485,15 +1485,8 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             (void)neko_priv_heap_register();
         }
     }
-    /* Allocate priv-heap wrappers for each native→Java direct-invoke
-     * trampoline now that the priv heap is set up. The wrappers are
-     * BufferBlob CodeBlobs that HotSpot's stack walker recognizes,
-     * letting fillInStackTrace / GC walks traverse our trampoline frame.
-     *
-     * Gated by NEKO_DIRECT_WRAPPER (default 1, set to 0 to disable). */
-    if (getenv("NEKO_DIRECT_WRAPPER") == NULL || getenv("NEKO_DIRECT_WRAPPER")[0] != '0') {
-        neko_njx_init_wrappers();
-    }
+    /* Native→Java direct invoke now enters through HotSpot call_stub. */
+    neko_njx_init_wrappers();
     /* Publish JNIEnv->JavaThread distance to the early-defined
      * neko_exception_check (which lives in the renderHotSpotSupport region
      * and cannot reach into g_neko_method_layout directly). */

@@ -433,7 +433,6 @@ public final class CCodeGenerator {
         sb.append("} neko_icache_site;\n\n");
         sb.append("#define NEKO_ICACHE_EMPTY 0u\n");
         sb.append("#define NEKO_ICACHE_DIRECT_C 1u\n");
-        sb.append("#define NEKO_ICACHE_NONVIRT_MID 2u\n");
         sb.append("#define NEKO_ICACHE_MEGA 3u\n");
         sb.append("#define NEKO_ICACHE_DIRECT_NJX 4u\n");
         sb.append("#define NEKO_ICACHE_MEGA_THRESHOLD 16u\n\n");
@@ -2110,11 +2109,32 @@ fail:
 #define NEKO_FAST_INLINE static
 #endif
 
+NEKO_FAST_INLINE jboolean neko_ref_is_direct_oop(jobject ref) {
+    uintptr_t raw;
+    if (ref == NULL) return JNI_FALSE;
+    raw = (uintptr_t)ref;
+#if UINTPTR_MAX > 0xffffffffu
+    if ((raw & (uintptr_t)0x7u) == 0 && raw < (uintptr_t)0x0000100000000000ULL) {
+        return JNI_TRUE;
+    }
+#endif
+    return JNI_FALSE;
+}
+
 NEKO_FAST_INLINE void* neko_handle_oop(jobject handle) {
     uintptr_t raw;
     uintptr_t slot;
     if (handle == NULL) return NULL;
     raw = (uintptr_t)handle;
+    /* Direct call_stub entry can re-enter translated native code with raw
+     * HotSpot oops in Java heap registers/stack slots. JNI handle slots live
+     * in native stack or JNIHandleBlock memory, which is far above the zero-
+     * based compressed-oops heap used by the supported JDK 21 test targets.
+     * Treat low aligned references as already-unwrapped oops so nested direct
+     * calls do not dereference the object mark word as a handle slot. */
+    if (neko_ref_is_direct_oop(handle)) {
+        return (void*)raw;
+    }
     slot = (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_HANDLE_TAGS) != 0 ? (raw & ~(uintptr_t)0x3u) : raw;
     return *(void**)slot;
 }
@@ -2175,40 +2195,6 @@ NEKO_FAST_INLINE char neko_icache_return_kind(const char *desc) {
     return (ret != NULL && ret[1] != '\\0') ? ret[1] : 'V';
 }
 
-static jvalue neko_icache_call_virtual(JNIEnv *env, jobject receiver, jmethodID mid, const jvalue *args, const char *desc) {
-    jvalue result = {0};
-    switch (neko_icache_return_kind(desc)) {
-        case 'V': neko_call_void_method_a(env, receiver, mid, args); break;
-        case 'Z': result.z = neko_call_boolean_method_a(env, receiver, mid, args); break;
-        case 'B': result.b = neko_call_byte_method_a(env, receiver, mid, args); break;
-        case 'C': result.c = neko_call_char_method_a(env, receiver, mid, args); break;
-        case 'S': result.s = neko_call_short_method_a(env, receiver, mid, args); break;
-        case 'I': result.i = neko_call_int_method_a(env, receiver, mid, args); break;
-        case 'J': result.j = neko_call_long_method_a(env, receiver, mid, args); break;
-        case 'F': result.f = neko_call_float_method_a(env, receiver, mid, args); break;
-        case 'D': result.d = neko_call_double_method_a(env, receiver, mid, args); break;
-        default: result.l = neko_call_object_method_a(env, receiver, mid, args); break;
-    }
-    return result;
-}
-
-static jvalue neko_icache_call_nonvirtual(JNIEnv *env, jobject receiver, jclass klass, jmethodID mid, const jvalue *args, const char *desc) {
-    jvalue result = {0};
-    switch (neko_icache_return_kind(desc)) {
-        case 'V': neko_call_nonvirtual_void_method_a(env, receiver, klass, mid, args); break;
-        case 'Z': result.z = neko_call_nonvirtual_boolean_method_a(env, receiver, klass, mid, args); break;
-        case 'B': result.b = neko_call_nonvirtual_byte_method_a(env, receiver, klass, mid, args); break;
-        case 'C': result.c = neko_call_nonvirtual_char_method_a(env, receiver, klass, mid, args); break;
-        case 'S': result.s = neko_call_nonvirtual_short_method_a(env, receiver, klass, mid, args); break;
-        case 'I': result.i = neko_call_nonvirtual_int_method_a(env, receiver, klass, mid, args); break;
-        case 'J': result.j = neko_call_nonvirtual_long_method_a(env, receiver, klass, mid, args); break;
-        case 'F': result.f = neko_call_nonvirtual_float_method_a(env, receiver, klass, mid, args); break;
-        case 'D': result.d = neko_call_nonvirtual_double_method_a(env, receiver, klass, mid, args); break;
-        default: result.l = neko_call_nonvirtual_object_method_a(env, receiver, klass, mid, args); break;
-    }
-    return result;
-}
-
 NEKO_FAST_INLINE void neko_icache_replace_class(JNIEnv *env, neko_icache_site *site, jclass cachedClass) {
     if (site == NULL) return;
     if (site->cached_class != NULL) neko_delete_global_ref(env, site->cached_class);
@@ -2223,18 +2209,10 @@ NEKO_FAST_INLINE void neko_icache_store_direct(JNIEnv *env, neko_icache_site *si
     site->target_kind = NEKO_ICACHE_DIRECT_C;
 }
 
-NEKO_FAST_INLINE void neko_icache_store_nonvirt(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, jmethodID mid) {
-    if (site == NULL) return;
-    neko_icache_replace_class(env, site, cachedClass);
-    site->receiver_key = receiverKey;
-    site->target = (void*)mid;
-    site->target_kind = NEKO_ICACHE_NONVIRT_MID;
-}
-
 /* Cache a resolved (Method*, _from_compiled_entry) pair for the receiver
  * class. Subsequent dispatches to the same class skip the JNI GetMethodID
- * and the JNI Call*MethodA call entirely — they invoke the per-shape
- * dispatcher (from meta) directly with the cached entry pointer. */
+ * and invoke the per-shape dispatcher (from meta) directly with the cached
+ * entry pointer. */
 NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *method_ptr, void *compiled_entry) {
     if (site == NULL) return;
     neko_icache_replace_class(env, site, cachedClass);
@@ -2247,10 +2225,8 @@ NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site
 /* Forward decls: defined later in the methodPatcherEmitter region. */
 extern jboolean g_neko_direct_invoke_ready;
 
-/* Runtime gate for the direct-NJX path. The direct dispatcher is now the
- * DEFAULT path. The env var NEKO_DIRECT_INVOKE=0 can disable it for
- * troubleshooting (revert to legacy JNI dispatch). NEKO_DIRECT_DEBUG=1
- * enables verbose [neko-direct] logging on the hot path. */
+/* Runtime gate for direct-NJX diagnostics. Direct invoke is mandatory;
+ * NEKO_DIRECT_DEBUG=1 enables verbose [neko-direct] logging on the hot path. */
 static int g_neko_njx_enabled_cached = 1;
 static int g_neko_njx_enabled_initialized = 0;
 static int g_neko_njx_debug_cached = 0;
@@ -2259,12 +2235,7 @@ static volatile uint64_t g_neko_njx_resolve_fail_count = 0;
 NEKO_FAST_INLINE int neko_njx_debug(void) { return g_neko_njx_debug_cached; }
 NEKO_FAST_INLINE int neko_njx_enabled(void) {
     if (__builtin_expect(!g_neko_njx_enabled_initialized, 0)) {
-        const char *v = getenv("NEKO_DIRECT_INVOKE");
-        if (v != NULL && (v[0] == '0' || (v[0] == 'f' && v[1] == 'a') || (v[0] == 'F' && v[1] == 'A'))) {
-            g_neko_njx_enabled_cached = 0;
-        } else {
-            g_neko_njx_enabled_cached = 1;
-        }
+        g_neko_njx_enabled_cached = 1;
         const char *d = getenv("NEKO_DIRECT_DEBUG");
         g_neko_njx_debug_cached = (d != NULL && d[0] != '\\0' && d[0] != '0') ? 1 : 0;
         g_neko_njx_enabled_initialized = 1;
@@ -2280,12 +2251,8 @@ NEKO_FAST_INLINE int neko_njx_enabled(void) {
 NEKO_FAST_INLINE jboolean neko_icache_note_miss(JNIEnv *env, neko_icache_site *site) {
     if (site == NULL) return JNI_FALSE;
     if (site->miss_count < (uint16_t)0xFFFFu) site->miss_count++;
-    if (site->miss_count < NEKO_ICACHE_MEGA_THRESHOLD) return JNI_FALSE;
-    neko_icache_replace_class(env, site, NULL);
-    site->receiver_key = (uintptr_t)0;
-    site->target = NULL;
-    site->target_kind = NEKO_ICACHE_MEGA;
-    return JNI_TRUE;
+    (void)env;
+    return JNI_FALSE;
 }
 
 /* Forward decls for direct-NJX helpers — actual definitions live in the
@@ -2299,18 +2266,25 @@ static jvalue neko_icache_dispatch(
     neko_icache_site *site,
     const neko_icache_meta *meta,
     jobject receiver,
-    jmethodID fallback_mid,
+    jmethodID declared_mid,
     const jvalue *args
 ) {
     jvalue result = {0};
     uintptr_t receiverKey;
-    if (env == NULL || receiver == NULL || fallback_mid == NULL) return result;
+    void *__receiver_jni_slot = NULL;
+    jobject receiver_jni;
+    if (env == NULL || receiver == NULL || declared_mid == NULL) return result;
+    receiver_jni = receiver;
+    if (neko_ref_is_direct_oop(receiver)) {
+        __receiver_jni_slot = (void*)receiver;
+        receiver_jni = (jobject)&__receiver_jni_slot;
+    }
     if (site != NULL && neko_receiver_key_supported()) {
         receiverKey = neko_receiver_key(receiver);
         if (receiverKey != 0 && site->target_kind != NEKO_ICACHE_MEGA) {
             if (receiverKey == site->receiver_key) {
                 if (site->target_kind == NEKO_ICACHE_DIRECT_C && site->target != NULL) {
-                    return ((neko_icache_direct_stub)site->target)(thread, env, receiver, args);
+                    return ((neko_icache_direct_stub)site->target)(thread, env, receiver_jni, args);
                 }
                 if (site->target_kind == NEKO_ICACHE_DIRECT_NJX && site->target != NULL && site->target2 != NULL
                     && meta != NULL && meta->direct_dispatcher != NULL && neko_njx_enabled()) {
@@ -2318,12 +2292,9 @@ static jvalue neko_icache_dispatch(
                     NEKO_DIRECT_LOG("hit %s%s method=%p entry=%p", meta->name, meta->desc, site->target, site->target2);
                     return meta->direct_dispatcher(thread, env, site->target, site->target2, receiver, args);
                 }
-                if (site->target_kind == NEKO_ICACHE_NONVIRT_MID && site->cached_class != NULL && site->target != NULL) {
-                    return neko_icache_call_nonvirtual(env, receiver, site->cached_class, (jmethodID)site->target, args, meta != NULL ? meta->desc : NULL);
-                }
             }
             if (!neko_icache_note_miss(env, site)) {
-                jclass exactClass = neko_get_object_class(env, receiver);
+                jclass exactClass = neko_get_object_class(env, receiver_jni);
                 if (exactClass != NULL && !neko_exception_check(env)) {
                     jclass translatedClass = (meta != NULL && meta->translated_class_slot != NULL) ? *meta->translated_class_slot : NULL;
                     if (translatedClass != NULL && meta != NULL && meta->translated_stub != NULL && neko_is_same_object(env, exactClass, translatedClass)) {
@@ -2334,7 +2305,7 @@ static jvalue neko_icache_dispatch(
                         }
                         neko_icache_store_direct(env, site, receiverKey, cachedExactClass, (void*)meta->translated_stub);
                         neko_delete_local_ref(env, exactClass);
-                        return meta->translated_stub(thread, env, receiver, args);
+                        return meta->translated_stub(thread, env, receiver_jni, args);
                     }
                     jmethodID exactMid = neko_get_method_id(env, exactClass, meta != NULL ? meta->name : NULL, meta != NULL ? meta->desc : NULL);
                     if (exactMid != NULL && !neko_exception_check(env)) {
@@ -2343,18 +2314,9 @@ static jvalue neko_icache_dispatch(
                             neko_exception_clear(env);
                             cachedExactClass = NULL;
                         }
-                        /* Default path: direct-NJX. We arrive here only when
-                         * (a) the dispatcher is enabled (default, unless
-                         *     NEKO_DIRECT_INVOKE=0),
-                         * (b) the layout walker resolved every required
-                         *     offset (g_neko_direct_invoke_ready),
-                         * (c) the call site has a per-shape dispatcher,
-                         * (d) we successfully resolve Method* + compiled
-                         *     entry from this jmethodID.
-                         *
-                         * Any of those failing → fall through to legacy
-                         * JNI-based dispatch (kept until trampoline CodeBlob
-                         * registration handles GC stack walking). */
+                        /* Direct-NJX is mandatory once the virtual target is
+                         * resolved. A missing dispatcher or unresolved Method*
+                         * is a hard runtime failure, not a JNI call fallback. */
                         if (neko_njx_enabled() && g_neko_direct_invoke_ready
                             && meta != NULL && meta->direct_dispatcher != NULL) {
                             void *m_ptr = NULL, *m_entry = NULL;
@@ -2370,16 +2332,14 @@ static jvalue neko_icache_dispatch(
                                 return result;
                             } else {
                                 __atomic_fetch_add(&g_neko_njx_resolve_fail_count, 1, __ATOMIC_RELAXED);
-                                NEKO_DIRECT_LOG("resolve-failed %s%s mid=%p (falling back to JNI)",
+                                fprintf(stderr, "[neko-direct] resolve-failed %s%s mid=%p\\n",
                                     meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?", exactMid);
+                                abort();
                             }
                         }
-                        if (cachedExactClass != NULL) {
-                            neko_icache_store_nonvirt(env, site, receiverKey, cachedExactClass, exactMid);
-                        }
-                        result = neko_icache_call_nonvirtual(env, receiver, cachedExactClass != NULL ? cachedExactClass : exactClass, exactMid, args, meta != NULL ? meta->desc : NULL);
-                        neko_delete_local_ref(env, exactClass);
-                        return result;
+                        fprintf(stderr, "[neko-direct] missing direct dispatcher for %s%s\\n",
+                            meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?");
+                        abort();
                     }
                     if (neko_exception_check(env)) neko_exception_clear(env);
                     neko_delete_local_ref(env, exactClass);
@@ -2389,7 +2349,11 @@ static jvalue neko_icache_dispatch(
             }
         }
     }
-    return neko_icache_call_virtual(env, receiver, fallback_mid, args, meta != NULL ? meta->desc : NULL);
+    __atomic_fetch_add(&g_neko_njx_resolve_fail_count, 1, __ATOMIC_RELAXED);
+    fprintf(stderr, "[neko-direct] unresolved virtual dispatch %s%s declared_mid=%p receiver=%p site=%p\\n",
+        meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?", declared_mid, receiver, (void*)site);
+    abort();
+    return result;
 }
 
 __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
@@ -2550,7 +2514,16 @@ NEKO_FAST_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArra
             }
         }
     }
-    fprintf(stderr, "[neko-direct] AALOAD direct path unavailable arr=%p idx=%d thread=%p\\n", (void*)arr, (int)idx, thread);
+    {
+        void *dbg_block = thread != NULL && g_neko_off_thread_active_handles > 0 ? *(void**)((char*)thread + g_neko_off_thread_active_handles) : NULL;
+        int32_t dbg_top = dbg_block != NULL ? *(int32_t*)((char*)dbg_block + g_neko_off_jnih_block_top) : -1;
+        void *dbg_oop = arr != NULL ? neko_handle_oop((jobject)arr) : NULL;
+        jint dbg_len = dbg_oop != NULL ? *(jint*)((char*)dbg_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4) : -1;
+        fprintf(stderr, "[neko-direct] AALOAD direct path unavailable arr=%p idx=%d thread=%p init=%d bits=0x%x base=%d push=%d block=%p top=%d oop=%p len=%d\\n",
+            (void*)arr, (int)idx, thread, (int)g_hotspot.initialized, (unsigned)g_hotspot.fast_bits,
+            (int)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I], (int)g_neko_handle_push_ready,
+            dbg_block, (int)dbg_top, dbg_oop, (int)dbg_len);
+    }
     abort();
 }
 
