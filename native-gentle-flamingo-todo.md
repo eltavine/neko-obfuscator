@@ -32,7 +32,9 @@ Status legend:
 
 This gate applies to every T0-T4 subtask, including small scaffolding and cleanup subtasks.
 
+- Before editing code for a new subtask, write down the runtime target(s) that will prove the changed path. If the current subtask cannot be proven by `TEST-native.jar` plus `obfusjack-test21`/`obfusjack-native.jar`, add the narrower or additional runtime target before implementation.
 - A subtask must stay `[ ]` or `[-]` until its changed code path is exercised by a regenerated runtime artifact, not only by compile success, source inspection, or generated-C inspection.
+- Every code change inside a subtask must be followed by runtime validation of a freshly regenerated artifact before that change can be treated as resolved. Compile-only, unit-only, stale-jar, or source-only validation is not enough.
 - Before changing any subtask checkbox to `[x]`, rerun the exact Gradle/native generation path that rebuilds the jar or native artifact affected by that subtask.
 - After regeneration, run the exact runtime target that exercises the new path. For this plan, the default minimum runtime targets are `TEST-native.jar` and `obfusjack-test21`/`obfusjack-native.jar`; if a subtask needs a narrower or additional runtime target, state it before marking `[x]`.
 - Runtime validation must inspect stdout, stderr, generated native logs, and any `hs_err_pid*.log` from that run. Crashes, SIGSEGV/SIGABRT, verifier errors, `translated=0`, `Native compilation produced no libraries`, skip-on-error output, missing required symbol diagnostics, or fallback/original-bytecode execution keep the subtask incomplete.
