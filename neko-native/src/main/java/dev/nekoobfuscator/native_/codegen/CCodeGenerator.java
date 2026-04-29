@@ -1744,29 +1744,6 @@ static jboolean neko_hotspot_clear_exception(JNIEnv *env) {
     return JNI_TRUE;
 }
 
-static jboolean neko_parse_bool_option(const char *value, jboolean *out) {
-    if (value == NULL || out == NULL) return JNI_FALSE;
-    if (strcmp(value, "true") == 0) {
-        *out = JNI_TRUE;
-        return JNI_TRUE;
-    }
-    if (strcmp(value, "false") == 0) {
-        *out = JNI_FALSE;
-        return JNI_TRUE;
-    }
-    return JNI_FALSE;
-}
-
-static jboolean neko_parse_int_option(const char *value, jint *out) {
-    char *end = NULL;
-    long parsed;
-    if (value == NULL || out == NULL) return JNI_FALSE;
-    parsed = strtol(value, &end, 10);
-    if (end == value || (end != NULL && *end != '\\0')) return JNI_FALSE;
-    *out = (jint)parsed;
-    return JNI_TRUE;
-}
-
 static jint neko_hotspot_shift_from_alignment(jint alignment) {
     jint shift = 0;
     if (alignment <= 0) return 0;
@@ -1806,56 +1783,6 @@ static jboolean neko_detect_hotspot(JNIEnv *env) {
     return isHotspot;
 }
 
-static jboolean neko_hotspot_option_string(JNIEnv *env, const char *name, char *buffer, size_t bufferSize) {
-    jclass managementFactoryClass;
-    jclass hotspotMxBeanClass;
-    jmethodID getPlatformMxBean;
-    jmethodID getVmOption;
-    jmethodID getValue;
-    jobject mxBean;
-    jobject vmOption;
-    jstring optionName;
-    jstring optionValue;
-    const char *chars;
-    jvalue args[1];
-    if (buffer == NULL || bufferSize == 0) return JNI_FALSE;
-    managementFactoryClass = neko_find_class(env, "java/lang/management/ManagementFactory");
-    hotspotMxBeanClass = neko_find_class(env, "com/sun/management/HotSpotDiagnosticMXBean");
-    if (managementFactoryClass == NULL || hotspotMxBeanClass == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    getPlatformMxBean = neko_get_static_method_id(env, managementFactoryClass, "getPlatformMXBean", "(Ljava/lang/Class;)Ljava/lang/Object;");
-    if (getPlatformMxBean == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    args[0].l = hotspotMxBeanClass;
-    mxBean = neko_call_static_object_method_a(env, managementFactoryClass, getPlatformMxBean, args);
-    if (mxBean == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    getVmOption = neko_get_method_id(env, hotspotMxBeanClass, "getVMOption", "(Ljava/lang/String;)Lcom/sun/management/VMOption;");
-    if (getVmOption == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    optionName = neko_new_string_utf(env, name);
-    if (optionName == NULL) return JNI_FALSE;
-    args[0].l = optionName;
-    vmOption = neko_call_object_method_a(env, mxBean, getVmOption, args);
-    if (neko_hotspot_clear_exception(env)) {
-        neko_delete_local_ref(env, optionName);
-        return JNI_FALSE;
-    }
-    neko_delete_local_ref(env, optionName);
-    if (vmOption == NULL) return JNI_FALSE;
-    getValue = neko_get_method_id(env, neko_get_object_class(env, vmOption), "getValue", "()Ljava/lang/String;");
-    if (getValue == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    optionValue = (jstring)neko_call_object_method_a(env, vmOption, getValue, NULL);
-    if (neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    if (optionValue == NULL) return JNI_FALSE;
-    chars = neko_get_string_utf_chars(env, optionValue);
-    if (chars == NULL) {
-        neko_delete_local_ref(env, optionValue);
-        return JNI_FALSE;
-    }
-    strncpy(buffer, chars, bufferSize - 1u);
-    buffer[bufferSize - 1u] = '\\0';
-    neko_release_string_utf_chars(env, optionValue, chars);
-    neko_delete_local_ref(env, optionValue);
-    return JNI_TRUE;
-}
-
 static jobject neko_hotspot_unsafe_singleton_for(JNIEnv *env, const char *className) {
     jclass unsafeClass = neko_find_class(env, className);
     jfieldID theUnsafe;
@@ -1875,18 +1802,6 @@ static jobject neko_hotspot_unsafe_singleton(JNIEnv *env) {
     jobject unsafe = neko_hotspot_unsafe_singleton_for(env, "sun/misc/Unsafe");
     if (unsafe != NULL) return unsafe;
     return neko_hotspot_unsafe_singleton_for(env, "jdk/internal/misc/Unsafe");
-}
-
-static jint neko_hotspot_address_size(JNIEnv *env) {
-    jobject unsafe = neko_hotspot_unsafe_singleton(env);
-    jmethodID mid;
-    jint value;
-    if (unsafe == NULL) return 0;
-    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "addressSize", "()I");
-    if (mid == NULL || neko_hotspot_clear_exception(env)) return 0;
-    value = neko_call_int_method_a(env, unsafe, mid, NULL);
-    if (neko_hotspot_clear_exception(env)) return 0;
-    return value;
 }
 
 static jclass neko_hotspot_primitive_array_class(JNIEnv *env, const char *primitiveName) {
@@ -1957,10 +1872,11 @@ static void neko_hotspot_init(JNIEnv *env) {
     if (!neko_detect_hotspot(env)) goto fail;
 
     state.is_hotspot = JNI_TRUE;
-    state.address_size = neko_hotspot_address_size(env);
-    if (neko_hotspot_clear_exception(env) || state.address_size <= 0) goto fail;
+    state.address_size = (jint)sizeof(void*);
+    if (state.address_size != 4 && state.address_size != 8) goto fail;
 
-    /* Do not query HotSpotDiagnosticMXBean here. JNI_OnLoad runs before the
+    /* Do not query Java management beans or Unsafe pointer-size helpers here.
+     * JNI_OnLoad runs before the
      * native pending-exception offsets are published, so failed reflective
      * probes cannot be cleared without falling back through JNI. VMStructs in
      * neko_method_layout_init publishes the authoritative compressed-oops and

@@ -24,6 +24,8 @@ Verification run in this pass:
 - `env XDG_CACHE_HOME=/tmp/neko-zig-cache neko-cli ... configs/native-test.yml ... /tmp/native-gentle-flamingo-TEST-native.jar` PASS: `translated=46 rejected=0`, wrote `neko/native/libneko_linux_x64.so`.
 - `timeout 120s java -jar /tmp/native-gentle-flamingo-TEST-native.jar` PASS at process level: TEST output reached finish, `Calc: 12ms`; observed `Test 2.8: Sec ERROR`, so this is not recorded as all-green.
 - After removing the MXBean probe path, regenerated `/tmp/native-gentle-flamingo-TEST-native.jar` and reran it: process exit 0, all expected native integration pass lines reached, `Calc: 13ms`; `Test 2.8: Sec ERROR` remains the repository's known TEST baseline as asserted by `NativeObfuscationIntegrationTest.nativeObfuscation_TEST_allTestsExceptSecurityPass`.
+- T2.7 follow-up removed the dead MXBean helper and active `Unsafe.addressSize()` probe from `renderHotSpotSupport`; source grep for `DiagnosticMXBean|HotSpotDiagnostic|addressSize|neko_hotspot_option_string|neko_hotspot_address_size` is clean.
+- After T2.7 cleanup, regenerated `/tmp/native-gentle-flamingo-TEST-native.jar`: `translated=46 rejected=0`; runtime exit 0, expected pass lines reached, `Calc: 14ms`, known `Test 2.8: Sec ERROR` baseline remains.
 - `nm -D /tmp/native-gentle-flamingo-libneko_linux_x64.so | rg " Java_|neko_impl_|neko_entry_|JNI_OnLoad"` showed only exported `JNI_OnLoad`; no `Java_*` export symbols.
 - Static generated-C check on `/tmp/neko_native_5410848013843882579/neko_native.c` still finds `NEKO_JNI_FN_PTR`, so T2.9/T4.1 remain open.
 - `neko_exception_check` no longer falls back to JNI table index 228; early bootstrap without offsets returns `JNI_FALSE` until T2 moves all probes behind VMStructs.
@@ -51,7 +53,7 @@ Verification run in this pass:
 - [ ] T2.4 Implement `neko_resolve_field(InstanceKlass*, name, sig, is_static)` by scanning field metadata.
 - [ ] T2.5 Implement `neko_intern_string(modutf, len)` without `NewStringUTF`.
 - [ ] T2.6 Rewrite `renderBindSupport()` macros and remove Unsafe-reflection field offset path.
-- [-] T2.7 Rewrite `renderHotSpotSupport()` to remove MXBean and `Unsafe.addressSize()` probes. MXBean option probing is removed from active init; `Unsafe.addressSize()` still remains.
+- [x] T2.7 Rewrite `renderHotSpotSupport()` to remove MXBean and `Unsafe.addressSize()` probes.
 - [x] T2.8 Remove `JniHandlesShimEmitter` raw `*(void**)ref` fallback; missing `JNIHandles::resolve` now aborts.
 - [ ] T2.9 Verify generated bind-support C has zero `(*env)->` / `NEKO_JNI_FN_PTR` hits outside allowed `GetEnv`. Current generated C still fails this check.
 
