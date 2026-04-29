@@ -30,7 +30,7 @@ Status legend:
 
 ## Preparation
 
-- [ ] T0.1 VMStructs offsets for `SystemDictionary`, `InstanceKlass`, `ConstantPool`, `Symbol`, `StringTable`, `Universe`, `BarrierSet`, and `oopFactory`.
+- [x] T0.1 VMStructs offsets for `SystemDictionary`, `InstanceKlass`, `ConstantPool`, `Symbol`, `StringTable`, `Universe`, `BarrierSet`, and `oopFactory`.
 - [ ] T0.2 GC barrier dlsym table for G1, ZGC, Shenandoah, Parallel, and Serial, with missing required symbols aborting.
 
 ## Stage 1: Native Entry
