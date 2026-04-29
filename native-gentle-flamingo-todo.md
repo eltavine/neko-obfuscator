@@ -32,6 +32,10 @@ Status legend:
 
 This gate applies to every T0-T4 subtask, including small scaffolding and cleanup subtasks.
 
+- Before starting any new subtask or any new code change inside the current subtask, reread this todo and the source plan, then record which row in the runtime target matrix below will validate that exact change.
+- Every implementation change must follow this loop before it is treated as resolved: edit one coherent change, regenerate the affected native artifact with repository `./gradlew`, run the required runtime target(s), inspect stdout/stderr/native logs/`hs_err_pid*.log`, inspect generated C when JNI removal is claimed, then either fix and rerun or commit only after the checks pass.
+- No checkbox may be changed to `[x]` because a previous jar, stale generated C file, unit-only test, or compile-only check passed. The validation artifact must be regenerated after the latest source edit.
+- If a subtask is split into multiple commits or multiple code changes, each split inherits the full runtime target row for that subtask unless the todo is updated first with a narrower runtime target and a plan-level reason.
 - Before editing code for a new subtask, write down the runtime target(s) that will prove the changed path. If the current subtask cannot be proven by `TEST-native.jar` plus `obfusjack-test21`/`obfusjack-native.jar`, add the narrower or additional runtime target before implementation.
 - A subtask must stay `[ ]` or `[-]` until its changed code path is exercised by a regenerated runtime artifact, not only by compile success, source inspection, or generated-C inspection.
 - Every code change inside a subtask must be followed by runtime validation of a freshly regenerated artifact before that change can be treated as resolved. Compile-only, unit-only, stale-jar, or source-only validation is not enough.
@@ -42,6 +46,62 @@ This gate applies to every T0-T4 subtask, including small scaffolding and cleanu
 - A hot-path opcode subtask is not complete until a runtime jar executes that opcode through the new native path and the generated C inspection confirms no forbidden JNI wrapper remains for that path.
 - A cleanup/removal subtask is not complete until a runtime jar proves the removed fallback is not required and the failure mode is a hard abort/error when the required native mechanism is unavailable.
 - The commit for a completed subtask must include only the implementation plus its todo checkbox update after the runtime validation above has passed.
+
+### Runtime Target Matrix
+
+Use these target groups in every row below:
+
+- `R-build`: regenerate with repository `./gradlew` through the native integration path that rebuilds `TEST-native.jar` and `obfusjack-native.jar`; compile-only is not enough.
+- `R-test`: run the regenerated `TEST-native.jar` directly with `java -XX:+PerfDisableSharedMem -jar neko-test/build/test-native/TEST-native.jar`.
+- `R-obfusjack`: run the regenerated `obfusjack-test21`/`obfusjack-native.jar` target directly with `java -XX:+PerfDisableSharedMem -jar neko-test/build/test-native/obfusjack-native.jar`.
+- `R-native-test`: run the relevant `NativeObfuscationIntegrationTest` Gradle target after regeneration; use focused tests while iterating, then the full class before marking `[x]`.
+- `R-inspect`: inspect generated C, native build logs, stdout, stderr, and newest `hs_err_pid*.log`; reject `translated=0`, `Native compilation produced no libraries`, skip-on-error success, forbidden JNI function-table calls, crashes, verifier errors, or fallback/original-bytecode execution.
+- `R-negative`: where a subtask removes a fallback, force or inspect the missing-capability path so the failure mode is a hard abort/error, not JNI fallback or original bytecode.
+
+Each subtask below requires the listed runtime proof after the latest edit:
+
+- T0.1: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; prove native resolution readiness bits are required before Stage 2 resolver use.
+- T0.2: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; prove missing GC barrier symbols abort and no GC mode is silently skipped.
+- T1.1: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; generated manifest/export inspection must prove no `Java_*`/`RegisterNatives` entry path remains.
+- T1.2: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; generated Windows trampoline inspection must prove Java ABI entry and no JNI state transition.
+- T1.3: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; generated SysV/Aarch64 trampoline inspection must prove Java ABI entry and no JNI state transition.
+- T1.4: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must prove patched compiled/interpreted entries execute the new stubs.
+- T1.5: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; prove `NEKO_DISABLE_CODEBLOB` is gone and private CodeHeap failure aborts.
+- T1.6: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must prove obfusjack-test21 completes and native execution stays in `_thread_in_java`.
+- T2.1: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; `JNI_OnLoad` inspection must show only allowed `GetEnv` bootstrap behavior.
+- T2.2: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove class resolver calls current bind path and missing class resolution aborts.
+- T2.3: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove method resolver calls current bind path and missing method resolution aborts.
+- T2.4: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove field resolver calls current bind path and missing field resolution aborts.
+- T2.5: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove string literal binding uses `neko_intern_string` and generated C has no `NewStringUTF` on that path.
+- T2.6: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove bind macros use native resolvers and Unsafe-reflection offset paths are removed.
+- T2.7: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove HotSpot support derives compressed-oops/klass data natively and MXBean/Unsafe probes are gone.
+- T2.8: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove `JNIHandles::resolve`/local handle support works and raw `*(void**)ref` fallback aborts.
+- T2.9: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; generated bind-support C must have zero forbidden `(*env)->`/`NEKO_JNI_FN_PTR` hits outside allowed `GetEnv`.
+- T3.1: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute LDC String/Class through cached bind-time slots.
+- T3.2: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must execute primitive field access through direct offsets with JNI fallback deleted.
+- T3.3: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must execute object field/static loads through barrier-aware native load entry.
+- T3.4: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must execute object field/static stores through barrier-aware native store entry.
+- T3.5: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute `ARRAYLENGTH` through direct array length offset.
+- T3.6: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute primitive array load/store through direct array memory access.
+- T3.7: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must execute `AALOAD`/`AASTORE` through barrier-aware array load/store and native store checks.
+- T3.8: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute `NEW` and `NEW+<init>` without JNI allocation.
+- T3.9: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute primitive/object/multi array allocation without JNI allocation.
+- T3.10: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute `INSTANCEOF`/`CHECKCAST` through native subtype metadata.
+- T3.11: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute `getClass` through oop header klass and mirror.
+- T3.12: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute monitor enter/exit through HotSpot synchronizer/stub entry.
+- T3.13: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute `ATHROW` by writing `_pending_exception`.
+- T3.14: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must construct implicit exceptions through native allocation/call-stub path.
+- T3.15: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must dispatch exception handlers through `_pending_exception` read/clear.
+- T3.16: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; runtime must execute boxing/unboxing through cached methods/direct fields without JNI wrappers.
+- T3.17: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime plus safety checker must prove non-manifest invoke callees are rejected and JNI invoke wrappers are deleted.
+- T3.18: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove supported invokedynamic paths run natively and unsupported paths reject before fallback.
+- T3.19: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove StringConcat paths do not enter StringBuilder JNI fallback.
+- T3.20: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; generated runtime support C must prove `NEKO_JNI_FN_PTR` and replaced wrappers are gone.
+- T4.1: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; final grep must prove generated C has zero forbidden JNI function-table calls outside single `GetEnv`.
+- T4.2: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; final inspection must prove `JNIEnv` is only a type/bootstrap handle and never a function-table caller after bootstrap.
+- T4.3: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; final runtime must prove obfusjack-test21 and Calc pass, with Calc `<= 20 ms`.
+- T4.4: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; final runtime or explicit VM-mode proof must cover G1, Parallel, Serial, ZGC, and Shenandoah strict behavior with no soft skip.
+- T4.5: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; final replay/regression must prove the replacement for `replay_pid2968920.log` still covers the native path.
 
 ## Preparation
 
