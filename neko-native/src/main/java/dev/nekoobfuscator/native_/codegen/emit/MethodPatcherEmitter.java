@@ -14,7 +14,7 @@ package dev.nekoobfuscator.native_.codegen.emit;
 public final class MethodPatcherEmitter {
 
     public String render() {
-        return renderPart1() + renderPart2() + renderPart3();
+        return renderPart1() + renderPart1b() + renderPart2() + renderPart3();
     }
 
     private static String renderPart1() {
@@ -185,6 +185,30 @@ typedef struct {
     ptrdiff_t off_array_data;
     ptrdiff_t off_barrierset_fake_rtti;
     ptrdiff_t off_barrierset_fakertti_concrete_tag;
+    ptrdiff_t off_cardtablebarrierset_card_table;
+    ptrdiff_t off_cardtable_byte_map_base;
+    int32_t vmconst_barrierset_modref;
+    int32_t vmconst_barrierset_cardtable;
+    int32_t vmconst_barrierset_g1;
+    int32_t vmconst_cardtable_clean_card;
+    int32_t vmconst_cardtable_dirty_card;
+    int32_t vmconst_g1_young_card;
+    int32_t current_barrier_kind;
+    void *current_barrier_set;
+    void *current_card_table;
+    void *card_table_byte_map_base;
+    void *sym_g1_write_ref_array_pre_oop_entry;
+    void *sym_g1_write_ref_field_pre_entry;
+    void *sym_g1_write_ref_field_post_entry;
+    void *sym_z_load_barrier_on_oop_field_preloaded;
+    void *sym_z_load_barrier_on_oop_array;
+    void *sym_z_store_barrier_on_oop_field_with_healing;
+    void *sym_shenandoah_load_reference_barrier_strong;
+    void *sym_shenandoah_load_reference_barrier_strong_narrow;
+    void *sym_shenandoah_write_ref_field_pre_entry;
+    void *sym_shenandoah_arraycopy_barrier_oop_entry;
+    void *sym_shenandoah_arraycopy_barrier_narrow_oop_entry;
+    jboolean gc_barrier_ready;
     void *sym_jvm_find_loaded_class;
     void *sym_jvm_find_class_from_boot_loader;
     void *sym_jvm_intern_string;
@@ -287,6 +311,27 @@ __attribute__((visibility("hidden"))) void *g_neko_heap_base = NULL;
 __attribute__((visibility("hidden"))) void *g_neko_jni_onload_thread_reg = NULL;
 __attribute__((visibility("hidden"))) void *g_neko_jni_functions_table = NULL;
 __attribute__((visibility("hidden"))) jboolean g_neko_native_resolution_ready = JNI_FALSE;
+__attribute__((visibility("hidden"))) jboolean g_neko_gc_barrier_ready = JNI_FALSE;
+__attribute__((visibility("hidden"))) int32_t g_neko_gc_barrier_kind = 0;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_load_oop_field_preloaded = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_load_oop_array = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_store_oop_field = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_write_ref_array_pre = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_write_ref_field_pre = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_barrier_write_ref_field_post = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_card_table_byte_map_base = NULL;
+__attribute__((visibility("hidden"))) int32_t g_neko_card_table_dirty_card = 0;
+__attribute__((visibility("hidden"))) int32_t g_neko_card_table_clean_card = -1;
+__attribute__((visibility("hidden"))) int32_t g_neko_g1_young_card = -1;
+__attribute__((visibility("hidden"))) int32_t g_neko_card_table_shift = 9;
+
+enum {
+    NEKO_GC_BARRIER_UNKNOWN = 0,
+    NEKO_GC_BARRIER_CARDTABLE = 1,
+    NEKO_GC_BARRIER_G1 = 2,
+    NEKO_GC_BARRIER_Z = 3,
+    NEKO_GC_BARRIER_SHENANDOAH = 4
+};
 
 /* Debug flag is cached once at JNI_OnLoad time. The original macro called
  * getenv("NEKO_PATCH_DEBUG") on every NEKO_PATCH_LOG invocation — and the
@@ -406,6 +451,49 @@ static void neko_resolve_native_resolution_symbols(void *jvm) {
         neko_dlsym(jvm, "_ZN11StringTable10_the_tableE");
 }
 
+static void neko_resolve_gc_barrier_symbols(void *jvm) {
+    if (jvm == NULL) return;
+    g_neko_method_layout.sym_g1_write_ref_array_pre_oop_entry =
+        neko_dlsym(jvm, "_ZN19G1BarrierSetRuntime29write_ref_array_pre_oop_entryEPP7oopDescm");
+    g_neko_method_layout.sym_g1_write_ref_field_pre_entry =
+        neko_dlsym(jvm, "_ZN19G1BarrierSetRuntime25write_ref_field_pre_entryEP7oopDescP10JavaThread");
+    g_neko_method_layout.sym_g1_write_ref_field_post_entry =
+        neko_dlsym(jvm, "_ZN19G1BarrierSetRuntime26write_ref_field_post_entryEPVhP10JavaThread");
+    g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded =
+        neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime35load_barrier_on_oop_field_preloadedEP7oopDescPS0_");
+    if (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded == NULL) {
+        g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded =
+            neko_dlsym(jvm, "_ZN18XBarrierSetRuntime35load_barrier_on_oop_field_preloadedEP7oopDescPS0_");
+    }
+    g_neko_method_layout.sym_z_load_barrier_on_oop_array =
+        neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime29load_barrier_on_oop_arrayEP7oopDesc");
+    if (g_neko_method_layout.sym_z_load_barrier_on_oop_array == NULL) {
+        g_neko_method_layout.sym_z_load_barrier_on_oop_array =
+            neko_dlsym(jvm, "_ZN18XBarrierSetRuntime29load_barrier_on_oop_arrayEP7oopDesc");
+    }
+    g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing =
+        neko_dlsym(jvm, "_ZN18ZBarrierSetRuntime39store_barrier_on_oop_field_with_healingEPP7oopDesc");
+    if (g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing == NULL) {
+        g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing =
+            neko_dlsym(jvm, "_ZN18XBarrierSetRuntime39store_barrier_on_oop_field_with_healingEPP7oopDesc");
+    }
+    g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime29load_reference_barrier_strongEP7oopDescPS0_");
+    g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong_narrow =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime36load_reference_barrier_strong_narrowEP7oopDescPj");
+    g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime25write_ref_field_pre_entryEP7oopDescP10JavaThread");
+    g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime27arraycopy_barrier_oop_entryEPP7oopDescS2_m");
+    g_neko_method_layout.sym_shenandoah_arraycopy_barrier_narrow_oop_entry =
+        neko_dlsym(jvm, "_ZN17ShenandoahRuntime34arraycopy_barrier_narrow_oop_entryEPjS0_m");
+}
+
+""";
+    }
+
+    private static String renderPart1b() {
+        return """
 static int neko_detect_java_spec_version_from_env(JNIEnv *env) {
     static jclass cls = NULL;
     static jmethodID mid = NULL;
@@ -490,6 +578,13 @@ static jboolean neko_walk_vm_structs(void *jvm) {
         } else if (neko_streq_safe(field_name, "_ZPointerLoadShift")) {
             if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_load_shift = static_addr;
             g_neko_method_layout.off_zglobals_pointer_load_shift = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "CompilerToVM::Data") && is_static && static_addr != NULL) {
+            void *entry = *(void**)static_addr;
+            if (entry != NULL && neko_streq_safe(field_name, "ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded")) {
+                g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded = entry;
+            } else if (entry != NULL && neko_streq_safe(field_name, "ZBarrierSetRuntime_load_barrier_on_oop_array")) {
+                g_neko_method_layout.sym_z_load_barrier_on_oop_array = entry;
+            }
         }
         /* Field-name fallback for inherited Thread fields. VMStructs splits
          * across the Thread / ThreadShadow / JavaThread chain, and some are
@@ -566,6 +661,14 @@ static jboolean neko_walk_vm_structs(void *jvm) {
         } else if (neko_streq_safe(type_name, "BarrierSet::FakeRtti")) {
             if (neko_streq_safe(field_name, "_concrete_tag")) {
                 g_neko_method_layout.off_barrierset_fakertti_concrete_tag = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "CardTableBarrierSet")) {
+            if (neko_streq_safe(field_name, "_card_table")) {
+                g_neko_method_layout.off_cardtablebarrierset_card_table = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "CardTable")) {
+            if (neko_streq_safe(field_name, "_byte_map_base")) {
+                g_neko_method_layout.off_cardtable_byte_map_base = (ptrdiff_t)off_value;
             }
         } else if (neko_streq_safe(type_name, "Universe")) {
             if (is_static && neko_streq_safe(field_name, "_collectedHeap")) {
@@ -742,12 +845,80 @@ static void neko_walk_vm_int_constants(void *jvm) {
         else if (neko_streq_safe(name, "T_DOUBLE"))  g_neko_method_layout.basictype_double  = (int32_t)value;
         else if (neko_streq_safe(name, "T_OBJECT"))  g_neko_method_layout.basictype_object  = (int32_t)value;
         else if (neko_streq_safe(name, "T_ARRAY"))   g_neko_method_layout.basictype_array   = (int32_t)value;
+        else if (neko_streq_safe(name, "BarrierSet::ModRef")) g_neko_method_layout.vmconst_barrierset_modref = (int32_t)value;
+        else if (neko_streq_safe(name, "BarrierSet::CardTableBarrierSet")) g_neko_method_layout.vmconst_barrierset_cardtable = (int32_t)value;
+        else if (neko_streq_safe(name, "BarrierSet::G1BarrierSet")) g_neko_method_layout.vmconst_barrierset_g1 = (int32_t)value;
+        else if (neko_streq_safe(name, "CardTable::clean_card")) g_neko_method_layout.vmconst_cardtable_clean_card = (int32_t)value;
+        else if (neko_streq_safe(name, "CardTable::dirty_card")) g_neko_method_layout.vmconst_cardtable_dirty_card = (int32_t)value;
+        else if (neko_streq_safe(name, "G1CardTable::g1_young_gen")) g_neko_method_layout.vmconst_g1_young_card = (int32_t)value;
     }
     /* The default value for T_VOID in HotSpot's BasicType enum is 14 on JDK
      * 21+ but we won't trust any constant if T_INT didn't show up — that
      * would mean the VMIntConstants table didn't include the BasicType
      * group at all. Mark the resolution as ready only when we got T_INT. */
     g_neko_method_layout.basictypes_resolved = (g_neko_method_layout.basictype_int != 0) ? JNI_TRUE : JNI_FALSE;
+}
+
+static void neko_detect_current_gc_barrier(void) {
+    void *bs;
+    int32_t tag = -1;
+    g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_UNKNOWN;
+    g_neko_method_layout.current_barrier_set = NULL;
+    g_neko_method_layout.current_card_table = NULL;
+    g_neko_method_layout.card_table_byte_map_base = NULL;
+    if (g_neko_method_layout.addr_barrierset_barrier_set == NULL
+        || g_neko_method_layout.off_barrierset_fake_rtti < 0
+        || g_neko_method_layout.off_barrierset_fakertti_concrete_tag < 0) {
+        return;
+    }
+    bs = *(void**)g_neko_method_layout.addr_barrierset_barrier_set;
+    if (bs == NULL) return;
+    g_neko_method_layout.current_barrier_set = bs;
+    tag = *(int32_t*)((char*)bs
+        + g_neko_method_layout.off_barrierset_fake_rtti
+        + g_neko_method_layout.off_barrierset_fakertti_concrete_tag);
+    if (tag == g_neko_method_layout.vmconst_barrierset_g1) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_G1;
+    } else if (tag == g_neko_method_layout.vmconst_barrierset_cardtable) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_CARDTABLE;
+    } else if (g_hotspot.use_zgc) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_Z;
+    } else if (g_hotspot.use_shenandoah_gc) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_SHENANDOAH;
+    }
+    if (g_neko_method_layout.off_cardtablebarrierset_card_table >= 0) {
+        void *ct = *(void**)((char*)bs + g_neko_method_layout.off_cardtablebarrierset_card_table);
+        g_neko_method_layout.current_card_table = ct;
+        if (ct != NULL && g_neko_method_layout.off_cardtable_byte_map_base >= 0) {
+            g_neko_method_layout.card_table_byte_map_base =
+                *(void**)((char*)ct + g_neko_method_layout.off_cardtable_byte_map_base);
+        }
+    }
+}
+
+static jboolean neko_gc_barrier_layout_ready(void) {
+    jboolean card_table_ready =
+        (g_neko_method_layout.card_table_byte_map_base != NULL
+         && g_neko_method_layout.vmconst_cardtable_dirty_card >= 0)
+        ? JNI_TRUE : JNI_FALSE;
+    switch (g_neko_method_layout.current_barrier_kind) {
+        case NEKO_GC_BARRIER_G1:
+            return card_table_ready ? JNI_TRUE : JNI_FALSE;
+        case NEKO_GC_BARRIER_CARDTABLE:
+            return card_table_ready ? JNI_TRUE : JNI_FALSE;
+        case NEKO_GC_BARRIER_Z:
+            return (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded != NULL
+                    && g_neko_method_layout.sym_z_load_barrier_on_oop_array != NULL
+                    && g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing != NULL)
+                ? JNI_TRUE : JNI_FALSE;
+        case NEKO_GC_BARRIER_SHENANDOAH:
+            return (g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong != NULL
+                    && g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry != NULL
+                    && g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry != NULL)
+                ? JNI_TRUE : JNI_FALSE;
+        default:
+            return JNI_FALSE;
+    }
 }
 
 static jboolean neko_native_resolution_layout_ready(void) {
@@ -1623,11 +1794,20 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_array_data = -1;
     g_neko_method_layout.off_barrierset_fake_rtti = -1;
     g_neko_method_layout.off_barrierset_fakertti_concrete_tag = -1;
+    g_neko_method_layout.off_cardtablebarrierset_card_table = -1;
+    g_neko_method_layout.off_cardtable_byte_map_base = -1;
+    g_neko_method_layout.vmconst_barrierset_modref = -1;
+    g_neko_method_layout.vmconst_barrierset_cardtable = -1;
+    g_neko_method_layout.vmconst_barrierset_g1 = -1;
+    g_neko_method_layout.vmconst_cardtable_clean_card = -1;
+    g_neko_method_layout.vmconst_cardtable_dirty_card = -1;
+    g_neko_method_layout.vmconst_g1_young_card = -1;
     g_neko_method_layout.java_spec_version = neko_detect_java_spec_version_from_env(env);
     void *jvm = neko_resolve_libjvm_handle();
     NEKO_PATCH_LOG("layout_init: jdk=%d libjvm=%p", g_neko_method_layout.java_spec_version, jvm);
     if (jvm == NULL) return JNI_FALSE;
     neko_resolve_native_resolution_symbols(jvm);
+    neko_resolve_gc_barrier_symbols(jvm);
     if (!neko_walk_vm_structs(jvm)) { NEKO_PATCH_LOG("walk_vm_structs failed"); return JNI_FALSE; }
     (void)neko_walk_vm_types(jvm);
     neko_walk_vm_int_constants(jvm);
@@ -2012,6 +2192,53 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
                     (unsigned long long)g_hotspot.z_pointer_load_bad_mask);
             }
         }
+    }
+    neko_detect_current_gc_barrier();
+    g_neko_method_layout.gc_barrier_ready = neko_gc_barrier_layout_ready();
+    g_neko_gc_barrier_ready = g_neko_method_layout.gc_barrier_ready;
+    g_neko_gc_barrier_kind = g_neko_method_layout.current_barrier_kind;
+    g_neko_barrier_load_oop_field_preloaded =
+        (g_neko_method_layout.current_barrier_kind == NEKO_GC_BARRIER_SHENANDOAH)
+        ? g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong
+        : g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded;
+    g_neko_barrier_load_oop_array = g_neko_method_layout.sym_z_load_barrier_on_oop_array;
+    g_neko_barrier_store_oop_field = g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing;
+    g_neko_barrier_write_ref_array_pre =
+        (g_neko_method_layout.current_barrier_kind == NEKO_GC_BARRIER_SHENANDOAH)
+        ? g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry
+        : g_neko_method_layout.sym_g1_write_ref_array_pre_oop_entry;
+    g_neko_barrier_write_ref_field_pre =
+        (g_neko_method_layout.current_barrier_kind == NEKO_GC_BARRIER_SHENANDOAH)
+        ? g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry
+        : g_neko_method_layout.sym_g1_write_ref_field_pre_entry;
+    g_neko_barrier_write_ref_field_post = g_neko_method_layout.sym_g1_write_ref_field_post_entry;
+    g_neko_card_table_byte_map_base = g_neko_method_layout.card_table_byte_map_base;
+    g_neko_card_table_dirty_card = g_neko_method_layout.vmconst_cardtable_dirty_card;
+    g_neko_card_table_clean_card = g_neko_method_layout.vmconst_cardtable_clean_card;
+    g_neko_g1_young_card = g_neko_method_layout.vmconst_g1_young_card;
+    NEKO_PATCH_LOG("gc barrier: ready=%d kind=%d bs=%p card_table=%p byte_map_base=%p card_clean=%d card_dirty=%d g1_young=%d g1_pre=%p g1_post=%p z_lrb=%p z_array=%p z_store=%p sh_lrb=%p sh_lrb_narrow=%p sh_pre=%p sh_array=%p/%p",
+        (int)g_neko_gc_barrier_ready,
+        g_neko_gc_barrier_kind,
+        g_neko_method_layout.current_barrier_set,
+        g_neko_method_layout.current_card_table,
+        g_neko_card_table_byte_map_base,
+        g_neko_card_table_clean_card,
+        g_neko_card_table_dirty_card,
+        g_neko_g1_young_card,
+        g_neko_method_layout.sym_g1_write_ref_field_pre_entry,
+        g_neko_method_layout.sym_g1_write_ref_field_post_entry,
+        g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded,
+        g_neko_method_layout.sym_z_load_barrier_on_oop_array,
+        g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing,
+        g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong,
+        g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong_narrow,
+        g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry,
+        g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry,
+        g_neko_method_layout.sym_shenandoah_arraycopy_barrier_narrow_oop_entry);
+    if (!g_neko_gc_barrier_ready) {
+        NEKO_PATCH_LOG("gc barrier path not ready for kind=%d; aborting native layout initialization",
+            g_neko_gc_barrier_kind);
+        return JNI_FALSE;
     }
     neko_fast_string_runtime_init(env);
     g_neko_method_layout.usable = JNI_TRUE;
