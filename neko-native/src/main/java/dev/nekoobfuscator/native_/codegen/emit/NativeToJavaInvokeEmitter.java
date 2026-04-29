@@ -707,6 +707,7 @@ static int neko_njx_resolve_entry(jmethodID mid, void **out_method, void **out_e
         sb.append("        fprintf(stderr, \"[neko-direct] precondition failed shape=").append(key)
           .append(" ready=%d m=%p e=%p t=%p\\n\", (int)g_neko_direct_invoke_ready, method_ptr, entry_point, thread); abort();\n");
         sb.append("    }\n");
+        sb.append("    neko_njx_note_dispatch();\n");
         sb.append("    NEKO_DIRECT_LOG(\"dispatch shape=").append(key).append(" m=%p e=%p recv=%p\", method_ptr, entry_point, (void*)receiver);\n");
         sb.append("    int64_t gp_args[").append(Math.max(gpCount, 1)).append("];\n");
         sb.append("    double  fp_args[").append(Math.max(xmmCount, 1)).append("];\n");

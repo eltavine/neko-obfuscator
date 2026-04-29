@@ -81,6 +81,9 @@ typedef struct {
     ptrdiff_t off_jnih_block_top;
     ptrdiff_t off_jnih_block_handles;
     ptrdiff_t off_jnih_block_next;
+    ptrdiff_t off_thread_tlab;
+    ptrdiff_t off_tlab_top;
+    ptrdiff_t off_tlab_end;
     size_t    sizeof_JNIHandleBlock;
     int32_t   jnih_block_capacity;
     /* Direct read of the pending exception so the dispatcher can substitute
@@ -174,6 +177,10 @@ __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_jnih_block_top      =
 __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_jnih_block_handles  = 0;
 __attribute__((visibility("hidden"))) int32_t   g_neko_jnih_block_capacity     = 32;
 __attribute__((visibility("hidden"))) jboolean  g_neko_handle_push_ready = JNI_FALSE;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_tlab = 0;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_tlab_top = 0;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_tlab_end = 0;
+__attribute__((visibility("hidden"))) jboolean  g_neko_tlab_alloc_ready = JNI_FALSE;
 /* Final byte offset within JavaThread of the _pending_exception oop slot.
  * Set during VMStructs walk; used by the direct-call dispatcher to read the
  * pending exception without crossing the JNI boundary. */
@@ -398,6 +405,8 @@ static jboolean neko_walk_vm_structs(void *jvm) {
                 g_neko_method_layout.off_thread_anchor = (ptrdiff_t)off_value;
             } else if (neko_streq_safe(field_name, "_active_handles")) {
                 g_neko_method_layout.off_thread_active_handles = (ptrdiff_t)off_value;
+            } else if (neko_streq_safe(field_name, "_tlab")) {
+                g_neko_method_layout.off_thread_tlab = (ptrdiff_t)off_value;
             } else if (neko_streq_safe(field_name, "_anchor._last_Java_sp")
                     || neko_streq_safe(field_name, "_last_Java_sp")) {
                 g_neko_method_layout.off_thread_last_Java_sp_direct = (ptrdiff_t)off_value;
@@ -419,6 +428,12 @@ static jboolean neko_walk_vm_structs(void *jvm) {
                 g_neko_method_layout.off_jnih_block_handles = (ptrdiff_t)off_value;
             } else if (neko_streq_safe(field_name, "_next")) {
                 g_neko_method_layout.off_jnih_block_next = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "ThreadLocalAllocBuffer")) {
+            if (neko_streq_safe(field_name, "_top")) {
+                g_neko_method_layout.off_tlab_top = (ptrdiff_t)off_value;
+            } else if (neko_streq_safe(field_name, "_end")) {
+                g_neko_method_layout.off_tlab_end = (ptrdiff_t)off_value;
             }
         } else if (neko_streq_safe(type_name, "JavaFrameAnchor")) {
             if (neko_streq_safe(field_name, "_last_Java_sp")) {
@@ -1318,6 +1333,9 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_frame_anchor_fp = -1;
     g_neko_method_layout.off_frame_anchor_pc = -1;
     g_neko_method_layout.off_jcw_anchor = -1;
+    g_neko_method_layout.off_thread_tlab = -1;
+    g_neko_method_layout.off_tlab_top = -1;
+    g_neko_method_layout.off_tlab_end = -1;
     g_neko_method_layout.java_spec_version = neko_detect_java_spec_version_from_env(env);
     void *jvm = neko_resolve_libjvm_handle();
     NEKO_PATCH_LOG("layout_init: jdk=%d libjvm=%p", g_neko_method_layout.java_spec_version, jvm);
@@ -1453,11 +1471,21 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
          && g_neko_off_jnih_block_top >= 0
          && g_neko_off_jnih_block_handles >= 0)
         ? JNI_TRUE : JNI_FALSE;
-    NEKO_PATCH_LOG("handles: th_active=%td blk_top=%td blk_handles=%td blk_size=%zu pend_exc=%td ready=%d",
+    g_neko_off_thread_tlab = g_neko_method_layout.off_thread_tlab;
+    g_neko_off_tlab_top = g_neko_method_layout.off_tlab_top;
+    g_neko_off_tlab_end = g_neko_method_layout.off_tlab_end;
+    g_neko_tlab_alloc_ready =
+        (g_neko_off_thread_tlab > 0
+         && g_neko_off_tlab_top >= 0
+         && g_neko_off_tlab_end > 0)
+        ? JNI_TRUE : JNI_FALSE;
+    NEKO_PATCH_LOG("handles: th_active=%td blk_top=%td blk_handles=%td blk_size=%zu pend_exc=%td ready=%d tlab=%td top=%td end=%td tlab_ready=%d",
         g_neko_off_thread_active_handles, g_neko_off_jnih_block_top,
         g_neko_off_jnih_block_handles, g_neko_method_layout.sizeof_JNIHandleBlock,
         g_neko_off_thread_pending_exception,
-        (int)g_neko_handle_push_ready);
+        (int)g_neko_handle_push_ready,
+        g_neko_off_thread_tlab, g_neko_off_tlab_top, g_neko_off_tlab_end,
+        (int)g_neko_tlab_alloc_ready);
     NEKO_PATCH_LOG("jni env: off=%td", g_neko_method_layout.off_thread_jni_environment);
     NEKO_PATCH_LOG("codecache layout: heaps=%p ga_len=%td ga_data=%td ch_mem=%td ch_seg=%td ch_log2=%td vs_low=%td vs_high=%td blob_name=%td blob_size=%td blob_code_begin=%td",
         g_neko_method_layout.addr_codecache_heaps,
@@ -1558,6 +1586,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_hotspot.compressed_oops_base = (jlong)(uintptr_t)base;
         NEKO_PATCH_LOG("vmstructs coop: shift=%d base=%p", shift, base);
     }
+    neko_fast_string_runtime_init(env);
     g_neko_method_layout.usable = JNI_TRUE;
     return JNI_TRUE;
 }

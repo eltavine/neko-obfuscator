@@ -501,6 +501,24 @@ public final class OpcodeTranslator {
                     + cachedClassExpression("java/lang/NullPointerException")
                     + "; neko_throw_new(env, exc, \"\"); } else { jobjectArray __trace = neko_shadow_stack_trace(env); if (!neko_exception_check(env)) { PUSH_O(__trace); } } }";
             }
+            if ("java/util/concurrent/atomic/AtomicLong".equals(mi.owner) && "addAndGet".equals(mi.name) && "(J)J".equals(mi.desc)) {
+                return "{ jlong __delta = POP_L(); jobject obj = POP_O(); if (obj == NULL) { jclass exc = "
+                    + cachedClassExpression("java/lang/NullPointerException")
+                    + "; neko_throw_new(env, exc, \"\"); } else { jfieldID __value = "
+                    + cachedFieldExpression("java/util/concurrent/atomic/AtomicLong", "value", "J", false)
+                    + "; (void)__value; PUSH_L(neko_fast_atomic_long_add_and_get(env, obj, __delta, "
+                    + codeGenerator.fieldOffsetSlotName("java/util/concurrent/atomic/AtomicLong", "value", "J", false)
+                    + ")); } }";
+            }
+            if ("java/util/concurrent/atomic/AtomicInteger".equals(mi.owner) && "addAndGet".equals(mi.name) && "(I)I".equals(mi.desc)) {
+                return "{ jint __delta = POP_I(); jobject obj = POP_O(); if (obj == NULL) { jclass exc = "
+                    + cachedClassExpression("java/lang/NullPointerException")
+                    + "; neko_throw_new(env, exc, \"\"); } else { jfieldID __value = "
+                    + cachedFieldExpression("java/util/concurrent/atomic/AtomicInteger", "value", "I", false)
+                    + "; (void)__value; PUSH_I(neko_fast_atomic_int_add_and_get(env, obj, __delta, "
+                    + codeGenerator.fieldOffsetSlotName("java/util/concurrent/atomic/AtomicInteger", "value", "I", false)
+                    + ")); } }";
+            }
             if ("java/lang/reflect/Method".equals(mi.owner) && "invoke".equals(mi.name) && "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;".equals(mi.desc)) {
                 String adapterDesc = "(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;";
                 Type[] adapterArgs = Type.getArgumentTypes(adapterDesc);
@@ -1094,13 +1112,33 @@ public final class OpcodeTranslator {
 
     private void appendSimpleConcatLiteral(StringBuilder sb, String literal) {
         String literalExpr = cachedStringExpression(literal);
-        sb.append("if (__acc == NULL) { __acc = ").append(literalExpr).append("; } else { __acc = neko_string_concat_string(env, __acc, ")
-            .append(literalExpr).append("); } ");
+        appendDirectStringConcat(sb, literalExpr);
     }
 
     private void appendSimpleConcatArg(StringBuilder sb, String valueExpr) {
         sb.append("if (__acc == NULL) { __acc = (jstring)(").append(valueExpr).append(" == NULL ? neko_string_null(env) : ")
-            .append(valueExpr).append("); } else { __acc = neko_string_concat2(env, __acc, ").append(valueExpr).append("); } ");
+            .append(valueExpr).append("); } else { ");
+        appendDirectStringConcat(sb, valueExpr);
+        sb.append("} ");
+    }
+
+    private void appendDirectStringConcat(StringBuilder sb, String rhsExpr) {
+        String concatDesc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;";
+        String concatDispatcher = codeGenerator.registerInvokeShape(true, 'L', new char[] { 'L', 'L' });
+        sb.append("{ jstring __lhs = __acc == NULL ? neko_string_null(env) : __acc; ");
+        sb.append("jstring __rhs = (jstring)(").append(rhsExpr).append(" == NULL ? neko_string_null(env) : ").append(rhsExpr).append("); ");
+        sb.append("jfieldID __stringValue = ").append(cachedFieldExpression("java/lang/String", "value", "[B", false)).append("; ");
+        sb.append("jfieldID __stringCoder = ").append(cachedFieldExpression("java/lang/String", "coder", "B", false)).append("; ");
+        sb.append("(void)__stringValue; (void)__stringCoder; ");
+        sb.append("jobject __fastConcat = neko_fast_string_concat(thread, env, __lhs, __rhs, ")
+            .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false)).append(", ")
+            .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false)).append("); ");
+        sb.append("if (__fastConcat != NULL) { __acc = (jstring)__fastConcat; } else { ");
+        sb.append("jvalue __concatArgs[2]; __concatArgs[0].l = __lhs; __concatArgs[1].l = __rhs; ");
+        sb.append("jvalue __concatResult = ").append(concatDispatcher).append("(thread, env, ")
+            .append(cachedMethodPtrExpression("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true)).append(", ")
+            .append(cachedMethodIEntryExpression("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true))
+            .append(", NULL, __concatArgs); if (!neko_exception_check(env)) { __acc = (jstring)__concatResult.l; } } } ");
     }
 
     private String translateGenericInvokeDynamic(InvokeDynamicInsnNode indy, Type[] argTypes, Type retType, long siteId) {

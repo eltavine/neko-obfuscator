@@ -265,6 +265,7 @@ public final class CCodeGenerator {
         sb.append("static jboolean neko_resolve_jnihandles(void *jvm);\n");
         sb.append("static void *neko_dlsym(void *h, const char *name);\n");
         sb.append("static void neko_njx_init_wrappers(void);\n\n");
+        sb.append("static void neko_fast_string_runtime_init(JNIEnv *env);\n\n");
         sb.append(renderResolutionCaches());
         sb.append(renderRawFunctionPrototypes(bindings));
         sb.append(nativeToJavaInvokeEmitter.renderPrelude());
@@ -2166,7 +2167,17 @@ NEKO_FAST_INLINE void* neko_static_base_oop(jobject staticBase) {
 }
 
 NEKO_FAST_INLINE jint neko_fast_array_length(JNIEnv *env, jarray arr) {
-    return (jint)neko_get_array_length(env, arr);
+    (void)env;
+    if (g_hotspot.initialized
+        && (g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0
+        && arr != NULL) {
+        char *oop = (char*)neko_handle_oop((jobject)arr);
+        if (oop != NULL) {
+            return *(jint*)(oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
+        }
+    }
+    fprintf(stderr, "[neko-direct] ARRAYLENGTH direct path unavailable arr=%p\\n", (void*)arr);
+    abort();
 }
 
 NEKO_FAST_INLINE jboolean neko_receiver_key_supported(void) {
@@ -2246,7 +2257,7 @@ NEKO_FAST_INLINE uint32_t neko_icache_claim_slot(JNIEnv *env, neko_icache_site *
 extern jboolean g_neko_direct_invoke_ready;
 
 /* Runtime gate for direct-NJX diagnostics. Direct invoke is mandatory;
- * NEKO_DIRECT_DEBUG=1 enables verbose [neko-direct] logging on the hot path. */
+ * NEKO_DIRECT_DEBUG=1 enables the final one-line stats report. */
 static int g_neko_njx_enabled_cached = 1;
 static int g_neko_njx_enabled_initialized = 0;
 static int g_neko_njx_debug_cached = 0;
@@ -2260,14 +2271,23 @@ NEKO_FAST_INLINE int neko_njx_enabled(void) {
         const char *d = getenv("NEKO_DIRECT_DEBUG");
         g_neko_njx_debug_cached = (d != NULL && d[0] != '\\0' && d[0] != '0') ? 1 : 0;
         g_neko_njx_enabled_initialized = 1;
-        if (g_neko_njx_debug_cached) {
-            fprintf(stderr, "[neko-direct] init enabled=%d debug=%d ready=%d\\n",
-                g_neko_njx_enabled_cached, g_neko_njx_debug_cached, (int)g_neko_direct_invoke_ready);
-        }
     }
     return g_neko_njx_enabled_cached;
 }
-#define NEKO_DIRECT_LOG(fmt, ...) do { if (__builtin_expect(neko_njx_debug(), 0)) { fprintf(stderr, "[neko-direct] " fmt "\\n", ##__VA_ARGS__); } } while (0)
+
+NEKO_FAST_INLINE void neko_njx_note_dispatch(void) {
+    if (__builtin_expect(neko_njx_debug(), 0)) {
+        __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
+    }
+}
+
+NEKO_FAST_INLINE void neko_njx_note_resolve_fail(void) {
+    if (__builtin_expect(neko_njx_debug(), 0)) {
+        __atomic_fetch_add(&g_neko_njx_resolve_fail_count, 1, __ATOMIC_RELAXED);
+    }
+}
+
+#define NEKO_DIRECT_LOG(fmt, ...) do { } while (0)
 
 NEKO_FAST_INLINE void neko_icache_store_direct(JNIEnv *env, neko_icache_site *site, uintptr_t receiverKey, jclass cachedClass, void *target) {
     uint32_t slot;
@@ -2339,9 +2359,6 @@ static jvalue neko_icache_dispatch(
                 }
                 if (site->target_kind[cacheSlot] == NEKO_ICACHE_DIRECT_NJX && site->target[cacheSlot] != NULL && site->target2[cacheSlot] != NULL
                     && meta != NULL && meta->direct_dispatcher != NULL && neko_njx_enabled()) {
-                    __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
-                    NEKO_DIRECT_LOG("hit %s%s site=%p key=%zx slot=%d method=%p entry=%p",
-                        meta->name, meta->desc, (void*)site, (size_t)receiverKey, cacheSlot, site->target[cacheSlot], site->target2[cacheSlot]);
                     return meta->direct_dispatcher(thread, env, site->target[cacheSlot], site->target2[cacheSlot], receiver, args);
                 }
             }
@@ -2374,14 +2391,11 @@ static jvalue neko_icache_dispatch(
                             void *m_ptr = NULL, *m_entry = NULL;
                             if (neko_njx_resolve_entry(exactMid, &m_ptr, &m_entry)) {
                                 neko_icache_store_direct_njx(env, site, receiverKey, cachedExactClass, m_ptr, m_entry);
-                                __atomic_fetch_add(&g_neko_njx_dispatch_count, 1, __ATOMIC_RELAXED);
-                                NEKO_DIRECT_LOG("miss-resolve %s%s site=%p key=%zx mid=%p method=%p entry=%p",
-                                    meta->name, meta->desc, (void*)site, (size_t)receiverKey, exactMid, m_ptr, m_entry);
                                 result = meta->direct_dispatcher(thread, env, m_ptr, m_entry, receiver, args);
                                 neko_delete_local_ref(env, exactClass);
                                 return result;
                             } else {
-                                __atomic_fetch_add(&g_neko_njx_resolve_fail_count, 1, __ATOMIC_RELAXED);
+                                neko_njx_note_resolve_fail();
                                 fprintf(stderr, "[neko-direct] resolve-failed %s%s mid=%p\\n",
                                     meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?", exactMid);
                                 abort();
@@ -2399,7 +2413,7 @@ static jvalue neko_icache_dispatch(
             }
         }
     }
-    __atomic_fetch_add(&g_neko_njx_resolve_fail_count, 1, __ATOMIC_RELAXED);
+    neko_njx_note_resolve_fail();
     fprintf(stderr, "[neko-direct] unresolved virtual dispatch %s%s declared_mid=%p receiver=%p site=%p\\n",
         meta != NULL ? meta->name : "?", meta != NULL ? meta->desc : "?", declared_mid, receiver, (void*)site);
     abort();
@@ -2467,6 +2481,171 @@ __attribute__((constructor)) static void neko_njx_register_atexit(void) {
 
     private void appendObjectArrayHelpers(StringBuilder sb) {
         sb.append("""
+static uintptr_t g_neko_string_klass_bits = 0;
+static uintptr_t g_neko_byte_array_klass_bits = 0;
+static jboolean g_neko_fast_string_alloc_ready = JNI_FALSE;
+
+NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop);
+
+static void neko_fast_string_runtime_init(JNIEnv *env) {
+    jstring empty;
+    jbyteArray bytes;
+    char *empty_oop;
+    char *bytes_oop;
+    if (g_neko_fast_string_alloc_ready || env == NULL) return;
+    if (!g_hotspot.initialized
+        || (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) == 0
+        || g_hotspot.use_compact_object_headers
+        || g_hotspot.klass_offset_bytes <= 0
+        || !g_neko_tlab_alloc_ready) {
+        return;
+    }
+    empty = neko_new_string_utf(env, "");
+    bytes = neko_new_byte_array(env, 0);
+    if (empty == NULL || bytes == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear(env);
+        return;
+    }
+    empty_oop = (char*)neko_handle_oop((jobject)empty);
+    bytes_oop = (char*)neko_handle_oop((jobject)bytes);
+    if (empty_oop != NULL && bytes_oop != NULL) {
+        if (g_hotspot.use_compressed_klass_ptrs) {
+            g_neko_string_klass_bits = (uintptr_t)(*(uint32_t*)(empty_oop + g_hotspot.klass_offset_bytes));
+            g_neko_byte_array_klass_bits = (uintptr_t)(*(uint32_t*)(bytes_oop + g_hotspot.klass_offset_bytes));
+        } else {
+            g_neko_string_klass_bits = *(uintptr_t*)(empty_oop + g_hotspot.klass_offset_bytes);
+            g_neko_byte_array_klass_bits = *(uintptr_t*)(bytes_oop + g_hotspot.klass_offset_bytes);
+        }
+        g_neko_fast_string_alloc_ready =
+            (g_neko_string_klass_bits != 0 && g_neko_byte_array_klass_bits != 0) ? JNI_TRUE : JNI_FALSE;
+    }
+    neko_delete_local_ref(env, empty);
+    neko_delete_local_ref(env, bytes);
+}
+
+NEKO_FAST_INLINE size_t neko_align_object_bytes(size_t bytes) {
+    size_t alignment = (size_t)(g_hotspot.object_alignment_in_bytes > 0 ? g_hotspot.object_alignment_in_bytes : 8);
+    return (bytes + alignment - 1u) & ~(alignment - 1u);
+}
+
+NEKO_FAST_INLINE void *neko_fast_tlab_alloc(void *thread, size_t bytes) {
+    char *tlab;
+    char *top;
+    char *end;
+    char *new_top;
+    size_t aligned;
+    if (!g_neko_fast_string_alloc_ready || !g_neko_tlab_alloc_ready || thread == NULL || bytes == 0) return NULL;
+    aligned = neko_align_object_bytes(bytes);
+    tlab = (char*)thread + g_neko_off_thread_tlab;
+    top = *(char**)(tlab + g_neko_off_tlab_top);
+    end = *(char**)(tlab + g_neko_off_tlab_end);
+    if (top == NULL || end == NULL || top > end || aligned > (size_t)(end - top)) return NULL;
+    new_top = top + aligned;
+    *(char**)(tlab + g_neko_off_tlab_top) = new_top;
+    memset(top, 0, aligned);
+    return top;
+}
+
+NEKO_FAST_INLINE void neko_init_oop_header(char *oop, uintptr_t klass_bits) {
+    *(uintptr_t*)oop = (uintptr_t)1u;
+    if (g_hotspot.use_compressed_klass_ptrs) {
+        *(uint32_t*)(oop + g_hotspot.klass_offset_bytes) = (uint32_t)klass_bits;
+    } else {
+        *(uintptr_t*)(oop + g_hotspot.klass_offset_bytes) = klass_bits;
+    }
+}
+
+NEKO_FAST_INLINE void* neko_decode_narrow_oop(uint32_t narrow) {
+    if (narrow == 0) return NULL;
+    return (void*)((uintptr_t)((uintptr_t)narrow << g_hotspot.compressed_oops_shift)
+                   + (uintptr_t)g_hotspot.compressed_oops_base);
+}
+
+NEKO_FAST_INLINE uint32_t neko_encode_narrow_oop(void *oop) {
+    if (oop == NULL) return 0u;
+    return (uint32_t)(((uintptr_t)oop - (uintptr_t)g_hotspot.compressed_oops_base) >> g_hotspot.compressed_oops_shift);
+}
+
+NEKO_FAST_INLINE void neko_store_oop_raw(char *oop, jlong offset, void *value) {
+    if (g_hotspot.compressed_oops_enabled) {
+        *(uint32_t*)(oop + offset) = neko_encode_narrow_oop(value);
+    } else {
+        *(void**)(oop + offset) = value;
+    }
+}
+
+NEKO_FAST_INLINE char *neko_string_value_oop(char *str_oop, jlong valueOffset) {
+    if (str_oop == NULL || valueOffset <= 0) return NULL;
+    if (g_hotspot.compressed_oops_enabled) {
+        return (char*)neko_decode_narrow_oop(*(uint32_t*)(str_oop + valueOffset));
+    }
+    return *(char**)(str_oop + valueOffset);
+}
+
+NEKO_FAST_INLINE jobject neko_fast_string_concat(
+    void *thread,
+    JNIEnv *env,
+    jstring left,
+    jstring right,
+    jlong valueOffset,
+    jlong coderOffset
+) {
+    (void)env;
+    if (!g_neko_fast_string_alloc_ready
+        || (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) == 0
+        || valueOffset <= 0
+        || coderOffset <= 0
+        || left == NULL
+        || right == NULL) {
+        return NULL;
+    }
+    char *left_oop = (char*)neko_handle_oop((jobject)left);
+    char *right_oop = (char*)neko_handle_oop((jobject)right);
+    char *left_value;
+    char *right_value;
+    jint left_len;
+    jint right_len;
+    jint total_len;
+    char *array_oop;
+    char *string_oop;
+    size_t array_bytes;
+    size_t string_bytes;
+    size_t ref_size = g_hotspot.compressed_oops_enabled ? 4u : sizeof(void*);
+    if (left_oop == NULL || right_oop == NULL) return NULL;
+    if (*(jbyte*)(left_oop + coderOffset) != 0 || *(jbyte*)(right_oop + coderOffset) != 0) return NULL;
+    left_value = neko_string_value_oop(left_oop, valueOffset);
+    right_value = neko_string_value_oop(right_oop, valueOffset);
+    if (left_value == NULL || right_value == NULL) return NULL;
+    left_len = *(jint*)(left_value + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4);
+    right_len = *(jint*)(right_value + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4);
+    if (left_len < 0 || right_len < 0 || left_len > INT32_MAX - right_len) return NULL;
+    total_len = left_len + right_len;
+    array_bytes = (size_t)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] + (size_t)total_len;
+    array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
+    if (array_oop == NULL) return NULL;
+    neko_init_oop_header(array_oop, g_neko_byte_array_klass_bits);
+    *(jint*)(array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4) = total_len;
+    if (left_len > 0) {
+        memcpy(array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B],
+               left_value + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B],
+               (size_t)left_len);
+    }
+    if (right_len > 0) {
+        memcpy(array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] + left_len,
+               right_value + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B],
+               (size_t)right_len);
+    }
+
+    string_bytes = (size_t)valueOffset + ref_size;
+    if ((size_t)coderOffset + 1u > string_bytes) string_bytes = (size_t)coderOffset + 1u;
+    string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
+    if (string_oop == NULL) return NULL;
+    neko_init_oop_header(string_oop, g_neko_string_klass_bits);
+    neko_store_oop_raw(string_oop, valueOffset, array_oop);
+    *(jbyte*)(string_oop + coderOffset) = 0;
+    return neko_direct_oop_to_handle(thread, string_oop);
+}
+
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
     if (g_neko_handle_push_ready && thread != NULL) {
@@ -2503,12 +2682,6 @@ NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) 
     }
     fprintf(stderr, "[neko-direct] JNIHandleBlock direct slot unavailable thread=%p raw=%p\\n", thread, raw_oop);
     abort();
-}
-
-NEKO_FAST_INLINE void* neko_decode_narrow_oop(uint32_t narrow) {
-    if (narrow == 0) return NULL;
-    return (void*)((uintptr_t)((uintptr_t)narrow << g_hotspot.compressed_oops_shift)
-                   + (uintptr_t)g_hotspot.compressed_oops_base);
 }
 
 NEKO_FAST_INLINE char *neko_inner_oop_from_outer(char *outer_oop, jint idx1, jint outer_len) {
@@ -2646,6 +2819,30 @@ NEKO_FAST_INLINE jobject neko_fast_get_static_object_field(void *thread, JNIEnv 
             dbg_block, (int)dbg_top, (int)g_neko_jnih_block_capacity, (void*)dbg_cls_oop, (void*)dbg_base_oop,
             (unsigned)dbg_narrow, dbg_wide, (int)g_hotspot.compressed_oops_enabled);
     }
+    abort();
+}
+
+NEKO_FAST_INLINE jlong neko_fast_atomic_long_add_and_get(JNIEnv *env, jobject obj, jlong delta, jlong offset) {
+    (void)env;
+    if (g_hotspot.initialized && offset > 0 && obj != NULL) {
+        char *oop = (char*)neko_handle_oop(obj);
+        if (oop != NULL) {
+            return __atomic_add_fetch((jlong*)(oop + offset), delta, __ATOMIC_SEQ_CST);
+        }
+    }
+    fprintf(stderr, "[neko-direct] AtomicLong.addAndGet direct path unavailable obj=%p offset=%lld\\n", (void*)obj, (long long)offset);
+    abort();
+}
+
+NEKO_FAST_INLINE jint neko_fast_atomic_int_add_and_get(JNIEnv *env, jobject obj, jint delta, jlong offset) {
+    (void)env;
+    if (g_hotspot.initialized && offset > 0 && obj != NULL) {
+        char *oop = (char*)neko_handle_oop(obj);
+        if (oop != NULL) {
+            return __atomic_add_fetch((jint*)(oop + offset), delta, __ATOMIC_SEQ_CST);
+        }
+    }
+    fprintf(stderr, "[neko-direct] AtomicInteger.addAndGet direct path unavailable obj=%p offset=%lld\\n", (void*)obj, (long long)offset);
     abort();
 }
 
