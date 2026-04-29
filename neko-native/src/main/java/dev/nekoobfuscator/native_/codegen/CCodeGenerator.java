@@ -1831,34 +1831,46 @@ static jarray neko_hotspot_new_primitive_array(JNIEnv *env, int kind, jsize len)
     }
 }
 
-static jint neko_hotspot_array_base_offset(JNIEnv *env, const char *primitiveName) {
-    jobject unsafe = neko_hotspot_unsafe_singleton(env);
-    jclass arrayClass = neko_hotspot_primitive_array_class(env, primitiveName);
-    jmethodID mid;
-    jvalue args[1];
-    jint value;
-    if (unsafe == NULL || arrayClass == NULL || neko_hotspot_clear_exception(env)) return -1;
-    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "arrayBaseOffset", "(Ljava/lang/Class;)I");
-    if (mid == NULL || neko_hotspot_clear_exception(env)) return -1;
-    args[0].l = arrayClass;
-    value = neko_call_int_method_a(env, unsafe, mid, args);
-    if (neko_hotspot_clear_exception(env)) return -1;
-    return value;
+static jint neko_hotspot_align_up(jint value, jint alignment) {
+    jint mask;
+    if (alignment <= 1) return value;
+    mask = alignment - 1;
+    return (value + mask) & ~mask;
 }
 
-static jint neko_hotspot_array_index_scale(JNIEnv *env, const char *primitiveName) {
-    jobject unsafe = neko_hotspot_unsafe_singleton(env);
-    jclass arrayClass = neko_hotspot_primitive_array_class(env, primitiveName);
-    jmethodID mid;
-    jvalue args[1];
-    jint value;
-    if (unsafe == NULL || arrayClass == NULL || neko_hotspot_clear_exception(env)) return 0;
-    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "arrayIndexScale", "(Ljava/lang/Class;)I");
-    if (mid == NULL || neko_hotspot_clear_exception(env)) return 0;
-    args[0].l = arrayClass;
-    value = neko_call_int_method_a(env, unsafe, mid, args);
-    if (neko_hotspot_clear_exception(env)) return 0;
-    return value;
+static jint neko_hotspot_array_index_scale_for(int kind) {
+    switch (kind) {
+        case NEKO_PRIM_Z:
+        case NEKO_PRIM_B:
+            return 1;
+        case NEKO_PRIM_C:
+        case NEKO_PRIM_S:
+            return 2;
+        case NEKO_PRIM_I:
+        case NEKO_PRIM_F:
+            return 4;
+        case NEKO_PRIM_J:
+        case NEKO_PRIM_D:
+            return 8;
+        default:
+            return 0;
+    }
+}
+
+static jint neko_hotspot_array_base_offset_for(const neko_hotspot_state *state, int kind) {
+    jint scale;
+    jint lengthOffset;
+    jint base;
+    jint alignment;
+    if (state == NULL || state->klass_offset_bytes <= 0) return -1;
+    scale = neko_hotspot_array_index_scale_for(kind);
+    if (scale <= 0) return -1;
+    lengthOffset = state->klass_offset_bytes + (state->use_compressed_klass_ptrs ? 4 : state->address_size);
+    base = lengthOffset + 4;
+    alignment = state->address_size;
+    if (scale > alignment && scale <= 8) alignment = scale;
+    if (alignment < 4) alignment = 4;
+    return neko_hotspot_align_up(base, alignment);
 }
 
 static void neko_hotspot_init(JNIEnv *env) {
@@ -1895,24 +1907,6 @@ static void neko_hotspot_init(JNIEnv *env) {
         state.coop_encoded_mode = NEKO_COOP_MODE_DISABLED;
     }
 
-    for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
-        const char *primitiveName = neko_hotspot_primitive_name(i);
-        jint baseOffset;
-        jint indexScale;
-        if (primitiveName == NULL) goto fail;
-        baseOffset = neko_hotspot_array_base_offset(env, primitiveName);
-        if (neko_hotspot_clear_exception(env)) {
-            goto fail;
-        }
-        indexScale = neko_hotspot_array_index_scale(env, primitiveName);
-        if (neko_hotspot_clear_exception(env)) {
-            goto fail;
-        }
-        state.primitive_array_base_offsets[i] = baseOffset;
-        state.primitive_array_index_scales[i] = indexScale;
-        if (baseOffset < 0 || indexScale <= 0) arraysOk = JNI_FALSE;
-    }
-
     {
         jclass integerClass = neko_find_class(env, "java/lang/Integer");
         jlong instanceOffset;
@@ -1944,6 +1938,14 @@ static void neko_hotspot_init(JNIEnv *env) {
         }
         if (staticBase != NULL) neko_delete_local_ref(env, staticBase);
         neko_delete_local_ref(env, integerClass);
+    }
+
+    for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
+        jint baseOffset = neko_hotspot_array_base_offset_for(&state, i);
+        jint indexScale = neko_hotspot_array_index_scale_for(i);
+        state.primitive_array_base_offsets[i] = baseOffset;
+        state.primitive_array_index_scales[i] = indexScale;
+        if (baseOffset < 0 || indexScale <= 0) arraysOk = JNI_FALSE;
     }
 
     if (state.address_size == 8) {
