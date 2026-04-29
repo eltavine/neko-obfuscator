@@ -52,8 +52,8 @@ This gate applies to every T0-T4 subtask, including small scaffolding and cleanu
 Use these target groups in every row below:
 
 - `R-build`: regenerate with repository `./gradlew` through the native integration path that rebuilds `TEST-native.jar` and `obfusjack-native.jar`; compile-only is not enough.
-- `R-test`: run the regenerated `TEST-native.jar` directly with `java -XX:+PerfDisableSharedMem -jar neko-test/build/test-native/TEST-native.jar`.
-- `R-obfusjack`: run the regenerated `obfusjack-test21`/`obfusjack-native.jar` target directly with `java -XX:+PerfDisableSharedMem -jar neko-test/build/test-native/obfusjack-native.jar`.
+- `R-test`: run the regenerated `TEST-native.jar` directly with `NEKO_PATCH_DEBUG=1 java -XX:+PerfDisableSharedMem -jar neko-test/build/test-native/TEST-native.jar`.
+- `R-obfusjack`: run the regenerated `obfusjack-test21`/`obfusjack-native.jar` target directly with `NEKO_PATCH_DEBUG=1 java -XX:+PerfDisableSharedMem -jar neko-test/build/test-native/obfusjack-native.jar`.
 - `R-native-test`: run the relevant `NativeObfuscationIntegrationTest` Gradle target after regeneration; use focused tests while iterating, then the full class before marking `[x]`.
 - `R-inspect`: inspect generated C, native build logs, stdout, stderr, and newest `hs_err_pid*.log`; reject `translated=0`, `Native compilation produced no libraries`, skip-on-error success, forbidden JNI function-table calls, crashes, verifier errors, or fallback/original-bytecode execution.
 - `R-negative`: where a subtask removes a fallback, force or inspect the missing-capability path so the failure mode is a hard abort/error, not JNI fallback or original bytecode.
@@ -123,7 +123,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T2.2 Implement `neko_resolve_class(const char*)` via JVM symbol / SystemDictionary walk.
 - [x] T2.3 Implement `neko_resolve_method(InstanceKlass*, name, sig)` by scanning `InstanceKlass::_methods`.
 - [x] T2.4 Implement `neko_resolve_field(InstanceKlass*, name, sig, is_static)` by scanning field metadata.
-- [ ] T2.5 Implement `neko_intern_string(modutf, len)` without `NewStringUTF`.
+- [x] T2.5 Implement `neko_intern_string(modutf, len)` without `NewStringUTF`.
 - [ ] T2.6 Rewrite `renderBindSupport()` macros and remove Unsafe-reflection field offset path.
 - [ ] T2.7 Rewrite `renderHotSpotSupport()` to remove MXBean and `Unsafe.addressSize()` probes.
 - [ ] T2.8 Remove `JniHandlesShimEmitter` raw `*(void**)ref` fallback; missing `JNIHandles::resolve` must abort.

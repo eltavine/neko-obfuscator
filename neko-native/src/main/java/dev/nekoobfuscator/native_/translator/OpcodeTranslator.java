@@ -1392,7 +1392,7 @@ public final class OpcodeTranslator {
     private String cachedStringExpression(String value) {
         String cacheVar = stringCacheVar(value);
         codeGenerator.registerOwnerStringReference(currentOwnerInternalName, value, cacheVar);
-        return "neko_bound_string(env, " + cacheVar + ", \"" + cStringLiteral(value) + "\")";
+        return "neko_bound_string(thread, env, &" + cacheVar + ", \"" + cStringLiteral(value) + "\")";
     }
 
     private String stringCacheVar(String value) {

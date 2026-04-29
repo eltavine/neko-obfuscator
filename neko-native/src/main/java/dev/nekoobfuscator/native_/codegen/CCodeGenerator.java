@@ -449,6 +449,7 @@ public final class CCodeGenerator {
         return """
 typedef jclass (*neko_jvm_find_class_boot_t)(JNIEnv*, const char*);
 typedef jclass (*neko_jvm_find_class_from_class_t)(JNIEnv*, const char*, jboolean, jclass);
+typedef jstring (*neko_jvm_intern_string_t)(JNIEnv*, jstring);
 
 static void *neko_class_mirror_to_klass(jclass mirror) {
     void *mirror_oop;
@@ -475,11 +476,14 @@ static jobject neko_klass_java_mirror_handle(void *thread, void *klass) {
     return mirror_oop != NULL ? neko_handle_push(thread, mirror_oop) : NULL;
 }
 
-static void *neko_resolve_class_with_mirror(const char *utf8, jclass from_class) {
-    void *thread;
-    JNIEnv *env;
+static void *neko_resolve_class_with_env(JNIEnv *env, const char *utf8, jclass from_class) {
     jclass resolved = NULL;
     void *klass;
+    if (env == NULL) {
+        fprintf(stderr, "[neko-bind] native class resolution missing JNIEnv: %s\\n",
+            utf8 == NULL ? "<null>" : utf8);
+        abort();
+    }
     if (utf8 == NULL || utf8[0] == '\\0') {
         fprintf(stderr, "[neko-bind] class resolution requested with empty name\\n");
         abort();
@@ -488,8 +492,6 @@ static void *neko_resolve_class_with_mirror(const char *utf8, jclass from_class)
         fprintf(stderr, "[neko-bind] native class resolution missing java.lang.Class::_klass: %s\\n", utf8);
         abort();
     }
-    thread = neko_current_thread_register();
-    env = neko_thread_jni_env(thread);
     if (from_class != NULL && g_neko_method_layout.sym_jvm_find_class_from_class != NULL) {
         resolved = ((neko_jvm_find_class_from_class_t)g_neko_method_layout.sym_jvm_find_class_from_class)(
             env, utf8, JNI_FALSE, from_class);
@@ -505,8 +507,53 @@ static void *neko_resolve_class_with_mirror(const char *utf8, jclass from_class)
     return klass;
 }
 
+static void *neko_resolve_class_with_mirror(const char *utf8, jclass from_class) {
+    void *thread = neko_current_thread_register();
+    return neko_resolve_class_with_env(neko_thread_jni_env(thread), utf8, from_class);
+}
+
 static void *neko_resolve_class(const char *utf8) {
     return neko_resolve_class_with_mirror(utf8, NULL);
+}
+
+static uintptr_t neko_klass_header_bits(void *klass) {
+    uintptr_t base;
+    int shift;
+    if (klass == NULL) return 0;
+    if (g_hotspot.use_compressed_klass_ptrs) {
+        if (g_neko_method_layout.addr_compressed_klass_base == NULL
+            || g_neko_method_layout.addr_compressed_klass_shift == NULL) {
+            fprintf(stderr, "[neko-bind] compressed Klass encoding layout unavailable\\n");
+            abort();
+        }
+        base = (uintptr_t)(*(void**)g_neko_method_layout.addr_compressed_klass_base);
+        shift = *(int*)g_neko_method_layout.addr_compressed_klass_shift;
+        return (uintptr_t)(((uintptr_t)klass - base) >> shift);
+    }
+    return (uintptr_t)klass;
+}
+
+static void neko_ensure_string_alloc_bits(JNIEnv *env) {
+    void *string_klass;
+    if (g_neko_fast_string_alloc_ready) return;
+    if (!g_hotspot.initialized
+        || (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) == 0
+        || g_hotspot.use_compact_object_headers
+        || g_hotspot.klass_offset_bytes <= 0
+        || !g_neko_tlab_alloc_ready
+        || g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B] == 0) {
+        fprintf(stderr, "[neko-bind] direct String allocation layout unavailable\\n");
+        abort();
+    }
+    string_klass = neko_resolve_class_with_env(env, "java/lang/String", NULL);
+    g_neko_string_klass_bits = neko_klass_header_bits(string_klass);
+    g_neko_byte_array_klass_bits = g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B];
+    g_neko_fast_string_alloc_ready =
+        (g_neko_string_klass_bits != 0 && g_neko_byte_array_klass_bits != 0) ? JNI_TRUE : JNI_FALSE;
+    if (!g_neko_fast_string_alloc_ready) {
+        fprintf(stderr, "[neko-bind] direct String allocation klass bits unavailable\\n");
+        abort();
+    }
 }
 
 static jboolean neko_symbol_equals_utf8(void *symbol, const char *utf8) {
@@ -813,6 +860,163 @@ static neko_field_resolution_t neko_resolve_field(void *instance_klass, const ch
     abort();
 }
 
+typedef struct {
+    jboolean latin1;
+    size_t utf16_units;
+    size_t latin1_bytes;
+} neko_utf8_shape_t;
+
+static uint32_t neko_utf8_next_codepoint(const uint8_t **cursor, const uint8_t *end) {
+    const uint8_t *p = *cursor;
+    uint32_t cp;
+    if (p >= end) return 0;
+    if (p[0] < 0x80u) {
+        *cursor = p + 1;
+        return p[0];
+    }
+    if ((p[0] & 0xe0u) == 0xc0u && p + 1 < end) {
+        cp = ((uint32_t)(p[0] & 0x1fu) << 6) | (uint32_t)(p[1] & 0x3fu);
+        if ((p[1] & 0xc0u) != 0x80u || cp < 0x80u) goto invalid;
+        *cursor = p + 2;
+        return cp;
+    }
+    if ((p[0] & 0xf0u) == 0xe0u && p + 2 < end) {
+        cp = ((uint32_t)(p[0] & 0x0fu) << 12) | ((uint32_t)(p[1] & 0x3fu) << 6) | (uint32_t)(p[2] & 0x3fu);
+        if ((p[1] & 0xc0u) != 0x80u || (p[2] & 0xc0u) != 0x80u || cp < 0x800u || (cp >= 0xd800u && cp <= 0xdfffu)) goto invalid;
+        *cursor = p + 3;
+        return cp;
+    }
+    if ((p[0] & 0xf8u) == 0xf0u && p + 3 < end) {
+        cp = ((uint32_t)(p[0] & 0x07u) << 18) | ((uint32_t)(p[1] & 0x3fu) << 12)
+            | ((uint32_t)(p[2] & 0x3fu) << 6) | (uint32_t)(p[3] & 0x3fu);
+        if ((p[1] & 0xc0u) != 0x80u || (p[2] & 0xc0u) != 0x80u || (p[3] & 0xc0u) != 0x80u
+            || cp < 0x10000u || cp > 0x10ffffu) goto invalid;
+        *cursor = p + 4;
+        return cp;
+    }
+invalid:
+    fprintf(stderr, "[neko-bind] invalid UTF-8 string literal while interning\\n");
+    abort();
+}
+
+static neko_utf8_shape_t neko_utf8_shape(const uint8_t *utf, size_t len) {
+    neko_utf8_shape_t shape;
+    const uint8_t *cursor = utf;
+    const uint8_t *end = utf + len;
+    memset(&shape, 0, sizeof(shape));
+    shape.latin1 = JNI_TRUE;
+    while (cursor < end) {
+        uint32_t cp = neko_utf8_next_codepoint(&cursor, end);
+        if (cp <= 0xffu) {
+            shape.latin1_bytes++;
+            shape.utf16_units++;
+        } else if (cp <= 0xffffu) {
+            shape.latin1 = JNI_FALSE;
+            shape.utf16_units++;
+        } else {
+            shape.latin1 = JNI_FALSE;
+            shape.utf16_units += 2u;
+        }
+    }
+    return shape;
+}
+
+static void neko_put_utf16_unit_le(uint8_t *dst, size_t index, uint16_t value) {
+    dst[index * 2u] = (uint8_t)(value & 0xffu);
+    dst[index * 2u + 1u] = (uint8_t)(value >> 8);
+}
+
+static void neko_fill_string_bytes(uint8_t *dst, const uint8_t *utf, size_t len, jboolean latin1) {
+    const uint8_t *cursor = utf;
+    const uint8_t *end = utf + len;
+    size_t out = 0;
+    while (cursor < end) {
+        uint32_t cp = neko_utf8_next_codepoint(&cursor, end);
+        if (latin1) {
+            dst[out++] = (uint8_t)cp;
+        } else if (cp <= 0xffffu) {
+            neko_put_utf16_unit_le(dst, out++, (uint16_t)cp);
+        } else {
+            cp -= 0x10000u;
+            neko_put_utf16_unit_le(dst, out++, (uint16_t)(0xd800u + (cp >> 10)));
+            neko_put_utf16_unit_le(dst, out++, (uint16_t)(0xdc00u + (cp & 0x3ffu)));
+        }
+    }
+}
+
+static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf, size_t len) {
+    void *string_klass;
+    neko_field_resolution_t value_field;
+    neko_field_resolution_t coder_field;
+    neko_utf8_shape_t shape;
+    char *array_oop;
+    char *string_oop;
+    jstring local_string;
+    jstring interned;
+    size_t payload_bytes;
+    size_t array_bytes;
+    size_t string_bytes;
+    size_t ref_size;
+    if (env == NULL) {
+        fprintf(stderr, "[neko-bind] null JNIEnv for string intern\\n");
+        abort();
+    }
+    if (modutf == NULL) {
+        fprintf(stderr, "[neko-bind] null string literal requested\\n");
+        abort();
+    }
+    if (g_neko_method_layout.sym_jvm_intern_string == NULL) {
+        fprintf(stderr, "[neko-bind] JVM_InternString unavailable\\n");
+        abort();
+    }
+    neko_ensure_string_alloc_bits(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] JavaThread missing for native string intern\\n");
+        abort();
+    }
+    string_klass = neko_resolve_class_with_env(env, "java/lang/String", NULL);
+    value_field = neko_resolve_field(string_klass, "value", "[B", JNI_FALSE);
+    coder_field = neko_resolve_field(string_klass, "coder", "B", JNI_FALSE);
+    if (!value_field.found || !coder_field.found || value_field.offset == 0 || coder_field.offset == 0) {
+        fprintf(stderr, "[neko-bind] java/lang/String value/coder metadata unavailable\\n");
+        abort();
+    }
+    shape = neko_utf8_shape(modutf, len);
+    payload_bytes = shape.latin1 ? shape.latin1_bytes : shape.utf16_units * 2u;
+    if (payload_bytes > (size_t)INT32_MAX) {
+        fprintf(stderr, "[neko-bind] string literal too large to intern\\n");
+        abort();
+    }
+    array_bytes = (size_t)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] + payload_bytes;
+    array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
+    if (array_oop == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB byte[] allocation failed for string literal\\n");
+        abort();
+    }
+    neko_init_oop_header(array_oop, g_neko_byte_array_klass_bits);
+    *(jint*)(array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] - 4) = (jint)payload_bytes;
+    neko_fill_string_bytes((uint8_t*)array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B], modutf, len, shape.latin1);
+    ref_size = g_hotspot.compressed_oops_enabled ? 4u : sizeof(void*);
+    string_bytes = (size_t)value_field.offset + ref_size;
+    if ((size_t)coder_field.offset + 1u > string_bytes) string_bytes = (size_t)coder_field.offset + 1u;
+    string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
+    if (string_oop == NULL) {
+        fprintf(stderr, "[neko-bind] TLAB String allocation failed for string literal\\n");
+        abort();
+    }
+    neko_init_oop_header(string_oop, g_neko_string_klass_bits);
+    neko_store_oop_raw(string_oop, (jlong)value_field.offset, array_oop);
+    *(jbyte*)(string_oop + coder_field.offset) = shape.latin1 ? 0 : 1;
+    local_string = (jstring)neko_direct_oop_to_handle(thread, string_oop);
+    interned = ((neko_jvm_intern_string_t)g_neko_method_layout.sym_jvm_intern_string)(env, local_string);
+    if (interned == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear(env);
+        fprintf(stderr, "[neko-bind] JVM_InternString failed for string literal\\n");
+        abort();
+    }
+    return neko_handle_oop((jobject)interned);
+}
+
 static void *neko_resolve_declared_method(void *instance_klass, const char *name_utf8, const char *sig_utf8) {
     void *methods_array;
     int method_count;
@@ -1050,26 +1254,22 @@ static void neko_bind_field_slot(JNIEnv *env, jfieldID *slot, jclass cls, const 
     }
 }
 
-static void neko_bind_string_slot(JNIEnv *env, jstring *slot, const char *utf) {
+static void neko_bind_string_slot(void *thread, JNIEnv *env, jstring *slot, const char *utf) {
+    void *string_oop;
     jstring localString;
     jobject globalRef;
-    char message[256];
     if (env == NULL || slot == NULL || *slot != NULL || utf == NULL) return;
-    localString = neko_new_string_utf(env, utf);
-    if (localString == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear(env);
-        snprintf(message, sizeof(message), "Bind-time string resolution failed: %s", utf);
-        neko_bind_log_failure(env, "java/lang/IllegalStateException", message);
-        if (localString != NULL) neko_delete_local_ref(env, localString);
-        return;
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] JavaThread missing while binding string: %s\\n", utf);
+        abort();
     }
+    string_oop = neko_intern_string(thread, env, (const uint8_t*)utf, strlen(utf));
+    localString = (jstring)neko_direct_oop_to_handle(thread, string_oop);
     globalRef = neko_new_global_ref(env, localString);
-    neko_delete_local_ref(env, localString);
     if (globalRef == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear(env);
-        snprintf(message, sizeof(message), "Bind-time string global-ref failed: %s", utf);
-        neko_bind_log_failure(env, "java/lang/IllegalStateException", message);
-        return;
+        fprintf(stderr, "[neko-bind] global-ref failed for native string literal: %s\\n", utf);
+        abort();
     }
     *slot = (jstring)globalRef;
 }
@@ -1124,12 +1324,11 @@ static jfieldID neko_bound_field(JNIEnv *env, jfieldID slot, const char *owner, 
     return NULL;
 }
 
-static jstring neko_bound_string(JNIEnv *env, jstring slot, const char *utf) {
-    char message[256];
-    if (slot != NULL) return slot;
-    snprintf(message, sizeof(message), "Unresolved bound string: %s", utf == NULL ? "<null>" : utf);
-    neko_raise_bound_resolution_error(env, "java/lang/IllegalStateException", message);
-    return NULL;
+static jstring neko_bound_string(void *thread, JNIEnv *env, jstring *slot, const char *utf) {
+    if (slot == NULL || *slot == NULL) {
+        neko_bind_string_slot(thread, env, slot, utf);
+    }
+    return slot != NULL ? *slot : NULL;
 }
 
 static jboolean neko_bind_primitive_field_metadata_enabled(void) {
@@ -1392,10 +1591,6 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
                         .append("JNI_TRUE")
                         .append(");\n");
                 }
-            }
-            for (StringRef stringRef : resolution.strings) {
-                sb.append("    neko_bind_string_slot(env, &").append(stringRef.cacheVar()).append(", \"")
-                    .append(c(stringRef.value())).append("\");\n");
             }
             sb.append("}\n\n");
         }
