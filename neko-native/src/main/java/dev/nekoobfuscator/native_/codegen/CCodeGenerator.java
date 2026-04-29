@@ -258,6 +258,10 @@ public final class CCodeGenerator {
         sb.append("__attribute__((visibility(\"hidden\"))) extern jboolean  g_neko_native_resolution_ready;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern jboolean  g_neko_gc_barrier_ready;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern int32_t   g_neko_gc_barrier_kind;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern void     *g_neko_addr_compressed_oops_base;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern void     *g_neko_addr_compressed_oops_shift;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern void     *g_neko_addr_compressed_klass_base;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern void     *g_neko_addr_compressed_klass_shift;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern void     *g_neko_barrier_load_oop_field_preloaded;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern void     *g_neko_barrier_load_oop_array;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern void     *g_neko_barrier_store_oop_field;\n");
@@ -440,6 +444,7 @@ public final class CCodeGenerator {
         sb.append("static jstring neko_ensure_string_slot(jstring *slot, JNIEnv *env, const char *utf);\n");
         sb.append("static jmethodID neko_ensure_method_id_slot(jmethodID *slot, JNIEnv *env, jclass cls, const char *name, const char *desc, jboolean isStatic);\n");
         sb.append("static jfieldID neko_ensure_field_id_slot(jfieldID *slot, JNIEnv *env, jclass cls, const char *name, const char *desc, jboolean isStatic);\n");
+        sb.append("static jclass neko_resolve_class_mirror_with_env(JNIEnv *env, const char *utf8, jclass from_class, void **klass_out);\n");
         sb.append("#define NEKO_ENSURE_CLASS(slot, env, name) neko_ensure_class_slot(&(slot), (env), (name))\n");
         sb.append("#define NEKO_ENSURE_STRING(slot, env, utf) neko_ensure_string_slot(&(slot), (env), (utf))\n");
         sb.append("#define NEKO_ENSURE_METHOD_ID(slot, env, cls, name, desc) neko_ensure_method_id_slot(&(slot), (env), (cls), (name), (desc), JNI_FALSE)\n");
@@ -2535,6 +2540,11 @@ enum {
     NEKO_FAST_PRIM_ARRAY = 0x8ll
 };
 
+enum {
+    NEKO_EARLY_GC_BARRIER_Z = 3,
+    NEKO_EARLY_GC_BARRIER_SHENANDOAH = 4
+};
+
 typedef struct {
     jboolean initialized;
     jint address_size;
@@ -2586,373 +2596,178 @@ static const char* neko_hotspot_primitive_name(int kind) {
     }
 }
 
-static jboolean neko_hotspot_clear_exception(JNIEnv *env) {
-    if (!neko_exception_check(env)) return JNI_FALSE;
-    neko_exception_clear(env);
-    return JNI_TRUE;
-}
-
-static jboolean neko_parse_bool_option(const char *value, jboolean *out) {
-    if (value == NULL || out == NULL) return JNI_FALSE;
-    if (strcmp(value, "true") == 0) {
-        *out = JNI_TRUE;
-        return JNI_TRUE;
-    }
-    if (strcmp(value, "false") == 0) {
-        *out = JNI_FALSE;
-        return JNI_TRUE;
-    }
-    return JNI_FALSE;
-}
-
-static jboolean neko_parse_int_option(const char *value, jint *out) {
-    char *end = NULL;
-    long parsed;
-    if (value == NULL || out == NULL) return JNI_FALSE;
-    parsed = strtol(value, &end, 10);
-    if (end == value || (end != NULL && *end != '\\0')) return JNI_FALSE;
-    *out = (jint)parsed;
-    return JNI_TRUE;
-}
-
-static jint neko_hotspot_shift_from_alignment(jint alignment) {
-    jint shift = 0;
-    if (alignment <= 0) return 0;
-    while ((alignment & 1) == 0) {
-        alignment >>= 1;
-        shift++;
-    }
-    return alignment == 1 ? shift : 0;
-}
-
-static jstring neko_system_property(JNIEnv *env, const char *key) {
-    static jclass g_system_cls = NULL;
-    static jmethodID g_system_get_property = NULL;
-    jclass systemClass = NEKO_ENSURE_CLASS(g_system_cls, env, "java/lang/System");
-    jmethodID getProperty = NEKO_ENSURE_STATIC_METHOD_ID(g_system_get_property, env, systemClass, "getProperty", "(Ljava/lang/String;)Ljava/lang/String;");
-    jvalue args[1];
-    args[0].l = neko_new_string_utf(env, key);
-    if (args[0].l == NULL) return NULL;
-    jstring value = (jstring)neko_call_static_object_method_a(env, systemClass, getProperty, args);
-    neko_delete_local_ref(env, args[0].l);
-    return value;
-}
-
-static jboolean neko_detect_hotspot(JNIEnv *env) {
-    jstring vmName = neko_system_property(env, "java.vm.name");
-    const char *chars;
-    jboolean isHotspot = JNI_FALSE;
-    if (vmName == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    chars = neko_get_string_utf_chars(env, vmName);
-    if (chars != NULL) {
-        if (strstr(chars, "HotSpot") != NULL || strstr(chars, "OpenJDK") != NULL) {
-            isHotspot = JNI_TRUE;
-        }
-        neko_release_string_utf_chars(env, vmName, chars);
-    }
-    neko_delete_local_ref(env, vmName);
-    return isHotspot;
-}
-
-static jboolean neko_hotspot_option_string(JNIEnv *env, const char *name, char *buffer, size_t bufferSize) {
-    jclass managementFactoryClass;
-    jclass hotspotMxBeanClass;
-    jmethodID getPlatformMxBean;
-    jmethodID getVmOption;
-    jmethodID getValue;
-    jobject mxBean;
-    jobject vmOption;
-    jstring optionName;
-    jstring optionValue;
-    const char *chars;
-    jvalue args[1];
-    if (buffer == NULL || bufferSize == 0) return JNI_FALSE;
-    managementFactoryClass = neko_find_class(env, "java/lang/management/ManagementFactory");
-    hotspotMxBeanClass = neko_find_class(env, "com/sun/management/HotSpotDiagnosticMXBean");
-    if (managementFactoryClass == NULL || hotspotMxBeanClass == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    getPlatformMxBean = neko_get_static_method_id(env, managementFactoryClass, "getPlatformMXBean", "(Ljava/lang/Class;)Ljava/lang/Object;");
-    if (getPlatformMxBean == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    args[0].l = hotspotMxBeanClass;
-    mxBean = neko_call_static_object_method_a(env, managementFactoryClass, getPlatformMxBean, args);
-    if (mxBean == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    getVmOption = neko_get_method_id(env, hotspotMxBeanClass, "getVMOption", "(Ljava/lang/String;)Lcom/sun/management/VMOption;");
-    if (getVmOption == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    optionName = neko_new_string_utf(env, name);
-    if (optionName == NULL) return JNI_FALSE;
-    args[0].l = optionName;
-    vmOption = neko_call_object_method_a(env, mxBean, getVmOption, args);
-    if (neko_hotspot_clear_exception(env)) {
-        neko_delete_local_ref(env, optionName);
-        return JNI_FALSE;
-    }
-    neko_delete_local_ref(env, optionName);
-    if (vmOption == NULL) return JNI_FALSE;
-    getValue = neko_get_method_id(env, neko_get_object_class(env, vmOption), "getValue", "()Ljava/lang/String;");
-    if (getValue == NULL || neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    optionValue = (jstring)neko_call_object_method_a(env, vmOption, getValue, NULL);
-    if (neko_hotspot_clear_exception(env)) return JNI_FALSE;
-    if (optionValue == NULL) return JNI_FALSE;
-    chars = neko_get_string_utf_chars(env, optionValue);
-    if (chars == NULL) {
-        neko_delete_local_ref(env, optionValue);
-        return JNI_FALSE;
-    }
-    strncpy(buffer, chars, bufferSize - 1u);
-    buffer[bufferSize - 1u] = '\\0';
-    neko_release_string_utf_chars(env, optionValue, chars);
-    neko_delete_local_ref(env, optionValue);
-    return JNI_TRUE;
-}
-
-static jobject neko_hotspot_unsafe_singleton_for(JNIEnv *env, const char *className) {
-    jclass unsafeClass = neko_find_class(env, className);
-    jfieldID theUnsafe;
-    jobject unsafe;
-    if (unsafeClass == NULL || neko_hotspot_clear_exception(env)) return NULL;
-    theUnsafe = neko_get_static_field_id(env, unsafeClass, "theUnsafe", "Lsun/misc/Unsafe;");
-    if (theUnsafe == NULL || neko_hotspot_clear_exception(env)) {
-        theUnsafe = neko_get_static_field_id(env, unsafeClass, "theUnsafe", "Ljdk/internal/misc/Unsafe;");
-        if (theUnsafe == NULL || neko_hotspot_clear_exception(env)) return NULL;
-    }
-    unsafe = neko_get_static_object_field(env, unsafeClass, theUnsafe);
-    if (neko_hotspot_clear_exception(env)) return NULL;
-    return unsafe;
-}
-
-static jobject neko_hotspot_unsafe_singleton(JNIEnv *env) {
-    jobject unsafe = neko_hotspot_unsafe_singleton_for(env, "sun/misc/Unsafe");
-    if (unsafe != NULL) return unsafe;
-    return neko_hotspot_unsafe_singleton_for(env, "jdk/internal/misc/Unsafe");
-}
-
-static jint neko_hotspot_address_size(JNIEnv *env) {
-    jobject unsafe = neko_hotspot_unsafe_singleton(env);
-    jmethodID mid;
-    jint value;
-    if (unsafe == NULL) return 0;
-    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "addressSize", "()I");
-    if (mid == NULL || neko_hotspot_clear_exception(env)) return 0;
-    value = neko_call_int_method_a(env, unsafe, mid, NULL);
-    if (neko_hotspot_clear_exception(env)) return 0;
-    return value;
-}
-
-static jclass neko_hotspot_primitive_array_class(JNIEnv *env, const char *primitiveName) {
-    if (primitiveName == NULL) return NULL;
-    if (strcmp(primitiveName, "boolean") == 0) return neko_find_class(env, "[Z");
-    if (strcmp(primitiveName, "byte") == 0) return neko_find_class(env, "[B");
-    if (strcmp(primitiveName, "char") == 0) return neko_find_class(env, "[C");
-    if (strcmp(primitiveName, "short") == 0) return neko_find_class(env, "[S");
-    if (strcmp(primitiveName, "int") == 0) return neko_find_class(env, "[I");
-    if (strcmp(primitiveName, "long") == 0) return neko_find_class(env, "[J");
-    if (strcmp(primitiveName, "float") == 0) return neko_find_class(env, "[F");
-    if (strcmp(primitiveName, "double") == 0) return neko_find_class(env, "[D");
-    return NULL;
-}
-
-static jarray neko_hotspot_new_primitive_array(JNIEnv *env, int kind, jsize len) {
+static const char* neko_hotspot_primitive_array_descriptor(int kind) {
     switch (kind) {
-        case NEKO_PRIM_Z: return (jarray)neko_new_boolean_array(env, len);
-        case NEKO_PRIM_B: return (jarray)neko_new_byte_array(env, len);
-        case NEKO_PRIM_C: return (jarray)neko_new_char_array(env, len);
-        case NEKO_PRIM_S: return (jarray)neko_new_short_array(env, len);
-        case NEKO_PRIM_I: return (jarray)neko_new_int_array(env, len);
-        case NEKO_PRIM_J: return (jarray)neko_new_long_array(env, len);
-        case NEKO_PRIM_F: return (jarray)neko_new_float_array(env, len);
-        case NEKO_PRIM_D: return (jarray)neko_new_double_array(env, len);
+        case NEKO_PRIM_Z: return "[Z";
+        case NEKO_PRIM_B: return "[B";
+        case NEKO_PRIM_C: return "[C";
+        case NEKO_PRIM_S: return "[S";
+        case NEKO_PRIM_I: return "[I";
+        case NEKO_PRIM_J: return "[J";
+        case NEKO_PRIM_F: return "[F";
+        case NEKO_PRIM_D: return "[D";
         default: return NULL;
     }
 }
 
-static jint neko_hotspot_array_base_offset(JNIEnv *env, const char *primitiveName) {
-    jobject unsafe = neko_hotspot_unsafe_singleton(env);
-    jclass arrayClass = neko_hotspot_primitive_array_class(env, primitiveName);
-    jmethodID mid;
-    jvalue args[1];
-    jint value;
-    if (unsafe == NULL || arrayClass == NULL || neko_hotspot_clear_exception(env)) return -1;
-    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "arrayBaseOffset", "(Ljava/lang/Class;)I");
-    if (mid == NULL || neko_hotspot_clear_exception(env)) return -1;
-    args[0].l = arrayClass;
-    value = neko_call_int_method_a(env, unsafe, mid, args);
-    if (neko_hotspot_clear_exception(env)) return -1;
-    return value;
+static jint neko_hotspot_primitive_scale(int kind) {
+    switch (kind) {
+        case NEKO_PRIM_Z:
+        case NEKO_PRIM_B:
+            return 1;
+        case NEKO_PRIM_C:
+        case NEKO_PRIM_S:
+            return 2;
+        case NEKO_PRIM_I:
+        case NEKO_PRIM_F:
+            return 4;
+        case NEKO_PRIM_J:
+        case NEKO_PRIM_D:
+            return 8;
+        default:
+            return 0;
+    }
 }
 
-static jint neko_hotspot_array_index_scale(JNIEnv *env, const char *primitiveName) {
-    jobject unsafe = neko_hotspot_unsafe_singleton(env);
-    jclass arrayClass = neko_hotspot_primitive_array_class(env, primitiveName);
-    jmethodID mid;
-    jvalue args[1];
-    jint value;
-    if (unsafe == NULL || arrayClass == NULL || neko_hotspot_clear_exception(env)) return 0;
-    mid = neko_get_method_id(env, neko_get_object_class(env, unsafe), "arrayIndexScale", "(Ljava/lang/Class;)I");
-    if (mid == NULL || neko_hotspot_clear_exception(env)) return 0;
-    args[0].l = arrayClass;
-    value = neko_call_int_method_a(env, unsafe, mid, args);
-    if (neko_hotspot_clear_exception(env)) return 0;
-    return value;
+static size_t neko_hotspot_align_up_size(size_t value, size_t alignment) {
+    if (alignment == 0 || (alignment & (alignment - 1u)) != 0) {
+        fprintf(stderr, "[neko-hotspot] invalid alignment %zu\\n", alignment);
+        abort();
+    }
+    return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+static jint neko_hotspot_array_base_offset_for(const neko_hotspot_state *state, int kind) {
+    size_t heap_word = sizeof(void*);
+    size_t length_offset;
+    size_t header_bytes;
+    size_t header_words;
+    if (state == NULL || state->klass_offset_bytes <= 0) return -1;
+    length_offset = state->use_compressed_klass_ptrs
+        ? (size_t)state->klass_offset_bytes + sizeof(uint32_t)
+        : (size_t)state->klass_offset_bytes + sizeof(void*);
+    header_bytes = neko_hotspot_align_up_size(length_offset + sizeof(jint), heap_word);
+    header_words = header_bytes / heap_word;
+    if (kind == NEKO_PRIM_J || kind == NEKO_PRIM_D) {
+        size_t words_per_long = (sizeof(jlong) + heap_word - 1u) / heap_word;
+        header_words = neko_hotspot_align_up_size(header_words, words_per_long);
+    }
+    return (jint)(header_words * heap_word);
+}
+
+static uintptr_t neko_hotspot_klass_header_bits_for(const neko_hotspot_state *state, void *klass) {
+    uintptr_t base;
+    int shift;
+    if (state == NULL || klass == NULL) return 0;
+    if (state->use_compressed_klass_ptrs) {
+        if (g_neko_addr_compressed_klass_base == NULL
+            || g_neko_addr_compressed_klass_shift == NULL) {
+            fprintf(stderr, "[neko-hotspot] compressed Klass VMStructs unavailable\\n");
+            abort();
+        }
+        base = (uintptr_t)(*(void**)g_neko_addr_compressed_klass_base);
+        shift = *(int*)g_neko_addr_compressed_klass_shift;
+        if (shift < 0 || shift > 31 || (uintptr_t)klass < base) {
+            fprintf(stderr, "[neko-hotspot] invalid compressed Klass encoding klass=%p base=%p shift=%d\\n",
+                klass, (void*)base, shift);
+            abort();
+        }
+        return (uintptr_t)(((uintptr_t)klass - base) >> shift);
+    }
+    return (uintptr_t)klass;
+}
+
+static void neko_hotspot_abort_missing(const char *what) {
+    fprintf(stderr, "[neko-hotspot] required native HotSpot layout missing: %s\\n",
+        what != NULL ? what : "unknown");
+    abort();
 }
 
 static void neko_hotspot_init(JNIEnv *env) {
     neko_hotspot_state state;
-    char optionValue[64];
     jlong fastBits = 0;
     jboolean arraysOk = JNI_TRUE;
     jboolean fieldHelpersOk = JNI_FALSE;
     if (g_hotspot.initialized) return;
     memset(&state, 0, sizeof(state));
-    if (env == NULL) goto fail;
-    if (!neko_detect_hotspot(env)) goto fail;
+    if (env == NULL) neko_hotspot_abort_missing("JNIEnv anchor");
+    if (!g_neko_native_resolution_ready) neko_hotspot_abort_missing("native resolution layout");
+    if (g_neko_addr_compressed_oops_base == NULL
+        || g_neko_addr_compressed_oops_shift == NULL) {
+        neko_hotspot_abort_missing("CompressedOops VMStructs");
+    }
+    if (g_neko_addr_compressed_klass_base == NULL
+        || g_neko_addr_compressed_klass_shift == NULL) {
+        neko_hotspot_abort_missing("CompressedKlassPointers VMStructs");
+    }
 
     state.is_hotspot = JNI_TRUE;
-    state.address_size = neko_hotspot_address_size(env);
-    if (neko_hotspot_clear_exception(env) || state.address_size <= 0) goto fail;
-
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseCompressedOops", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.compressed_oops_enabled);
+    state.address_size = (jint)sizeof(void*);
+    state.compressed_oops_enabled = JNI_TRUE;
+    state.compressed_oops_shift = *(int*)g_neko_addr_compressed_oops_shift;
+    state.compressed_oops_base = (jlong)(uintptr_t)(*(void**)g_neko_addr_compressed_oops_base);
+    if (state.compressed_oops_shift < 0 || state.compressed_oops_shift > 31) {
+        neko_hotspot_abort_missing("valid CompressedOops shift");
     }
-    /* If the MXBean probe failed (it consistently does inside JNI_OnLoad
-     * because the platform MXBean registry hasn't been fully wired up yet),
-     * neko_method_layout_init will overwrite compressed_oops_enabled /
-     * _shift / _base from the authoritative CompressedOops::_narrow_oop
-     * VMStructs entries. */
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseCompressedClassPointers", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.compressed_klass_ptrs);
-    }
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseCompactObjectHeaders", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.use_compact_object_headers);
-    }
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseZGC", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.use_zgc);
-    }
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "UseShenandoahGC", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_bool_option(optionValue, &state.use_shenandoah_gc);
-    }
-    memset(optionValue, 0, sizeof(optionValue));
-    if (neko_hotspot_option_string(env, "ObjectAlignmentInBytes", optionValue, sizeof(optionValue))) {
-        (void)neko_parse_int_option(optionValue, &state.object_alignment_in_bytes);
-    }
-
+    state.coop_encoded_mode = state.compressed_oops_base == 0
+        ? (state.compressed_oops_shift == 0 ? NEKO_COOP_MODE_ZERO_BASED : NEKO_COOP_MODE_ZERO_BASED)
+        : NEKO_COOP_MODE_HEAP_BASED;
+    state.object_alignment_in_bytes = state.compressed_oops_shift >= 3
+        ? (jint)(1u << state.compressed_oops_shift)
+        : 8;
+    state.compressed_klass_ptrs = sizeof(void*) == 8 ? JNI_TRUE : JNI_FALSE;
     state.use_compressed_klass_ptrs = state.compressed_klass_ptrs;
-    if (state.address_size == 4 || state.address_size == 8) {
-        state.klass_offset_bytes = state.address_size;
-    }
-
-    if (state.compressed_oops_enabled) {
-        state.compressed_oops_shift = neko_hotspot_shift_from_alignment(state.object_alignment_in_bytes);
-        state.compressed_oops_base = 0;
-        state.coop_encoded_mode = NEKO_COOP_MODE_UNKNOWN;
-    } else {
-        state.coop_encoded_mode = NEKO_COOP_MODE_DISABLED;
-    }
+    state.klass_offset_bytes = (jint)sizeof(void*);
+    state.use_zgc = g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z ? JNI_TRUE : JNI_FALSE;
+    state.use_shenandoah_gc = g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH ? JNI_TRUE : JNI_FALSE;
 
     for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
-        const char *primitiveName = neko_hotspot_primitive_name(i);
         jint baseOffset;
         jint indexScale;
-        if (primitiveName == NULL) goto fail;
-        baseOffset = neko_hotspot_array_base_offset(env, primitiveName);
-        if (neko_hotspot_clear_exception(env)) {
-            goto fail;
-        }
-        indexScale = neko_hotspot_array_index_scale(env, primitiveName);
-        if (neko_hotspot_clear_exception(env)) {
-            goto fail;
-        }
+        if (neko_hotspot_primitive_name(i) == NULL) neko_hotspot_abort_missing("primitive kind name");
+        baseOffset = neko_hotspot_array_base_offset_for(&state, i);
+        indexScale = neko_hotspot_primitive_scale(i);
         state.primitive_array_base_offsets[i] = baseOffset;
         state.primitive_array_index_scales[i] = indexScale;
         if (baseOffset < 0 || indexScale <= 0) arraysOk = JNI_FALSE;
     }
 
     {
-        jclass integerClass = neko_find_class(env, "java/lang/Integer");
+        jclass integerClass = neko_resolve_class_mirror_with_env(env, "java/lang/Integer", NULL, NULL);
         jlong instanceOffset;
         jlong staticOffset;
-        if (integerClass == NULL || neko_hotspot_clear_exception(env)) goto fail;
+        if (integerClass == NULL) neko_hotspot_abort_missing("java/lang/Integer mirror");
         instanceOffset = neko_native_instance_field_offset(env, integerClass, "value", "I");
-        if (neko_hotspot_clear_exception(env)) {
-            neko_delete_local_ref(env, integerClass);
-            goto fail;
-        }
         staticOffset = neko_native_static_field_offset(env, integerClass, "TYPE", "Ljava/lang/Class;");
-        if (neko_hotspot_clear_exception(env)) {
-            neko_delete_local_ref(env, integerClass);
-            goto fail;
-        }
         fieldHelpersOk = (instanceOffset >= 0 && staticOffset >= 0) ? JNI_TRUE : JNI_FALSE;
         if (state.address_size == 8) {
             if (instanceOffset == 12) {
                 state.use_compressed_klass_ptrs = JNI_TRUE;
+                state.compressed_klass_ptrs = JNI_TRUE;
             } else if (instanceOffset >= 16) {
                 state.use_compressed_klass_ptrs = JNI_FALSE;
+                state.compressed_klass_ptrs = JNI_FALSE;
             }
-        }
-        neko_delete_local_ref(env, integerClass);
-    }
-
-    if (state.address_size == 8) {
-        jint byteArrayBase = state.primitive_array_base_offsets[NEKO_PRIM_B];
-        if (byteArrayBase == 16) {
-            state.use_compressed_klass_ptrs = JNI_TRUE;
-        } else if (byteArrayBase >= 24) {
-            state.use_compressed_klass_ptrs = JNI_FALSE;
         }
     }
 
     for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
-        jarray emptyArray = neko_hotspot_new_primitive_array(env, i, 0);
-        char *arrayOop;
-        if (emptyArray == NULL || neko_hotspot_clear_exception(env)) {
+        state.primitive_array_base_offsets[i] = neko_hotspot_array_base_offset_for(&state, i);
+    }
+
+    for (int i = 0; i < NEKO_PRIM_COUNT; i++) {
+        const char *arrayDesc = neko_hotspot_primitive_array_descriptor(i);
+        void *arrayKlass = NULL;
+        if (arrayDesc == NULL) neko_hotspot_abort_missing("primitive array descriptor");
+        (void)neko_resolve_class_mirror_with_env(env, arrayDesc, NULL, &arrayKlass);
+        if (arrayKlass == NULL) {
             arraysOk = JNI_FALSE;
             continue;
         }
-        arrayOop = (char*)neko_handle_oop((jobject)emptyArray);
-        if (arrayOop != NULL && state.klass_offset_bytes > 0) {
-            if (state.use_compressed_klass_ptrs) {
-                state.primitive_array_klass_bits[i] = (uintptr_t)(*(uint32_t*)(arrayOop + state.klass_offset_bytes));
-            } else {
-                state.primitive_array_klass_bits[i] = *(uintptr_t*)(arrayOop + state.klass_offset_bytes);
-            }
-        }
-        neko_delete_local_ref(env, emptyArray);
+        state.primitive_array_klass_bits[i] = neko_hotspot_klass_header_bits_for(&state, arrayKlass);
     }
 
-    {
-        jclass objectClass = neko_find_class(env, "java/lang/Object");
-        jobject globalRef;
-        jobject weakRef;
-        if (objectClass == NULL || neko_hotspot_clear_exception(env)) goto fail;
-        globalRef = neko_new_global_ref(env, objectClass);
-        weakRef = neko_new_weak_global_ref(env, objectClass);
-        if (getenv("NEKO_PATCH_DEBUG") != NULL) {
-            uintptr_t localSlot = ((uintptr_t)objectClass) & ~(uintptr_t)0x3u;
-            uintptr_t globalSlot = ((uintptr_t)globalRef) & ~(uintptr_t)0x3u;
-            void *localOop = localSlot != 0 ? *(void**)localSlot : NULL;
-            void *globalOop = globalSlot != 0 ? *(void**)globalSlot : NULL;
-            g_neko_handle_sample_oop = (uintptr_t)(localOop != NULL ? localOop : globalOop);
-            fprintf(stderr, "[neko-patch] handle sample: local_ref=%p local_oop=%p global_ref=%p global_oop=%p coop_shift=%d use_zgc=%d\\n",
-                (void*)objectClass, localOop, (void*)globalRef, globalOop,
-                state.compressed_oops_shift, (int)state.use_zgc);
-        } else {
-            uintptr_t localSlot = ((uintptr_t)objectClass) & ~(uintptr_t)0x3u;
-            if (localSlot != 0) g_neko_handle_sample_oop = (uintptr_t)(*(void**)localSlot);
-        }
-        if (globalRef != NULL && weakRef != NULL
-            && ((((uintptr_t)objectClass) & 0x3u) == 0u)
-            && ((((uintptr_t)globalRef) & 0x3u) == 0x2u)
-            && ((((uintptr_t)weakRef) & 0x3u) == 0x1u)) {
-            fastBits |= NEKO_HOTSPOT_FAST_HANDLE_TAGS;
-        }
-        if (globalRef != NULL) neko_delete_global_ref(env, globalRef);
-        if (weakRef != NULL) neko_delete_weak_global_ref(env, weakRef);
-        neko_delete_local_ref(env, objectClass);
-    }
+    fastBits |= NEKO_HOTSPOT_FAST_HANDLE_TAGS;
 
     if (arraysOk) fastBits |= NEKO_HOTSPOT_FAST_ARRAY_LAYOUT;
     if (fieldHelpersOk) fastBits |= NEKO_HOTSPOT_FAST_FIELD_HELPERS;
@@ -2970,7 +2785,6 @@ static void neko_hotspot_init(JNIEnv *env) {
     /*
      * Compact object headers change where klass metadata lives, so any future
      * receiver-key extraction or raw heap layout shortcut must stay disabled.
-     * Zeroing fast_bits here keeps later tiers on the conservative JNI path.
      */
     if (state.use_compact_object_headers) fastBits = 0;
 
@@ -2978,11 +2792,6 @@ static void neko_hotspot_init(JNIEnv *env) {
     state.initialized = JNI_TRUE;
     g_hotspot = state;
     return;
-
-fail:
-    memset(&g_hotspot, 0, sizeof(g_hotspot));
-    g_hotspot.initialized = JNI_TRUE;
-    g_hotspot.fast_bits = 0;
 }
 
 """ + renderHotSpotFastAccessHelpers();

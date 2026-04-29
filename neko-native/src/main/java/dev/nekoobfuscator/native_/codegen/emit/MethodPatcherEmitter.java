@@ -127,11 +127,8 @@ typedef struct {
      *   CompressedOops::_narrow_oop._base   (address of an oop pointer)
      *   CompressedOops::_narrow_oop._shift  (address of an int)
      * These are static fields with non-NULL static_addr in gHotSpotVMStructs.
-     * We capture their addresses here so the fast aaload path can decode
-     * narrow oops (`oop = (narrow << shift) + base`) without ever asking the
-     * libjvm-internal HotSpotDiagnosticMXBean.getVMOption() chain — which
-     * fails to resolve during JNI_OnLoad context (ManagementFactory's
-     * platform MXBean registry isn't fully wired up yet). */
+     * We capture their addresses here so native code can decode narrow oops
+     * (`oop = (narrow << shift) + base`) directly from VMStructs. */
     void *addr_compressed_oops_base;
     void *addr_compressed_oops_shift;
     void *addr_compressed_klass_base;
@@ -313,6 +310,10 @@ __attribute__((visibility("hidden"))) int32_t g_neko_basictype_array   = 0;
  * %r12 as the heap base register. Set once at OnLoad from the
  * CompressedOops::_narrow_oop._base static field. */
 __attribute__((visibility("hidden"))) void *g_neko_heap_base = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_addr_compressed_oops_base = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_addr_compressed_oops_shift = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_addr_compressed_klass_base = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_addr_compressed_klass_shift = NULL;
 /* Thread-register snapshot captured right at JNI_OnLoad entry, before any C
  * code can clobber r15 (x86_64) / x28 (AArch64). HotSpot keeps the current
  * JavaThread* there across the JNI dispatch. We use this to derive
@@ -1974,6 +1975,10 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     NEKO_PATCH_LOG("jni env: off=%td", g_neko_method_layout.off_thread_jni_environment);
     g_neko_method_layout.native_resolution_ready = neko_native_resolution_layout_ready();
     g_neko_native_resolution_ready = g_neko_method_layout.native_resolution_ready;
+    g_neko_addr_compressed_oops_base = g_neko_method_layout.addr_compressed_oops_base;
+    g_neko_addr_compressed_oops_shift = g_neko_method_layout.addr_compressed_oops_shift;
+    g_neko_addr_compressed_klass_base = g_neko_method_layout.addr_compressed_klass_base;
+    g_neko_addr_compressed_klass_shift = g_neko_method_layout.addr_compressed_klass_shift;
     NEKO_PATCH_LOG("native resolution: ready=%d ik_methods=%td ik_fields=%td ik_fieldinfo=%td ik_java_fields=%td ik_constants=%td klass_mirror=%td class_klass=%td klass_super=%td klass_supers=%td cp_tags=%td cp_holder=%td cp_len=%td cp_base=%td cp_size=%zu method_const=%td cm_name=%td cm_sig=%td symbol_len=%td symbol_body=%td array_len=%td array_data=%td array_u1_data=%td array_u2_data=%td universe_heap=%p bs=%p bs_rtti=%td bs_tag=%td jvm_find_loaded=%p boot_find=%p class_find=%p jvm_intern=%p jvm_array=%p/%p string_intern=%p/%p oopfactory=%p/%p",
         (int)g_neko_native_resolution_ready,
         g_neko_method_layout.off_instanceklass_methods,
@@ -2094,11 +2099,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         (int)g_neko_thread_state_ready, (int)(g_neko_off_last_Java_sp > 0),
         g_neko_call_stub_entry,
         (int)g_neko_direct_invoke_ready);
-    /* Pull compressed-oops state directly from VMStructs. The MXBean probe
-     * via HotSpotDiagnosticMXBean.getVMOption() runs in renderHotSpotSupport
-     * earlier but consistently fails inside JNI_OnLoad context (the platform
-     * MXBean registry isn't fully initialized). VMStructs publishes the same
-     * state authoritatively in CompressedOops::_narrow_oop._{base,shift}. */
+    /* Pull compressed-oops state directly from VMStructs. */
     if (g_neko_method_layout.addr_compressed_oops_shift != NULL) {
         int shift = *(int*)g_neko_method_layout.addr_compressed_oops_shift;
         void *base = (g_neko_method_layout.addr_compressed_oops_base != NULL)
