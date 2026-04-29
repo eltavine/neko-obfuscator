@@ -28,6 +28,19 @@ Status legend:
 - `test-jars/oouput/` is pre-existing untracked output and must not be staged unless explicitly requested.
 - Existing unrelated worktree changes, especially `X86_64WindowsTrampoline.java`, must not be reverted or staged accidentally.
 
+## Per-Subtask Runtime Validation Gate
+
+This gate applies to every T0-T4 subtask, including small scaffolding and cleanup subtasks.
+
+- A subtask must stay `[ ]` or `[-]` until its changed code path is exercised by a regenerated runtime artifact, not only by compile success, source inspection, or generated-C inspection.
+- Before changing any subtask checkbox to `[x]`, rerun the exact Gradle/native generation path that rebuilds the jar or native artifact affected by that subtask.
+- After regeneration, run the exact runtime target that exercises the new path. For this plan, the default minimum runtime targets are `TEST-native.jar` and `obfusjack-test21`/`obfusjack-native.jar`; if a subtask needs a narrower or additional runtime target, state it before marking `[x]`.
+- Runtime validation must inspect stdout, stderr, generated native logs, and any `hs_err_pid*.log` from that run. Crashes, SIGSEGV/SIGABRT, verifier errors, `translated=0`, `Native compilation produced no libraries`, skip-on-error output, missing required symbol diagnostics, or fallback/original-bytecode execution keep the subtask incomplete.
+- A resolver/bind-time subtask is not complete until the resolver is called by the current bind/runtime path and a runtime jar proves the resolved pointer/offset/entry is used correctly.
+- A hot-path opcode subtask is not complete until a runtime jar executes that opcode through the new native path and the generated C inspection confirms no forbidden JNI wrapper remains for that path.
+- A cleanup/removal subtask is not complete until a runtime jar proves the removed fallback is not required and the failure mode is a hard abort/error when the required native mechanism is unavailable.
+- The commit for a completed subtask must include only the implementation plus its todo checkbox update after the runtime validation above has passed.
+
 ## Preparation
 
 - [x] T0.1 VMStructs offsets for `SystemDictionary`, `InstanceKlass`, `ConstantPool`, `Symbol`, `StringTable`, `Universe`, `BarrierSet`, and `oopFactory`.
