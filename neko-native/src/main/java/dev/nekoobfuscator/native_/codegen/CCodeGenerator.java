@@ -447,6 +447,68 @@ public final class CCodeGenerator {
 
     private String renderBindSupport() {
         return """
+typedef jclass (*neko_jvm_find_class_boot_t)(JNIEnv*, const char*);
+typedef jclass (*neko_jvm_find_class_from_class_t)(JNIEnv*, const char*, jboolean, jclass);
+
+static void *neko_class_mirror_to_klass(jclass mirror) {
+    void *mirror_oop;
+    void *klass;
+    if (mirror == NULL) return NULL;
+    if (!g_neko_native_resolution_ready || g_neko_method_layout.off_java_lang_class_klass < 0) {
+        fprintf(stderr, "[neko-bind] java.lang.Class::_klass offset unavailable\\n");
+        abort();
+    }
+    mirror_oop = neko_handle_oop((jobject)mirror);
+    if (mirror_oop == NULL) return NULL;
+    klass = *(void**)((char*)mirror_oop + g_neko_method_layout.off_java_lang_class_klass);
+    return klass;
+}
+
+static jobject neko_klass_java_mirror_handle(void *thread, void *klass) {
+    void *mirror_oop;
+    if (klass == NULL) return NULL;
+    if (!g_neko_native_resolution_ready || g_neko_method_layout.off_klass_java_mirror < 0) {
+        fprintf(stderr, "[neko-bind] Klass::_java_mirror offset unavailable\\n");
+        abort();
+    }
+    mirror_oop = *(void**)((char*)klass + g_neko_method_layout.off_klass_java_mirror);
+    return mirror_oop != NULL ? neko_handle_push(thread, mirror_oop) : NULL;
+}
+
+static void *neko_resolve_class_with_mirror(const char *utf8, jclass from_class) {
+    void *thread;
+    JNIEnv *env;
+    jclass resolved = NULL;
+    void *klass;
+    if (utf8 == NULL || utf8[0] == '\\0') {
+        fprintf(stderr, "[neko-bind] class resolution requested with empty name\\n");
+        abort();
+    }
+    if (!g_neko_native_resolution_ready) {
+        fprintf(stderr, "[neko-bind] native class resolution requested before readiness: %s\\n", utf8);
+        abort();
+    }
+    thread = neko_current_thread_register();
+    env = neko_thread_jni_env(thread);
+    if (from_class != NULL && g_neko_method_layout.sym_jvm_find_class_from_class != NULL) {
+        resolved = ((neko_jvm_find_class_from_class_t)g_neko_method_layout.sym_jvm_find_class_from_class)(
+            env, utf8, JNI_FALSE, from_class);
+    }
+    if (resolved == NULL && g_neko_method_layout.sym_jvm_find_class_from_boot_loader != NULL) {
+        resolved = ((neko_jvm_find_class_boot_t)g_neko_method_layout.sym_jvm_find_class_from_boot_loader)(env, utf8);
+    }
+    klass = neko_class_mirror_to_klass(resolved);
+    if (klass == NULL) {
+        fprintf(stderr, "[neko-bind] native class resolution failed: %s\\n", utf8);
+        abort();
+    }
+    return klass;
+}
+
+static void *neko_resolve_class(const char *utf8) {
+    return neko_resolve_class_with_mirror(utf8, NULL);
+}
+
 static void neko_raise_bound_resolution_error(JNIEnv *env, const char *errorClass, const char *message) {
     if (env == NULL || errorClass == NULL || message == NULL) return;
     if (neko_exception_check(env)) neko_exception_clear(env);

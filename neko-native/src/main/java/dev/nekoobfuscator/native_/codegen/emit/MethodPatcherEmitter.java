@@ -170,6 +170,7 @@ typedef struct {
     ptrdiff_t off_klass_super;
     ptrdiff_t off_klass_subklass;
     ptrdiff_t off_klass_name;
+    ptrdiff_t off_java_lang_class_klass;
     ptrdiff_t off_constantpool_tags;
     ptrdiff_t off_constantpool_cache;
     ptrdiff_t off_constantpool_pool_holder;
@@ -211,6 +212,7 @@ typedef struct {
     jboolean gc_barrier_ready;
     void *sym_jvm_find_loaded_class;
     void *sym_jvm_find_class_from_boot_loader;
+    void *sym_jvm_find_class_from_class;
     void *sym_jvm_intern_string;
     void *sym_jvm_new_array;
     void *sym_jvm_new_multi_array;
@@ -425,6 +427,8 @@ static void neko_resolve_native_resolution_symbols(void *jvm) {
         neko_dlsym(jvm, "JVM_FindLoadedClass");
     g_neko_method_layout.sym_jvm_find_class_from_boot_loader =
         neko_dlsym(jvm, "JVM_FindClassFromBootLoader");
+    g_neko_method_layout.sym_jvm_find_class_from_class =
+        neko_dlsym(jvm, "JVM_FindClassFromClass");
     g_neko_method_layout.sym_jvm_intern_string =
         neko_dlsym(jvm, "JVM_InternString");
     g_neko_method_layout.sym_jvm_new_array =
@@ -631,6 +635,12 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             else if (neko_streq_safe(field_name, "_super")) g_neko_method_layout.off_klass_super = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_subklass")) g_neko_method_layout.off_klass_subklass = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_name")) g_neko_method_layout.off_klass_name = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "java_lang_Class")) {
+            if (neko_streq_safe(field_name, "_klass_offset") && is_static && static_addr != NULL) {
+                g_neko_method_layout.off_java_lang_class_klass = (ptrdiff_t)(*(int*)static_addr);
+            } else if (neko_streq_safe(field_name, "_klass")) {
+                g_neko_method_layout.off_java_lang_class_klass = (ptrdiff_t)off_value;
+            }
         } else if (neko_streq_safe(type_name, "ConstantPool")) {
             if (neko_streq_safe(field_name, "_tags")) g_neko_method_layout.off_constantpool_tags = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_cache")) g_neko_method_layout.off_constantpool_cache = (ptrdiff_t)off_value;
@@ -935,6 +945,7 @@ static jboolean neko_native_resolution_layout_ready(void) {
          && g_neko_method_layout.off_klass_java_mirror >= 0
          && g_neko_method_layout.off_klass_super >= 0
          && g_neko_method_layout.off_klass_name >= 0
+         && g_neko_method_layout.off_java_lang_class_klass >= 0
          && g_neko_method_layout.off_constantpool_tags >= 0
          && g_neko_method_layout.off_constantpool_pool_holder >= 0
          && g_neko_method_layout.off_constantpool_length >= 0
@@ -960,6 +971,7 @@ static jboolean neko_native_resolution_layout_ready(void) {
     jboolean class_lookup_ready =
         (g_neko_method_layout.sym_jvm_find_loaded_class != NULL
          || g_neko_method_layout.sym_jvm_find_class_from_boot_loader != NULL
+         || g_neko_method_layout.sym_jvm_find_class_from_class != NULL
          || g_neko_method_layout.sym_systemdictionary_find_instance_klass != NULL
          || g_neko_method_layout.sym_systemdictionary_find_instance_or_array_klass != NULL)
         ? JNI_TRUE : JNI_FALSE;
@@ -1771,6 +1783,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_klass_super = -1;
     g_neko_method_layout.off_klass_subklass = -1;
     g_neko_method_layout.off_klass_name = -1;
+    g_neko_method_layout.off_java_lang_class_klass = -1;
     g_neko_method_layout.off_constantpool_tags = -1;
     g_neko_method_layout.off_constantpool_cache = -1;
     g_neko_method_layout.off_constantpool_pool_holder = -1;
@@ -1949,13 +1962,14 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     NEKO_PATCH_LOG("jni env: off=%td", g_neko_method_layout.off_thread_jni_environment);
     g_neko_method_layout.native_resolution_ready = neko_native_resolution_layout_ready();
     g_neko_native_resolution_ready = g_neko_method_layout.native_resolution_ready;
-    NEKO_PATCH_LOG("native resolution: ready=%d ik_methods=%td ik_fields=%td ik_fieldinfo=%td ik_constants=%td klass_mirror=%td klass_super=%td klass_supers=%td cp_tags=%td cp_holder=%td cp_len=%td method_const=%td cm_name=%td cm_sig=%td symbol_len=%td symbol_body=%td array_len=%td array_data=%td universe_heap=%p bs=%p bs_rtti=%td bs_tag=%td jvm_find_loaded=%p boot_find=%p jvm_intern=%p jvm_array=%p/%p string_intern=%p/%p oopfactory=%p/%p",
+    NEKO_PATCH_LOG("native resolution: ready=%d ik_methods=%td ik_fields=%td ik_fieldinfo=%td ik_constants=%td klass_mirror=%td class_klass=%td klass_super=%td klass_supers=%td cp_tags=%td cp_holder=%td cp_len=%td method_const=%td cm_name=%td cm_sig=%td symbol_len=%td symbol_body=%td array_len=%td array_data=%td universe_heap=%p bs=%p bs_rtti=%td bs_tag=%td jvm_find_loaded=%p boot_find=%p class_find=%p jvm_intern=%p jvm_array=%p/%p string_intern=%p/%p oopfactory=%p/%p",
         (int)g_neko_native_resolution_ready,
         g_neko_method_layout.off_instanceklass_methods,
         g_neko_method_layout.off_instanceklass_fields,
         g_neko_method_layout.off_instanceklass_fieldinfo_stream,
         g_neko_method_layout.off_instanceklass_constants,
         g_neko_method_layout.off_klass_java_mirror,
+        g_neko_method_layout.off_java_lang_class_klass,
         g_neko_method_layout.off_klass_super,
         g_neko_method_layout.off_klass_secondary_supers,
         g_neko_method_layout.off_constantpool_tags,
@@ -1974,6 +1988,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_neko_method_layout.off_barrierset_fakertti_concrete_tag,
         g_neko_method_layout.sym_jvm_find_loaded_class,
         g_neko_method_layout.sym_jvm_find_class_from_boot_loader,
+        g_neko_method_layout.sym_jvm_find_class_from_class,
         g_neko_method_layout.sym_jvm_intern_string,
         g_neko_method_layout.sym_jvm_new_array,
         g_neko_method_layout.sym_jvm_new_multi_array,
