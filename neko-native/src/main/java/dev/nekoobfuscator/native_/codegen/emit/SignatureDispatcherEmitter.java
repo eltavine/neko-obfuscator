@@ -5,10 +5,9 @@ package dev.nekoobfuscator.native_.codegen.emit;
  *
  * The dispatcher is the direct-C bridge between the per-arch trampoline
  * (which delivers raw interpreter args) and the generated raw translated
- * body. The hot path is structured so the only JNI calls per invocation
- * are {@code PushLocalFrame} / {@code PopLocalFrame} — both required for
- * GC-safe handle-block bookkeeping when the translated body internally
- * uses JNI to do its work. Everything else is direct VMStruct memory ops:
+ * body. The hot path does not call the JNI function table for frame
+ * bookkeeping; it snapshots JavaThread::_active_handles and restores the
+ * JNIHandleBlock chain directly after the translated body returns:
  *
  * <ul>
  *   <li>{@code JNIEnv*} comes from {@code JavaThread::_jni_environment}
@@ -30,17 +29,11 @@ package dev.nekoobfuscator.native_.codegen.emit;
  *       what {@code JNIHandles::resolve} would do internally.</li>
  * </ul>
  *
- * The PushLocalFrame / PopLocalFrame pair could not be simply replaced
- * by raw {@code _top} save/restore: the impl_fn's own JNI calls may
- * extend the handle-block chain ({@code _next}-linked) when filling
- * past 32 slots, and only PopLocalFrame walks the chain back. Resetting
- * just the saved block's {@code _top} leaks roots into chained blocks
- * and triggers GC stalls / SEGVs on long test runs (validated on
- * obfusjack inheritance tests).
+ * Resetting just the saved block's {@code _top} leaks roots into chained
+ * blocks, so restore walks/free's any blocks linked above the saved one.
  *
  * Constraints documented in {@code todo.md} / {@code problems.md}: no
- * JVMTI; the trampoline-to-impl_fn boundary keeps JNI usage to the two
- * frame-management calls plus what the translated body itself emits.
+ * JVMTI; the trampoline-to-impl_fn boundary must not use JNI fallback calls.
  */
 public final class SignatureDispatcherEmitter {
 
@@ -84,13 +77,11 @@ public final class SignatureDispatcherEmitter {
         sb.append("    JNIEnv *env = neko_thread_jni_env(thread);\n");
         sb.append("    if (env == NULL) ").append(returnZero(ret)).append(";\n");
         sb.append("    NEKO_PATCH_LOG(\"sig").append(sigId).append(" enter %s.%s%s\", entry->owner_internal, entry->method_name, entry->method_desc);\n");
-        sb.append("    if ((*env)->PushLocalFrame(env, 16) != 0) ").append(returnZero(ret)).append(";\n");
 
         // Save the active handle block top for receiver/ref args we push
         // ourselves (translates raw oops the trampoline gave us into
-        // jobject slots). PushLocalFrame above bounds the impl_fn's own
-        // local-ref allocations; this save/restore is the bookend for the
-        // refs we push BEFORE PushLocalFrame's frame is unwound.
+        // jobject slots). restore also unlinks any JNIHandleBlock chain
+        // extension performed by nested native/JNI allocations.
         sb.append("    neko_handle_save_t __hsave;\n");
         sb.append("    neko_handle_save(thread, &__hsave);\n");
 
@@ -133,15 +124,12 @@ public final class SignatureDispatcherEmitter {
         }
         sb.append(");\n");
 
-        // Direct read of JavaThread::_pending_exception when VMStructs
-        // published the offset; otherwise fall through to JNI ExceptionCheck.
-        // Either way, on a pending exception we PopLocalFrame(NULL) and
-        // restore the saved _top before returning zero.
-        sb.append("    int __pending = (g_neko_off_thread_pending_exception > 0)\n");
-        sb.append("        ? (*(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL)\n");
-        sb.append("        : ((*env)->ExceptionCheck(env) ? 1 : 0);\n");
+        // Direct read of JavaThread::_pending_exception. Missing VMStructs
+        // metadata is a hard failure here; hot path JNI ExceptionCheck is not
+        // a valid fallback.
+        sb.append("    if (g_neko_off_thread_pending_exception <= 0) { fprintf(stderr, \"[neko-direct] pending-exception offset missing in sig").append(sigId).append("\\n\"); abort(); }\n");
+        sb.append("    int __pending = (*(void**)((char*)thread + g_neko_off_thread_pending_exception) != NULL);\n");
         sb.append("    if (__pending) {\n");
-        sb.append("        (void)(*env)->PopLocalFrame(env, NULL);\n");
         sb.append("        neko_handle_restore(&__hsave);\n");
         if (ret == 'V') sb.append("        return;\n");
         else if (ret == 'L') sb.append("        return NULL;\n");
@@ -150,25 +138,14 @@ public final class SignatureDispatcherEmitter {
 
         // return + restore
         if (ret == 'V') {
-            sb.append("    (void)(*env)->PopLocalFrame(env, NULL);\n");
             sb.append("    neko_handle_restore(&__hsave);\n");
             sb.append("    return;\n");
         } else if (ret == 'L') {
-            // PopLocalFrame relocates __ret into the parent frame and
-            // returns the new jobject. JNI globals (e.g. cached bound
-            // strings, owner_class_global_ref escaping out via reflection)
-            // would carry tag bits; mask before deref. For local refs
-            // the bits are zero so the mask is a no-op.
-            sb.append("    jobject __surviving = (*env)->PopLocalFrame(env, __ret);\n");
             sb.append("    void *__raw_ret = NULL;\n");
-            sb.append("    if (__surviving != NULL) {\n");
-            sb.append("        uintptr_t __slot = (uintptr_t)__surviving & ~(uintptr_t)0x3;\n");
-            sb.append("        __raw_ret = *(void**)__slot;\n");
-            sb.append("    }\n");
+            sb.append("    if (__ret != NULL) __raw_ret = neko_handle_oop(__ret);\n");
             sb.append("    neko_handle_restore(&__hsave);\n");
             sb.append("    return __raw_ret;\n");
         } else {
-            sb.append("    (void)(*env)->PopLocalFrame(env, NULL);\n");
             sb.append("    neko_handle_restore(&__hsave);\n");
             sb.append("    return (").append(retC).append(")__ret;\n");
         }

@@ -243,11 +243,11 @@ class OpcodeTranslatorUnitTest {
         ));
 
         assertContains(code,
-            "neko_get_int_array_region",
-            "neko_set_int_array_region",
+            "neko_fast_iaload(env,",
+            "neko_fast_iastore(env,",
             "neko_fast_array_length(env, arr)",
-            "PUSH_O(neko_new_int_array(env, len));",
-            "PUSH_O(neko_new_object_array(env, len, cls, NULL));",
+            "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
+            "PUSH_O(neko_fast_new_object_array(thread, env, len,",
             "PUSH_O(neko_multi_new_array(env, 2, __dims, \"[[I\"));"
         );
     }
@@ -317,17 +317,14 @@ class OpcodeTranslatorUnitTest {
         /* AALOAD now goes through neko_fast_aaload, which reads the narrow-oop
          * element directly from the array layout (decoded via VMStructs-derived
          * compressed-oops base/shift) and pushes it into the active
-         * JNIHandleBlock without crossing the JNI handle-allocation path. The
-         * libjvm GetObjectArrayElement is kept as a tail fallback in case
-         * the layout could not be recovered or the handle block is full. */
+         * JNIHandleBlock without crossing the JNI handle-allocation path. */
         String aaloadBody = translatedBodySection(translateSingleMethod(objectArrayLoadOwner()));
         assertContains(aaloadBody, "neko_fast_aaload(thread, env,");
-        assertContains(aaloadBody, "neko_get_object_array_element"); // still referenced as fallback comment
+        assertFalse(aaloadBody.contains("neko_get_object_array_element"), aaloadBody);
 
-        /* AASTORE has no fast path yet (writing into an object array also has
-         * to perform a runtime element-type check); it stays on the JNI route. */
         String aastoreBody = translatedBodySection(translateSingleMethod(objectArrayStoreOwner()));
-        assertContains(aastoreBody, "neko_set_object_array_element(");
+        assertContains(aastoreBody, "neko_fast_aastore(thread, env,");
+        assertFalse(aastoreBody.contains("neko_set_object_array_element("), aastoreBody);
     }
 
     @Test

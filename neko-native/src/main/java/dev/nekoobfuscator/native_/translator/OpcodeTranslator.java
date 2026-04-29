@@ -165,23 +165,23 @@ public final class OpcodeTranslator {
             case Opcodes.DSTORE -> stmts.add(raw("locals[" + ((VarInsnNode) insn).var + "].d = POP_D();"));
             case Opcodes.ASTORE -> stmts.add(raw("locals[" + ((VarInsnNode) insn).var + "].o = POP_O();"));
 
-            case Opcodes.IALOAD -> stmts.add(raw("{ jint __i = POP_I(); jintArray __a = (jintArray)POP_O(); PUSH_I(neko_fast_iaload(env, __a, __i)); /* fallback: neko_get_int_array_region */ }"));
-            case Opcodes.LALOAD -> stmts.add(raw("{ jint __i = POP_I(); jlongArray __a = (jlongArray)POP_O(); PUSH_L(neko_fast_laload(env, __a, __i)); /* fallback: neko_get_long_array_region */ }"));
-            case Opcodes.FALOAD -> stmts.add(raw("{ jint __i = POP_I(); jfloatArray __a = (jfloatArray)POP_O(); PUSH_F(neko_fast_faload(env, __a, __i)); /* fallback: neko_get_float_array_region */ }"));
-            case Opcodes.DALOAD -> stmts.add(raw("{ jint __i = POP_I(); jdoubleArray __a = (jdoubleArray)POP_O(); PUSH_D(neko_fast_daload(env, __a, __i)); /* fallback: neko_get_double_array_region */ }"));
-            case Opcodes.AALOAD -> stmts.add(raw("{ jint __i = POP_I(); jobjectArray __a = (jobjectArray)POP_O(); PUSH_O(neko_fast_aaload(thread, env, __a, __i)); /* fallback: neko_get_object_array_element */ }"));
-            case Opcodes.BALOAD -> stmts.add(raw("{ jint __i = POP_I(); jbyteArray __a = (jbyteArray)POP_O(); PUSH_I((jint)neko_fast_baload(env, __a, __i)); /* fallback: neko_get_byte_array_region */ }"));
-            case Opcodes.CALOAD -> stmts.add(raw("{ jint __i = POP_I(); jcharArray __a = (jcharArray)POP_O(); PUSH_I((jint)neko_fast_caload(env, __a, __i)); /* fallback: neko_get_char_array_region */ }"));
-            case Opcodes.SALOAD -> stmts.add(raw("{ jint __i = POP_I(); jshortArray __a = (jshortArray)POP_O(); PUSH_I((jint)neko_fast_saload(env, __a, __i)); /* fallback: neko_get_short_array_region */ }"));
+            case Opcodes.IALOAD -> stmts.add(raw("{ jint __i = POP_I(); jintArray __a = (jintArray)POP_O(); PUSH_I(neko_fast_iaload(env, __a, __i)); }"));
+            case Opcodes.LALOAD -> stmts.add(raw("{ jint __i = POP_I(); jlongArray __a = (jlongArray)POP_O(); PUSH_L(neko_fast_laload(env, __a, __i)); }"));
+            case Opcodes.FALOAD -> stmts.add(raw("{ jint __i = POP_I(); jfloatArray __a = (jfloatArray)POP_O(); PUSH_F(neko_fast_faload(env, __a, __i)); }"));
+            case Opcodes.DALOAD -> stmts.add(raw("{ jint __i = POP_I(); jdoubleArray __a = (jdoubleArray)POP_O(); PUSH_D(neko_fast_daload(env, __a, __i)); }"));
+            case Opcodes.AALOAD -> stmts.add(raw("{ jint __i = POP_I(); jobjectArray __a = (jobjectArray)POP_O(); PUSH_O(neko_fast_aaload(thread, env, __a, __i)); }"));
+            case Opcodes.BALOAD -> stmts.add(raw("{ jint __i = POP_I(); jbyteArray __a = (jbyteArray)POP_O(); PUSH_I((jint)neko_fast_baload(env, __a, __i)); }"));
+            case Opcodes.CALOAD -> stmts.add(raw("{ jint __i = POP_I(); jcharArray __a = (jcharArray)POP_O(); PUSH_I((jint)neko_fast_caload(env, __a, __i)); }"));
+            case Opcodes.SALOAD -> stmts.add(raw("{ jint __i = POP_I(); jshortArray __a = (jshortArray)POP_O(); PUSH_I((jint)neko_fast_saload(env, __a, __i)); }"));
 
-            case Opcodes.IASTORE -> stmts.add(raw("{ jint __v = POP_I(); jint __i = POP_I(); jintArray __a = (jintArray)POP_O(); neko_fast_iastore(env, __a, __i, __v); /* fallback: neko_set_int_array_region */ }"));
-            case Opcodes.LASTORE -> stmts.add(raw("{ jlong __v = POP_L(); jint __i = POP_I(); jlongArray __a = (jlongArray)POP_O(); neko_fast_lastore(env, __a, __i, __v); /* fallback: neko_set_long_array_region */ }"));
-            case Opcodes.FASTORE -> stmts.add(raw("{ jfloat __v = POP_F(); jint __i = POP_I(); jfloatArray __a = (jfloatArray)POP_O(); neko_fast_fastore(env, __a, __i, __v); /* fallback: neko_set_float_array_region */ }"));
-            case Opcodes.DASTORE -> stmts.add(raw("{ jdouble __v = POP_D(); jint __i = POP_I(); jdoubleArray __a = (jdoubleArray)POP_O(); neko_fast_dastore(env, __a, __i, __v); /* fallback: neko_set_double_array_region */ }"));
-            case Opcodes.AASTORE -> stmts.add(raw("{ jobject __v = POP_O(); jint __i = POP_I(); jobjectArray __a = (jobjectArray)POP_O(); neko_set_object_array_element(env, __a, __i, __v); }"));
-            case Opcodes.BASTORE -> stmts.add(raw("{ jint __v = POP_I(); jint __i = POP_I(); jbyteArray __a = (jbyteArray)POP_O(); neko_fast_bastore(env, __a, __i, (jbyte)__v); /* fallback: neko_set_byte_array_region */ }"));
-            case Opcodes.CASTORE -> stmts.add(raw("{ jint __v = POP_I(); jint __i = POP_I(); jcharArray __a = (jcharArray)POP_O(); neko_fast_castore(env, __a, __i, (jchar)__v); /* fallback: neko_set_char_array_region */ }"));
-            case Opcodes.SASTORE -> stmts.add(raw("{ jint __v = POP_I(); jint __i = POP_I(); jshortArray __a = (jshortArray)POP_O(); neko_fast_sastore(env, __a, __i, (jshort)__v); /* fallback: neko_set_short_array_region */ }"));
+            case Opcodes.IASTORE -> stmts.add(raw("{ jint __v = POP_I(); jint __i = POP_I(); jintArray __a = (jintArray)POP_O(); neko_fast_iastore(env, __a, __i, __v); }"));
+            case Opcodes.LASTORE -> stmts.add(raw("{ jlong __v = POP_L(); jint __i = POP_I(); jlongArray __a = (jlongArray)POP_O(); neko_fast_lastore(env, __a, __i, __v); }"));
+            case Opcodes.FASTORE -> stmts.add(raw("{ jfloat __v = POP_F(); jint __i = POP_I(); jfloatArray __a = (jfloatArray)POP_O(); neko_fast_fastore(env, __a, __i, __v); }"));
+            case Opcodes.DASTORE -> stmts.add(raw("{ jdouble __v = POP_D(); jint __i = POP_I(); jdoubleArray __a = (jdoubleArray)POP_O(); neko_fast_dastore(env, __a, __i, __v); }"));
+            case Opcodes.AASTORE -> stmts.add(raw("{ jobject __v = POP_O(); jint __i = POP_I(); jobjectArray __a = (jobjectArray)POP_O(); neko_fast_aastore(thread, env, __a, __i, __v); }"));
+            case Opcodes.BASTORE -> stmts.add(raw("{ jint __v = POP_I(); jint __i = POP_I(); jbyteArray __a = (jbyteArray)POP_O(); neko_fast_bastore(env, __a, __i, (jbyte)__v); }"));
+            case Opcodes.CASTORE -> stmts.add(raw("{ jint __v = POP_I(); jint __i = POP_I(); jcharArray __a = (jcharArray)POP_O(); neko_fast_castore(env, __a, __i, (jchar)__v); }"));
+            case Opcodes.SASTORE -> stmts.add(raw("{ jint __v = POP_I(); jint __i = POP_I(); jshortArray __a = (jshortArray)POP_O(); neko_fast_sastore(env, __a, __i, (jshort)__v); }"));
 
             case Opcodes.IADD -> stmts.add(raw("{ jint b = POP_I(); jint a = POP_I(); PUSH_I(a + b); }"));
             case Opcodes.ISUB -> stmts.add(raw("{ jint b = POP_I(); jint a = POP_I(); PUSH_I(a - b); }"));
@@ -279,7 +279,9 @@ public final class OpcodeTranslator {
             case Opcodes.NEWARRAY -> stmts.add(raw("{ jint len = POP_I(); PUSH_O(" + newArrayCall(((IntInsnNode) insn).operand) + "); }"));
             case Opcodes.ANEWARRAY -> {
                 TypeInsnNode ti = (TypeInsnNode) insn;
-                stmts.add(raw("{ jint len = POP_I(); jclass cls = " + cachedClassExpression(ti.desc) + "; if (cls != NULL) { PUSH_O(neko_new_object_array(env, len, cls, NULL)); } }"));
+                String cls = cachedClassExpression(ti.desc);
+                String klassBits = codeGenerator.objectArrayKlassBitsSlotName(ti.desc);
+                stmts.add(raw("{ jint len = POP_I(); jclass cls = " + cls + "; if (cls != NULL) { PUSH_O(neko_fast_new_object_array(thread, env, len, " + klassBits + ", NULL)); } }"));
             }
 
             case Opcodes.GETFIELD -> stmts.add(raw(translateFieldGet((FieldInsnNode) insn, false)));
@@ -578,7 +580,7 @@ public final class OpcodeTranslator {
         sb.append("jvalue __bridgeArgs[").append(args.length + 1).append("]; ");
         sb.append("__bridgeArgs[0].l = __mh; ");
         for (int i = 0; i < args.length; i++) {
-            sb.append("__bridgeArgs[").append(i + 1).append(']').append(jvalueAccessor(args[i])).append(" = arg").append(i).append("; ");
+            sb.append(jvalueStore(args[i], "__bridgeArgs[" + (i + 1) + "]", "arg" + i)).append(' ');
         }
         Type[] bridgeArgs = Type.getArgumentTypes(bridge.descriptor());
         String bridgeDispatcher = codeGenerator.registerInvokeShape(true, SignaturePlan.collapseKind(ret), collapseArgKinds(bridgeArgs));
@@ -781,7 +783,7 @@ public final class OpcodeTranslator {
         }
         sb.append("jvalue __args[").append(args.length).append("]; ");
         for (int i = 0; i < args.length; i++) {
-            sb.append("__args[").append(i).append(']').append(jvalueAccessor(args[i])).append(" = arg").append(i).append("; ");
+            sb.append(jvalueStore(args[i], "__args[" + i + "]", "arg" + i)).append(' ');
         }
         return sb.toString();
     }
@@ -892,15 +894,15 @@ public final class OpcodeTranslator {
 
     private String newArrayCall(int operand) {
         return switch (operand) {
-            case 4 -> "neko_new_boolean_array(env, len)";
-            case 5 -> "neko_new_char_array(env, len)";
-            case 6 -> "neko_new_float_array(env, len)";
-            case 7 -> "neko_new_double_array(env, len)";
-            case 8 -> "neko_new_byte_array(env, len)";
-            case 9 -> "neko_new_short_array(env, len)";
-            case 10 -> "neko_new_int_array(env, len)";
-            case 11 -> "neko_new_long_array(env, len)";
-            default -> "neko_new_int_array(env, len)";
+            case 4 -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_Z)";
+            case 5 -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_C)";
+            case 6 -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_F)";
+            case 7 -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_D)";
+            case 8 -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_B)";
+            case 9 -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_S)";
+            case 10 -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I)";
+            case 11 -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_J)";
+            default -> "neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I)";
         };
     }
 
@@ -986,6 +988,20 @@ public final class OpcodeTranslator {
             case Type.LONG -> ".j";
             case Type.DOUBLE -> ".d";
             default -> ".l";
+        };
+    }
+
+    private String jvalueStore(Type type, String slotExpr, String valueExpr) {
+        return switch (type.getSort()) {
+            case Type.BOOLEAN -> slotExpr + ".i = (jint)((jboolean)" + valueExpr + ");";
+            case Type.BYTE -> slotExpr + ".i = (jint)((jbyte)" + valueExpr + ");";
+            case Type.CHAR -> slotExpr + ".i = (jint)((jchar)" + valueExpr + ");";
+            case Type.SHORT -> slotExpr + ".i = (jint)((jshort)" + valueExpr + ");";
+            case Type.INT -> slotExpr + ".i = (jint)" + valueExpr + ";";
+            case Type.FLOAT -> slotExpr + ".f = (jfloat)" + valueExpr + ";";
+            case Type.LONG -> slotExpr + ".j = (jlong)" + valueExpr + ";";
+            case Type.DOUBLE -> slotExpr + ".d = (jdouble)" + valueExpr + ";";
+            default -> slotExpr + ".l = (jobject)" + valueExpr + ";";
         };
     }
 
@@ -1324,7 +1340,8 @@ public final class OpcodeTranslator {
 
     private void appendStringBuilderValue(StringBuilder sb, String appendSig, String accessor, String valueExpr) {
         sb.append("{ ");
-        sb.append("jvalue __appendArgs[1]; __appendArgs[0]").append(accessor).append(" = ").append(valueExpr).append("; ");
+        Type appendArg = Type.getArgumentTypes(appendSig)[0];
+        sb.append("jvalue __appendArgs[1]; ").append(jvalueStore(appendArg, "__appendArgs[0]", valueExpr)).append(' ');
         String appendDispatcher = codeGenerator.registerInvokeShape(false, 'L', collapseArgKinds(Type.getArgumentTypes(appendSig)));
         sb.append("if (__sb != NULL) { ").append(appendDispatcher)
             .append("(thread, env, ")

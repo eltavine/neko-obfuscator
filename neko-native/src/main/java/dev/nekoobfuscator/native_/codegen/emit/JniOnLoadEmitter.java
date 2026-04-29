@@ -16,6 +16,7 @@ public final class JniOnLoadEmitter {
     public String renderJniOnLoadAndBootstrap() {
         return """
 __attribute__((visibility("hidden"))) extern void *g_neko_jni_onload_thread_reg;
+__attribute__((visibility("hidden"))) extern void *g_neko_jni_functions_table;
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     /* Capture HotSpot's thread register IMMEDIATELY, before any compiler-
@@ -33,6 +34,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
     g_neko_java_vm = vm;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
+    g_neko_jni_functions_table = env != NULL ? *(void**)env : NULL;
     neko_hotspot_init(env);
     if (!neko_method_layout_init(env)) {
         if (neko_exception_check(env)) neko_exception_clear(env);

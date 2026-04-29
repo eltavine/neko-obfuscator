@@ -133,6 +133,17 @@ typedef struct {
      * platform MXBean registry isn't fully wired up yet). */
     void *addr_compressed_oops_base;
     void *addr_compressed_oops_shift;
+    void *addr_zglobals_instance_p;
+    void *addr_zglobals_address_offset_mask;
+    void *addr_zglobals_pointer_load_good_mask;
+    void *addr_zglobals_pointer_load_bad_mask;
+    void *addr_zglobals_pointer_store_good_mask;
+    void *addr_zglobals_pointer_load_shift;
+    ptrdiff_t off_zglobals_address_offset_mask;
+    ptrdiff_t off_zglobals_pointer_load_good_mask;
+    ptrdiff_t off_zglobals_pointer_load_bad_mask;
+    ptrdiff_t off_zglobals_pointer_store_good_mask;
+    ptrdiff_t off_zglobals_pointer_load_shift;
     ptrdiff_t off_jcw_anchor;
     size_t    sizeof_JavaCallWrapper;
     /* === Native→Java direct invoke ===
@@ -223,6 +234,7 @@ __attribute__((visibility("hidden"))) void *g_neko_heap_base = NULL;
  * off_thread_jni_environment when VMStructs does not export it (the field
  * is only registered in the JVMCI-only struct list). */
 __attribute__((visibility("hidden"))) void *g_neko_jni_onload_thread_reg = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_jni_functions_table = NULL;
 
 /* Debug flag is cached once at JNI_OnLoad time. The original macro called
  * getenv("NEKO_PATCH_DEBUG") on every NEKO_PATCH_LOG invocation — and the
@@ -366,6 +378,34 @@ static jboolean neko_walk_vm_structs(void *jvm) {
              || neko_streq_safe(field_name, "_pending_exception"))) {
             fprintf(stderr, "[neko-patch] vmstructs %s::%s @+%zu\\n",
                 type_name ? type_name : "?", field_name, (size_t)off_value);
+        }
+        if (NEKO_PATCH_DEBUG && (neko_strstr_safe(type_name, "ZGlobals")
+             || neko_strstr_safe(field_name, "ZAddress")
+             || neko_strstr_safe(field_name, "ZPointer"))) {
+            fprintf(stderr, "[neko-patch] vmstructs Z %s::%s @+%zu static=%d addr=%p\\n",
+                type_name ? type_name : "?",
+                field_name ? field_name : "?",
+                (size_t)off_value, (int)is_static, static_addr);
+        }
+        if (neko_streq_safe(field_name, "_instance_p")) {
+            if (is_static && static_addr != NULL) {
+                g_neko_method_layout.addr_zglobals_instance_p = static_addr;
+            }
+        } else if (neko_streq_safe(field_name, "_ZAddressOffsetMask")) {
+            if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_address_offset_mask = static_addr;
+            g_neko_method_layout.off_zglobals_address_offset_mask = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(field_name, "_ZPointerLoadGoodMask")) {
+            if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_load_good_mask = static_addr;
+            g_neko_method_layout.off_zglobals_pointer_load_good_mask = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(field_name, "_ZPointerLoadBadMask")) {
+            if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_load_bad_mask = static_addr;
+            g_neko_method_layout.off_zglobals_pointer_load_bad_mask = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(field_name, "_ZPointerStoreGoodMask")) {
+            if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_store_good_mask = static_addr;
+            g_neko_method_layout.off_zglobals_pointer_store_good_mask = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(field_name, "_ZPointerLoadShift")) {
+            if (is_static && static_addr != NULL) g_neko_method_layout.addr_zglobals_pointer_load_shift = static_addr;
+            g_neko_method_layout.off_zglobals_pointer_load_shift = (ptrdiff_t)off_value;
         }
         /* Field-name fallback for inherited Thread fields. VMStructs splits
          * across the Thread / ThreadShadow / JavaThread chain, and some are
@@ -1333,6 +1373,11 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_frame_anchor_fp = -1;
     g_neko_method_layout.off_frame_anchor_pc = -1;
     g_neko_method_layout.off_jcw_anchor = -1;
+    g_neko_method_layout.off_zglobals_address_offset_mask = -1;
+    g_neko_method_layout.off_zglobals_pointer_load_good_mask = -1;
+    g_neko_method_layout.off_zglobals_pointer_load_bad_mask = -1;
+    g_neko_method_layout.off_zglobals_pointer_store_good_mask = -1;
+    g_neko_method_layout.off_zglobals_pointer_load_shift = -1;
     g_neko_method_layout.off_thread_tlab = -1;
     g_neko_method_layout.off_tlab_top = -1;
     g_neko_method_layout.off_tlab_end = -1;
@@ -1377,7 +1422,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             g_neko_method_layout.off_method_intrinsic_id + (ptrdiff_t)2;
     }
     if (!neko_resolve_jnihandles(jvm)) {
-        NEKO_PATCH_LOG("JNIHandles symbols not resolvable; dispatch will use jobject fallback");
+        NEKO_PATCH_LOG("JNIHandles symbols not resolvable; direct handle globals unavailable");
     }
     if (g_neko_method_layout.off_method_access_flags < 0
         || g_neko_method_layout.off_method_code < 0
@@ -1586,6 +1631,111 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
         g_hotspot.compressed_oops_base = (jlong)(uintptr_t)base;
         NEKO_PATCH_LOG("vmstructs coop: shift=%d base=%p", shift, base);
     }
+    if (g_neko_method_layout.addr_zglobals_address_offset_mask != NULL
+        && g_neko_method_layout.addr_zglobals_pointer_load_good_mask != NULL
+        && g_neko_method_layout.addr_zglobals_pointer_load_bad_mask != NULL
+        && g_neko_method_layout.addr_zglobals_pointer_store_good_mask != NULL
+        && g_neko_method_layout.addr_zglobals_pointer_load_shift != NULL) {
+        uintptr_t *addr_mask_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_address_offset_mask;
+        uintptr_t *load_good_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_pointer_load_good_mask;
+        uintptr_t *load_bad_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_pointer_load_bad_mask;
+        uintptr_t *store_good_p = *(uintptr_t**)g_neko_method_layout.addr_zglobals_pointer_store_good_mask;
+        size_t *load_shift_p = *(size_t**)g_neko_method_layout.addr_zglobals_pointer_load_shift;
+        if (addr_mask_p != NULL && load_good_p != NULL && load_bad_p != NULL && store_good_p != NULL && load_shift_p != NULL
+            && *addr_mask_p != 0 && (*load_good_p != 0 || *load_bad_p != 0)) {
+            g_hotspot.use_zgc = JNI_TRUE;
+            g_hotspot.compressed_oops_enabled = JNI_FALSE;
+            g_hotspot.compressed_oops_shift = 0;
+            g_hotspot.compressed_oops_base = 0;
+            g_hotspot.z_address_offset_mask = *addr_mask_p;
+            g_hotspot.z_pointer_load_good_mask = *load_good_p;
+            g_hotspot.z_pointer_load_bad_mask = *load_bad_p;
+            g_hotspot.z_pointer_store_good_mask = *store_good_p;
+            g_hotspot.z_pointer_load_shift = *load_shift_p;
+            g_hotspot.fast_bits &= ~(NEKO_HOTSPOT_FAST_RAW_HEAP | NEKO_FAST_RECEIVER_KEY);
+            NEKO_PATCH_LOG("zgc vmstructs(static): offset_mask=0x%llx load_good=0x%llx load_bad=0x%llx store_good=0x%llx shift=%zu",
+                (unsigned long long)g_hotspot.z_address_offset_mask,
+                (unsigned long long)g_hotspot.z_pointer_load_good_mask,
+                (unsigned long long)g_hotspot.z_pointer_load_bad_mask,
+                (unsigned long long)g_hotspot.z_pointer_store_good_mask,
+                g_hotspot.z_pointer_load_shift);
+        }
+    }
+    if (g_hotspot.z_address_offset_mask == 0 && g_neko_method_layout.addr_zglobals_instance_p != NULL) {
+        void *zg = *(void**)g_neko_method_layout.addr_zglobals_instance_p;
+        if (zg != NULL
+            && g_neko_method_layout.off_zglobals_address_offset_mask >= 0
+            && g_neko_method_layout.off_zglobals_pointer_load_good_mask >= 0
+            && g_neko_method_layout.off_zglobals_pointer_load_bad_mask >= 0
+            && g_neko_method_layout.off_zglobals_pointer_store_good_mask >= 0
+            && g_neko_method_layout.off_zglobals_pointer_load_shift >= 0) {
+            uintptr_t *addr_mask_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_address_offset_mask);
+            uintptr_t *load_good_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_good_mask);
+            uintptr_t *load_bad_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_bad_mask);
+            uintptr_t *store_good_p = *(uintptr_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_store_good_mask);
+            size_t *load_shift_p = *(size_t**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_shift);
+            uintptr_t addr_mask = addr_mask_p != NULL ? *addr_mask_p : 0;
+            uintptr_t load_good = load_good_p != NULL ? *load_good_p : 0;
+            uintptr_t load_bad = load_bad_p != NULL ? *load_bad_p : 0;
+            uintptr_t store_good = store_good_p != NULL ? *store_good_p : 0;
+            size_t load_shift = load_shift_p != NULL ? *load_shift_p : 0;
+            NEKO_PATCH_LOG("zgc vmstructs(instance raw): zg=%p offset_mask_p=%p load_good_p=%p load_bad_p=%p store_good_p=%p shift_p=%p",
+                zg, (void*)addr_mask_p, (void*)load_good_p, (void*)load_bad_p, (void*)store_good_p, (void*)load_shift_p);
+            NEKO_PATCH_LOG("zgc vmstructs(instance val): offset_mask=0x%llx load_good=0x%llx load_bad=0x%llx store_good=0x%llx shift=%zu",
+                (unsigned long long)addr_mask,
+                (unsigned long long)load_good,
+                (unsigned long long)load_bad,
+                (unsigned long long)store_good,
+                load_shift);
+            if (addr_mask != 0 && (load_good != 0 || load_bad != 0)) {
+                g_hotspot.use_zgc = JNI_TRUE;
+                g_hotspot.compressed_oops_enabled = JNI_FALSE;
+                g_hotspot.compressed_oops_shift = 0;
+                g_hotspot.compressed_oops_base = 0;
+                g_hotspot.z_address_offset_mask = addr_mask;
+                g_hotspot.z_pointer_load_good_mask = load_good;
+                g_hotspot.z_pointer_load_bad_mask = load_bad;
+                g_hotspot.z_pointer_store_good_mask = store_good;
+                g_hotspot.z_pointer_load_shift = load_shift;
+                g_hotspot.fast_bits &= ~(NEKO_HOTSPOT_FAST_RAW_HEAP | NEKO_FAST_RECEIVER_KEY);
+                NEKO_PATCH_LOG("zgc vmstructs: offset_mask=0x%llx load_good=0x%llx load_bad=0x%llx store_good=0x%llx shift=%zu",
+                    (unsigned long long)g_hotspot.z_address_offset_mask,
+                    (unsigned long long)g_hotspot.z_pointer_load_good_mask,
+                    (unsigned long long)g_hotspot.z_pointer_load_bad_mask,
+                    (unsigned long long)g_hotspot.z_pointer_store_good_mask,
+                    g_hotspot.z_pointer_load_shift);
+            }
+        }
+    }
+    if (g_hotspot.z_address_offset_mask == 0
+        && g_hotspot.compressed_oops_shift == 0
+        && g_neko_handle_sample_oop != 0) {
+        uintptr_t sample = g_neko_handle_sample_oop;
+        int bit = (int)(sizeof(uintptr_t) * 8u) - 1;
+        while (bit >= 44 && ((sample & ((uintptr_t)1u << bit)) == 0)) bit--;
+        if (bit >= 44 && bit <= (int)(sizeof(uintptr_t) * 8u) - 4) {
+            uintptr_t metadata_mask = ((uintptr_t)0xfu) << bit;
+            uintptr_t good_mask = sample & metadata_mask;
+            uintptr_t offset_mask = ((uintptr_t)1u << bit) - 1u;
+            if (good_mask != 0 && (sample & offset_mask) != 0) {
+                g_hotspot.use_zgc = JNI_TRUE;
+                g_hotspot.compressed_oops_enabled = JNI_FALSE;
+                g_hotspot.compressed_oops_shift = 0;
+                g_hotspot.compressed_oops_base = 0;
+                g_hotspot.z_address_offset_mask = offset_mask;
+                g_hotspot.z_pointer_load_good_mask = good_mask;
+                g_hotspot.z_pointer_load_bad_mask = metadata_mask & ~good_mask;
+                g_hotspot.z_pointer_store_good_mask = good_mask;
+                g_hotspot.z_pointer_load_shift = 0;
+                g_hotspot.fast_bits &= ~(NEKO_HOTSPOT_FAST_RAW_HEAP | NEKO_FAST_RECEIVER_KEY);
+                NEKO_PATCH_LOG("zgc handle-sample: sample=%p offset_mask=0x%llx good=0x%llx bad=0x%llx",
+                    (void*)sample,
+                    (unsigned long long)g_hotspot.z_address_offset_mask,
+                    (unsigned long long)g_hotspot.z_pointer_load_good_mask,
+                    (unsigned long long)g_hotspot.z_pointer_load_bad_mask);
+            }
+        }
+    }
     neko_fast_string_runtime_init(env);
     g_neko_method_layout.usable = JNI_TRUE;
     return JNI_TRUE;
@@ -1607,46 +1757,71 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
 
 static inline __attribute__((always_inline))
 void neko_handle_save(void *thread, neko_handle_save_t *save) {
+    save->thread = thread;
     save->block = NULL;
+    save->saved_next = NULL;
+    save->saved_last = NULL;
     save->saved_top = 0;
     if (!g_neko_handle_push_ready || thread == NULL) return;
     void *block = *(void**)((char*)thread + g_neko_off_thread_active_handles);
     if (block == NULL) return;
     save->block = block;
     save->saved_top = *(int32_t*)((char*)block + g_neko_off_jnih_block_top);
+    if (g_neko_method_layout.off_jnih_block_next > 0) {
+        ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
+        save->saved_next = *(void**)((char*)block + g_neko_method_layout.off_jnih_block_next);
+        save->saved_last = *(void**)((char*)block + off_last);
+    }
 }
 
 static inline __attribute__((always_inline))
 void neko_handle_restore(neko_handle_save_t *save) {
+    void *thread;
+    void *active;
     if (save->block == NULL) return;
+    thread = save->thread;
+    if (thread != NULL && g_neko_off_thread_active_handles > 0 && g_neko_method_layout.off_jnih_block_next > 0) {
+        active = *(void**)((char*)thread + g_neko_off_thread_active_handles);
+        while (active != NULL && active != save->block) {
+            void *next = *(void**)((char*)active + g_neko_method_layout.off_jnih_block_next);
+            free(active);
+            active = next;
+        }
+        *(void**)((char*)thread + g_neko_off_thread_active_handles) = save->block;
+    }
+    if (g_neko_method_layout.off_jnih_block_next > 0) {
+        void *next = *(void**)((char*)save->block + g_neko_method_layout.off_jnih_block_next);
+        while (next != NULL && next != save->saved_next) {
+            void *after = *(void**)((char*)next + g_neko_method_layout.off_jnih_block_next);
+            free(next);
+            next = after;
+        }
+        *(void**)((char*)save->block + g_neko_method_layout.off_jnih_block_next) = save->saved_next;
+    }
     *(int32_t*)((char*)save->block + g_neko_off_jnih_block_top) = save->saved_top;
+    if (g_neko_method_layout.off_jnih_block_next > 0) {
+        ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
+        *(void**)((char*)save->block + off_last) = save->saved_last != NULL ? save->saved_last : save->block;
+    }
 }
 
 static inline __attribute__((always_inline))
 JNIEnv *neko_thread_jni_env(void *thread) {
-    JNIEnv *env = NULL;
     if (thread != NULL && g_neko_method_layout.off_thread_jni_environment > 0) {
         return (JNIEnv*)((char*)thread + g_neko_method_layout.off_thread_jni_environment);
     }
-    if (g_neko_java_vm == NULL) return NULL;
-    if ((*g_neko_java_vm)->GetEnv(g_neko_java_vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) return NULL;
-    /* Stock JDK 21 doesn't publish JavaThread::_jni_environment in
-     * gHotSpotVMStructs (only the JVMCI subtable carries it), so the layout
-     * walker bails. Recover the offset opportunistically: every i2i / c2i
-     * trampoline path calls into the dispatcher which calls neko_thread_jni_env
-     * with a non-NULL JavaThread*. The JNIEnv* GetEnv hands back is the
-     * SAME embedded field; the distance is the offset we want. Store both
-     * the layout copy (so the next call hits the fast branch above) and the
-     * mirror used by neko_exception_check. Safe to write unsynchronized:
-     * the value is a stable per-process constant. */
-    if (thread != NULL && env != NULL && g_neko_method_layout.off_thread_jni_environment <= 0) {
-        ptrdiff_t derived = (ptrdiff_t)((char*)env - (char*)thread);
-        if (derived > 0 && derived < 0x10000) {
-            g_neko_method_layout.off_thread_jni_environment = derived;
-            g_neko_off_thread_jni_environment_for_check = derived;
+    if (thread != NULL && g_neko_jni_functions_table != NULL) {
+        for (ptrdiff_t off = 0; off < 0x4000; off += (ptrdiff_t)sizeof(void*)) {
+            JNIEnv *candidate = (JNIEnv*)((char*)thread + off);
+            if (*(void**)candidate == g_neko_jni_functions_table) {
+                g_neko_method_layout.off_thread_jni_environment = off;
+                g_neko_off_thread_jni_environment_for_check = off;
+                return candidate;
+            }
         }
     }
-    return env;
+    fprintf(stderr, "[neko-direct] JavaThread::_jni_environment offset unavailable thread=%p\\n", thread);
+    abort();
 }
 
 static inline __attribute__((always_inline))
@@ -1658,15 +1833,35 @@ void *neko_jni_env_to_thread(JNIEnv *env) {
 static inline __attribute__((always_inline))
 void *neko_handle_push(void *thread, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
-    if (!g_neko_handle_push_ready || thread == NULL) return raw_oop; /* fallback */
+    if (!g_neko_handle_push_ready || thread == NULL) {
+        fprintf(stderr, "[neko-direct] JNIHandleBlock push unavailable thread=%p raw=%p\\n", thread, raw_oop);
+        abort();
+    }
     void *block = *(void**)((char*)thread + g_neko_off_thread_active_handles);
-    if (block == NULL) return raw_oop;
+    if (block == NULL) {
+        fprintf(stderr, "[neko-direct] JNIHandleBlock active block missing thread=%p raw=%p\\n", thread, raw_oop);
+        abort();
+    }
     int32_t *top_ptr = (int32_t*)((char*)block + g_neko_off_jnih_block_top);
     int32_t top = *top_ptr;
     if (top >= g_neko_jnih_block_capacity) {
-        /* Block full — would need to allocate a new block. Bail to
-         * fallback (slot-address as jobject). Short calls usually work. */
-        return raw_oop;
+        if (g_neko_method_layout.sizeof_JNIHandleBlock > 0 && g_neko_method_layout.off_jnih_block_next > 0) {
+            void *new_block = calloc(1, g_neko_method_layout.sizeof_JNIHandleBlock);
+            if (new_block != NULL) {
+                void **new_handles = (void**)((char*)new_block + g_neko_off_jnih_block_handles);
+                new_handles[0] = raw_oop;
+                *(int32_t*)((char*)new_block + g_neko_off_jnih_block_top) = 1;
+                *(void**)((char*)new_block + g_neko_method_layout.off_jnih_block_next) = block;
+                {
+                    ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
+                    *(void**)((char*)new_block + off_last) = new_block;
+                }
+                *(void**)((char*)thread + g_neko_off_thread_active_handles) = new_block;
+                return &new_handles[0];
+            }
+        }
+        fprintf(stderr, "[neko-direct] JNIHandleBlock chain allocation failed thread=%p raw=%p\\n", thread, raw_oop);
+        abort();
     }
     void **handles = (void**)((char*)block + g_neko_off_jnih_block_handles);
     handles[top] = raw_oop;
@@ -1708,17 +1903,63 @@ static jboolean neko_apply_no_compile_flags(void *method_star) {
     return JNI_TRUE;
 }
 
-/* Called from naked-asm trampoline when the polling word indicates a safepoint
- * is requested. We can't easily reach HotSpot's SafepointMechanism::block from
- * here without C++ glue, so we go through a JNI no-op (MonitorEnter on a sentinel)
- * which forces the JVM through its safepoint check. */
+static inline __attribute__((always_inline)) void neko_cpu_relax(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    __asm__ __volatile__("pause" ::: "memory");
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield" ::: "memory");
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
+
+static inline __attribute__((always_inline)) void *neko_current_thread_register(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    void *thread;
+    __asm__ __volatile__("movq %%r15, %0" : "=r"(thread));
+    return thread;
+#elif defined(__aarch64__)
+    void *thread;
+    __asm__ __volatile__("mov %0, x28" : "=r"(thread));
+    return thread;
+#else
+    return NULL;
+#endif
+}
+
+__attribute__((visibility("hidden"))) void neko_safepoint_poll_thread(void *thread) {
+    if (thread == NULL || g_neko_off_thread_polling_word <= 0) return;
+    volatile uintptr_t *poll = (volatile uintptr_t*)((char*)thread + g_neko_off_thread_polling_word);
+    uint32_t spins = 0;
+    while (*poll != 0) {
+        __sync_synchronize();
+        neko_cpu_relax();
+        if (++spins == 0) break;
+    }
+}
+
+__attribute__((visibility("hidden"))) void neko_transition_native_to_java(void *thread) {
+    if (thread == NULL || g_neko_off_thread_state <= 0) return;
+    *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_native_trans;
+    __sync_synchronize();
+    neko_safepoint_poll_thread(thread);
+    *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_java;
+}
+
+__attribute__((visibility("hidden"))) void neko_transition_java_to_native(void *thread) {
+    if (thread == NULL || g_neko_off_thread_state <= 0) return;
+    *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_native_trans;
+    __sync_synchronize();
+    neko_safepoint_poll_thread(thread);
+    *(int32_t*)((char*)thread + g_neko_off_thread_state) = g_neko_thread_state_in_native;
+}
+
+/* Called from naked-asm trampolines when the polling word indicates a safepoint
+ * is requested. This must not cross the JNI function table: the JavaThread is
+ * recovered from HotSpot's thread register and we wait directly on the
+ * VMStructs-published polling word while the thread is in native_trans. */
 __attribute__((visibility("hidden"))) void neko_handle_safepoint_poll(void) {
-    JNIEnv *env = NULL;
-    if (g_neko_java_vm == NULL) return;
-    if ((*g_neko_java_vm)->GetEnv(g_neko_java_vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) return;
-    /* GetVersion is the cheapest JNI call that takes us through the
-     * thread-in-native -> thread-in-Java transition with safepoint poll. */
-    (void)(*env)->GetVersion(env);
+    neko_safepoint_poll_thread(neko_current_thread_register());
 }
 
 static jboolean neko_patch_method_entry(void *method_star, void *manifest_entry) {
