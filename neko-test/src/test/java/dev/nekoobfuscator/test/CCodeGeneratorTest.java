@@ -84,6 +84,8 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_array_store_check("), source);
         assertTrue(source.contains("NEKO_FAST_INLINE jboolean neko_fast_is_instance_of(JNIEnv *env, jobject obj, jclass cls)"), source);
         assertTrue(source.contains("return neko_klass_is_subtype_of(value_klass, target_klass);"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj)"), source);
+        assertTrue(source.contains("return (jclass)neko_klass_java_mirror_handle(thread, value_klass);"), source);
         assertTrue(source.contains("off_objarrayklass_element_klass"), source);
         assertTrue(source.contains("NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls)"), source);
         assertTrue(source.contains("off_klass_layout_helper"), source);

@@ -359,17 +359,20 @@ class OpcodeTranslatorUnitTest {
         String code = render(List.of(
             translator.translate(new TypeInsnNode(Opcodes.NEW, "java/lang/StringBuilder")).getFirst(),
             translator.translate(new TypeInsnNode(Opcodes.INSTANCEOF, "java/lang/String")).getFirst(),
-            translator.translate(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/String")).getFirst()
+            translator.translate(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/String")).getFirst(),
+            translator.translate(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false)).getFirst()
         ));
 
         assertContains(code,
             "neko_fast_alloc_object(thread, env, cls)",
             "neko_fast_is_instance_of(env, obj, cls)",
+            "neko_fast_get_object_class(thread, obj)",
             "ClassCastException",
             "goto __neko_exception_exit;"
         );
         assertFalse(code.contains("neko_alloc_object(env,"), code);
         assertFalse(code.contains("neko_is_instance_of(env,"), code);
+        assertFalse(code.contains("neko_get_object_class(env,"), code);
     }
 
     @Test

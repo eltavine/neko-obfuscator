@@ -470,7 +470,7 @@ public final class OpcodeTranslator {
     private String translateIntrinsicMethodInvoke(MethodInsnNode mi, int opcode) {
         if (opcode == Opcodes.INVOKESTATIC) {
             if ("java/lang/invoke/MethodHandles".equals(mi.owner) && "lookup".equals(mi.name) && "()Ljava/lang/invoke/MethodHandles$Lookup;".equals(mi.desc)) {
-                String callerClass = currentMethodStatic ? "clazz" : "neko_get_object_class(env, self)";
+                String callerClass = currentMethodStatic ? "clazz" : "neko_fast_get_object_class(thread, self)";
                 return "{ jclass __callerCls = " + callerClass + "; jobject __lookup = __callerCls == NULL ? NULL : neko_lookup_for_jclass(env, __callerCls); if (!neko_exception_check(env)) { PUSH_O(__lookup); } }";
             }
         }
@@ -491,7 +491,7 @@ public final class OpcodeTranslator {
             if ("java/lang/Object".equals(mi.owner) && "getClass".equals(mi.name) && "()Ljava/lang/Class;".equals(mi.desc)) {
                 return "{ jobject obj = POP_O(); if (obj == NULL) { jclass exc = "
                     + cachedClassExpression("java/lang/NullPointerException")
-                    + "; neko_throw_new(env, exc, \"\"); } else { PUSH_O(neko_get_object_class(env, obj)); } }";
+                    + "; neko_throw_new(env, exc, \"\"); } else { PUSH_O(neko_fast_get_object_class(thread, obj)); } }";
             }
             if ("java/lang/Throwable".equals(mi.owner) && "getStackTrace".equals(mi.name) && "()[Ljava/lang/StackTraceElement;".equals(mi.desc)) {
                 return "{ jobject obj = POP_O(); if (obj == NULL) { jclass exc = "
@@ -520,7 +520,7 @@ public final class OpcodeTranslator {
                 String adapterDesc = "(Ljava/lang/Object;[Ljava/lang/Object;Ljava/lang/Class;)Ljava/lang/Object;";
                 Type[] adapterArgs = Type.getArgumentTypes(adapterDesc);
                 String adapterDispatcher = codeGenerator.registerInvokeShape(false, 'L', collapseArgKinds(adapterArgs));
-                String callerClass = currentMethodStatic ? "clazz" : "neko_get_object_class(env, self)";
+                String callerClass = currentMethodStatic ? "clazz" : "neko_fast_get_object_class(thread, self)";
                 return "{ jobject __invokeArgsArray = POP_O(); "
                     + "jobject __targetObj = POP_O(); "
                     + "jobject __methodObj = POP_O(); "

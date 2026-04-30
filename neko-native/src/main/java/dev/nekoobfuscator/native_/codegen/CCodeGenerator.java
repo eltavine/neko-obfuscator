@@ -303,6 +303,7 @@ public final class CCodeGenerator {
         sb.append("static jboolean neko_resolve_jnihandles(void *jvm);\n");
         sb.append("static void *neko_dlsym(void *h, const char *name);\n");
         sb.append("static void *neko_class_mirror_to_klass(jclass mirror);\n");
+        sb.append("static jobject neko_klass_java_mirror_handle(void *thread, void *klass);\n");
         sb.append("static uintptr_t neko_klass_header_bits(void *klass);\n");
         sb.append("static void *neko_decode_klass_header_bits(uintptr_t bits);\n");
         sb.append("static void neko_njx_init_wrappers(void);\n\n");
@@ -4236,6 +4237,30 @@ NEKO_FAST_INLINE jboolean neko_fast_is_instance_of(JNIEnv *env, jobject obj, jcl
         abort();
     }
     return neko_klass_is_subtype_of(value_klass, target_klass);
+}
+
+NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj) {
+    void *value_oop;
+    void *value_klass;
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-direct] getClass missing JavaThread\\n");
+        abort();
+    }
+    if (obj == NULL) {
+        fprintf(stderr, "[neko-direct] getClass called with null object\\n");
+        abort();
+    }
+    value_oop = neko_handle_oop(obj);
+    if (value_oop == NULL) {
+        fprintf(stderr, "[neko-direct] getClass object handle did not resolve obj=%p\\n", (void*)obj);
+        abort();
+    }
+    value_klass = neko_raw_oop_klass((char*)value_oop);
+    if (value_klass == NULL) {
+        fprintf(stderr, "[neko-direct] getClass object Klass* unavailable obj=%p\\n", (void*)obj);
+        abort();
+    }
+    return (jclass)neko_klass_java_mirror_handle(thread, value_klass);
 }
 
 NEKO_FAST_INLINE void neko_array_store_check(char *array_oop, jobject val) {
