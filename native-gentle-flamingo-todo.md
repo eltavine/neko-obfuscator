@@ -130,7 +130,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T2.7 Rewrite `renderHotSpotSupport()` to remove MXBean and `Unsafe.addressSize()` probes.
 - [x] T2.8 Remove `JniHandlesShimEmitter` raw `*(void**)ref` fallback; missing `JNIHandles::resolve` must abort.
 - [x] T2.8a Fix random obfusjack runtime abort/hang and add 10-run native stability validation.
-- [ ] T2.9 Verify generated bind-support C has zero `(*env)->` / `NEKO_JNI_FN_PTR` hits outside allowed `GetEnv`.
+- [x] T2.9 Verify generated bind-support C has zero `(*env)->` / `NEKO_JNI_FN_PTR` hits outside allowed `GetEnv`.
 
 ## Stage 3: Hot-Path Opcode Removal
 
