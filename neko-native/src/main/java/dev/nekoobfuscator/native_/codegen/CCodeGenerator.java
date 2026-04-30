@@ -2187,7 +2187,6 @@ static inline jmethodID neko_get_method_id(JNIEnv *env, jclass c, const char *n,
 static inline jmethodID neko_get_static_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 113, jmethodID, jclass, const char*, const char*)(env, c, n, s); }
 static inline jfieldID neko_get_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 94, jfieldID, jclass, const char*, const char*)(env, c, n, s); }
 static inline jfieldID neko_get_static_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 144, jfieldID, jclass, const char*, const char*)(env, c, n, s); }
-static inline jint neko_throw(JNIEnv *env, jthrowable exc) { return NEKO_JNI_FN_PTR(env, 13, jint, jthrowable)(env, exc); }
 static inline jint neko_throw_new(JNIEnv *env, jclass cls, const char *msg) { return NEKO_JNI_FN_PTR(env, 14, jint, jclass, const char*)(env, cls, msg); }
 static inline jthrowable neko_exception_occurred(JNIEnv *env) { return NEKO_JNI_FN_PTR(env, 15, jthrowable)(env); }
 static inline void neko_exception_clear(JNIEnv *env) { NEKO_JNI_FN_PTR(env, 17, void)(env); }
@@ -2266,6 +2265,26 @@ static inline void neko_set_double_array_region(JNIEnv *env, jdoubleArray arr, j
  * section is emitted in the final C file. Declare it here so C99 does not
  * infer an implicit int-returning prototype on first use. */
 static inline void* neko_handle_oop(jobject handle);
+
+static inline void neko_set_pending_exception(void *thread, jthrowable exc) {
+    void *exc_oop;
+    if (thread == NULL || g_neko_off_thread_pending_exception <= 0) {
+        fprintf(stderr, "[neko-direct] cannot set pending exception thread=%p pending_off=%td\\n",
+            thread, g_neko_off_thread_pending_exception);
+        abort();
+    }
+    if (exc == NULL) {
+        fprintf(stderr, "[neko-direct] ATHROW null throwable requires implicit NPE construction\\n");
+        abort();
+    }
+    exc_oop = neko_handle_oop((jobject)exc);
+    if (exc_oop == NULL) {
+        fprintf(stderr, "[neko-direct] ATHROW throwable handle did not resolve exc=%p\\n", (void*)exc);
+        abort();
+    }
+    *(void**)((char*)thread + g_neko_off_thread_pending_exception) = exc_oop;
+}
+
 /* Forward decl + helper: read JavaThread::_pending_exception directly. The
  * field offset is recovered by VMStructs (g_neko_off_thread_pending_exception)
  * and the JNIEnv->JavaThread distance is recovered by the patcher init

@@ -146,7 +146,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T3.10 `INSTANCEOF` / `CHECKCAST` via subtype metadata walk.
 - [x] T3.11 `getClass` intrinsic via oop header klass and mirror.
 - [x] T3.12 `MONITORENTER` / `MONITOREXIT` via HotSpot synchronizer/stub entry.
-- [ ] T3.13 `ATHROW` by writing `JavaThread::_pending_exception`.
+- [x] T3.13 `ATHROW` by writing `JavaThread::_pending_exception`.
 - [ ] T3.14 Implicit exception construction without `ThrowNew`.
 - [ ] T3.15 Exception dispatch via `_pending_exception` read/clear.
 - [ ] T3.16 Boxing/unboxing through direct call_stub / field reads.

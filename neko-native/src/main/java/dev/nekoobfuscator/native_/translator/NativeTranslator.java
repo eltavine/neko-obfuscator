@@ -617,7 +617,7 @@ public final class NativeTranslator {
                 sb.append("if (__hcls != NULL && neko_is_instance_of(env, __exc, __hcls)) { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } }");
             }
         }
-        sb.append("neko_throw(env, __exc); goto __neko_exception_exit; }");
+        sb.append("neko_set_pending_exception(thread, __exc); goto __neko_exception_exit; }");
         return sb.toString();
     }
 

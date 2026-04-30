@@ -392,6 +392,16 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
+    void opcodeTranslator_athrowWritesPendingExceptionDirectly() {
+        OpcodeTranslator translator = translator();
+        translator.beginMethod("pkg/ThrowOwner", "demo", "()V", true);
+        String code = render(translator.translate(new InsnNode(Opcodes.ATHROW)));
+
+        assertContains(code, "neko_set_pending_exception(thread, (jthrowable)POP_O());");
+        assertFalse(code.contains("neko_throw(env"), code);
+    }
+
+    @Test
     void stringConcatFallbackAvoidsStringBuilderAllocation() {
         OpcodeTranslator translator = translator();
         translator.beginMethod("pkg/ConcatOwner", "run", "()V", true);

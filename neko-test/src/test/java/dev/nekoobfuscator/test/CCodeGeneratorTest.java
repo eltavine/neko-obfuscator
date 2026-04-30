@@ -93,6 +93,9 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_monitor_record monitors["), source);
         assertFalse(source.contains("static inline jint neko_monitor_enter"), source);
         assertFalse(source.contains("static inline jint neko_monitor_exit"), source);
+        assertTrue(source.contains("static inline void neko_set_pending_exception(void *thread, jthrowable exc)"), source);
+        assertFalse(source.contains("static inline jint neko_throw("), source);
+        assertFalse(source.contains("NEKO_JNI_FN_PTR(env, 13, jint, jthrowable)"), source);
         assertTrue(source.contains("off_objarrayklass_element_klass"), source);
         assertTrue(source.contains("NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls)"), source);
         assertTrue(source.contains("off_klass_layout_helper"), source);
