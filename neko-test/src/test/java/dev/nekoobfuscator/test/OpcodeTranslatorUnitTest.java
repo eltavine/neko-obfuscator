@@ -233,6 +233,22 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
+    void opcodeTranslator_monitorOpsUseRuntime1StubHelpers() {
+        OpcodeTranslator translator = translator();
+        String code = render(List.of(
+            translator.translate(new InsnNode(Opcodes.MONITORENTER)).getFirst(),
+            translator.translate(new InsnNode(Opcodes.MONITOREXIT)).getFirst()
+        ));
+
+        assertContains(code,
+            "neko_fast_monitor_enter(thread, __mon, &monitors[monitor_sp++]);",
+            "neko_fast_monitor_exit(thread, __mon, &monitors[--monitor_sp]);"
+        );
+        assertFalse(code.contains("neko_monitor_enter(env,"), code);
+        assertFalse(code.contains("neko_monitor_exit(env,"), code);
+    }
+
+    @Test
     void opcodeTranslator_arrayOpsUseDirectArrayHelpers() {
         OpcodeTranslator translator = translator();
         String code = render(List.of(

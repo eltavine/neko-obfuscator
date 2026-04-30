@@ -252,6 +252,17 @@ typedef struct {
     int32_t basictype_object;
     int32_t basictype_array;
     jboolean basictypes_resolved;
+    /* Runtime1 monitor stubs and BasicObjectLock layout for native
+     * MONITORENTER/MONITOREXIT. The stubs are not dlsym-exported on stripped
+     * JDK 21 libjvm builds, so we harvest their CodeBlob entries by name while
+     * walking CodeHeap. */
+    void *runtime1_monitorenter_entry;
+    void *runtime1_monitorexit_entry;
+    ptrdiff_t off_basicobjectlock_lock;
+    ptrdiff_t off_basicobjectlock_obj;
+    ptrdiff_t off_basiclock_displaced_header;
+    size_t sizeof_BasicObjectLock;
+    size_t sizeof_BasicLock;
 } neko_method_layout_t;
 
 static neko_method_layout_t g_neko_method_layout = {0};
@@ -311,6 +322,14 @@ __attribute__((visibility("hidden"))) int32_t g_neko_basictype_float   = 0;
 __attribute__((visibility("hidden"))) int32_t g_neko_basictype_double  = 0;
 __attribute__((visibility("hidden"))) int32_t g_neko_basictype_object  = 0;
 __attribute__((visibility("hidden"))) int32_t g_neko_basictype_array   = 0;
+__attribute__((visibility("hidden"))) void *g_neko_runtime1_monitorenter_entry = NULL;
+__attribute__((visibility("hidden"))) void *g_neko_runtime1_monitorexit_entry = NULL;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_basicobjectlock_lock = -1;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_basicobjectlock_obj = -1;
+__attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_basiclock_displaced_header = -1;
+__attribute__((visibility("hidden"))) size_t g_neko_sizeof_basicobjectlock = 0;
+__attribute__((visibility("hidden"))) size_t g_neko_sizeof_basiclock = 0;
+__attribute__((visibility("hidden"))) jboolean g_neko_monitor_stub_ready = JNI_FALSE;
 /* HotSpot's r12_heapbase value — what %r12 must contain when calling
  * compiled Java code. The narrow_oop encode/decode in JIT'd methods reads
  * %r12 as the heap base register. Set once at OnLoad from the
@@ -755,6 +774,16 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             if (neko_streq_safe(field_name, "_anchor")) {
                 g_neko_method_layout.off_jcw_anchor = (ptrdiff_t)off_value;
             }
+        } else if (neko_streq_safe(type_name, "BasicObjectLock")) {
+            if (neko_streq_safe(field_name, "_lock")) {
+                g_neko_method_layout.off_basicobjectlock_lock = (ptrdiff_t)off_value;
+            } else if (neko_streq_safe(field_name, "_obj")) {
+                g_neko_method_layout.off_basicobjectlock_obj = (ptrdiff_t)off_value;
+            }
+        } else if (neko_streq_safe(type_name, "BasicLock")) {
+            if (neko_streq_safe(field_name, "_displaced_header")) {
+                g_neko_method_layout.off_basiclock_displaced_header = (ptrdiff_t)off_value;
+            }
         } else if (neko_streq_safe(type_name, "StubRoutines")) {
             if (is_static && neko_streq_safe(field_name, "_call_stub_return_address")) {
                 g_neko_method_layout.addr_call_stub_return_address = static_addr;
@@ -826,6 +855,8 @@ static jboolean neko_walk_vm_types(void *jvm) {
         else if (neko_streq_safe(type_name, "JNIHandleBlock")) g_neko_method_layout.sizeof_JNIHandleBlock = (size_t)sz;
         else if (neko_streq_safe(type_name, "JavaCallWrapper")) g_neko_method_layout.sizeof_JavaCallWrapper = (size_t)sz;
         else if (neko_streq_safe(type_name, "ConstantPool")) g_neko_method_layout.sizeof_ConstantPool = (size_t)sz;
+        else if (neko_streq_safe(type_name, "BasicObjectLock")) g_neko_method_layout.sizeof_BasicObjectLock = (size_t)sz;
+        else if (neko_streq_safe(type_name, "BasicLock")) g_neko_method_layout.sizeof_BasicLock = (size_t)sz;
     }
     return JNI_TRUE;
 }
@@ -1192,6 +1223,23 @@ static void neko_blob_visit_log(void *blob, const char *name, void *cookie) {
             if (NEKO_PATCH_DEBUG) {
                 fprintf(stderr, "[neko-patch] call_stub blob=%p name=%s ret=%p entry=%p code=[%p..%p)\\n",
                     blob, name ? name : "?", ctx->call_stub_return_pc, ctx->call_stub_entry, code_begin, code_end);
+            }
+        }
+    }
+    if (name != NULL) {
+        if (g_neko_method_layout.runtime1_monitorenter_entry == NULL
+            && strcmp(name, "monitorenter Runtime1 stub") == 0) {
+            g_neko_method_layout.runtime1_monitorenter_entry = neko_codeblob_code_begin(blob);
+            if (NEKO_PATCH_DEBUG) {
+                fprintf(stderr, "[neko-patch] runtime1 monitorenter entry=%p blob=%p\\n",
+                    g_neko_method_layout.runtime1_monitorenter_entry, blob);
+            }
+        } else if (g_neko_method_layout.runtime1_monitorexit_entry == NULL
+            && strcmp(name, "monitorexit Runtime1 stub") == 0) {
+            g_neko_method_layout.runtime1_monitorexit_entry = neko_codeblob_code_begin(blob);
+            if (NEKO_PATCH_DEBUG) {
+                fprintf(stderr, "[neko-patch] runtime1 monitorexit entry=%p blob=%p\\n",
+                    g_neko_method_layout.runtime1_monitorexit_entry, blob);
             }
         }
     }
@@ -1789,6 +1837,9 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_zglobals_pointer_load_bad_mask = -1;
     g_neko_method_layout.off_zglobals_pointer_store_good_mask = -1;
     g_neko_method_layout.off_zglobals_pointer_load_shift = -1;
+    g_neko_method_layout.off_basicobjectlock_lock = -1;
+    g_neko_method_layout.off_basicobjectlock_obj = -1;
+    g_neko_method_layout.off_basiclock_displaced_header = -1;
     g_neko_method_layout.off_thread_tlab = -1;
     g_neko_method_layout.off_tlab_top = -1;
     g_neko_method_layout.off_tlab_end = -1;
@@ -2093,6 +2144,31 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_basictype_double  = g_neko_method_layout.basictype_double;
     g_neko_basictype_object  = g_neko_method_layout.basictype_object;
     g_neko_basictype_array   = g_neko_method_layout.basictype_array;
+    g_neko_runtime1_monitorenter_entry = g_neko_method_layout.runtime1_monitorenter_entry;
+    g_neko_runtime1_monitorexit_entry = g_neko_method_layout.runtime1_monitorexit_entry;
+    g_neko_off_basicobjectlock_lock = g_neko_method_layout.off_basicobjectlock_lock;
+    g_neko_off_basicobjectlock_obj = g_neko_method_layout.off_basicobjectlock_obj;
+    g_neko_off_basiclock_displaced_header = g_neko_method_layout.off_basiclock_displaced_header;
+    g_neko_sizeof_basicobjectlock = g_neko_method_layout.sizeof_BasicObjectLock;
+    g_neko_sizeof_basiclock = g_neko_method_layout.sizeof_BasicLock;
+    g_neko_monitor_stub_ready =
+        (g_neko_runtime1_monitorenter_entry != NULL
+         && g_neko_runtime1_monitorexit_entry != NULL
+         && g_neko_off_basicobjectlock_lock >= 0
+         && g_neko_off_basicobjectlock_obj >= 0
+         && g_neko_off_basiclock_displaced_header >= 0
+         && g_neko_sizeof_basicobjectlock > 0
+         && g_neko_sizeof_basiclock > 0)
+        ? JNI_TRUE : JNI_FALSE;
+    NEKO_PATCH_LOG("monitor stubs: enter=%p exit=%p bol_lock=%td bol_obj=%td block_hdr=%td bol_size=%zu block_size=%zu ready=%d",
+        g_neko_runtime1_monitorenter_entry,
+        g_neko_runtime1_monitorexit_entry,
+        g_neko_off_basicobjectlock_lock,
+        g_neko_off_basicobjectlock_obj,
+        g_neko_off_basiclock_displaced_header,
+        g_neko_sizeof_basicobjectlock,
+        g_neko_sizeof_basiclock,
+        (int)g_neko_monitor_stub_ready);
     /* Publish the heap base value (for %r12 setup before Java calls). On
      * zero-based compressed oops this is NULL; with non-zero base we must
      * publish the actual base. Read from the harvested CompressedOops slot

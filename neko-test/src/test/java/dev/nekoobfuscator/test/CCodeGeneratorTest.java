@@ -86,6 +86,13 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("return neko_klass_is_subtype_of(value_klass, target_klass);"), source);
         assertTrue(source.contains("NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj)"), source);
         assertTrue(source.contains("return (jclass)neko_klass_java_mirror_handle(thread, value_klass);"), source);
+        assertTrue(source.contains("g_neko_runtime1_monitorenter_entry"), source);
+        assertTrue(source.contains("g_neko_runtime1_monitorexit_entry"), source);
+        assertTrue(source.contains("NEKO_FAST_INLINE void neko_fast_monitor_enter(void *thread, jobject obj, neko_monitor_record *rec)"), source);
+        assertTrue(source.contains("neko_call_runtime1_monitorenter(g_neko_runtime1_monitorenter_entry, thread"), source);
+        assertTrue(source.contains("neko_monitor_record monitors["), source);
+        assertFalse(source.contains("static inline jint neko_monitor_enter"), source);
+        assertFalse(source.contains("static inline jint neko_monitor_exit"), source);
         assertTrue(source.contains("off_objarrayklass_element_klass"), source);
         assertTrue(source.contains("NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls)"), source);
         assertTrue(source.contains("off_klass_layout_helper"), source);

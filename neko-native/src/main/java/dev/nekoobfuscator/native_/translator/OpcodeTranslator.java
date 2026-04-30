@@ -264,8 +264,8 @@ public final class OpcodeTranslator {
 
             case Opcodes.ARRAYLENGTH -> stmts.add(raw("{ jarray arr = (jarray)POP_O(); PUSH_I(neko_fast_array_length(arr)); }"));
             case Opcodes.ATHROW -> stmts.add(raw("{ neko_throw(env, (jthrowable)POP_O()); }"));
-            case Opcodes.MONITORENTER -> stmts.add(raw("neko_monitor_enter(env, POP_O());"));
-            case Opcodes.MONITOREXIT -> stmts.add(raw("neko_monitor_exit(env, POP_O());"));
+            case Opcodes.MONITORENTER -> stmts.add(raw("{ jobject __mon = POP_O(); neko_fast_monitor_enter(thread, __mon, &monitors[monitor_sp++]); }"));
+            case Opcodes.MONITOREXIT -> stmts.add(raw("{ jobject __mon = POP_O(); if (monitor_sp <= 0) { fprintf(stderr, \"[neko-direct] MONITOREXIT without matching MONITORENTER\\n\"); abort(); } neko_fast_monitor_exit(thread, __mon, &monitors[--monitor_sp]); }"));
             case Opcodes.NOP -> stmts.add(raw("/* nop */"));
             case Opcodes.IINC -> {
                 IincInsnNode iinc = (IincInsnNode) insn;

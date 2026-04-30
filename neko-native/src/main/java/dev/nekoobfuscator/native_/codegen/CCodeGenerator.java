@@ -357,6 +357,8 @@ public final class CCodeGenerator {
         sb.append(") {\n");
         sb.append("    neko_slot stack[").append(fn.maxStack() + 16).append("];\n");
         sb.append("    int sp = 0;\n");
+        sb.append("    neko_monitor_record monitors[").append(fn.maxStack() + 16).append("];\n");
+        sb.append("    int monitor_sp = 0;\n");
         /* Locals are uninitialized at function entry (Java spec requires
          * every local be assigned before read). Skipping the memset saves
          * 26+ qword-stores per call on every translated method. The stack
@@ -2260,8 +2262,6 @@ static inline void neko_set_int_array_region(JNIEnv *env, jintArray arr, jsize s
 static inline void neko_set_long_array_region(JNIEnv *env, jlongArray arr, jsize start, jsize len, const jlong *buf) { NEKO_JNI_FN_PTR(env, 212, void, jlongArray, jsize, jsize, const jlong*)(env, arr, start, len, buf); }
 static inline void neko_set_float_array_region(JNIEnv *env, jfloatArray arr, jsize start, jsize len, const jfloat *buf) { NEKO_JNI_FN_PTR(env, 213, void, jfloatArray, jsize, jsize, const jfloat*)(env, arr, start, len, buf); }
 static inline void neko_set_double_array_region(JNIEnv *env, jdoubleArray arr, jsize start, jsize len, const jdouble *buf) { NEKO_JNI_FN_PTR(env, 214, void, jdoubleArray, jsize, jsize, const jdouble*)(env, arr, start, len, buf); }
-static inline jint neko_monitor_enter(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 217, jint, jobject)(env, obj); }
-static inline jint neko_monitor_exit(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 218, jint, jobject)(env, obj); }
 /* Some HotSpot helper blocks use `neko_handle_oop` before the fast-access
  * section is emitted in the final C file. Declare it here so C99 does not
  * infer an implicit int-returning prototype on first use. */
@@ -4261,6 +4261,154 @@ NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj) {
         abort();
     }
     return (jclass)neko_klass_java_mirror_handle(thread, value_klass);
+}
+
+#define NEKO_MONITOR_RECORD_BYTES 64u
+
+typedef struct {
+    unsigned char basic_object_lock[NEKO_MONITOR_RECORD_BYTES];
+    jobject handle;
+} neko_monitor_record;
+
+NEKO_FAST_INLINE void neko_call_runtime1_monitorenter(void *entry, void *thread, void *lock_record, void *obj_oop) {
+#if defined(__x86_64__)
+    __asm__ __volatile__(
+        "pushq %%r15\\n\\t"
+        "movq %[entry], %%r11\\n\\t"
+        "movq %[thread], %%r15\\n\\t"
+        "subq $24, %%rsp\\n\\t"
+        "movq %[lock_record], (%%rsp)\\n\\t"
+        "movq %[obj_oop], 8(%%rsp)\\n\\t"
+        "call *%%r11\\n\\t"
+        "addq $24, %%rsp\\n\\t"
+        "popq %%r15\\n\\t"
+        :
+        : [entry] "r" (entry),
+          [thread] "r" (thread),
+          [lock_record] "r" (lock_record),
+          [obj_oop] "r" (obj_oop)
+        : "memory", "cc",
+          "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11",
+          "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+          "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+#else
+    (void)entry;
+    (void)thread;
+    (void)lock_record;
+    (void)obj_oop;
+    fprintf(stderr, "[neko-direct] Runtime1 monitor stubs unsupported on this architecture\\n");
+    abort();
+#endif
+}
+
+NEKO_FAST_INLINE void neko_call_runtime1_monitorexit(void *entry, void *thread, void *lock_record) {
+#if defined(__x86_64__)
+    __asm__ __volatile__(
+        "pushq %%r15\\n\\t"
+        "movq %[entry], %%r11\\n\\t"
+        "movq %[thread], %%r15\\n\\t"
+        "subq $8, %%rsp\\n\\t"
+        "movq %[lock_record], (%%rsp)\\n\\t"
+        "call *%%r11\\n\\t"
+        "addq $8, %%rsp\\n\\t"
+        "popq %%r15\\n\\t"
+        :
+        : [entry] "r" (entry),
+          [thread] "r" (thread),
+          [lock_record] "r" (lock_record)
+        : "memory", "cc",
+          "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11",
+          "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+          "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+#else
+    (void)entry;
+    (void)thread;
+    (void)lock_record;
+    fprintf(stderr, "[neko-direct] Runtime1 monitor stubs unsupported on this architecture\\n");
+    abort();
+#endif
+}
+
+NEKO_FAST_INLINE void *neko_monitor_record_lock_addr(neko_monitor_record *rec) {
+    return (void*)(rec->basic_object_lock + g_neko_off_basicobjectlock_lock);
+}
+
+NEKO_FAST_INLINE void neko_prepare_monitor_record(neko_monitor_record *rec, jobject obj, void *raw_oop) {
+    void *lock_addr;
+    uintptr_t mark_bits;
+    if (rec == NULL || raw_oop == NULL) {
+        fprintf(stderr, "[neko-direct] monitor record/object unavailable rec=%p obj=%p\\n", (void*)rec, raw_oop);
+        abort();
+    }
+    if (!g_neko_monitor_stub_ready
+        || g_neko_sizeof_basicobjectlock == 0
+        || g_neko_sizeof_basicobjectlock > NEKO_MONITOR_RECORD_BYTES
+        || g_neko_off_basicobjectlock_lock < 0
+        || g_neko_off_basicobjectlock_obj < 0
+        || g_neko_off_basiclock_displaced_header < 0
+        || g_hotspot.klass_offset_bytes <= 0
+        || g_hotspot.use_compact_object_headers) {
+        fprintf(stderr, "[neko-direct] monitor layout unavailable ready=%d enter=%p exit=%p bol_size=%zu lock=%td obj=%td disp=%td klass_off=%d coh=%d\\n",
+            (int)g_neko_monitor_stub_ready,
+            g_neko_runtime1_monitorenter_entry,
+            g_neko_runtime1_monitorexit_entry,
+            g_neko_sizeof_basicobjectlock,
+            g_neko_off_basicobjectlock_lock,
+            g_neko_off_basicobjectlock_obj,
+            g_neko_off_basiclock_displaced_header,
+            (int)g_hotspot.klass_offset_bytes,
+            (int)g_hotspot.use_compact_object_headers);
+        abort();
+    }
+    memset(rec->basic_object_lock, 0, sizeof(rec->basic_object_lock));
+    rec->handle = obj;
+    *(void**)(rec->basic_object_lock + g_neko_off_basicobjectlock_obj) = raw_oop;
+    lock_addr = neko_monitor_record_lock_addr(rec);
+    mark_bits = (*(uintptr_t*)raw_oop) | (uintptr_t)1u;
+    *(uintptr_t*)((char*)lock_addr + g_neko_off_basiclock_displaced_header) = mark_bits;
+}
+
+NEKO_FAST_INLINE void neko_fast_monitor_enter(void *thread, jobject obj, neko_monitor_record *rec) {
+    void *raw_oop;
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-direct] MONITORENTER missing JavaThread\\n");
+        abort();
+    }
+    if (obj == NULL) {
+        fprintf(stderr, "[neko-direct] MONITORENTER null object\\n");
+        abort();
+    }
+    raw_oop = neko_handle_oop(obj);
+    if (raw_oop == NULL) {
+        fprintf(stderr, "[neko-direct] MONITORENTER handle did not resolve obj=%p\\n", (void*)obj);
+        abort();
+    }
+    neko_prepare_monitor_record(rec, obj, raw_oop);
+    neko_call_runtime1_monitorenter(g_neko_runtime1_monitorenter_entry, thread, rec->basic_object_lock, raw_oop);
+}
+
+NEKO_FAST_INLINE void neko_fast_monitor_exit(void *thread, jobject obj, neko_monitor_record *rec) {
+    void *raw_oop;
+    void *entered_oop;
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-direct] MONITOREXIT missing JavaThread\\n");
+        abort();
+    }
+    if (rec == NULL || rec->handle == NULL) {
+        fprintf(stderr, "[neko-direct] MONITOREXIT missing active monitor record\\n");
+        abort();
+    }
+    raw_oop = neko_handle_oop(obj);
+    entered_oop = neko_handle_oop(rec->handle);
+    if (raw_oop == NULL || entered_oop == NULL || raw_oop != entered_oop) {
+        fprintf(stderr, "[neko-direct] MONITOREXIT monitor object mismatch obj=%p entered=%p raw=%p entered_raw=%p\\n",
+            (void*)obj, (void*)rec->handle, raw_oop, entered_oop);
+        abort();
+    }
+    *(void**)(rec->basic_object_lock + g_neko_off_basicobjectlock_obj) = raw_oop;
+    neko_call_runtime1_monitorexit(g_neko_runtime1_monitorexit_entry, thread, rec->basic_object_lock);
+    memset(rec->basic_object_lock, 0, sizeof(rec->basic_object_lock));
+    rec->handle = NULL;
 }
 
 NEKO_FAST_INLINE void neko_array_store_check(char *array_oop, jobject val) {
