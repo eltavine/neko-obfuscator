@@ -99,6 +99,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - T3.18: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove supported invokedynamic paths run natively and unsupported paths reject before fallback.
 - T3.19: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, `R-negative`; runtime must prove StringConcat paths do not enter StringBuilder JNI fallback.
 - T3.20: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; generated runtime support C must prove `NEKO_JNI_FN_PTR` and replaced wrappers are gone.
+- T3.21: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-native-obfusjack` x10, `R-inspect`; runtime must prove obfusjack matrix/thread microbench performance regressions are fixed as a separate optimization task, without changing the semantics of earlier opcode-removal tasks.
 - T4.1: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; final grep must prove generated C has zero forbidden JNI function-table calls outside single `GetEnv`.
 - T4.2: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; final inspection must prove `JNIEnv` is only a type/bootstrap handle and never a function-table caller after bootstrap.
 - T4.3: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`; final runtime must prove obfusjack-test21 and Calc pass, with Calc `<= 20 ms`.
@@ -147,13 +148,14 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T3.11 `getClass` intrinsic via oop header klass and mirror.
 - [x] T3.12 `MONITORENTER` / `MONITOREXIT` via HotSpot synchronizer/stub entry.
 - [x] T3.13 `ATHROW` by writing `JavaThread::_pending_exception`.
-- [ ] T3.14 Implicit exception construction without `ThrowNew`.
+- [x] T3.14 Implicit exception construction without `ThrowNew`.
 - [ ] T3.15 Exception dispatch via `_pending_exception` read/clear.
 - [ ] T3.16 Boxing/unboxing through direct call_stub / field reads.
 - [ ] T3.17 Reject non-manifest invoke callees and delete invoke JNI wrappers.
 - [ ] T3.18 Desugar or direct-resolve `INVOKEDYNAMIC`; delete MethodHandle JNI fallback.
 - [ ] T3.19 Remove StringBuilder JNI concat fallback.
 - [ ] T3.20 Delete `NEKO_JNI_FN_PTR` macro and replaced runtime wrappers.
+- [ ] T3.21 Recover obfusjack matrix/thread microbench performance without mixing optimization into prior semantic-removal tasks.
 
 ## Stage 4: Verification
 

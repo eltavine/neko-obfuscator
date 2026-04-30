@@ -82,6 +82,7 @@ class OpcodeTranslatorUnitTest {
     @Test
     void opcodeTranslator_integerArithmeticUsesTwoPopsAndOnePush() {
         OpcodeTranslator translator = translator();
+        translator.beginMethod("pkg/MathOwner", "demo", "()V", true);
         String code = render(List.of(
             translator.translate(new InsnNode(Opcodes.IADD)).getFirst(),
             translator.translate(new InsnNode(Opcodes.IMUL)).getFirst(),
@@ -93,8 +94,11 @@ class OpcodeTranslatorUnitTest {
         assertContains(code,
             "jint b = POP_I(); jint a = POP_I(); PUSH_I(a + b);",
             "jint b = POP_I(); jint a = POP_I(); PUSH_I(a * b);",
-            "jint b = POP_I(); jint a = POP_I(); PUSH_I(a / b);",
-            "jint b = POP_I(); jint a = POP_I(); PUSH_I(a % b);",
+            "jint b = POP_I(); jint a = POP_I(); if (b == 0) {",
+            "java/lang/ArithmeticException",
+            "neko_raise_implicit_exception(thread, env,",
+            "PUSH_I(a / b);",
+            "PUSH_I(a % b);",
             "PUSH_I(-POP_I());");
     }
 
@@ -251,6 +255,7 @@ class OpcodeTranslatorUnitTest {
     @Test
     void opcodeTranslator_arrayOpsUseDirectArrayHelpers() {
         OpcodeTranslator translator = translator();
+        translator.beginMethod("pkg/ArrayOwner", "demo", "()V", true);
         String code = render(List.of(
             translator.translate(new InsnNode(Opcodes.IALOAD)).getFirst(),
             translator.translate(new InsnNode(Opcodes.IASTORE)).getFirst(),
@@ -263,6 +268,9 @@ class OpcodeTranslatorUnitTest {
         assertContains(code,
             "neko_fast_iaload(",
             "neko_fast_iastore(",
+            "neko_raise_implicit_exception(thread, env,",
+            "java/lang/NullPointerException",
+            "java/lang/ArrayIndexOutOfBoundsException",
             "neko_fast_array_length(arr)",
             "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
             "PUSH_O(neko_fast_new_object_array(thread, env, len,",
@@ -384,6 +392,7 @@ class OpcodeTranslatorUnitTest {
             "neko_fast_is_instance_of(env, obj, cls)",
             "neko_fast_get_object_class(thread, obj)",
             "ClassCastException",
+            "neko_raise_implicit_exception(thread, env,",
             "goto __neko_exception_exit;"
         );
         assertFalse(code.contains("neko_alloc_object(env,"), code);
@@ -397,8 +406,14 @@ class OpcodeTranslatorUnitTest {
         translator.beginMethod("pkg/ThrowOwner", "demo", "()V", true);
         String code = render(translator.translate(new InsnNode(Opcodes.ATHROW)));
 
-        assertContains(code, "neko_set_pending_exception(thread, (jthrowable)POP_O());");
+        assertContains(code,
+            "jthrowable __athrow = (jthrowable)POP_O();",
+            "java/lang/NullPointerException",
+            "neko_raise_implicit_exception(thread, env,",
+            "neko_set_pending_exception(thread, __athrow);"
+        );
         assertFalse(code.contains("neko_throw(env"), code);
+        assertFalse(code.contains("neko_throw_new(env"), code);
     }
 
     @Test

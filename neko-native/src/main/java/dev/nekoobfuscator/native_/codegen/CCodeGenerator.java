@@ -309,6 +309,7 @@ public final class CCodeGenerator {
         sb.append("static void neko_njx_init_wrappers(void);\n\n");
         sb.append("static void neko_fast_string_runtime_init(JNIEnv *env);\n\n");
         sb.append("static uintptr_t neko_array_klass_bits_for_descriptor(JNIEnv *env, const char *arrayDesc, jclass fromClass);\n");
+        sb.append("static jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls);\n");
         sb.append("static jobjectArray neko_fast_new_object_array(void *thread, JNIEnv *env, jint len, uintptr_t klass_bits, jobject init);\n");
         sb.append("static jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env, jint len, int kind);\n");
         sb.append("static void neko_fast_aastore(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject val);\n\n");
@@ -2187,7 +2188,6 @@ static inline jmethodID neko_get_method_id(JNIEnv *env, jclass c, const char *n,
 static inline jmethodID neko_get_static_method_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 113, jmethodID, jclass, const char*, const char*)(env, c, n, s); }
 static inline jfieldID neko_get_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 94, jfieldID, jclass, const char*, const char*)(env, c, n, s); }
 static inline jfieldID neko_get_static_field_id(JNIEnv *env, jclass c, const char *n, const char *s) { return NEKO_JNI_FN_PTR(env, 144, jfieldID, jclass, const char*, const char*)(env, c, n, s); }
-static inline jint neko_throw_new(JNIEnv *env, jclass cls, const char *msg) { return NEKO_JNI_FN_PTR(env, 14, jint, jclass, const char*)(env, cls, msg); }
 static inline jthrowable neko_exception_occurred(JNIEnv *env) { return NEKO_JNI_FN_PTR(env, 15, jthrowable)(env); }
 static inline void neko_exception_clear(JNIEnv *env) { NEKO_JNI_FN_PTR(env, 17, void)(env); }
 static inline jint neko_ensure_local_capacity(JNIEnv *env, jint capacity) { return NEKO_JNI_FN_PTR(env, 26, jint, jint)(env, capacity); }
@@ -2304,6 +2304,24 @@ static inline jboolean neko_exception_check(JNIEnv *env) {
             ? JNI_TRUE : JNI_FALSE;
     }
     return NEKO_JNI_FN_PTR(env, 228, jboolean)(env);
+}
+
+typedef jvalue (*neko_njx_dispatcher_t)(void*, JNIEnv*, void*, void*, jobject, const jvalue*);
+
+static inline void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry, neko_njx_dispatcher_t ctor_dispatcher, const char *name) {
+    jobject exc;
+    jvalue args[1];
+    if (thread == NULL || cls == NULL || ctor_method == NULL || ctor_entry == NULL || ctor_dispatcher == NULL) {
+        fprintf(stderr, "[neko-direct] implicit exception precondition failed name=%s thread=%p cls=%p method=%p entry=%p dispatch=%p\\n",
+            name == NULL ? "<null>" : name, thread, (void*)cls, ctor_method, ctor_entry, (void*)ctor_dispatcher);
+        abort();
+    }
+    exc = neko_fast_alloc_object(thread, env, cls);
+    args[0].l = NULL;
+    ctor_dispatcher(thread, env, ctor_method, ctor_entry, exc, args);
+    if (!neko_exception_check(env)) {
+        neko_set_pending_exception(thread, (jthrowable)exc);
+    }
 }
 
 typedef struct {
@@ -4725,6 +4743,14 @@ NEKO_FAST_INLINE jint neko_fast_atomic_int_add_and_get(JNIEnv *env, jobject obj,
      * per-iteration handle allocs in the inner loop.
      */
     private void appendFusedAALoadHelpers(StringBuilder sb) {
+        sb.append("""
+#define NEKO_FAST_ARRAY_OK 0
+#define NEKO_FAST_ARRAY_OUTER_NULL 1
+#define NEKO_FAST_ARRAY_OUTER_BOUNDS 2
+#define NEKO_FAST_ARRAY_INNER_NULL 3
+#define NEKO_FAST_ARRAY_INNER_BOUNDS 4
+
+""");
         appendFusedAALoadPrim(sb, "b", "jbyte",  "NEKO_PRIM_B", "byte",   "jbyteArray");
         appendFusedAALoadPrim(sb, "c", "jchar",  "NEKO_PRIM_C", "char",   "jcharArray");
         appendFusedAALoadPrim(sb, "s", "jshort", "NEKO_PRIM_S", "short",  "jshortArray");
@@ -4733,32 +4759,48 @@ NEKO_FAST_INLINE jint neko_fast_atomic_int_add_and_get(JNIEnv *env, jobject obj,
         appendFusedAALoadPrim(sb, "f", "jfloat", "NEKO_PRIM_F", "float",  "jfloatArray");
         appendFusedAALoadPrim(sb, "d", "jdouble","NEKO_PRIM_D", "double", "jdoubleArray");
         sb.append("""
-NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2) {
+NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2, int *reason) {
     (void)env;
-    if (g_hotspot.initialized
-        && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc)
-        && g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] >= 0
-        && thread != NULL && outer != NULL) {
-        char *outer_oop = (char*)neko_handle_oop((jobject)outer);
-        if (outer_oop != NULL) {
-            jint outer_len = *(jint*)(outer_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
-            char *inner_oop = neko_inner_oop_from_outer(outer_oop, idx1, outer_len);
-            if (inner_oop != NULL) {
-                jint inner_len = *(jint*)(inner_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
-                if (idx2 >= 0 && idx2 < inner_len) {
-                    void *element_oop;
-                    element_oop = neko_load_object_array_slot(
-                        inner_oop,
-                        (size_t)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I],
-                        idx2,
-                        g_hotspot.compressed_oops_enabled ? 4u : sizeof(void*));
-                    return neko_direct_oop_to_handle(thread, element_oop);
-                }
-            }
-        }
+    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;
+    if (!g_hotspot.initialized
+        || ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) == 0 && !g_hotspot.use_zgc)
+        || g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] < 0
+        || thread == NULL) {
+        fprintf(stderr, "[neko-direct] AALOAD+AALOAD layout unavailable outer=%p idx1=%d idx2=%d thread=%p\\n", (void*)outer, (int)idx1, (int)idx2, thread);
+        abort();
     }
-    fprintf(stderr, "[neko-direct] AALOAD+AALOAD direct path unavailable outer=%p idx1=%d idx2=%d thread=%p\\n", (void*)outer, (int)idx1, (int)idx2, thread);
-    abort();
+    if (outer == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return NULL; }
+    char *outer_oop = (char*)neko_handle_oop((jobject)outer);
+    if (outer_oop == NULL) {
+        fprintf(stderr, "[neko-direct] AALOAD+AALOAD outer handle unresolved outer=%p\\n", (void*)outer);
+        abort();
+    }
+    jint outer_len = *(jint*)(outer_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
+    if (idx1 < 0 || idx1 >= outer_len) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return NULL; }
+    char *inner_oop = neko_inner_oop_from_outer(outer_oop, idx1, outer_len);
+    if (inner_oop == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_NULL; return NULL; }
+    jint inner_len = *(jint*)(inner_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);
+    if (idx2 < 0 || idx2 >= inner_len) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_BOUNDS; return NULL; }
+    void *element_oop;
+    element_oop = neko_load_object_array_slot(
+        inner_oop,
+        (size_t)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I],
+        idx2,
+        g_hotspot.compressed_oops_enabled ? 4u : sizeof(void*));
+    return neko_direct_oop_to_handle(thread, element_oop);
+}
+
+NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
+    jclass npe_cls, void *npe_method, void *npe_entry, neko_njx_dispatcher_t npe_dispatcher,
+    jclass aioobe_cls, void *aioobe_method, void *aioobe_entry, neko_njx_dispatcher_t aioobe_dispatcher) {
+    if (reason == NEKO_FAST_ARRAY_OUTER_NULL || reason == NEKO_FAST_ARRAY_INNER_NULL) {
+        neko_raise_implicit_exception(thread, env, npe_cls, npe_method, npe_entry, npe_dispatcher, "java/lang/NullPointerException");
+    } else if (reason == NEKO_FAST_ARRAY_OUTER_BOUNDS || reason == NEKO_FAST_ARRAY_INNER_BOUNDS) {
+        neko_raise_implicit_exception(thread, env, aioobe_cls, aioobe_method, aioobe_entry, aioobe_dispatcher, "java/lang/ArrayIndexOutOfBoundsException");
+    } else {
+        fprintf(stderr, "[neko-direct] unexpected fast array failure reason=%d\\n", reason);
+        abort();
+    }
 }
 
 """);
@@ -4768,27 +4810,26 @@ NEKO_FAST_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobj
         StringBuilder sb, String prefix, String cType, String elemKind, String wrapperStem, String jArrayType
     ) {
         sb.append("NEKO_FAST_INLINE ").append(cType).append(" neko_fast_aaload_").append(prefix)
-            .append("aload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2) {\n")
+            .append("aload(void *thread, JNIEnv *env, jobjectArray outer, jint idx1, jint idx2, int *reason) {\n")
             .append("    (void)thread;\n")
             .append("    (void)env;\n")
-            .append("    if (g_hotspot.initialized\n")
-            .append("        && ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) != 0 || g_hotspot.use_zgc)\n")
-            .append("        && g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] >= 0\n")
-            .append("        && outer != NULL) {\n")
-            .append("        char *outer_oop = (char*)neko_handle_oop((jobject)outer);\n")
-            .append("        if (outer_oop != NULL) {\n")
-            .append("            jint outer_len = *(jint*)(outer_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);\n")
-            .append("            char *inner_oop = neko_inner_oop_from_outer(outer_oop, idx1, outer_len);\n")
-            .append("            if (inner_oop != NULL) {\n")
-            .append("                jint inner_len = *(jint*)(inner_oop + g_hotspot.primitive_array_base_offsets[").append(elemKind).append("] - 4);\n")
-            .append("                if (idx2 >= 0 && idx2 < inner_len) {\n")
-            .append("                    char *addr = inner_oop + g_hotspot.primitive_array_base_offsets[").append(elemKind).append("] + ((jlong)idx2 * g_hotspot.primitive_array_index_scales[").append(elemKind).append("]);\n")
-            .append("                    return *(").append(cType).append("*)addr;\n")
-            .append("                }\n")
-            .append("            }\n")
-            .append("        }\n")
+            .append("    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;\n")
+            .append("    if (!g_hotspot.initialized\n")
+            .append("        || ((g_hotspot.fast_bits & NEKO_FAST_PRIM_ARRAY) == 0 && !g_hotspot.use_zgc)\n")
+            .append("        || g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] < 0) {\n")
+            .append("        fprintf(stderr, \"[neko-direct] AALOAD+").append(prefix).append("ALOAD layout unavailable outer=%p idx1=%d idx2=%d\\n\", (void*)outer, (int)idx1, (int)idx2); abort();\n")
             .append("    }\n")
-            .append("    fprintf(stderr, \"[neko-direct] AALOAD+").append(prefix).append("ALOAD direct path unavailable outer=%p idx1=%d idx2=%d\\n\", (void*)outer, (int)idx1, (int)idx2); abort();\n")
+            .append("    if (outer == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return (").append(cType).append(")0; }\n")
+            .append("    char *outer_oop = (char*)neko_handle_oop((jobject)outer);\n")
+            .append("    if (outer_oop == NULL) { fprintf(stderr, \"[neko-direct] AALOAD+").append(prefix).append("ALOAD outer handle unresolved outer=%p\\n\", (void*)outer); abort(); }\n")
+            .append("    jint outer_len = *(jint*)(outer_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_I] - 4);\n")
+            .append("    if (idx1 < 0 || idx1 >= outer_len) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return (").append(cType).append(")0; }\n")
+            .append("    char *inner_oop = neko_inner_oop_from_outer(outer_oop, idx1, outer_len);\n")
+            .append("    if (inner_oop == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_NULL; return (").append(cType).append(")0; }\n")
+            .append("    jint inner_len = *(jint*)(inner_oop + g_hotspot.primitive_array_base_offsets[").append(elemKind).append("] - 4);\n")
+            .append("    if (idx2 < 0 || idx2 >= inner_len) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_INNER_BOUNDS; return (").append(cType).append(")0; }\n")
+            .append("    char *addr = inner_oop + g_hotspot.primitive_array_base_offsets[").append(elemKind).append("] + ((jlong)idx2 * g_hotspot.primitive_array_index_scales[").append(elemKind).append("]);\n")
+            .append("    return *(").append(cType).append("*)addr;\n")
             .append("}\n\n");
     }
 
