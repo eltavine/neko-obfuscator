@@ -169,6 +169,41 @@ class NativeObfuscationIntegrationTest {
 
     @Test
     @Timeout(2)
+    void nativeObfuscation_objectArrayLoadStoreRun() throws Exception {
+        Path workDir = NativeObfuscationHelper.nativeWorkDir();
+        Path input = workDir.resolve("object-array-access.jar");
+        Path output = workDir.resolve("object-array-access-native.jar");
+        writeObjectArrayAccessJar(input);
+
+        NativeObfuscationHelper.ObfuscationRunResult obfuscation = NativeObfuscationHelper.obfuscateJar(
+            input,
+            output,
+            NativeObfuscationHelper.configsDir().resolve("native-test.yml"),
+            Duration.ofMinutes(2)
+        );
+        String obfuscationLog = obfuscation.combinedOutput();
+        assertTrue(obfuscationLog.contains("Native stage: translated="), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("Native compilation produced no libraries"), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("translated=0"), () -> obfuscationLog);
+
+        NativeObfuscationHelper.JarRunResult result = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("object-array-access-native.stdout.log"),
+            workDir.resolve("object-array-access-native.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_PATCH_DEBUG", "1")
+        );
+
+        String combined = result.combinedOutput();
+        assertEquals(0, result.exitCode(), () -> combined);
+        NativeObfuscationHelper.assertNoFatalNativeCrash(result);
+        assertTrue(combined.contains("object-array-ok"), () -> combined);
+    }
+
+    @Test
+    @Timeout(2)
     void nativeObfuscation_SnakeGame_headlessExceptionOnly() throws Exception {
         NativeObfuscationHelper.JarRunResult result = NativeObfuscationHelper.runCachedObfuscated(
             "SnakeGame",
@@ -292,6 +327,67 @@ class NativeObfuscationIntegrationTest {
             out.write(objectFieldStoreClassBytes());
             out.closeEntry();
         }
+    }
+
+    private static void writeObjectArrayAccessJar(Path jar) throws Exception {
+        Files.createDirectories(jar.getParent());
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        manifest.getMainAttributes().put(Attributes.Name.MAIN_CLASS, "pkg.ObjectArrayRuntime");
+
+        try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(jar), manifest)) {
+            out.putNextEntry(new JarEntry("pkg/ObjectArrayRuntime.class"));
+            out.write(objectArrayAccessClassBytes());
+            out.closeEntry();
+        }
+    }
+
+    private static byte[] objectArrayAccessClassBytes() {
+        String owner = "pkg/ObjectArrayRuntime";
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+
+        var init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        init.visitCode();
+        init.visitVarInsn(Opcodes.ALOAD, 0);
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        init.visitInsn(Opcodes.RETURN);
+        init.visitMaxs(0, 0);
+        init.visitEnd();
+
+        var main = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null);
+        Label fail = new Label();
+        main.visitCode();
+        main.visitInsn(Opcodes.ICONST_1);
+        main.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object");
+        main.visitVarInsn(Opcodes.ASTORE, 1);
+        main.visitVarInsn(Opcodes.ALOAD, 1);
+        main.visitInsn(Opcodes.ICONST_0);
+        main.visitLdcInsn("array-ok");
+        main.visitInsn(Opcodes.AASTORE);
+        main.visitVarInsn(Opcodes.ALOAD, 1);
+        main.visitInsn(Opcodes.ICONST_0);
+        main.visitInsn(Opcodes.AALOAD);
+        main.visitTypeInsn(Opcodes.CHECKCAST, "java/lang/String");
+        main.visitLdcInsn("array-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+        main.visitJumpInsn(Opcodes.IFEQ, fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("object-array-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitLabel(fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("object-array-bad");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.ICONST_1);
+        main.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "exit", "(I)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitMaxs(0, 0);
+        main.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
     }
 
     private static byte[] objectFieldStoreClassBytes() {

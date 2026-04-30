@@ -79,6 +79,10 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("NEKO_FAST_INLINE void neko_fast_iastore(jarray arr"), source);
         assertFalse(source.contains("neko_fast_iaload(JNIEnv *env"), source);
         assertFalse(source.contains("neko_fast_iastore(JNIEnv *env"), source);
+        assertTrue(source.contains("neko_select_oop_array_load_barrier();"), source);
+        assertTrue(source.contains("neko_barrier_load_oop_array("), source);
+        assertTrue(source.contains("neko_array_store_check("), source);
+        assertTrue(source.contains("off_objarrayklass_element_klass"), source);
     }
 
     @Test

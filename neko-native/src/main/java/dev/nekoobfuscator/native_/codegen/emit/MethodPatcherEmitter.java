@@ -168,6 +168,7 @@ typedef struct {
     ptrdiff_t off_klass_subklass;
     ptrdiff_t off_klass_next_link;
     ptrdiff_t off_klass_name;
+    ptrdiff_t off_objarrayklass_element_klass;
     ptrdiff_t off_java_lang_class_klass;
     void *addr_classloaderdatagraph_head;
     ptrdiff_t off_classloaderdata_next;
@@ -621,6 +622,8 @@ static jboolean neko_walk_vm_structs(void *jvm) {
             else if (neko_streq_safe(field_name, "_subklass")) g_neko_method_layout.off_klass_subklass = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_next_link")) g_neko_method_layout.off_klass_next_link = (ptrdiff_t)off_value;
             else if (neko_streq_safe(field_name, "_name")) g_neko_method_layout.off_klass_name = (ptrdiff_t)off_value;
+        } else if (neko_streq_safe(type_name, "ObjArrayKlass")) {
+            if (neko_streq_safe(field_name, "_element_klass")) g_neko_method_layout.off_objarrayklass_element_klass = (ptrdiff_t)off_value;
         } else if (neko_streq_safe(type_name, "java_lang_Class")) {
             if (neko_streq_safe(field_name, "_klass_offset") && is_static && static_addr != NULL) {
                 g_neko_method_layout.off_java_lang_class_klass = (ptrdiff_t)(*(int*)static_addr);
@@ -1794,6 +1797,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.off_klass_subklass = -1;
     g_neko_method_layout.off_klass_next_link = -1;
     g_neko_method_layout.off_klass_name = -1;
+    g_neko_method_layout.off_objarrayklass_element_klass = -1;
     g_neko_method_layout.off_java_lang_class_klass = -1;
     g_neko_method_layout.off_classloaderdata_next = -1;
     g_neko_method_layout.off_classloaderdata_klasses = -1;

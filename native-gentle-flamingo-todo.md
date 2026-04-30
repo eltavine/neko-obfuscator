@@ -140,7 +140,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T3.4 Object field/static store through barrier-aware store entry.
 - [x] T3.5 `ARRAYLENGTH` direct length offset.
 - [x] T3.6 Primitive array load/store direct memory path.
-- [ ] T3.7 `AALOAD` / `AASTORE` barrier-aware path with bounds and store checks.
+- [x] T3.7 `AALOAD` / `AASTORE` barrier-aware path with bounds and store checks.
 - [ ] T3.8 `NEW` / `NEW+<init>` without `AllocObject` / `NewObjectA`.
 - [ ] T3.9 `NEWARRAY` / `ANEWARRAY` / `MULTIANEWARRAY` without JNI array allocation.
 - [ ] T3.10 `INSTANCEOF` / `CHECKCAST` via subtype metadata walk.
