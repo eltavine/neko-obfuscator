@@ -153,7 +153,7 @@ Each subtask below requires the listed runtime proof after the latest edit:
 - [x] T3.15 Exception dispatch via `_pending_exception` read/clear.
 - [x] T3.15a Fix `NEW TLAB allocation failed` runtime abort and add 10-run TEST/obfusjack stability validation.
 - [x] T3.16 Boxing/unboxing through direct call_stub / field reads.
-- [ ] T3.17 Reject non-manifest invoke callees and delete invoke JNI wrappers.
+- [x] T3.17 Reject non-manifest invoke callees and delete invoke JNI wrappers.
 - [ ] T3.18 Desugar or direct-resolve `INVOKEDYNAMIC`; delete MethodHandle JNI fallback.
 - [ ] T3.19 Remove StringBuilder JNI concat fallback.
 - [ ] T3.20 Delete `NEKO_JNI_FN_PTR` macro and replaced runtime wrappers.

@@ -30,9 +30,11 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
@@ -62,9 +64,11 @@ public final class NativeCompilationStage {
         List<ResourceEntry> originalResources = new ArrayList<>(resources);
 
         Map<String, ParsedClass> parsedClasses = parseClasses(allClasses);
+        Map<String, MethodSelection> manifestableMethods = manifestableMethods(parsedClasses);
+        List<MethodSelection> candidateMethods = new ArrayList<>();
         List<MethodSelection> selectedMethods = new ArrayList<>();
         Map<String, List<String>> rejectionReasons = new LinkedHashMap<>();
-        int rejectedMethodCount = 0;
+        Set<String> queuedCandidates = new LinkedHashSet<>();
 
         for (ParsedClass parsedClass : parsedClasses.values()) {
             boolean classAnnotated = hasAnnotation(parsedClass.l1Class().asmNode().visibleAnnotations)
@@ -77,21 +81,44 @@ public final class NativeCompilationStage {
                 if (method.isConstructor() || method.isClassInit() || method.isAbstract() || method.isNative() || method.isBridge()) {
                     continue;
                 }
+                MethodSelection selection = new MethodSelection(parsedClass.l1Class(), method);
+                addCandidate(selection, candidateMethods, queuedCandidates);
+            }
+        }
+        closeOverApplicationCallees(candidateMethods, queuedCandidates, manifestableMethods);
 
+        Set<String> applicationMethodKeys = manifestableMethods.keySet();
+        Set<String> selectedMethodKeys = methodKeys(candidateMethods);
+        boolean changed;
+        do {
+            changed = false;
+            selectedMethods.clear();
+            rejectionReasons.clear();
+            for (MethodSelection selection : candidateMethods) {
                 List<String> reasons = new ArrayList<>();
-                if (parsedClass.l1Class().isInterface()) {
+                if (selection.owner().isInterface()) {
                     reasons.add("interface methods cannot be marked ACC_NATIVE in valid classfiles");
                 }
-                if (!safetyChecker.isSafe(method, reasons)) {
-                    rejectedMethodCount++;
-                    rejectionReasons.put(methodKey(parsedClass.l1Class().name(), method), reasons);
-                    log.warn("Rejected native translation for {}: {}", methodKey(parsedClass.l1Class().name(), method), String.join("; ", reasons));
-                    if (!cfg.skipOnError()) {
-                        throw new IllegalStateException("Unsafe native translation target: " + methodKey(parsedClass.l1Class().name(), method));
-                    }
+                if (!safetyChecker.isSafe(selection.method(), reasons, applicationMethodKeys, selectedMethodKeys)) {
+                    rejectionReasons.put(methodKey(selection), reasons);
                     continue;
                 }
-                selectedMethods.add(new MethodSelection(parsedClass.l1Class(), method));
+                selectedMethods.add(selection);
+            }
+            Set<String> nextKeys = methodKeys(selectedMethods);
+            if (!nextKeys.equals(selectedMethodKeys)) {
+                selectedMethodKeys = nextKeys;
+                changed = true;
+            }
+        } while (changed);
+
+        int rejectedMethodCount = rejectionReasons.size();
+        if (!rejectionReasons.isEmpty()) {
+            for (Map.Entry<String, List<String>> entry : rejectionReasons.entrySet()) {
+                log.warn("Rejected native translation for {}: {}", entry.getKey(), String.join("; ", entry.getValue()));
+            }
+            if (!cfg.skipOnError()) {
+                throw new IllegalStateException("Unsafe native translation target: " + rejectionReasons.keySet().iterator().next());
             }
         }
 
@@ -375,6 +402,59 @@ public final class NativeCompilationStage {
 
     private String methodKey(String owner, L1Method method) {
         return owner + '#' + method.name() + method.descriptor();
+    }
+
+    private String methodKey(MethodSelection selection) {
+        return methodKey(selection.owner().name(), selection.method());
+    }
+
+    private Set<String> methodKeys(List<MethodSelection> selections) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (MethodSelection selection : selections) {
+            keys.add(methodKey(selection));
+        }
+        return keys;
+    }
+
+    private Map<String, MethodSelection> manifestableMethods(Map<String, ParsedClass> parsedClasses) {
+        Map<String, MethodSelection> methods = new LinkedHashMap<>();
+        for (ParsedClass parsedClass : parsedClasses.values()) {
+            if (parsedClass.l1Class().isInterface()) {
+                continue;
+            }
+            for (L1Method method : parsedClass.l1Class().methods()) {
+                if (method.isConstructor() || method.isClassInit() || method.isAbstract() || method.isNative() || method.isBridge()) {
+                    continue;
+                }
+                MethodSelection selection = new MethodSelection(parsedClass.l1Class(), method);
+                methods.put(methodKey(selection), selection);
+            }
+        }
+        return methods;
+    }
+
+    private void closeOverApplicationCallees(
+        List<MethodSelection> candidateMethods,
+        Set<String> queuedCandidates,
+        Map<String, MethodSelection> manifestableMethods
+    ) {
+        for (int i = 0; i < candidateMethods.size(); i++) {
+            MethodSelection selection = candidateMethods.get(i);
+            for (var insn = selection.method().instructions().getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof MethodInsnNode methodInsn) {
+                    MethodSelection callee = manifestableMethods.get(methodInsn.owner + '#' + methodInsn.name + methodInsn.desc);
+                    if (callee != null) {
+                        addCandidate(callee, candidateMethods, queuedCandidates);
+                    }
+                }
+            }
+        }
+    }
+
+    private void addCandidate(MethodSelection selection, List<MethodSelection> candidateMethods, Set<String> queuedCandidates) {
+        if (queuedCandidates.add(methodKey(selection))) {
+            candidateMethods.add(selection);
+        }
     }
 
     private record ParsedClass(ClassNode classNode, L1Class l1Class) {}

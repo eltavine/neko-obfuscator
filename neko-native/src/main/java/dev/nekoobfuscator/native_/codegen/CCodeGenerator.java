@@ -2319,36 +2319,6 @@ static inline jboolean neko_is_same_object(JNIEnv *env, jobject a, jobject b) { 
 static inline jobject neko_new_weak_global_ref(JNIEnv *env, jobject obj) { return NEKO_JNI_FN_PTR(env, 226, jobject, jobject)(env, obj); }
 static inline void neko_delete_weak_global_ref(JNIEnv *env, jobject obj) { NEKO_JNI_FN_PTR(env, 227, void, jobject)(env, obj); }
 static inline jobject neko_new_object_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 30, jobject, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jobject neko_call_object_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jboolean neko_call_boolean_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 39, jboolean, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jbyte neko_call_byte_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 42, jbyte, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jchar neko_call_char_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 45, jchar, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jshort neko_call_short_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 48, jshort, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jint neko_call_int_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 51, jint, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jlong neko_call_long_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 54, jlong, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jfloat neko_call_float_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 57, jfloat, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jdouble neko_call_double_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 60, jdouble, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline void neko_call_void_method_a(JNIEnv *env, jobject obj, jmethodID mid, const jvalue *args) { NEKO_JNI_FN_PTR(env, 63, void, jobject, jmethodID, const jvalue*)(env, obj, mid, args); }
-static inline jobject neko_call_nonvirtual_object_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 66, jobject, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jboolean neko_call_nonvirtual_boolean_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 69, jboolean, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jbyte neko_call_nonvirtual_byte_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 72, jbyte, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jchar neko_call_nonvirtual_char_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 75, jchar, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jshort neko_call_nonvirtual_short_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 78, jshort, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jint neko_call_nonvirtual_int_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 81, jint, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jlong neko_call_nonvirtual_long_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 84, jlong, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jfloat neko_call_nonvirtual_float_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 87, jfloat, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jdouble neko_call_nonvirtual_double_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 90, jdouble, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline void neko_call_nonvirtual_void_method_a(JNIEnv *env, jobject obj, jclass cls, jmethodID mid, const jvalue *args) { NEKO_JNI_FN_PTR(env, 93, void, jobject, jclass, jmethodID, const jvalue*)(env, obj, cls, mid, args); }
-static inline jobject neko_call_static_object_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jboolean neko_call_static_boolean_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 119, jboolean, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jbyte neko_call_static_byte_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 122, jbyte, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jchar neko_call_static_char_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 125, jchar, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jshort neko_call_static_short_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 128, jshort, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jint neko_call_static_int_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 131, jint, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jlong neko_call_static_long_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 134, jlong, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jfloat neko_call_static_float_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 137, jfloat, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline jdouble neko_call_static_double_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { return NEKO_JNI_FN_PTR(env, 140, jdouble, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
-static inline void neko_call_static_void_method_a(JNIEnv *env, jclass cls, jmethodID mid, const jvalue *args) { NEKO_JNI_FN_PTR(env, 143, void, jclass, jmethodID, const jvalue*)(env, cls, mid, args); }
 static inline jobject neko_get_static_object_field(JNIEnv *env, jclass cls, jfieldID fid) { return NEKO_JNI_FN_PTR(env, 145, jobject, jclass, jfieldID)(env, cls, fid); }
 static inline jsize neko_get_string_length(JNIEnv *env, jstring str) { return NEKO_JNI_FN_PTR(env, 164, jsize, jstring)(env, str); }
 static inline jstring neko_new_string_utf(JNIEnv *env, const char *utf) { return NEKO_JNI_FN_PTR(env, 167, jstring, const char*)(env, utf); }
@@ -2551,7 +2521,7 @@ static jclass neko_load_class_noinit(JNIEnv *env, const char *internalName) {
     if (dotted == NULL) return NULL;
     jclass clClass = neko_find_class(env, "java/lang/ClassLoader");
     jmethodID getSystem = neko_get_static_method_id(env, clClass, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
-    jobject loader = neko_call_static_object_method_a(env, clClass, getSystem, NULL);
+    jobject loader = NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, clClass, getSystem, NULL);
     jclass classClass = neko_find_class(env, "java/lang/Class");
     jmethodID forName = neko_get_static_method_id(env, classClass, "forName", "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;");
     jvalue args[3];
@@ -2559,7 +2529,7 @@ static jclass neko_load_class_noinit(JNIEnv *env, const char *internalName) {
     args[1].z = JNI_FALSE;
     args[2].l = loader;
     free(dotted);
-    return (jclass)neko_call_static_object_method_a(env, classClass, forName, args);
+    return (jclass)NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, classClass, forName, args);
 }
 
 static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
@@ -2623,7 +2593,7 @@ static jobject neko_put_indy_mh(JNIEnv *env, jlong site_id, jobject mh) {
 static jobject neko_public_lookup(JNIEnv *env) {
     jclass mhClass = neko_find_class(env, "java/lang/invoke/MethodHandles");
     jmethodID mid = neko_get_static_method_id(env, mhClass, "publicLookup", "()Ljava/lang/invoke/MethodHandles$Lookup;");
-    return neko_call_static_object_method_a(env, mhClass, mid, NULL);
+    return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, mhClass, mid, NULL);
 }
 
 static jobject neko_impl_lookup(JNIEnv *env) {
@@ -2645,7 +2615,7 @@ static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
     jvalue args[2];
     args[0].l = ownerClass;
     args[1].l = neko_impl_lookup(env);
-    return neko_call_static_object_method_a(env, mhClass, mid, args);
+    return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, mhClass, mid, args);
 }
 
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
@@ -2654,14 +2624,14 @@ static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
     jvalue args[2];
     args[0].l = neko_new_string_utf(env, desc);
     args[1].l = NULL;
-    return neko_call_static_object_method_a(env, mtClass, mid, args);
+    return NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, mtClass, mid, args);
 }
 
 static jobjectArray neko_bootstrap_parameter_array(JNIEnv *env, const char *bsm_desc) {
     jobject mt = neko_method_type_from_descriptor(env, bsm_desc);
     jclass mtClass = neko_find_class(env, "java/lang/invoke/MethodType");
     jmethodID mid = neko_get_method_id(env, mtClass, "parameterArray", "()[Ljava/lang/Class;");
-    return (jobjectArray)neko_call_object_method_a(env, mt, mid, NULL);
+    return (jobjectArray)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, mt, mid, NULL);
 }
 
 static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray invoke_args) {
@@ -2672,20 +2642,20 @@ static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const c
     jvalue getArgs[2];
     getArgs[0].l = neko_new_string_utf(env, bsm_name);
     getArgs[1].l = paramTypes;
-    jobject method = neko_call_object_method_a(env, bsmClass, getDeclaredMethod, getArgs);
+    jobject method = NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, bsmClass, getDeclaredMethod, getArgs);
 
     jclass accessibleClass = neko_find_class(env, "java/lang/reflect/AccessibleObject");
     jmethodID setAccessible = neko_get_method_id(env, accessibleClass, "setAccessible", "(Z)V");
     jvalue accessibleArgs[1];
     accessibleArgs[0].z = JNI_TRUE;
-    neko_call_void_method_a(env, method, setAccessible, accessibleArgs);
+    NEKO_JNI_FN_PTR(env, 63, void, jobject, jmethodID, const jvalue*)(env, method, setAccessible, accessibleArgs);
 
     jclass methodClass = neko_find_class(env, "java/lang/reflect/Method");
     jmethodID invoke = neko_get_method_id(env, methodClass, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
     jvalue invokeArgs[2];
     invokeArgs[0].l = NULL;
     invokeArgs[1].l = invoke_args;
-    return neko_call_object_method_a(env, method, invoke, invokeArgs);
+    return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, method, invoke, invokeArgs);
 }
 
 static jobject neko_method_handle_from_parts(JNIEnv *env, jint tag, const char *owner, const char *name, const char *desc, jboolean isInterface) {
@@ -2699,52 +2669,52 @@ static jobject neko_method_handle_from_parts(JNIEnv *env, jint tag, const char *
         case 1: {
             jmethodID mid = neko_get_method_id(env, lookupClass, "findGetter", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = neko_class_for_descriptor(env, desc);
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         case 2: {
             jmethodID mid = neko_get_method_id(env, lookupClass, "findStaticGetter", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = neko_class_for_descriptor(env, desc);
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         case 3: {
             jmethodID mid = neko_get_method_id(env, lookupClass, "findSetter", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = neko_class_for_descriptor(env, desc);
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         case 4: {
             jmethodID mid = neko_get_method_id(env, lookupClass, "findStaticSetter", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = neko_class_for_descriptor(env, desc);
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         case 5: {
             jobject mt = neko_method_type_from_descriptor(env, desc);
             jmethodID mid = neko_get_method_id(env, lookupClass, "findVirtual", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = mt;
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         case 6: {
             jobject mt = neko_method_type_from_descriptor(env, desc);
             jmethodID mid = neko_get_method_id(env, lookupClass, "findStatic", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = mt;
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         case 7: {
             jobject mt = neko_method_type_from_descriptor(env, desc);
             jmethodID mid = neko_get_method_id(env, lookupClass, "findSpecial", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[4]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = mt; args[3].l = ownerClass;
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         case 8: {
             jobject mt = neko_method_type_from_descriptor(env, desc);
             jmethodID mid = neko_get_method_id(env, lookupClass, "findConstructor", "(Ljava/lang/Class;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[2]; args[0].l = ownerClass; args[1].l = mt;
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         case 9: {
             jobject mt = neko_method_type_from_descriptor(env, desc);
             jmethodID mid = neko_get_method_id(env, lookupClass, "findVirtual", "(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;");
             jvalue args[3]; args[0].l = ownerClass; args[1].l = nameString; args[2].l = mt;
-            return neko_call_object_method_a(env, lookup, mid, args);
+            return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lookup, mid, args);
         }
         default:
             return NULL;
@@ -2756,7 +2726,7 @@ static jobject neko_call_mh(JNIEnv *env, jobject mh, jobjectArray args) {
     jmethodID mid = neko_get_method_id(env, mhClass, "invokeWithArguments", "([Ljava/lang/Object;)Ljava/lang/Object;");
     jvalue callArgs[1];
     callArgs[0].l = args;
-    return neko_call_object_method_a(env, mh, mid, callArgs);
+    return NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, mh, mid, callArgs);
 }
 
 static jstring neko_string_null(JNIEnv *env) {
@@ -2773,12 +2743,12 @@ static jstring neko_string_concat2(JNIEnv *env, jobject left, jobject right) {
     jmethodID concat = NEKO_ENSURE_METHOD_ID(g_str_concat, env, cls, "concat", "(Ljava/lang/String;)Ljava/lang/String;");
     jvalue valueOfArgs[1];
     valueOfArgs[0].l = left;
-    jstring lhs = (jstring)neko_call_static_object_method_a(env, cls, valueOf, valueOfArgs);
+    jstring lhs = (jstring)NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, cls, valueOf, valueOfArgs);
     valueOfArgs[0].l = right;
-    jstring rhs = (jstring)neko_call_static_object_method_a(env, cls, valueOf, valueOfArgs);
+    jstring rhs = (jstring)NEKO_JNI_FN_PTR(env, 116, jobject, jclass, jmethodID, const jvalue*)(env, cls, valueOf, valueOfArgs);
     jvalue concatArgs[1];
     concatArgs[0].l = rhs;
-    return (jstring)neko_call_object_method_a(env, lhs, concat, concatArgs);
+    return (jstring)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lhs, concat, concatArgs);
 }
 
 static jstring neko_string_concat_string(JNIEnv *env, jobject left, jstring right) {
@@ -2796,7 +2766,7 @@ static jstring neko_string_concat_string(JNIEnv *env, jobject left, jstring righ
     }
     jvalue concatArgs[1];
     concatArgs[0].l = right == NULL ? neko_string_null(env) : right;
-    return (jstring)neko_call_object_method_a(env, lhs, concat, concatArgs);
+    return (jstring)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, lhs, concat, concatArgs);
 }
 
 static jobject neko_resolve_indy(JNIEnv *env, jlong site_id, const char *caller_owner, const char *indy_name, const char *indy_desc, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray static_args) {
@@ -2819,7 +2789,7 @@ static jobject neko_resolve_indy(JNIEnv *env, jlong site_id, const char *caller_
     jobject mh = bootstrapResult;
     if (bootstrapResult != NULL && neko_is_instance_of(env, bootstrapResult, callSiteClass)) {
         jmethodID dynamicInvoker = neko_get_method_id(env, callSiteClass, "dynamicInvoker", "()Ljava/lang/invoke/MethodHandle;");
-        mh = neko_call_object_method_a(env, bootstrapResult, dynamicInvoker, NULL);
+        mh = NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, bootstrapResult, dynamicInvoker, NULL);
     }
     return neko_put_indy_mh(env, site_id, mh);
 }

@@ -629,7 +629,6 @@ public final class OpcodeTranslator {
         Type[] bridgeArgs = Type.getArgumentTypes(bridge.descriptor());
         String bridgeDispatcher = codeGenerator.registerInvokeShape(true, SignaturePlan.collapseKind(ret), collapseArgKinds(bridgeArgs));
         sb.append("(void)__bridgeCls; ");
-        sb.append("/* neko_call_static_int_method_a( replaced by direct NJX ) */ ");
         if (ret.getSort() == Type.VOID) {
             sb.append(bridgeDispatcher).append("(thread, env, ")
                 .append(cachedMethodPtrExpression(bridge.ownerInternalName(), bridge.name(), bridge.descriptor(), true)).append(", ")

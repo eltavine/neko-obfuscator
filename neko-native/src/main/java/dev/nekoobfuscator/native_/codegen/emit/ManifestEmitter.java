@@ -191,7 +191,7 @@ public final class ManifestEmitter {
         sb.append("    get_name = neko_get_method_id(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
         sb.append("    neko_delete_local_ref(env, class_cls);\n");
         sb.append("    if (get_name == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
-        sb.append("    name_obj = (jstring)neko_call_object_method_a(env, owner_cls, get_name, NULL);\n");
+        sb.append("    name_obj = (jstring)NEKO_JNI_FN_PTR(env, 36, jobject, jobject, jmethodID, const jvalue*)(env, owner_cls, get_name, NULL);\n");
         sb.append("    if (name_obj == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); return JNI_FALSE; }\n");
         sb.append("    chars = neko_get_string_utf_chars(env, name_obj);\n");
         sb.append("    if (chars == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear(env); neko_delete_local_ref(env, name_obj); return JNI_FALSE; }\n");

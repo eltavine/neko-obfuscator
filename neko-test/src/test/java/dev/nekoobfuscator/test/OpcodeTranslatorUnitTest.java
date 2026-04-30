@@ -492,15 +492,15 @@ class OpcodeTranslatorUnitTest {
             TranslationArtifact artifact = translateSingleMethodArtifact(methodHandleBridgeOwner(invokeExact));
             String body = translatedBodySection(artifact.source());
 
-            assertTrue(body.contains("neko_call_static_int_method_a("), body);
             assertTrue(body.contains("neko$mh$"), body);
+            assertTrue(body.contains("neko_bound_method_i_entry("), body);
+            assertFalse(body.contains("neko_call_static_int_method_a("), body);
 
             int mhLoad = body.indexOf("jobject __mh = POP_O();");
-            int callSite = body.indexOf("neko_call_static_int_method_a(", mhLoad);
-            assertTrue(mhLoad >= 0 && callSite > mhLoad, body);
-            String between = body.substring(mhLoad, callSite);
-            assertFalse(between.contains("neko_new_object_array("), between);
-            assertFalse(between.contains("neko_set_object_array_element("), between);
+            assertTrue(mhLoad >= 0, body);
+            String bridgePath = body.substring(mhLoad);
+            assertFalse(bridgePath.contains("neko_new_object_array("), bridgePath);
+            assertFalse(bridgePath.contains("neko_set_object_array_element("), bridgePath);
 
             MethodNode bridge = artifact.classNode().methods.stream()
                 .filter(candidate -> candidate.name.startsWith("neko$mh$"))
@@ -536,8 +536,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(body, "neko_icache_dispatch(", "&neko_icache_");
         assertTrue(source.contains("neko_receiver_key("), source);
-        assertTrue(Pattern.compile("neko_call_nonvirtual_\\w+_method_a\\(").matcher(source).find(), source);
-        assertTrue(source.contains("neko_call_object_method_a(") || source.contains("neko_call_int_method_a(") || source.contains("neko_call_void_method_a("), source);
+        assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
     }
 
     @Test
@@ -547,8 +546,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(body, "neko_icache_dispatch(", "JNI_TRUE", "&neko_icache_");
         assertTrue(source.contains("neko_receiver_key("), source);
-        assertTrue(Pattern.compile("neko_call_nonvirtual_\\w+_method_a\\(").matcher(source).find(), source);
-        assertTrue(source.contains("neko_call_object_method_a(") || source.contains("neko_call_int_method_a(") || source.contains("neko_call_void_method_a("), source);
+        assertFalse(Pattern.compile("neko_call_(?:static_|nonvirtual_)?\\w+_method_a\\(").matcher(source).find(), source);
     }
 
     @Test

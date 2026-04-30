@@ -111,7 +111,10 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("static jint neko_unbox_int(void *thread, JNIEnv *env, jobject obj)"), source);
         assertFalse(source.contains("static jobject neko_box_int(JNIEnv *env"), source);
         assertFalse(source.contains("NEKO_ENSURE_STATIC_METHOD_ID(g_box_int_mid"), source);
-        assertFalse(source.contains("neko_call_int_method_a(env, obj, mid, NULL)"), source);
+        assertFalse(source.contains("neko_call_int_method_a("), source);
+        assertFalse(source.contains("neko_call_object_method_a("), source);
+        assertFalse(source.contains("neko_call_static_object_method_a("), source);
+        assertFalse(source.contains("neko_call_nonvirtual_object_method_a("), source);
         assertTrue(source.contains("neko_array_klass_bits_for_descriptor(env,"), source);
         assertTrue(source.contains("neko_fast_new_primitive_array(thread, env,"), source);
         assertTrue(source.contains("static void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot)"), source);
