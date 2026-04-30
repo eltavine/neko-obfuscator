@@ -1152,14 +1152,14 @@ public final class OpcodeTranslator {
 
     private String concatObjectExpression(Type type, String valueExpr) {
         return switch (type.getSort()) {
-            case Type.BOOLEAN -> "neko_box_boolean(env, (jboolean)" + valueExpr + ")";
-            case Type.CHAR -> "neko_box_char(env, (jchar)" + valueExpr + ")";
-            case Type.BYTE -> "neko_box_byte(env, (jbyte)" + valueExpr + ")";
-            case Type.SHORT -> "neko_box_short(env, (jshort)" + valueExpr + ")";
-            case Type.INT -> "neko_box_int(env, (jint)" + valueExpr + ")";
-            case Type.LONG -> "neko_box_long(env, (jlong)" + valueExpr + ")";
-            case Type.FLOAT -> "neko_box_float(env, (jfloat)" + valueExpr + ")";
-            case Type.DOUBLE -> "neko_box_double(env, (jdouble)" + valueExpr + ")";
+            case Type.BOOLEAN -> "neko_box_boolean(thread, env, (jboolean)" + valueExpr + ")";
+            case Type.CHAR -> "neko_box_char(thread, env, (jchar)" + valueExpr + ")";
+            case Type.BYTE -> "neko_box_byte(thread, env, (jbyte)" + valueExpr + ")";
+            case Type.SHORT -> "neko_box_short(thread, env, (jshort)" + valueExpr + ")";
+            case Type.INT -> "neko_box_int(thread, env, (jint)" + valueExpr + ")";
+            case Type.LONG -> "neko_box_long(thread, env, (jlong)" + valueExpr + ")";
+            case Type.FLOAT -> "neko_box_float(thread, env, (jfloat)" + valueExpr + ")";
+            case Type.DOUBLE -> "neko_box_double(thread, env, (jdouble)" + valueExpr + ")";
             default -> "(jobject)" + valueExpr;
         };
     }
@@ -1252,28 +1252,28 @@ public final class OpcodeTranslator {
             return "NULL";
         }
         if (arg instanceof Boolean value) {
-            return "neko_box_boolean(env, " + (value ? "JNI_TRUE" : "JNI_FALSE") + ")";
+            return "neko_box_boolean(thread, env, " + (value ? "JNI_TRUE" : "JNI_FALSE") + ")";
         }
         if (arg instanceof Byte value) {
-            return "neko_box_byte(env, (jbyte)" + value + ")";
+            return "neko_box_byte(thread, env, (jbyte)" + value + ")";
         }
         if (arg instanceof Character value) {
-            return "neko_box_char(env, (jchar)" + (int) value.charValue() + ")";
+            return "neko_box_char(thread, env, (jchar)" + (int) value.charValue() + ")";
         }
         if (arg instanceof Short value) {
-            return "neko_box_short(env, (jshort)" + value + ")";
+            return "neko_box_short(thread, env, (jshort)" + value + ")";
         }
         if (arg instanceof Integer value) {
-            return "neko_box_int(env, " + value + ")";
+            return "neko_box_int(thread, env, " + value + ")";
         }
         if (arg instanceof Long value) {
-            return "neko_box_long(env, " + value + "LL)";
+            return "neko_box_long(thread, env, " + value + "LL)";
         }
         if (arg instanceof Float value) {
-            return "neko_box_float(env, " + floatLiteral(value) + ")";
+            return "neko_box_float(thread, env, " + floatLiteral(value) + ")";
         }
         if (arg instanceof Double value) {
-            return "neko_box_double(env, " + doubleLiteral(value) + ")";
+            return "neko_box_double(thread, env, " + doubleLiteral(value) + ")";
         }
         if (arg instanceof String value) {
             return cachedStringExpression(value);
@@ -1325,14 +1325,14 @@ public final class OpcodeTranslator {
 
     private String boxValueExpression(Type type, String valueExpr) {
         return switch (type.getSort()) {
-            case Type.BOOLEAN -> "neko_box_boolean(env, " + valueExpr + ")";
-            case Type.BYTE -> "neko_box_byte(env, " + valueExpr + ")";
-            case Type.CHAR -> "neko_box_char(env, " + valueExpr + ")";
-            case Type.SHORT -> "neko_box_short(env, " + valueExpr + ")";
-            case Type.INT -> "neko_box_int(env, " + valueExpr + ")";
-            case Type.FLOAT -> "neko_box_float(env, " + valueExpr + ")";
-            case Type.LONG -> "neko_box_long(env, " + valueExpr + ")";
-            case Type.DOUBLE -> "neko_box_double(env, " + valueExpr + ")";
+            case Type.BOOLEAN -> "neko_box_boolean(thread, env, " + valueExpr + ")";
+            case Type.BYTE -> "neko_box_byte(thread, env, " + valueExpr + ")";
+            case Type.CHAR -> "neko_box_char(thread, env, " + valueExpr + ")";
+            case Type.SHORT -> "neko_box_short(thread, env, " + valueExpr + ")";
+            case Type.INT -> "neko_box_int(thread, env, " + valueExpr + ")";
+            case Type.FLOAT -> "neko_box_float(thread, env, " + valueExpr + ")";
+            case Type.LONG -> "neko_box_long(thread, env, " + valueExpr + ")";
+            case Type.DOUBLE -> "neko_box_double(thread, env, " + valueExpr + ")";
             default -> valueExpr;
         };
     }
@@ -1340,16 +1340,22 @@ public final class OpcodeTranslator {
     private String unboxReturn(Type ret, String objExpr) {
         return switch (ret.getSort()) {
             case Type.VOID -> "";
-            case Type.BOOLEAN -> "PUSH_I(neko_unbox_boolean(env, " + objExpr + ")); ";
-            case Type.BYTE -> "PUSH_I((jint)neko_unbox_byte(env, " + objExpr + ")); ";
-            case Type.CHAR -> "PUSH_I((jint)neko_unbox_char(env, " + objExpr + ")); ";
-            case Type.SHORT -> "PUSH_I((jint)neko_unbox_short(env, " + objExpr + ")); ";
-            case Type.INT -> "PUSH_I(neko_unbox_int(env, " + objExpr + ")); ";
-            case Type.FLOAT -> "PUSH_F(neko_unbox_float(env, " + objExpr + ")); ";
-            case Type.LONG -> "PUSH_L(neko_unbox_long(env, " + objExpr + ")); ";
-            case Type.DOUBLE -> "PUSH_D(neko_unbox_double(env, " + objExpr + ")); ";
+            case Type.BOOLEAN -> unboxReturnWithNullCheck("PUSH_I(neko_unbox_boolean(thread, env, __unboxObj)); ", objExpr);
+            case Type.BYTE -> unboxReturnWithNullCheck("PUSH_I((jint)neko_unbox_byte(thread, env, __unboxObj)); ", objExpr);
+            case Type.CHAR -> unboxReturnWithNullCheck("PUSH_I((jint)neko_unbox_char(thread, env, __unboxObj)); ", objExpr);
+            case Type.SHORT -> unboxReturnWithNullCheck("PUSH_I((jint)neko_unbox_short(thread, env, __unboxObj)); ", objExpr);
+            case Type.INT -> unboxReturnWithNullCheck("PUSH_I(neko_unbox_int(thread, env, __unboxObj)); ", objExpr);
+            case Type.FLOAT -> unboxReturnWithNullCheck("PUSH_F(neko_unbox_float(thread, env, __unboxObj)); ", objExpr);
+            case Type.LONG -> unboxReturnWithNullCheck("PUSH_L(neko_unbox_long(thread, env, __unboxObj)); ", objExpr);
+            case Type.DOUBLE -> unboxReturnWithNullCheck("PUSH_D(neko_unbox_double(thread, env, __unboxObj)); ", objExpr);
             default -> "PUSH_O(" + objExpr + "); ";
         };
+    }
+
+    private String unboxReturnWithNullCheck(String successCode, String objExpr) {
+        return "{ jobject __unboxObj = " + objExpr + "; if (__unboxObj == NULL) { "
+            + raiseImplicitException("java/lang/NullPointerException")
+            + "; } else { " + successCode + "} } ";
     }
 
     private void appendStringBuilderLiteral(StringBuilder sb, String literal) {

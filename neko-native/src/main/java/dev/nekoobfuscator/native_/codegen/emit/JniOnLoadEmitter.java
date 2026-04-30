@@ -43,6 +43,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     }
     neko_hotspot_init(env);
     neko_refresh_hotspot_vmstruct_state();
+    neko_boxing_cache_init(env);
     neko_bootstrap_owner_discovery(env);
     return JNI_VERSION_1_6;
 }

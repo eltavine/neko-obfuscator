@@ -481,7 +481,7 @@ class OpcodeTranslatorUnitTest {
             "area=\u0001 count=\u0001"
         )));
 
-        assertContains(code, "neko_box_double(env, (jdouble)arg0)", "neko_box_int(env, (jint)arg1)", "java/lang/StringConcatHelper", "simpleConcat");
+        assertContains(code, "neko_box_double(thread, env, (jdouble)arg0)", "neko_box_int(thread, env, (jint)arg1)", "java/lang/StringConcatHelper", "simpleConcat");
         assertFalse(code.contains("java/lang/StringBuilder"), code);
         assertFalse(code.contains("neko_new_object_a(env"), code);
     }

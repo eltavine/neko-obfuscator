@@ -204,6 +204,13 @@ public final class CCodeGenerator {
         return nativeToJavaInvokeEmitter.register(SignaturePlan.Shape.of(returnKind, argKinds, isStatic));
     }
 
+    private void registerPrimitiveBoxingInvokeShapes() {
+        registerInvokeShape(true, 'L', new char[] { 'I' });
+        registerInvokeShape(true, 'L', new char[] { 'J' });
+        registerInvokeShape(true, 'L', new char[] { 'F' });
+        registerInvokeShape(true, 'L', new char[] { 'D' });
+    }
+
     public String reserveInvokeCacheMeta(
         String bindingOwner,
         String methodKey,
@@ -255,6 +262,7 @@ public final class CCodeGenerator {
         sb.append("#include <string.h>\n");
         sb.append("#include <math.h>\n\n");
         SignaturePlan signaturePlan = SignaturePlan.build(bindings);
+        registerPrimitiveBoxingInvokeShapes();
         /* Forward decls + manifest struct first; everything below references them. */
         sb.append(manifestEmitter.renderStructAndForwardDecls());
         sb.append("/* Forward decls for trampoline ↔ patcher coupling. */\n");
@@ -308,6 +316,7 @@ public final class CCodeGenerator {
         sb.append("static void *neko_decode_klass_header_bits(uintptr_t bits);\n");
         sb.append("static void neko_njx_init_wrappers(void);\n\n");
         sb.append("static void neko_fast_string_runtime_init(JNIEnv *env);\n\n");
+        sb.append("static void neko_boxing_cache_init(JNIEnv *env);\n\n");
         sb.append("static uintptr_t neko_array_klass_bits_for_descriptor(JNIEnv *env, const char *arrayDesc, jclass fromClass);\n");
         sb.append("static jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclass cls);\n");
         sb.append("static jobjectArray neko_fast_new_object_array(void *thread, JNIEnv *env, jint len, uintptr_t klass_bits, jobject init);\n");
@@ -332,6 +341,7 @@ public final class CCodeGenerator {
         sb.append(nativeToJavaInvokeEmitter.renderBodies());
         sb.append(nativeToJavaInvokeEmitter.renderInitFunction());
         sb.append(renderBindSupport());
+        sb.append(renderBoxingSupport());
         sb.append(jniOnLoadEmitter.renderRegistrationTable());
         sb.append(renderBindOwnerFunctions());
         sb.append(renderIcacheDirectStubs());
@@ -1957,6 +1967,117 @@ static void neko_bind_static_field_metadata(JNIEnv *env, jobject *baseSlot, jlon
 """;
     }
 
+    private String renderBoxingSupport() {
+        return """
+typedef struct {
+    const char *owner;
+    const char *value_sig;
+    const char *valueof_sig;
+    void *valueof_method;
+    void *valueof_entry;
+    jlong value_offset;
+} neko_boxing_cache_t;
+
+static neko_boxing_cache_t g_neko_box_boolean = {"java/lang/Boolean", "Z", "(Z)Ljava/lang/Boolean;", NULL, NULL, -1};
+static neko_boxing_cache_t g_neko_box_byte = {"java/lang/Byte", "B", "(B)Ljava/lang/Byte;", NULL, NULL, -1};
+static neko_boxing_cache_t g_neko_box_char = {"java/lang/Character", "C", "(C)Ljava/lang/Character;", NULL, NULL, -1};
+static neko_boxing_cache_t g_neko_box_short = {"java/lang/Short", "S", "(S)Ljava/lang/Short;", NULL, NULL, -1};
+static neko_boxing_cache_t g_neko_box_int = {"java/lang/Integer", "I", "(I)Ljava/lang/Integer;", NULL, NULL, -1};
+static neko_boxing_cache_t g_neko_box_long = {"java/lang/Long", "J", "(J)Ljava/lang/Long;", NULL, NULL, -1};
+static neko_boxing_cache_t g_neko_box_float = {"java/lang/Float", "F", "(F)Ljava/lang/Float;", NULL, NULL, -1};
+static neko_boxing_cache_t g_neko_box_double = {"java/lang/Double", "D", "(D)Ljava/lang/Double;", NULL, NULL, -1};
+static jboolean g_neko_boxing_cache_ready = JNI_FALSE;
+
+static void neko_boxing_cache_init_one(JNIEnv *env, neko_boxing_cache_t *cache) {
+    void *klass = NULL;
+    jclass mirror;
+    neko_field_resolution_t field;
+    if (env == NULL || cache == NULL || cache->owner == NULL || cache->value_sig == NULL || cache->valueof_sig == NULL) {
+        fprintf(stderr, "[neko-bind] boxing cache init missing input\\n");
+        abort();
+    }
+    mirror = neko_resolve_class_mirror_with_env(env, cache->owner, NULL, &klass);
+    if (mirror == NULL || klass == NULL) {
+        fprintf(stderr, "[neko-bind] boxing class resolution failed: %s\\n", cache->owner);
+        abort();
+    }
+    cache->valueof_method = neko_resolve_method(klass, "valueOf", cache->valueof_sig);
+    cache->valueof_entry = neko_bound_method_i_entry(cache->valueof_method, &cache->valueof_entry, cache->owner, "valueOf", cache->valueof_sig);
+    field = neko_resolve_field(klass, "value", cache->value_sig, JNI_FALSE);
+    if (!field.found || field.offset == 0) {
+        fprintf(stderr, "[neko-bind] boxing value field resolution failed: %s.value:%s\\n", cache->owner, cache->value_sig);
+        abort();
+    }
+    cache->value_offset = (jlong)field.offset;
+}
+
+static void neko_boxing_cache_init(JNIEnv *env) {
+    if (g_neko_boxing_cache_ready) return;
+    neko_boxing_cache_init_one(env, &g_neko_box_boolean);
+    neko_boxing_cache_init_one(env, &g_neko_box_byte);
+    neko_boxing_cache_init_one(env, &g_neko_box_char);
+    neko_boxing_cache_init_one(env, &g_neko_box_short);
+    neko_boxing_cache_init_one(env, &g_neko_box_int);
+    neko_boxing_cache_init_one(env, &g_neko_box_long);
+    neko_boxing_cache_init_one(env, &g_neko_box_float);
+    neko_boxing_cache_init_one(env, &g_neko_box_double);
+    g_neko_boxing_cache_ready = JNI_TRUE;
+}
+
+static jobject neko_box_call(void *thread, JNIEnv *env, neko_boxing_cache_t *cache, jvalue arg, neko_njx_dispatcher_t dispatcher) {
+    jvalue result;
+    result.j = 0;
+    if (!g_neko_boxing_cache_ready) neko_boxing_cache_init(env);
+    if (thread == NULL) thread = neko_jni_env_to_thread(env);
+    if (thread == NULL || cache == NULL || cache->valueof_method == NULL || dispatcher == NULL) {
+        fprintf(stderr, "[neko-direct] boxing call_stub precondition failed owner=%s thread=%p method=%p dispatcher=%p\\n",
+            cache == NULL ? "<null>" : cache->owner, thread, cache == NULL ? NULL : cache->valueof_method, (void*)dispatcher);
+        abort();
+    }
+    result = dispatcher(thread, env, cache->valueof_method,
+        neko_bound_method_i_entry(cache->valueof_method, &cache->valueof_entry, cache->owner, "valueOf", cache->valueof_sig),
+        NULL, &arg);
+    return result.l;
+}
+
+static char *neko_unbox_oop(void *thread, JNIEnv *env, jobject obj, neko_boxing_cache_t *cache) {
+    char *oop;
+    (void)thread;
+    if (!g_neko_boxing_cache_ready) neko_boxing_cache_init(env);
+    if (obj == NULL || cache == NULL || cache->value_offset <= 0) {
+        fprintf(stderr, "[neko-direct] unbox precondition failed owner=%s obj=%p offset=%lld\\n",
+            cache == NULL ? "<null>" : cache->owner, (void*)obj, (long long)(cache == NULL ? -1 : cache->value_offset));
+        abort();
+    }
+    oop = (char*)neko_handle_oop(obj);
+    if (oop == NULL) {
+        fprintf(stderr, "[neko-direct] boxed object handle unresolved owner=%s obj=%p\\n", cache->owner, (void*)obj);
+        abort();
+    }
+    return oop;
+}
+
+static jobject neko_box_boolean(void *thread, JNIEnv *env, jboolean v) { jvalue arg; arg.z = v; return neko_box_call(thread, env, &g_neko_box_boolean, arg, neko_njx_S_L_I); }
+static jobject neko_box_byte(void *thread, JNIEnv *env, jbyte v) { jvalue arg; arg.b = v; return neko_box_call(thread, env, &g_neko_box_byte, arg, neko_njx_S_L_I); }
+static jobject neko_box_char(void *thread, JNIEnv *env, jchar v) { jvalue arg; arg.c = v; return neko_box_call(thread, env, &g_neko_box_char, arg, neko_njx_S_L_I); }
+static jobject neko_box_short(void *thread, JNIEnv *env, jshort v) { jvalue arg; arg.s = v; return neko_box_call(thread, env, &g_neko_box_short, arg, neko_njx_S_L_I); }
+static jobject neko_box_int(void *thread, JNIEnv *env, jint v) { jvalue arg; arg.i = v; return neko_box_call(thread, env, &g_neko_box_int, arg, neko_njx_S_L_I); }
+static jobject neko_box_long(void *thread, JNIEnv *env, jlong v) { jvalue arg; arg.j = v; return neko_box_call(thread, env, &g_neko_box_long, arg, neko_njx_S_L_J); }
+static jobject neko_box_float(void *thread, JNIEnv *env, jfloat v) { jvalue arg; arg.f = v; return neko_box_call(thread, env, &g_neko_box_float, arg, neko_njx_S_L_F); }
+static jobject neko_box_double(void *thread, JNIEnv *env, jdouble v) { jvalue arg; arg.d = v; return neko_box_call(thread, env, &g_neko_box_double, arg, neko_njx_S_L_D); }
+
+static jboolean neko_unbox_boolean(void *thread, JNIEnv *env, jobject obj) { char *oop = neko_unbox_oop(thread, env, obj, &g_neko_box_boolean); return *(jboolean*)(oop + g_neko_box_boolean.value_offset); }
+static jbyte neko_unbox_byte(void *thread, JNIEnv *env, jobject obj) { char *oop = neko_unbox_oop(thread, env, obj, &g_neko_box_byte); return *(jbyte*)(oop + g_neko_box_byte.value_offset); }
+static jchar neko_unbox_char(void *thread, JNIEnv *env, jobject obj) { char *oop = neko_unbox_oop(thread, env, obj, &g_neko_box_char); return *(jchar*)(oop + g_neko_box_char.value_offset); }
+static jshort neko_unbox_short(void *thread, JNIEnv *env, jobject obj) { char *oop = neko_unbox_oop(thread, env, obj, &g_neko_box_short); return *(jshort*)(oop + g_neko_box_short.value_offset); }
+static jint neko_unbox_int(void *thread, JNIEnv *env, jobject obj) { char *oop = neko_unbox_oop(thread, env, obj, &g_neko_box_int); return *(jint*)(oop + g_neko_box_int.value_offset); }
+static jlong neko_unbox_long(void *thread, JNIEnv *env, jobject obj) { char *oop = neko_unbox_oop(thread, env, obj, &g_neko_box_long); return *(jlong*)(oop + g_neko_box_long.value_offset); }
+static jfloat neko_unbox_float(void *thread, JNIEnv *env, jobject obj) { char *oop = neko_unbox_oop(thread, env, obj, &g_neko_box_float); return *(jfloat*)(oop + g_neko_box_float.value_offset); }
+static jdouble neko_unbox_double(void *thread, JNIEnv *env, jobject obj) { char *oop = neko_unbox_oop(thread, env, obj, &g_neko_box_double); return *(jdouble*)(oop + g_neko_box_double.value_offset); }
+
+""";
+    }
+
     private String renderBindOwnerFunctions() {
         StringBuilder sb = new StringBuilder();
         if (ownerBindIndex.isEmpty()) {
@@ -2439,127 +2560,6 @@ static jclass neko_load_class_noinit(JNIEnv *env, const char *internalName) {
     args[2].l = loader;
     free(dotted);
     return (jclass)neko_call_static_object_method_a(env, classClass, forName, args);
-}
-
-static jobject neko_box_boolean(JNIEnv *env, jboolean v) {
-    static jclass g_box_boolean_cls = NULL;
-    static jmethodID g_box_boolean_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_box_boolean_cls, env, "java/lang/Boolean");
-    jmethodID mid = NEKO_ENSURE_STATIC_METHOD_ID(g_box_boolean_mid, env, cls, "valueOf", "(Z)Ljava/lang/Boolean;");
-    jvalue args[1]; args[0].z = v;
-    return neko_call_static_object_method_a(env, cls, mid, args);
-}
-static jobject neko_box_byte(JNIEnv *env, jbyte v) {
-    static jclass g_box_byte_cls = NULL;
-    static jmethodID g_box_byte_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_box_byte_cls, env, "java/lang/Byte");
-    jmethodID mid = NEKO_ENSURE_STATIC_METHOD_ID(g_box_byte_mid, env, cls, "valueOf", "(B)Ljava/lang/Byte;");
-    jvalue args[1]; args[0].b = v;
-    return neko_call_static_object_method_a(env, cls, mid, args);
-}
-static jobject neko_box_char(JNIEnv *env, jchar v) {
-    static jclass g_box_char_cls = NULL;
-    static jmethodID g_box_char_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_box_char_cls, env, "java/lang/Character");
-    jmethodID mid = NEKO_ENSURE_STATIC_METHOD_ID(g_box_char_mid, env, cls, "valueOf", "(C)Ljava/lang/Character;");
-    jvalue args[1]; args[0].c = v;
-    return neko_call_static_object_method_a(env, cls, mid, args);
-}
-static jobject neko_box_short(JNIEnv *env, jshort v) {
-    static jclass g_box_short_cls = NULL;
-    static jmethodID g_box_short_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_box_short_cls, env, "java/lang/Short");
-    jmethodID mid = NEKO_ENSURE_STATIC_METHOD_ID(g_box_short_mid, env, cls, "valueOf", "(S)Ljava/lang/Short;");
-    jvalue args[1]; args[0].s = v;
-    return neko_call_static_object_method_a(env, cls, mid, args);
-}
-static jobject neko_box_int(JNIEnv *env, jint v) {
-    static jclass g_box_int_cls = NULL;
-    static jmethodID g_box_int_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_box_int_cls, env, "java/lang/Integer");
-    jmethodID mid = NEKO_ENSURE_STATIC_METHOD_ID(g_box_int_mid, env, cls, "valueOf", "(I)Ljava/lang/Integer;");
-    jvalue args[1]; args[0].i = v;
-    return neko_call_static_object_method_a(env, cls, mid, args);
-}
-static jobject neko_box_long(JNIEnv *env, jlong v) {
-    static jclass g_box_long_cls = NULL;
-    static jmethodID g_box_long_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_box_long_cls, env, "java/lang/Long");
-    jmethodID mid = NEKO_ENSURE_STATIC_METHOD_ID(g_box_long_mid, env, cls, "valueOf", "(J)Ljava/lang/Long;");
-    jvalue args[1]; args[0].j = v;
-    return neko_call_static_object_method_a(env, cls, mid, args);
-}
-static jobject neko_box_float(JNIEnv *env, jfloat v) {
-    static jclass g_box_float_cls = NULL;
-    static jmethodID g_box_float_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_box_float_cls, env, "java/lang/Float");
-    jmethodID mid = NEKO_ENSURE_STATIC_METHOD_ID(g_box_float_mid, env, cls, "valueOf", "(F)Ljava/lang/Float;");
-    jvalue args[1]; args[0].f = v;
-    return neko_call_static_object_method_a(env, cls, mid, args);
-}
-static jobject neko_box_double(JNIEnv *env, jdouble v) {
-    static jclass g_box_double_cls = NULL;
-    static jmethodID g_box_double_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_box_double_cls, env, "java/lang/Double");
-    jmethodID mid = NEKO_ENSURE_STATIC_METHOD_ID(g_box_double_mid, env, cls, "valueOf", "(D)Ljava/lang/Double;");
-    jvalue args[1]; args[0].d = v;
-    return neko_call_static_object_method_a(env, cls, mid, args);
-}
-static jboolean neko_unbox_boolean(JNIEnv *env, jobject obj) {
-    static jclass g_unbox_boolean_cls = NULL;
-    static jmethodID g_unbox_boolean_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_unbox_boolean_cls, env, "java/lang/Boolean");
-    jmethodID mid = NEKO_ENSURE_METHOD_ID(g_unbox_boolean_mid, env, cls, "booleanValue", "()Z");
-    return neko_call_boolean_method_a(env, obj, mid, NULL);
-}
-static jbyte neko_unbox_byte(JNIEnv *env, jobject obj) {
-    static jclass g_unbox_byte_cls = NULL;
-    static jmethodID g_unbox_byte_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_unbox_byte_cls, env, "java/lang/Byte");
-    jmethodID mid = NEKO_ENSURE_METHOD_ID(g_unbox_byte_mid, env, cls, "byteValue", "()B");
-    return neko_call_byte_method_a(env, obj, mid, NULL);
-}
-static jchar neko_unbox_char(JNIEnv *env, jobject obj) {
-    static jclass g_unbox_char_cls = NULL;
-    static jmethodID g_unbox_char_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_unbox_char_cls, env, "java/lang/Character");
-    jmethodID mid = NEKO_ENSURE_METHOD_ID(g_unbox_char_mid, env, cls, "charValue", "()C");
-    return neko_call_char_method_a(env, obj, mid, NULL);
-}
-static jshort neko_unbox_short(JNIEnv *env, jobject obj) {
-    static jclass g_unbox_short_cls = NULL;
-    static jmethodID g_unbox_short_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_unbox_short_cls, env, "java/lang/Short");
-    jmethodID mid = NEKO_ENSURE_METHOD_ID(g_unbox_short_mid, env, cls, "shortValue", "()S");
-    return neko_call_short_method_a(env, obj, mid, NULL);
-}
-static jint neko_unbox_int(JNIEnv *env, jobject obj) {
-    static jclass g_unbox_int_cls = NULL;
-    static jmethodID g_unbox_int_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_unbox_int_cls, env, "java/lang/Integer");
-    jmethodID mid = NEKO_ENSURE_METHOD_ID(g_unbox_int_mid, env, cls, "intValue", "()I");
-    return neko_call_int_method_a(env, obj, mid, NULL);
-}
-static jlong neko_unbox_long(JNIEnv *env, jobject obj) {
-    static jclass g_unbox_long_cls = NULL;
-    static jmethodID g_unbox_long_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_unbox_long_cls, env, "java/lang/Long");
-    jmethodID mid = NEKO_ENSURE_METHOD_ID(g_unbox_long_mid, env, cls, "longValue", "()J");
-    return neko_call_long_method_a(env, obj, mid, NULL);
-}
-static jfloat neko_unbox_float(JNIEnv *env, jobject obj) {
-    static jclass g_unbox_float_cls = NULL;
-    static jmethodID g_unbox_float_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_unbox_float_cls, env, "java/lang/Float");
-    jmethodID mid = NEKO_ENSURE_METHOD_ID(g_unbox_float_mid, env, cls, "floatValue", "()F");
-    return neko_call_float_method_a(env, obj, mid, NULL);
-}
-static jdouble neko_unbox_double(JNIEnv *env, jobject obj) {
-    static jclass g_unbox_double_cls = NULL;
-    static jmethodID g_unbox_double_mid = NULL;
-    jclass cls = NEKO_ENSURE_CLASS(g_unbox_double_cls, env, "java/lang/Double");
-    jmethodID mid = NEKO_ENSURE_METHOD_ID(g_unbox_double_mid, env, cls, "doubleValue", "()D");
-    return neko_call_double_method_a(env, obj, mid, NULL);
 }
 
 static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
