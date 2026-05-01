@@ -37,6 +37,7 @@ public final class NativeTranslator {
     private static final String JDK_HIDDEN_DESC = "Ljdk/internal/vm/annotation/Hidden;";
 
     private final CCodeGenerator codeGenerator;
+    private int concatLiteralIndex = 0;
 
     public NativeTranslator(String outputPrefix, boolean obfuscateJniSlotDispatch, boolean cacheJniIds, long masterSeed) {
         this.codeGenerator = new CCodeGenerator(masterSeed);
@@ -530,47 +531,34 @@ public final class NativeTranslator {
             || !"()Ljava/lang/String;".equals(toStringCall.desc)) {
             return null;
         }
-        String firstExpr = stringProducerExpression(first);
-        if (firstExpr == null) {
+        StringProducer firstProducer = stringProducer(first);
+        if (firstProducer == null) {
             return null;
         }
         String code;
-        String concatDesc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;";
-        String concatDispatcher = codeGenerator.registerInvokeShape(true, 'L', new char[] { 'L', 'L' });
-        codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, "java/lang/StringConcatHelper", "simpleConcat", concatDesc, true);
         codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, "java/lang/String", "value", "[B", false);
         codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, "java/lang/String", "coder", "B", false);
         if (second instanceof LdcInsnNode ldcInsn && ldcInsn.cst instanceof String s) {
-            String literalVar = "__neko_concat_lit_" + Integer.toUnsignedString(s.hashCode(), 16);
-            code = "{ static jstring " + literalVar + " = NULL; if (" + literalVar + " == NULL) { " + literalVar
-                + " = (jstring)neko_new_global_ref(env, neko_new_string_utf(env, \"" + c(s) + "\")); } "
-                + "jstring __lhs = (jstring)(" + firstExpr + " == NULL ? neko_string_null(env) : " + firstExpr + "); "
-                + "jstring __rhs = " + literalVar + " == NULL ? neko_string_null(env) : " + literalVar + "; "
-                + "jobject __fastConcat = neko_fast_string_concat(thread, env, __lhs, __rhs, "
+            StringProducer secondProducer = literalStringProducer(s);
+            code = "{ " + firstProducer.prefix + secondProducer.prefix
+                + "jstring __lhs = (jstring)(" + firstProducer.expr + " == NULL ? neko_string_null(env) : " + firstProducer.expr + "); "
+                + "jstring __rhs = " + secondProducer.expr + " == NULL ? neko_string_null(env) : " + secondProducer.expr + "; "
+                + "jobject __fastConcat = neko_require_fast_string_concat(thread, env, __lhs, __rhs, "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
-                + "if (__fastConcat != NULL) { PUSH_O(__fastConcat); } else { "
-                + "jvalue __concatArgs[2]; __concatArgs[0].l = __lhs; __concatArgs[1].l = __rhs; "
-                + "jvalue __concatResult = " + concatDispatcher + "(thread, env, "
-                + codeGenerator.methodPtrSlotName("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true) + ", "
-                + codeGenerator.methodIEntrySlotName("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true)
-                + ", NULL, __concatArgs); if (!neko_exception_check(env)) { PUSH_O(__concatResult.l); } } }";
+                + "PUSH_O(__fastConcat); }";
         } else {
-            String secondExpr = stringProducerExpression(second);
-            if (secondExpr == null) {
+            StringProducer secondProducer = stringProducer(second);
+            if (secondProducer == null) {
                 return null;
             }
-            code = "{ jstring __lhs = (jstring)(" + firstExpr + " == NULL ? neko_string_null(env) : " + firstExpr + "); "
-                + "jstring __rhs = (jstring)(" + secondExpr + " == NULL ? neko_string_null(env) : " + secondExpr + "); "
-                + "jobject __fastConcat = neko_fast_string_concat(thread, env, __lhs, __rhs, "
+            code = "{ " + firstProducer.prefix + secondProducer.prefix
+                + "jstring __lhs = (jstring)(" + firstProducer.expr + " == NULL ? neko_string_null(env) : " + firstProducer.expr + "); "
+                + "jstring __rhs = (jstring)(" + secondProducer.expr + " == NULL ? neko_string_null(env) : " + secondProducer.expr + "); "
+                + "jobject __fastConcat = neko_require_fast_string_concat(thread, env, __lhs, __rhs, "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false) + ", "
                 + codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false) + "); "
-                + "if (__fastConcat != NULL) { PUSH_O(__fastConcat); } else { "
-                + "jvalue __concatArgs[2]; __concatArgs[0].l = __lhs; __concatArgs[1].l = __rhs; "
-                + "jvalue __concatResult = " + concatDispatcher + "(thread, env, "
-                + codeGenerator.methodPtrSlotName("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true) + ", "
-                + codeGenerator.methodIEntrySlotName("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true)
-                + ", NULL, __concatArgs); if (!neko_exception_check(env)) { PUSH_O(__concatResult.l); } } }";
+                + "PUSH_O(__fastConcat); }";
         }
         return new StringConcatPattern(code, toString);
     }
@@ -584,14 +572,21 @@ public final class NativeTranslator {
         return null;
     }
 
-    private String stringProducerExpression(AbstractInsnNode insn) {
+    private StringProducer stringProducer(AbstractInsnNode insn) {
         if (insn instanceof VarInsnNode varInsn && varInsn.getOpcode() == Opcodes.ALOAD) {
-            return "locals[" + varInsn.var + "].o";
+            return new StringProducer("", "locals[" + varInsn.var + "].o");
         }
         if (insn instanceof LdcInsnNode ldcInsn && ldcInsn.cst instanceof String s) {
-            return "neko_new_string_utf(env, \"" + c(s) + "\")";
+            return literalStringProducer(s);
         }
         return null;
+    }
+
+    private StringProducer literalStringProducer(String value) {
+        String literalVar = "__neko_concat_lit_" + concatLiteralIndex++;
+        String prefix = "static jstring " + literalVar + " = NULL; "
+            + "neko_bind_string_slot(thread, env, &" + literalVar + ", \"" + c(value) + "\"); ";
+        return new StringProducer(prefix, literalVar);
     }
 
     private String renderTableSwitch(TableSwitchInsnNode insn, Map<LabelNode, String> labelMap) {
@@ -800,4 +795,5 @@ public final class NativeTranslator {
     private record TryHandler(String handlerLabel, String exceptionType) {}
 
     private record StringConcatPattern(String code, AbstractInsnNode lastInsn) {}
+    private record StringProducer(String prefix, String expr) {}
 }

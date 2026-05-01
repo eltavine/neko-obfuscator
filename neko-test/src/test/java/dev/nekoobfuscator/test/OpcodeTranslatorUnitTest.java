@@ -19,6 +19,7 @@ import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.MultiANewArrayInsnNode;
@@ -464,7 +465,7 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
-    void stringConcatFallbackAvoidsStringBuilderAllocation() {
+    void stringConcatFallbackAvoidsStringBuilderAndBoxingFallback() {
         OpcodeTranslator translator = translator();
         translator.beginMethod("pkg/ConcatOwner", "run", "()V", true);
         Handle bootstrap = new Handle(
@@ -482,9 +483,26 @@ class OpcodeTranslatorUnitTest {
             "area=\u0001 count=\u0001"
         )));
 
-        assertContains(code, "neko_box_double(thread, env, (jdouble)arg0)", "neko_box_int(thread, env, (jint)arg1)", "java/lang/StringConcatHelper", "simpleConcat");
+        assertContains(code, "java/lang/String", "valueOf", "neko_require_fast_string_concat");
         assertFalse(code.contains("java/lang/StringBuilder"), code);
+        assertFalse(code.contains("java/lang/StringConcatHelper"), code);
+        assertFalse(code.contains("simpleConcat"), code);
+        assertFalse(code.contains("java/lang/String\", \"concat\""), code);
+        assertFalse(code.contains("neko_box_"), code);
         assertFalse(code.contains("neko_new_object_a(env"), code);
+    }
+
+    @Test
+    void stringBuilderConcatPatternUsesRequiredFastConcatOnly() {
+        String source = translateSingleMethod(stringBuilderConcatOwner());
+        String body = translatedBodySection(source);
+
+        assertContains(body, "neko_bind_string_slot(thread, env", "neko_require_fast_string_concat");
+        assertFalse(body.contains("java/lang/StringConcatHelper"), body);
+        assertFalse(body.contains("simpleConcat"), body);
+        assertFalse(body.contains("neko_new_string_utf(env, \"!\""), body);
+        assertFalse(body.contains("java/lang/String\", \"concat\""), body);
+        assertFalse(body.contains("neko_box_"), body);
     }
 
     @Test
@@ -635,6 +653,54 @@ class OpcodeTranslatorUnitTest {
             }
         }
         return translator.translate(selections).source();
+    }
+
+    private static ClassNode stringBuilderConcatOwner() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/StringBuilderConcat";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode method = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "run",
+            "(Ljava/lang/String;)Ljava/lang/String;",
+            null,
+            null
+        );
+        method.instructions.add(new TypeInsnNode(Opcodes.NEW, "java/lang/StringBuilder"));
+        method.instructions.add(new InsnNode(Opcodes.DUP));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            false
+        ));
+        method.instructions.add(new LdcInsnNode("!"));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            false
+        ));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "toString",
+            "()Ljava/lang/String;",
+            false
+        ));
+        method.instructions.add(new InsnNode(Opcodes.ARETURN));
+        method.maxStack = 3;
+        method.maxLocals = 1;
+        classNode.methods.add(method);
+        return classNode;
     }
 
     private static ClassNode methodHandleBridgeOwner(boolean invokeExact) {

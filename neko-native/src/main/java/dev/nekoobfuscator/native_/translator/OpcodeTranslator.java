@@ -47,6 +47,7 @@ public final class OpcodeTranslator {
     private boolean currentMethodShadowEnabled = true;
     private int indyIndex = 0;
     private int invokeSiteIndex = 0;
+    private int stringConcatTempIndex = 0;
 
     public OpcodeTranslator(CCodeGenerator codeGenerator, Map<String, NativeMethodBinding> translatedBindings) {
         this(codeGenerator, translatedBindings, null);
@@ -74,6 +75,7 @@ public final class OpcodeTranslator {
         this.currentMethodShadowEnabled = shadowEnabled;
         this.indyIndex = 0;
         this.invokeSiteIndex = 0;
+        this.stringConcatTempIndex = 0;
         this.codeGenerator.registerBindingOwner(owner);
     }
 
@@ -1092,7 +1094,8 @@ public final class OpcodeTranslator {
                 }
                 if (ch == '\u0001') {
                     Type argType = argTypes[dynIndex];
-                    appendObjectConcat(sb, concatObjectExpression(argType, "arg" + dynIndex));
+                    String concatArg = appendStringValueOf(sb, argType, "arg" + dynIndex);
+                    appendSimpleConcatArg(sb, concatArg);
                     dynIndex++;
                 } else {
                     Object constant = constIndex < indy.bsmArgs.length ? indy.bsmArgs[constIndex++] : "";
@@ -1177,50 +1180,44 @@ public final class OpcodeTranslator {
         sb.append("} ");
     }
 
-    private void appendObjectConcat(StringBuilder sb, String rhsExpr) {
-        String concatDesc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;";
-        String concatDispatcher = codeGenerator.registerInvokeShape(true, 'L', new char[] { 'L', 'L' });
-        sb.append("{ jobject __lhs = (jobject)(__acc == NULL ? neko_string_null(env) : __acc); ");
-        sb.append("jobject __rhs = (jobject)(").append(rhsExpr).append("); ");
-        sb.append("if (__rhs == NULL) { __rhs = (jobject)neko_string_null(env); } ");
-        sb.append("jvalue __concatArgs[2]; __concatArgs[0].l = __lhs; __concatArgs[1].l = __rhs; ");
-        sb.append("jvalue __concatResult = ").append(concatDispatcher).append("(thread, env, ")
-            .append(cachedMethodPtrExpression("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true)).append(", ")
-            .append(cachedMethodIEntryExpression("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true))
-            .append(", NULL, __concatArgs); if (!neko_exception_check(env)) { __acc = (jstring)__concatResult.l; } } ");
+    private String appendStringValueOf(StringBuilder sb, Type type, String valueExpr) {
+        if ("Ljava/lang/String;".equals(type.getDescriptor())) {
+            return valueExpr;
+        }
+        String valueOfDesc = stringValueOfDesc(type);
+        String valueOfDispatcher = codeGenerator.registerInvokeShape(true, 'L', collapseArgKinds(Type.getArgumentTypes(valueOfDesc)));
+        String temp = "__concatStr" + stringConcatTempIndex++;
+        sb.append("jstring ").append(temp).append(" = NULL; { jvalue __valueOfArgs[1]; ")
+            .append(jvalueStore(Type.getArgumentTypes(valueOfDesc)[0], "__valueOfArgs[0]", valueExpr)).append(' ')
+            .append("jvalue __valueOfResult = ").append(valueOfDispatcher).append("(thread, env, ")
+            .append(cachedMethodPtrExpression("java/lang/String", "valueOf", valueOfDesc, true)).append(", ")
+            .append(cachedMethodIEntryExpression("java/lang/String", "valueOf", valueOfDesc, true))
+            .append(", NULL, __valueOfArgs); if (!neko_exception_check(env)) { ")
+            .append(temp).append(" = (jstring)__valueOfResult.l; } } ");
+        return temp;
     }
 
-    private String concatObjectExpression(Type type, String valueExpr) {
+    private String stringValueOfDesc(Type type) {
         return switch (type.getSort()) {
-            case Type.BOOLEAN -> "neko_box_boolean(thread, env, (jboolean)" + valueExpr + ")";
-            case Type.CHAR -> "neko_box_char(thread, env, (jchar)" + valueExpr + ")";
-            case Type.BYTE -> "neko_box_byte(thread, env, (jbyte)" + valueExpr + ")";
-            case Type.SHORT -> "neko_box_short(thread, env, (jshort)" + valueExpr + ")";
-            case Type.INT -> "neko_box_int(thread, env, (jint)" + valueExpr + ")";
-            case Type.LONG -> "neko_box_long(thread, env, (jlong)" + valueExpr + ")";
-            case Type.FLOAT -> "neko_box_float(thread, env, (jfloat)" + valueExpr + ")";
-            case Type.DOUBLE -> "neko_box_double(thread, env, (jdouble)" + valueExpr + ")";
-            default -> "(jobject)" + valueExpr;
+            case Type.BOOLEAN -> "(Z)Ljava/lang/String;";
+            case Type.CHAR -> "(C)Ljava/lang/String;";
+            case Type.BYTE, Type.SHORT, Type.INT -> "(I)Ljava/lang/String;";
+            case Type.LONG -> "(J)Ljava/lang/String;";
+            case Type.FLOAT -> "(F)Ljava/lang/String;";
+            case Type.DOUBLE -> "(D)Ljava/lang/String;";
+            default -> "(Ljava/lang/Object;)Ljava/lang/String;";
         };
     }
 
     private void appendDirectStringConcat(StringBuilder sb, String rhsExpr) {
-        String concatDesc = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/String;";
-        String concatDispatcher = codeGenerator.registerInvokeShape(true, 'L', new char[] { 'L', 'L' });
         sb.append("{ jstring __lhs = __acc == NULL ? neko_string_null(env) : __acc; ");
         sb.append("jstring __rhs = (jstring)(").append(rhsExpr).append(" == NULL ? neko_string_null(env) : ").append(rhsExpr).append("); ");
         sb.append("jfieldID __stringValue = ").append(cachedFieldExpression("java/lang/String", "value", "[B", false)).append("; ");
         sb.append("jfieldID __stringCoder = ").append(cachedFieldExpression("java/lang/String", "coder", "B", false)).append("; ");
         sb.append("(void)__stringValue; (void)__stringCoder; ");
-        sb.append("jobject __fastConcat = neko_fast_string_concat(thread, env, __lhs, __rhs, ")
+        sb.append("__acc = (jstring)neko_require_fast_string_concat(thread, env, __lhs, __rhs, ")
             .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false)).append(", ")
-            .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false)).append("); ");
-        sb.append("if (__fastConcat != NULL) { __acc = (jstring)__fastConcat; } else { ");
-        sb.append("jvalue __concatArgs[2]; __concatArgs[0].l = __lhs; __concatArgs[1].l = __rhs; ");
-        sb.append("jvalue __concatResult = ").append(concatDispatcher).append("(thread, env, ")
-            .append(cachedMethodPtrExpression("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true)).append(", ")
-            .append(cachedMethodIEntryExpression("java/lang/StringConcatHelper", "simpleConcat", concatDesc, true))
-            .append(", NULL, __concatArgs); if (!neko_exception_check(env)) { __acc = (jstring)__concatResult.l; } } } ");
+            .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false)).append("); } ");
     }
 
     private Object[] adaptBootstrapArgs(Object[] originalArgs, Type[] bootstrapArgTypes) {
