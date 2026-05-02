@@ -194,38 +194,43 @@ public final class ManifestEmitter {
         sb.append("    entry->patch_state = NEKO_PATCH_STATE_APPLIED;\n");
         sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
+        // T4.10: collapse the Class.getName() round-trip
+        // (FindClass + GetMethodID + CallObjectMethodA + GetStringUTFChars +
+        // ReleaseStringUTFChars — function-table indices 6/33/36/169/170)
+        // into a Klass-direct read. owner_cls maps to a Klass via
+        // neko_class_mirror_to_klass; Klass::_name is a Symbol*; Symbol::_body
+        // is the UTF-8 internal name (already slash-form, no '.' translation
+        // needed). All offsets (off_klass_name, off_symbol_length,
+        // off_symbol_body) were collected at T0.1.
         sb.append("static jboolean neko_manifest_internal_name(JNIEnv *env, jclass owner_cls, char *out, size_t out_size) {\n");
-        sb.append("    jclass class_cls;\n");
-        sb.append("    jmethodID get_name;\n");
-        sb.append("    jstring name_obj;\n");
-        sb.append("    const char *chars;\n");
+        sb.append("    void *klass;\n");
+        sb.append("    void *name_symbol;\n");
+        sb.append("    uint16_t name_len;\n");
+        sb.append("    const char *body;\n");
         sb.append("    size_t i;\n");
-        sb.append("    if (env == NULL || owner_cls == NULL || out == NULL || out_size == 0u) return JNI_FALSE;\n");
+        sb.append("    (void)env;\n");
+        sb.append("    if (owner_cls == NULL || out == NULL || out_size == 0u) return JNI_FALSE;\n");
         sb.append("    out[0] = '\\0';\n");
-        // T4.2a: replace bind-time JNI FindClass with libjvm-internal
-        // JVM_FindClassFromBootLoader / JVM_FindClassFromClass via
-        // neko_resolve_class_mirror_with_env.
-        sb.append("    class_cls = neko_resolve_class_mirror_with_env(env, \"java/lang/Class\", NULL, NULL);\n");
-        sb.append("    if (class_cls == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear_direct(env); return JNI_FALSE; }\n");
-        // T4.2b: replace JNI GetMethodID with the libjvm-internal
-        // neko_resolve_method-based jmethodID resolver (instance method).
-        sb.append("    get_name = neko_resolve_jmethodID(env, class_cls, \"getName\", \"()Ljava/lang/String;\");\n");
-        sb.append("    neko_delete_local_ref(env, class_cls);\n");
-        sb.append("    if (get_name == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear_direct(env); return JNI_FALSE; }\n");
-        // T3.20: previously used the typed function-table macro plus the
-        // deleted opcode-side string-UTF probe wrappers (`get_string_utf_chars`
-        // and its release counterpart). Manifest discovery still needs the
-        // bind-time `Class.getName()` round-trip, so the function-table calls
-        // are expanded inline here instead. Indices: 36=CallObjectMethodA,
-        // 169=GetStringUTFChars, 170=ReleaseStringUTFChars.
-        sb.append("    name_obj = (jstring)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, owner_cls, get_name, NULL);\n");
-        sb.append("    if (name_obj == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear_direct(env); return JNI_FALSE; }\n");
-        sb.append("    chars = ((const char* (*)(JNIEnv*, jstring, jboolean*))(*((void***)(env)))[169])(env, name_obj, NULL);\n");
-        sb.append("    if (chars == NULL || neko_exception_check(env)) { if (neko_exception_check(env)) neko_exception_clear_direct(env); neko_delete_local_ref(env, name_obj); return JNI_FALSE; }\n");
-        sb.append("    for (i = 0; i + 1u < out_size && chars[i] != '\\0'; i++) out[i] = chars[i] == '.' ? '/' : chars[i];\n");
+        sb.append("    if (g_neko_method_layout.off_klass_name < 0\n");
+        sb.append("        || g_neko_method_layout.off_symbol_length < 0\n");
+        sb.append("        || g_neko_method_layout.off_symbol_body < 0) {\n");
+        sb.append("        fprintf(stderr, \"[neko-bind] T4.10 Symbol layout unavailable (klass_name=%td sym_len=%td sym_body=%td)\\n\",\n");
+        sb.append("            g_neko_method_layout.off_klass_name,\n");
+        sb.append("            g_neko_method_layout.off_symbol_length,\n");
+        sb.append("            g_neko_method_layout.off_symbol_body);\n");
+        sb.append("        abort();\n");
+        sb.append("    }\n");
+        sb.append("    klass = neko_class_mirror_to_klass(owner_cls);\n");
+        sb.append("    if (klass == NULL) {\n");
+        sb.append("        fprintf(stderr, \"[neko-bind] T4.10 cannot resolve Klass from jclass=%p\\n\", (void*)owner_cls);\n");
+        sb.append("        abort();\n");
+        sb.append("    }\n");
+        sb.append("    name_symbol = *(void**)((char*)klass + g_neko_method_layout.off_klass_name);\n");
+        sb.append("    if (name_symbol == NULL) return JNI_FALSE;\n");
+        sb.append("    name_len = *(uint16_t*)((char*)name_symbol + g_neko_method_layout.off_symbol_length);\n");
+        sb.append("    body = (const char*)name_symbol + g_neko_method_layout.off_symbol_body;\n");
+        sb.append("    for (i = 0; i < (size_t)name_len && i + 1u < out_size; i++) out[i] = body[i];\n");
         sb.append("    out[i] = '\\0';\n");
-        sb.append("    ((void (*)(JNIEnv*, jstring, const char*))(*((void***)(env)))[170])(env, name_obj, chars);\n");
-        sb.append("    neko_delete_local_ref(env, name_obj);\n");
         sb.append("    return out[0] != '\\0' ? JNI_TRUE : JNI_FALSE;\n");
         sb.append("}\n\n");
         sb.append("static jboolean neko_manifest_patch_defined_class(JNIEnv *env, jclass owner_cls) {\n");
