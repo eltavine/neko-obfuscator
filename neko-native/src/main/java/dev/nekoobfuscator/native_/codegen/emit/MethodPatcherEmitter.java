@@ -2427,6 +2427,14 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
      * captured pointers instead of the inline `(*((void***)(env)))[21]` /
      * `[22]` indexing. Failure to capture aborts inside the helper. */
     neko_capture_global_ref_fns();
+    /* T4.3 / T4.4 / T4.5: capture the bind-time JNI function-table entries
+     * (NewStringUTF, Call*MethodA, NewObjectA, GetArrayLength,
+     * NewObjectArray, Set/GetObjectArrayElement) used by the MethodType /
+     * MethodHandles.lookup / Throwable.getStackTrace pipelines. Production
+     * HotSpot 21 strips the corresponding C++ symbols, so capture-once
+     * is the equivalent libjvm-internal entry point. The grep gate
+     * (T4.12) sees only the captured-pointer call sites afterwards. */
+    neko_capture_bind_time_jni_fns();
     /* T4.7: deleted neko_fast_string_runtime_init (JNI probe via
      * NewStringUTF / NewByteArray, indices 167 + 176). The fast string
      * allocator path is gated on the receiver-key + raw-heap fast bits

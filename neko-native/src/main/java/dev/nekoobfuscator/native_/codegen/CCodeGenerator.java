@@ -344,6 +344,29 @@ public final class CCodeGenerator {
         sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_new_global_ref_fn_t   g_neko_jni_new_global_ref_fn;\n");
         sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_delete_global_ref_fn_t g_neko_jni_delete_global_ref_fn;\n");
         sb.append("static void neko_capture_global_ref_fns(void);\n");
+        /* T4.3 / T4.4 / T4.5 — captured pointers for the bind-time MethodType /
+         * MethodHandles.lookup / Throwable.getStackTrace helpers (production
+         * HotSpot 21 strips the C++ symbols, so dlsym is unreachable). The
+         * actual pointer storage lives in JniHandlesShimEmitter. */
+        sb.append("typedef jstring   (*neko_jni_new_string_utf_fn_t)(JNIEnv*, const char*);\n");
+        sb.append("typedef jobject   (*neko_jni_call_object_method_a_fn_t)(JNIEnv*, jobject, jmethodID, const jvalue*);\n");
+        sb.append("typedef void      (*neko_jni_call_void_method_a_fn_t)(JNIEnv*, jobject, jmethodID, const jvalue*);\n");
+        sb.append("typedef jobject   (*neko_jni_call_static_object_method_a_fn_t)(JNIEnv*, jclass, jmethodID, const jvalue*);\n");
+        sb.append("typedef jobject   (*neko_jni_new_object_a_fn_t)(JNIEnv*, jclass, jmethodID, const jvalue*);\n");
+        sb.append("typedef jsize     (*neko_jni_get_array_length_fn_t)(JNIEnv*, jarray);\n");
+        sb.append("typedef jobjectArray (*neko_jni_new_object_array_fn_t)(JNIEnv*, jsize, jclass, jobject);\n");
+        sb.append("typedef void      (*neko_jni_set_object_array_element_fn_t)(JNIEnv*, jobjectArray, jsize, jobject);\n");
+        sb.append("typedef jobject   (*neko_jni_get_object_array_element_fn_t)(JNIEnv*, jobjectArray, jsize);\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_new_string_utf_fn_t              g_neko_jni_new_string_utf_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_call_object_method_a_fn_t        g_neko_jni_call_object_method_a_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_call_void_method_a_fn_t          g_neko_jni_call_void_method_a_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_call_static_object_method_a_fn_t g_neko_jni_call_static_object_method_a_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_new_object_a_fn_t                g_neko_jni_new_object_a_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_get_array_length_fn_t            g_neko_jni_get_array_length_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_new_object_array_fn_t            g_neko_jni_new_object_array_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_set_object_array_element_fn_t    g_neko_jni_set_object_array_element_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_get_object_array_element_fn_t    g_neko_jni_get_object_array_element_fn;\n");
+        sb.append("static void neko_capture_bind_time_jni_fns(void);\n");
         sb.append("static void neko_boxing_cache_init(JNIEnv *env);\n\n");
         /* T4.1: cross-block forward declarations for the primitive descriptor →
          * mirror table. Storage lives in renderRuntimeSupport (so the inline
@@ -2967,7 +2990,7 @@ static jstring neko_shadow_dotted_string(JNIEnv *env, const char *internal_name)
         buf[i] = internal_name[i] == '/' ? '.' : internal_name[i];
     }
     buf[i] = '\\0';
-    return ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, buf);
+    return g_neko_jni_new_string_utf_fn(env, buf);
 }
 
 static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
@@ -2981,20 +3004,20 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
     ste_ctor = neko_resolve_jmethodID(env, ste_cls, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
     if (ste_ctor == NULL || neko_exception_check(env)) return NULL;
     count = depth == 0u ? 0u : depth;
-    trace = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, (jsize)count, ste_cls, NULL);
+    trace = g_neko_jni_new_object_array_fn(env, (jsize)count, ste_cls, NULL);
     if (trace == NULL || neko_exception_check(env)) return trace;
     for (i = 0u; i < count; i++) {
         neko_shadow_frame *frame = &g_neko_shadow_stack[depth - 1u - i];
         jvalue args[4];
         jobject element;
         args[0].l = neko_shadow_dotted_string(env, frame->owner);
-        args[1].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, frame->method);
-        args[2].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, frame->file);
+        args[1].l = g_neko_jni_new_string_utf_fn(env, frame->method);
+        args[2].l = g_neko_jni_new_string_utf_fn(env, frame->file);
         args[3].i = -1;
         if (neko_exception_check(env)) return trace;
-        element = ((jobject (*)(JNIEnv*, jclass, jmethodID, const jvalue*))(*((void***)(env)))[30])(env, ste_cls, ste_ctor, args);
+        element = g_neko_jni_new_object_a_fn(env, ste_cls, ste_ctor, args);
         if (neko_exception_check(env) || element == NULL) return trace;
-        ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, trace, (jsize)i, element);
+        g_neko_jni_set_object_array_element_fn(env, trace, (jsize)i, element);
         if (neko_exception_check(env)) return trace;
     }
     return trace;
@@ -3101,23 +3124,23 @@ static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
     jvalue args[2];
     args[0].l = ownerClass;
     args[1].l = neko_impl_lookup(env);
-    return ((jobject (*)(JNIEnv*, jclass, jmethodID, const jvalue*))(*((void***)(env)))[116])(env, mhClass, mid, args);
+    return g_neko_jni_call_static_object_method_a_fn(env, mhClass, mid, args);
 }
 
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
     jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
     jmethodID mid = neko_resolve_jmethodID(env, mtClass, "fromMethodDescriptorString", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;");
     jvalue args[2];
-    args[0].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, desc);
+    args[0].l = g_neko_jni_new_string_utf_fn(env, desc);
     args[1].l = NULL;
-    return ((jobject (*)(JNIEnv*, jclass, jmethodID, const jvalue*))(*((void***)(env)))[116])(env, mtClass, mid, args);
+    return g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args);
 }
 
 static jobjectArray neko_bootstrap_parameter_array(JNIEnv *env, const char *bsm_desc) {
     jobject mt = neko_method_type_from_descriptor(env, bsm_desc);
     jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
     jmethodID mid = neko_resolve_jmethodID(env, mtClass, "parameterArray", "()[Ljava/lang/Class;");
-    return (jobjectArray)((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, mt, mid, NULL);
+    return (jobjectArray)g_neko_jni_call_object_method_a_fn(env, mt, mid, NULL);
 }
 
 static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray invoke_args) {
@@ -3126,22 +3149,22 @@ static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const c
     jclass classClass = neko_resolve_class_mirror_with_env(env, "java/lang/Class", NULL, NULL);
     jmethodID getDeclaredMethod = neko_resolve_jmethodID(env, classClass, "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
     jvalue getArgs[2];
-    getArgs[0].l = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, bsm_name);
+    getArgs[0].l = g_neko_jni_new_string_utf_fn(env, bsm_name);
     getArgs[1].l = paramTypes;
-    jobject method = ((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, bsmClass, getDeclaredMethod, getArgs);
+    jobject method = g_neko_jni_call_object_method_a_fn(env, bsmClass, getDeclaredMethod, getArgs);
 
     jclass accessibleClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/AccessibleObject", NULL, NULL);
     jmethodID setAccessible = neko_resolve_jmethodID(env, accessibleClass, "setAccessible", "(Z)V");
     jvalue accessibleArgs[1];
     accessibleArgs[0].z = JNI_TRUE;
-    ((void (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[63])(env, method, setAccessible, accessibleArgs);
+    g_neko_jni_call_void_method_a_fn(env, method, setAccessible, accessibleArgs);
 
     jclass methodClass = neko_resolve_class_mirror_with_env(env, "java/lang/reflect/Method", NULL, NULL);
     jmethodID invoke = neko_resolve_jmethodID(env, methodClass, "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
     jvalue invokeArgs[2];
     invokeArgs[0].l = NULL;
     invokeArgs[1].l = invoke_args;
-    return ((jobject (*)(JNIEnv*, jobject, jmethodID, const jvalue*))(*((void***)(env)))[36])(env, method, invoke, invokeArgs);
+    return g_neko_jni_call_object_method_a_fn(env, method, invoke, invokeArgs);
 }
 
 static jstring neko_string_null(JNIEnv *env) {
@@ -3161,17 +3184,17 @@ static jstring neko_string_null(JNIEnv *env) {
  * helper works without resurrecting the opcode-side wrappers. */
 static jobject neko_resolve_constant_dynamic(JNIEnv *env, const char *caller_owner, const char *name, const char *desc, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray static_args) {
     jobjectArray paramTypes = neko_bootstrap_parameter_array(env, bsm_desc);
-    jsize paramCount = ((jsize (*)(JNIEnv*, jarray))(*((void***)(env)))[171])(env, (jarray)paramTypes);
+    jsize paramCount = g_neko_jni_get_array_length_fn(env, (jarray)paramTypes);
     jclass objClass = neko_resolve_class_mirror_with_env(env, "java/lang/Object", NULL, NULL);
-    jobjectArray invokeArgs = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, paramCount, objClass, NULL);
-    ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, 0, neko_lookup_for_class(env, caller_owner));
-    ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, 1, ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, name));
-    ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, 2, neko_class_for_descriptor(env, desc));
+    jobjectArray invokeArgs = g_neko_jni_new_object_array_fn(env, paramCount, objClass, NULL);
+    g_neko_jni_set_object_array_element_fn(env, invokeArgs, 0, neko_lookup_for_class(env, caller_owner));
+    g_neko_jni_set_object_array_element_fn(env, invokeArgs, 1, g_neko_jni_new_string_utf_fn(env, name));
+    g_neko_jni_set_object_array_element_fn(env, invokeArgs, 2, neko_class_for_descriptor(env, desc));
     {
-        jsize static_count = ((jsize (*)(JNIEnv*, jarray))(*((void***)(env)))[171])(env, (jarray)static_args);
+        jsize static_count = g_neko_jni_get_array_length_fn(env, (jarray)static_args);
         for (jsize i = 0; i < static_count; i++) {
-            jobject element = ((jobject (*)(JNIEnv*, jobjectArray, jsize))(*((void***)(env)))[173])(env, static_args, i);
-            ((void (*)(JNIEnv*, jobjectArray, jsize, jobject))(*((void***)(env)))[174])(env, invokeArgs, i + 3, element);
+            jobject element = g_neko_jni_get_object_array_element_fn(env, static_args, i);
+            g_neko_jni_set_object_array_element_fn(env, invokeArgs, i + 3, element);
         }
     }
     return neko_invoke_bootstrap(env, bsm_owner, bsm_name, bsm_desc, invokeArgs);

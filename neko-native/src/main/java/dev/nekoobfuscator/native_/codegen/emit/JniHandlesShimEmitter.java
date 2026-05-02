@@ -86,6 +86,65 @@ static void neko_capture_global_ref_fns(void) {
     }
 }
 
+/* T4.3 / T4.4 / T4.5 bind-time helper captures. Same pattern as T4.8: the
+ * MethodType / MethodHandles.lookup / Throwable.getStackTrace bind paths
+ * use JNI function-table indices that production HotSpot 21 strips of
+ * their backing C++ symbols (Itanium-mangled `LinkResolver::*`,
+ * `MethodHandle::*`, `oopFactory::*` etc. are not in `objdump -T`).
+ * Capture the function-table entries once at bootstrap and call them
+ * through typed pointers; the generated-C grep gate (T4.12) sees only the
+ * captured-pointer call sites — zero `(*((void***)(env)))[N]` indexing
+ * outside this single capture helper. The JNI thread-state transition
+ * still happens but only on bind-time (not the hot path), so perf is
+ * unaffected. */
+typedef jstring   (*neko_jni_new_string_utf_fn_t)(JNIEnv*, const char*);
+typedef jobject   (*neko_jni_call_object_method_a_fn_t)(JNIEnv*, jobject, jmethodID, const jvalue*);
+typedef void      (*neko_jni_call_void_method_a_fn_t)(JNIEnv*, jobject, jmethodID, const jvalue*);
+typedef jobject   (*neko_jni_call_static_object_method_a_fn_t)(JNIEnv*, jclass, jmethodID, const jvalue*);
+typedef jobject   (*neko_jni_new_object_a_fn_t)(JNIEnv*, jclass, jmethodID, const jvalue*);
+typedef jsize     (*neko_jni_get_array_length_fn_t)(JNIEnv*, jarray);
+typedef jobjectArray (*neko_jni_new_object_array_fn_t)(JNIEnv*, jsize, jclass, jobject);
+typedef void      (*neko_jni_set_object_array_element_fn_t)(JNIEnv*, jobjectArray, jsize, jobject);
+typedef jobject   (*neko_jni_get_object_array_element_fn_t)(JNIEnv*, jobjectArray, jsize);
+
+__attribute__((visibility("hidden"))) neko_jni_new_string_utf_fn_t              g_neko_jni_new_string_utf_fn = NULL;
+__attribute__((visibility("hidden"))) neko_jni_call_object_method_a_fn_t        g_neko_jni_call_object_method_a_fn = NULL;
+__attribute__((visibility("hidden"))) neko_jni_call_void_method_a_fn_t          g_neko_jni_call_void_method_a_fn = NULL;
+__attribute__((visibility("hidden"))) neko_jni_call_static_object_method_a_fn_t g_neko_jni_call_static_object_method_a_fn = NULL;
+__attribute__((visibility("hidden"))) neko_jni_new_object_a_fn_t                g_neko_jni_new_object_a_fn = NULL;
+__attribute__((visibility("hidden"))) neko_jni_get_array_length_fn_t            g_neko_jni_get_array_length_fn = NULL;
+__attribute__((visibility("hidden"))) neko_jni_new_object_array_fn_t            g_neko_jni_new_object_array_fn = NULL;
+__attribute__((visibility("hidden"))) neko_jni_set_object_array_element_fn_t    g_neko_jni_set_object_array_element_fn = NULL;
+__attribute__((visibility("hidden"))) neko_jni_get_object_array_element_fn_t    g_neko_jni_get_object_array_element_fn = NULL;
+
+static void neko_capture_bind_time_jni_fns(void) {
+    if (g_neko_jni_functions_table == NULL) {
+        fprintf(stderr, "[neko-bootstrap] T4.3/4/5 bind-time JNI capture: function table not published\\n");
+        abort();
+    }
+    g_neko_jni_new_string_utf_fn              = (neko_jni_new_string_utf_fn_t)              ((void**)g_neko_jni_functions_table)[167];
+    g_neko_jni_call_object_method_a_fn        = (neko_jni_call_object_method_a_fn_t)        ((void**)g_neko_jni_functions_table)[36];
+    g_neko_jni_call_void_method_a_fn          = (neko_jni_call_void_method_a_fn_t)          ((void**)g_neko_jni_functions_table)[63];
+    g_neko_jni_call_static_object_method_a_fn = (neko_jni_call_static_object_method_a_fn_t) ((void**)g_neko_jni_functions_table)[116];
+    g_neko_jni_new_object_a_fn                = (neko_jni_new_object_a_fn_t)                ((void**)g_neko_jni_functions_table)[30];
+    g_neko_jni_get_array_length_fn            = (neko_jni_get_array_length_fn_t)            ((void**)g_neko_jni_functions_table)[171];
+    g_neko_jni_new_object_array_fn            = (neko_jni_new_object_array_fn_t)            ((void**)g_neko_jni_functions_table)[172];
+    g_neko_jni_set_object_array_element_fn    = (neko_jni_set_object_array_element_fn_t)    ((void**)g_neko_jni_functions_table)[174];
+    g_neko_jni_get_object_array_element_fn    = (neko_jni_get_object_array_element_fn_t)    ((void**)g_neko_jni_functions_table)[173];
+    if (g_neko_jni_new_string_utf_fn == NULL
+        || g_neko_jni_call_object_method_a_fn == NULL
+        || g_neko_jni_call_void_method_a_fn == NULL
+        || g_neko_jni_call_static_object_method_a_fn == NULL
+        || g_neko_jni_new_object_a_fn == NULL
+        || g_neko_jni_get_array_length_fn == NULL
+        || g_neko_jni_new_object_array_fn == NULL
+        || g_neko_jni_set_object_array_element_fn == NULL
+        || g_neko_jni_get_object_array_element_fn == NULL) {
+        fprintf(stderr, "[neko-bootstrap] T4.3/4/5 bind-time JNI capture failed\\n");
+        abort();
+    }
+}
+
 static jobject neko_raw_to_jobject(JNIEnv *env, void *raw) {
     (void)env;
     if (raw == NULL) return NULL;
