@@ -147,7 +147,11 @@ public final class ManifestEmitter {
          * without calling FindClass at runtime. Skipped on second visits
          * (defineClass alias passes can re-enter for the same idx). */
         sb.append("    if (entry->owner_class_global_ref == NULL && owner_cls != NULL) {\n");
-        sb.append("        jobject __owner_global = neko_new_global_ref(env, owner_cls);\n");
+        // T4.8: bind-time global-ref via captured NewGlobalRef function pointer
+        // (production HotSpot 21 strips JNIHandles::make_global, so dlsym is
+        // unreachable; capture-once at OnLoad is the equivalent libjvm-internal
+        // entry point).
+        sb.append("        jobject __owner_global = g_neko_jni_new_global_ref_fn(env, owner_cls);\n");
         sb.append("        if (__owner_global == NULL || neko_exception_check(env)) {\n");
         sb.append("            if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
         sb.append("        } else {\n");

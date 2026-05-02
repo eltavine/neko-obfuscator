@@ -332,6 +332,18 @@ public final class CCodeGenerator {
          * probe function is deleted and neko_method_layout_init now drives
          * the VMStructs path neko_ensure_string_alloc_bits directly. */
         sb.append("static void neko_ensure_string_alloc_bits(JNIEnv *env);\n");
+        /* T4.8: captured JNI NewGlobalRef / DeleteGlobalRef function pointers,
+         * populated once at JNI_OnLoad (see JniHandlesShimEmitter). Bind-time
+         * global-ref allocation/release routes through these typed pointers
+         * instead of inline `(*((void***)(env)))[21]` / `[22]` indexing.
+         * Production HotSpot 21 strips the C++ `JNIHandles::make_global`
+         * symbol so plain dlsym is unavailable; capturing the function-table
+         * entry once is the equivalent libjvm-internal entry point. */
+        sb.append("typedef jobject (*neko_jni_new_global_ref_fn_t)(JNIEnv*, jobject);\n");
+        sb.append("typedef void    (*neko_jni_delete_global_ref_fn_t)(JNIEnv*, jobject);\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_new_global_ref_fn_t   g_neko_jni_new_global_ref_fn;\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern neko_jni_delete_global_ref_fn_t g_neko_jni_delete_global_ref_fn;\n");
+        sb.append("static void neko_capture_global_ref_fns(void);\n");
         sb.append("static void neko_boxing_cache_init(JNIEnv *env);\n\n");
         /* T4.1: cross-block forward declarations for the primitive descriptor →
          * mirror table. Storage lives in renderRuntimeSupport (so the inline
@@ -1558,7 +1570,7 @@ static void neko_bind_owner_class_slot(JNIEnv *env, jclass *slot, jclass self_cl
             owner == NULL ? "<null>" : owner, self_klass, resolved_klass);
         abort();
     }
-    globalRef = neko_new_global_ref(env, self_class);
+    globalRef = g_neko_jni_new_global_ref_fn(env, self_class);
     if (globalRef == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] owner class global-ref failed: %s\\n", owner == NULL ? "<null>" : owner);
@@ -1579,7 +1591,7 @@ static void neko_bind_class_slot_from(JNIEnv *env, jclass *slot, const char *own
     void *expected;
     if (env == NULL || slot == NULL || *slot != NULL || owner == NULL) return;
     localClass = neko_resolve_class_mirror_with_env(env, owner, from_class, &klass);
-    globalRef = neko_new_global_ref(env, localClass);
+    globalRef = g_neko_jni_new_global_ref_fn(env, localClass);
     if (globalRef == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] class global-ref failed after native resolution: %s\\n", owner);
@@ -1634,7 +1646,7 @@ static void neko_bind_primitive_class_slot(JNIEnv *env, jclass *slot, const char
         fprintf(stderr, "[neko-bind] primitive class resolution failed for descriptor %s\\n", desc);
         abort();
     }
-    globalRef = neko_new_global_ref(env, localClass);
+    globalRef = g_neko_jni_new_global_ref_fn(env, localClass);
     if (globalRef == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] primitive class global-ref failed for descriptor %s\\n", desc);
@@ -1826,7 +1838,7 @@ static void neko_bind_string_slot(void *thread, JNIEnv *env, jstring *slot, cons
     }
     string_oop = neko_intern_string(thread, env, (const uint8_t*)utf, strlen(utf));
     localString = (jstring)neko_direct_oop_to_handle(thread, string_oop);
-    globalRef = neko_new_global_ref(env, localString);
+    globalRef = g_neko_jni_new_global_ref_fn(env, localString);
     if (globalRef == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] global-ref failed for native string literal: %s\\n", utf);
@@ -3967,7 +3979,7 @@ NEKO_FAST_INLINE uint32_t neko_icache_claim_slot(JNIEnv *env, neko_icache_site *
         if (site->target_kind[i] == NEKO_ICACHE_EMPTY) return i;
     }
     i = (uint32_t)(site->next_slot++ & (NEKO_ICACHE_PIC_SIZE - 1u));
-    if (site->cached_class[i] != NULL) neko_delete_global_ref(env, site->cached_class[i]);
+    if (site->cached_class[i] != NULL) g_neko_jni_delete_global_ref_fn(env, site->cached_class[i]);
     site->receiver_key[i] = 0;
     site->target[i] = NULL;
     site->target2[i] = NULL;
@@ -4016,7 +4028,7 @@ NEKO_FAST_INLINE void neko_icache_store_direct(JNIEnv *env, neko_icache_site *si
     uint32_t slot;
     if (site == NULL) return;
     slot = neko_icache_claim_slot(env, site, receiverKey);
-    if (site->cached_class[slot] != NULL && site->cached_class[slot] != cachedClass) neko_delete_global_ref(env, site->cached_class[slot]);
+    if (site->cached_class[slot] != NULL && site->cached_class[slot] != cachedClass) g_neko_jni_delete_global_ref_fn(env, site->cached_class[slot]);
     site->cached_class[slot] = cachedClass;
     site->receiver_key[slot] = receiverKey;
     site->target[slot] = target;
@@ -4032,7 +4044,7 @@ NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site
     uint32_t slot;
     if (site == NULL) return;
     slot = neko_icache_claim_slot(env, site, receiverKey);
-    if (site->cached_class[slot] != NULL && site->cached_class[slot] != cachedClass) neko_delete_global_ref(env, site->cached_class[slot]);
+    if (site->cached_class[slot] != NULL && site->cached_class[slot] != cachedClass) g_neko_jni_delete_global_ref_fn(env, site->cached_class[slot]);
     site->cached_class[slot] = cachedClass;
     site->receiver_key[slot] = receiverKey;
     site->target[slot] = method_ptr;

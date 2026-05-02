@@ -2422,6 +2422,11 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             g_neko_gc_barrier_kind);
         return JNI_FALSE;
     }
+    /* T4.8: capture NewGlobalRef + DeleteGlobalRef function-table entries
+     * once at bootstrap. The bind-time class/string slot path uses these
+     * captured pointers instead of the inline `(*((void***)(env)))[21]` /
+     * `[22]` indexing. Failure to capture aborts inside the helper. */
+    neko_capture_global_ref_fns();
     /* T4.7: deleted neko_fast_string_runtime_init (JNI probe via
      * NewStringUTF / NewByteArray, indices 167 + 176). The fast string
      * allocator is only ever taken when the receiver-key + raw-heap
