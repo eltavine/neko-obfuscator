@@ -328,7 +328,10 @@ public final class CCodeGenerator {
         sb.append("static uintptr_t neko_klass_header_bits(void *klass);\n");
         sb.append("static void *neko_decode_klass_header_bits(uintptr_t bits);\n");
         sb.append("static void neko_njx_init_wrappers(void);\n\n");
-        sb.append("static void neko_fast_string_runtime_init(JNIEnv *env);\n\n");
+        /* T4.7: neko_fast_string_runtime_init forward decl removed; the
+         * probe function is deleted and neko_method_layout_init now drives
+         * the VMStructs path neko_ensure_string_alloc_bits directly. */
+        sb.append("static void neko_ensure_string_alloc_bits(JNIEnv *env);\n");
         sb.append("static void neko_boxing_cache_init(JNIEnv *env);\n\n");
         /* T4.1: cross-block forward declarations for the primitive descriptor →
          * mirror table. Storage lives in renderRuntimeSupport (so the inline
@@ -4208,44 +4211,16 @@ static jboolean g_neko_fast_string_alloc_ready = JNI_FALSE;
 
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop);
 
-static void neko_fast_string_runtime_init(JNIEnv *env) {
-    jstring empty;
-    jbyteArray bytes;
-    char *empty_oop;
-    char *bytes_oop;
-    if (g_neko_fast_string_alloc_ready || env == NULL) return;
-    if (!g_hotspot.initialized
-        || (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) == 0
-        || g_hotspot.use_compact_object_headers
-        || g_hotspot.klass_offset_bytes <= 0
-        || !g_neko_tlab_alloc_ready) {
-        return;
-    }
-    /* T3.20: replaced helper-name calls with inline JNI function-table
-     * indexing (167 = NewStringUTF, 176 = NewByteArray) so this bootstrap
-     * probe stops referencing the deleted opcode-side wrappers. */
-    empty = ((jstring (*)(JNIEnv*, const char*))(*((void***)(env)))[167])(env, "");
-    bytes = ((jbyteArray (*)(JNIEnv*, jsize))(*((void***)(env)))[176])(env, 0);
-    if (empty == NULL || bytes == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear_direct(env);
-        return;
-    }
-    empty_oop = (char*)neko_handle_oop((jobject)empty);
-    bytes_oop = (char*)neko_handle_oop((jobject)bytes);
-    if (empty_oop != NULL && bytes_oop != NULL) {
-        if (g_hotspot.use_compressed_klass_ptrs) {
-            g_neko_string_klass_bits = (uintptr_t)(*(uint32_t*)(empty_oop + g_hotspot.klass_offset_bytes));
-            g_neko_byte_array_klass_bits = (uintptr_t)(*(uint32_t*)(bytes_oop + g_hotspot.klass_offset_bytes));
-        } else {
-            g_neko_string_klass_bits = *(uintptr_t*)(empty_oop + g_hotspot.klass_offset_bytes);
-            g_neko_byte_array_klass_bits = *(uintptr_t*)(bytes_oop + g_hotspot.klass_offset_bytes);
-        }
-        g_neko_fast_string_alloc_ready =
-            (g_neko_string_klass_bits != 0 && g_neko_byte_array_klass_bits != 0) ? JNI_TRUE : JNI_FALSE;
-    }
-    neko_delete_local_ref(env, empty);
-    neko_delete_local_ref(env, bytes);
-}
+/* T4.7 — `neko_fast_string_runtime_init` deleted. The probe used JNI
+ * function-table indices 167 (NewStringUTF) and 176 (NewByteArray) to
+ * derive `g_neko_string_klass_bits` / `g_neko_byte_array_klass_bits`
+ * from a freshly allocated empty String + byte[] pair. The VMStructs
+ * path `neko_ensure_string_alloc_bits` (rendered earlier in this file)
+ * is authoritative: it resolves `java/lang/String` via libjvm-internal
+ * `JVM_FindClassFromBootLoader`, reads its Klass bits, and sets the
+ * byte-array bits from `g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B]`.
+ * `neko_method_layout_init` now drives that path instead of the probe;
+ * any missing prerequisite aborts there. */
 
 NEKO_FAST_INLINE size_t neko_align_object_bytes(size_t bytes) {
     size_t alignment = (size_t)(g_hotspot.object_alignment_in_bytes > 0 ? g_hotspot.object_alignment_in_bytes : 8);

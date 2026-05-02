@@ -2422,7 +2422,27 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             g_neko_gc_barrier_kind);
         return JNI_FALSE;
     }
-    neko_fast_string_runtime_init(env);
+    /* T4.7: deleted neko_fast_string_runtime_init (JNI probe via
+     * NewStringUTF / NewByteArray, indices 167 + 176). The fast string
+     * allocator is only ever taken when the receiver-key + raw-heap
+     * fast path is enabled (ZGC / Shenandoah deliberately clear that
+     * bit), so we only attempt the VMStructs derivation when
+     * NEKO_HOTSPOT_FAST_RAW_HEAP is on. The previous probe also skipped
+     * in those configurations; the difference is that
+     * neko_ensure_string_alloc_bits now aborts inside the helper if the
+     * derivation itself fails (missing String Klass / byte-array Klass
+     * bits) instead of silently leaving g_neko_fast_string_alloc_ready
+     * false — that's the "invariants not satisfied → abort" gate
+     * the T4.7 plan note specifies, scoped to "the probe call site"
+     * (i.e., when the fast path is supposed to be live). */
+    if (g_hotspot.initialized
+        && (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) != 0
+        && !g_hotspot.use_compact_object_headers
+        && g_hotspot.klass_offset_bytes > 0
+        && g_neko_tlab_alloc_ready
+        && g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B] != 0) {
+        neko_ensure_string_alloc_bits(env);
+    }
     g_neko_method_layout.usable = JNI_TRUE;
     return JNI_TRUE;
 }
