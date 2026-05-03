@@ -3814,24 +3814,16 @@ static void neko_select_oop_field_load_barrier(void) {
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
         if (g_neko_barrier_load_oop_field_preloaded == NULL) {
-            /* libjvm stripped of ZBarrierSetRuntime symbols. Fall back to
-             * neko_barrier_load_oop_field_raw which calls neko_barrier_oop_load.
-             * That path uses ZGlobals masks (if populated) to detect bad-oop
-             * cases and aborts if a bad oop is encountered. The fast case
-             * (no in-progress relocation) works without the C++ barrier. */
-            g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_raw;
-            return;
+            fprintf(stderr, "[neko-direct] ZGC object field load barrier symbol missing\\n");
+            abort();
         }
         g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_z;
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH) {
         if (g_neko_barrier_load_oop_field_preloaded == NULL) {
-            /* libjvm stripped of ShenandoahRuntime symbols. Same fallback
-             * as ZGC: raw read; aborts only if Shenandoah is mid-cycle and
-             * we encounter a forwarded oop. */
-            g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_raw;
-            return;
+            fprintf(stderr, "[neko-direct] Shenandoah object field load barrier symbol missing\\n");
+            abort();
         }
         g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_shenandoah;
         return;
@@ -3890,20 +3882,16 @@ static void neko_select_oop_array_load_barrier(void) {
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
         if (g_neko_barrier_load_oop_array == NULL) {
-            /* libjvm stripped of ZBarrierSetRuntime symbols. Fall back to
-             * raw read; ZGC's bad-oop check via masks (in
-             * neko_barrier_oop_load) catches relocation cases. */
-            g_neko_oop_array_load_barrier = neko_barrier_load_oop_array_raw;
-            return;
+            fprintf(stderr, "[neko-direct] ZGC object array load barrier symbol missing\\n");
+            abort();
         }
         g_neko_oop_array_load_barrier = neko_barrier_load_oop_array_z;
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH) {
         if (g_neko_barrier_load_oop_field_preloaded == NULL) {
-            /* libjvm stripped of ShenandoahRuntime symbols. Fall back. */
-            g_neko_oop_array_load_barrier = neko_barrier_load_oop_array_raw;
-            return;
+            fprintf(stderr, "[neko-direct] Shenandoah object array load barrier symbol missing\\n");
+            abort();
         }
         g_neko_oop_array_load_barrier = neko_barrier_load_oop_array_shenandoah;
         return;
@@ -3946,10 +3934,6 @@ static void neko_barrier_post_store_oop_field_unavailable(void *thread, void *fi
 
 static void neko_barrier_pre_store_oop_field_noop(void *thread, void *field_addr, void *old_oop) {
     (void)thread; (void)field_addr; (void)old_oop;
-}
-
-static void neko_barrier_post_store_oop_field_noop(void *thread, void *field_addr) {
-    (void)thread; (void)field_addr;
 }
 
 static void neko_barrier_post_store_oop_field_card(void *thread, void *field_addr) {
@@ -4021,15 +4005,8 @@ static void neko_select_oop_field_store_barrier(void) {
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
         if (g_neko_barrier_store_oop_field == NULL) {
-            /* libjvm stripped of ZBarrierSetRuntime symbols. Fall back
-             * to noop barriers — under ZGC store barriers handle
-             * marking + healing, but for a stripped libjvm we lose
-             * concurrent-marking precision. Acceptable tradeoff for
-             * being able to run at all (correctness preserved by ZGC's
-             * load barriers in Java code). */
-            g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_noop;
-            g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_noop;
-            return;
+            fprintf(stderr, "[neko-direct] ZGC object field store barrier symbol missing\\n");
+            abort();
         }
         g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_noop;
         g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_z;
@@ -4037,11 +4014,8 @@ static void neko_select_oop_field_store_barrier(void) {
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH) {
         if (g_neko_barrier_write_ref_field_pre == NULL) {
-            /* libjvm stripped of ShenandoahRuntime symbols. Same
-             * fallback as ZGC. */
-            g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_noop;
-            g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_noop;
-            return;
+            fprintf(stderr, "[neko-direct] Shenandoah object field store barrier symbol missing\\n");
+            abort();
         }
         g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_shenandoah;
         g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_shenandoah;
