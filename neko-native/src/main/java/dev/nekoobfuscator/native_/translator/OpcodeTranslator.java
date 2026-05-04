@@ -1170,7 +1170,13 @@ public final class OpcodeTranslator {
 
     private void appendSimpleConcatLiteral(StringBuilder sb, String literal) {
         String literalExpr = cachedStringExpression(literal);
+        /* When __acc is still NULL the first piece becomes the accumulator
+         * directly. Falling through to appendDirectStringConcat would compute
+         * neko_string_null(env) + literal == "null" + literal, producing the
+         * "null" prefix on every recipe whose first piece is a literal. */
+        sb.append("if (__acc == NULL) { __acc = (jstring)").append(literalExpr).append("; } else { ");
         appendDirectStringConcat(sb, literalExpr);
+        sb.append("} ");
     }
 
     private void appendSimpleConcatArg(StringBuilder sb, String valueExpr) {
