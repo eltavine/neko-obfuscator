@@ -3853,6 +3853,14 @@ static void neko_select_oop_field_load_barrier(void) {
 
 NEKO_FAST_INLINE void *neko_barrier_load_oop_field(void *field_addr, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
+    /* Hot path for stop-the-world / non-relocating collectors (G1/Parallel/Serial/CardTable)
+     * skips the indirect dispatch and returns the raw oop directly. ZGC and Shenandoah
+     * still route through the barrier function pointer where loads can rewrite the oop. */
+    int32_t kind = g_neko_gc_barrier_kind;
+    if (NEKO_LIKELY(kind == NEKO_EARLY_GC_BARRIER_G1
+                 || kind == NEKO_EARLY_GC_BARRIER_CARDTABLE)) {
+        return raw_oop;
+    }
     return g_neko_oop_field_load_barrier(field_addr, raw_oop);
 }
 
@@ -3921,6 +3929,14 @@ static void neko_select_oop_array_load_barrier(void) {
 
 NEKO_FAST_INLINE void *neko_barrier_load_oop_array(void *element_addr, void *raw_oop) {
     if (raw_oop == NULL) return NULL;
+    /* Hot path for stop-the-world / non-relocating collectors (G1/Parallel/Serial/CardTable)
+     * skips the indirect dispatch and returns the raw oop directly. ZGC and Shenandoah
+     * still route through the barrier function pointer where loads can rewrite the oop. */
+    int32_t kind = g_neko_gc_barrier_kind;
+    if (NEKO_LIKELY(kind == NEKO_EARLY_GC_BARRIER_G1
+                 || kind == NEKO_EARLY_GC_BARRIER_CARDTABLE)) {
+        return raw_oop;
+    }
     return g_neko_oop_array_load_barrier(element_addr, raw_oop);
 }
 
