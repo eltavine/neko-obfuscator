@@ -482,6 +482,12 @@ public final class CCodeGenerator {
          * slots are also uninitialized — POP only ever returns previously
          * PUSH'd values per JVM verifier guarantees. */
         sb.append("    neko_slot locals[").append(fn.maxLocals() + 8).append("];\n");
+        /* One-shot capability gate at impl entry. After this returns, every
+         * inlined fast helper's per-iteration capability check folds away
+         * via NEKO_ASSUME, removing the redundant g_hotspot.* reloads from
+         * tight inner loops (e.g. matrix-mul Seq). Generic — runs on every
+         * translated method, not benchmark-specific. */
+        sb.append("    neko_hotspot_fast_require(thread, env);\n");
         for (CStatement statement : fn.body()) {
             sb.append(renderStatement(statement));
         }
@@ -3745,6 +3751,27 @@ static void neko_hotspot_init(JNIEnv *env) {
 #define NEKO_CONST_INLINE NEKO_FAST_INLINE
 #endif
 
+#if defined(__GNUC__) || defined(__clang__)
+/* Tell the optimizer a runtime invariant is true so it can prune the cold
+ * recheck branches that the per-call helpers carry. Used at translated
+ * impl entry to fold away every per-iteration capability check. */
+#define NEKO_ASSUME(cond) do { if (!(cond)) __builtin_unreachable(); } while (0)
+#else
+#define NEKO_ASSUME(cond) ((void)0)
+#endif
+
+/* Const-typed alias of g_hotspot. Same backing storage, but accessed
+ * through a `const`-typed reference so the optimizer is allowed to CSE the
+ * reads without `volatile` or `pure` semantics getting in the way.
+ * Init code writes via `g_hotspot`; hot paths read via `g_hotspot_const`.
+ * Both bind to the same memory; the alias just gives the compiler a
+ * read-only view. */
+#if defined(__GNUC__) || defined(__clang__)
+extern const neko_hotspot_state g_hotspot_const __attribute__((alias("g_hotspot")));
+#else
+#define g_hotspot_const g_hotspot
+#endif
+
 /* Const accessors over post-OnLoad-immutable g_hotspot fields. The compiler
  * treats each call as returning the same value forever, enabling LICM out of
  * inner loops and CSE across translated opcodes. Backing storage IS modified
@@ -3753,7 +3780,7 @@ static void neko_hotspot_init(JNIEnv *env) {
  * translated impl_X function is reachable, so reads observed by the
  * compiler-visible "constant" view are always after the publish. */
 NEKO_CONST_INLINE int32_t neko_const_array_length_offset(void) {
-    return g_hotspot.array_length_offset;
+    return g_hotspot_const.array_length_offset;
 }
 NEKO_CONST_INLINE int32_t neko_const_klass_offset_bytes(void) {
     return g_hotspot.klass_offset_bytes;
@@ -3790,6 +3817,35 @@ NEKO_CONST_INLINE int32_t neko_const_prim_array_scale(int kind) {
 }
 NEKO_CONST_INLINE size_t neko_const_oop_ref_size(void) {
     return neko_const_compressed_oops_enabled() ? 4u : sizeof(void*);
+}
+
+/* One-shot capability gate emitted at the top of every translated impl. After
+ * the gate, NEKO_ASSUME tells the compiler the bits are known so it can fold
+ * away every per-iteration recheck inside the inlined fast helpers. */
+NEKO_HOT_INLINE void neko_hotspot_fast_require(void *thread, JNIEnv *env) {
+    (void)env;
+    if (NEKO_UNLIKELY(!neko_const_initialized())) {
+        fprintf(stderr, "[neko-direct] hotspot layout uninitialized at impl entry thread=%p\\n", thread);
+        abort();
+    }
+    if (NEKO_UNLIKELY(thread == NULL)) {
+        fprintf(stderr, "[neko-direct] hotspot fast path requires non-NULL thread\\n");
+        abort();
+    }
+    int32_t kind = neko_const_gc_kind();
+    if (NEKO_UNLIKELY(kind != NEKO_EARLY_GC_BARRIER_G1
+                   && kind != NEKO_EARLY_GC_BARRIER_CARDTABLE
+                   && kind != NEKO_EARLY_GC_BARRIER_Z
+                   && kind != NEKO_EARLY_GC_BARRIER_SHENANDOAH)) {
+        fprintf(stderr, "[neko-direct] hotspot fast path: unsupported gc barrier kind=%d\\n", (int)kind);
+        abort();
+    }
+    /* Hand the compiler invariants it can use to fold per-iteration checks. */
+    NEKO_ASSUME(neko_const_initialized());
+    NEKO_ASSUME(thread != NULL);
+    NEKO_ASSUME(neko_const_array_length_offset() >= 0);
+    NEKO_ASSUME(neko_const_prim_array_base(NEKO_PRIM_I) >= 0);
+    NEKO_ASSUME(neko_const_prim_array_base(NEKO_PRIM_B) >= 0);
 }
 
 NEKO_HOT_INLINE jboolean neko_ref_is_direct_oop(jobject ref) {
