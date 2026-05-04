@@ -3084,7 +3084,12 @@ void neko_exception_clear_direct(JNIEnv *env) {
 
 typedef jvalue (*neko_njx_dispatcher_t)(void*, JNIEnv*, void*, void*, jobject, const jvalue*);
 
-static inline void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry, neko_njx_dispatcher_t ctor_dispatcher, const char *name) {
+/* Cold + noinline so the bounds-check / NPE failure paths in every translated
+ * impl body are kept out of the inline copy. Without this every AALOAD,
+ * GETFIELD, etc. carries the constructor argument-load + dispatcher call
+ * inline beside the fast path, bloating the hot loop's icache footprint. */
+__attribute__((cold, noinline))
+static void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry, neko_njx_dispatcher_t ctor_dispatcher, const char *name) {
     jobject exc;
     jvalue args[1];
     if (thread == NULL || cls == NULL || ctor_method == NULL || ctor_entry == NULL || ctor_dispatcher == NULL) {
@@ -5619,7 +5624,11 @@ NEKO_HOT_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobje
     return neko_direct_oop_to_handle(thread, element_oop);
 }
 
-NEKO_FAST_INLINE void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
+/* Cold + noinline: the fused-aaload error dispatch is only reached on a
+ * NULL outer/inner array or out-of-bounds index. Keeping the dispatcher
+ * out-of-line lets the hot AALOAD+XALOAD chain stay tight. */
+__attribute__((cold, noinline))
+static void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
     jclass npe_cls, void *npe_method, void *npe_entry, neko_njx_dispatcher_t npe_dispatcher,
     jclass aioobe_cls, void *aioobe_method, void *aioobe_entry, neko_njx_dispatcher_t aioobe_dispatcher) {
     if (reason == NEKO_FAST_ARRAY_OUTER_NULL || reason == NEKO_FAST_ARRAY_INNER_NULL) {
