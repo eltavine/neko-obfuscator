@@ -198,6 +198,8 @@ typedef struct {
     int32_t vmconst_barrierset_modref;
     int32_t vmconst_barrierset_cardtable;
     int32_t vmconst_barrierset_g1;
+    int32_t vmconst_barrierset_z;
+    int32_t vmconst_barrierset_shenandoah;
     int32_t vmconst_cardtable_clean_card;
     int32_t vmconst_cardtable_dirty_card;
     int32_t vmconst_g1_young_card;
@@ -904,6 +906,8 @@ static void neko_walk_vm_int_constants(void *jvm) {
         else if (neko_streq_safe(name, "BarrierSet::ModRef")) g_neko_method_layout.vmconst_barrierset_modref = (int32_t)value;
         else if (neko_streq_safe(name, "BarrierSet::CardTableBarrierSet")) g_neko_method_layout.vmconst_barrierset_cardtable = (int32_t)value;
         else if (neko_streq_safe(name, "BarrierSet::G1BarrierSet")) g_neko_method_layout.vmconst_barrierset_g1 = (int32_t)value;
+        else if (neko_streq_safe(name, "BarrierSet::ZBarrierSet")) g_neko_method_layout.vmconst_barrierset_z = (int32_t)value;
+        else if (neko_streq_safe(name, "BarrierSet::ShenandoahBarrierSet")) g_neko_method_layout.vmconst_barrierset_shenandoah = (int32_t)value;
         else if (neko_streq_safe(name, "CardTable::clean_card")) g_neko_method_layout.vmconst_cardtable_clean_card = (int32_t)value;
         else if (neko_streq_safe(name, "CardTable::dirty_card")) g_neko_method_layout.vmconst_cardtable_dirty_card = (int32_t)value;
         else if (neko_streq_safe(name, "G1CardTable::g1_young_gen")) g_neko_method_layout.vmconst_g1_young_card = (int32_t)value;
@@ -933,14 +937,40 @@ static void neko_detect_current_gc_barrier(void) {
     tag = *(int32_t*)((char*)bs
         + g_neko_method_layout.off_barrierset_fake_rtti
         + g_neko_method_layout.off_barrierset_fakertti_concrete_tag);
+    NEKO_PATCH_LOG("barrier-tag detected: tag=%d g1=%d cardtable=%d z=%d shen=%d use_zgc=%d use_shen=%d zg_instance=%p sh_lrb=%p",
+        (int)tag,
+        g_neko_method_layout.vmconst_barrierset_g1,
+        g_neko_method_layout.vmconst_barrierset_cardtable,
+        g_neko_method_layout.vmconst_barrierset_z,
+        g_neko_method_layout.vmconst_barrierset_shenandoah,
+        (int)g_hotspot.use_zgc,
+        (int)g_hotspot.use_shenandoah_gc,
+        g_neko_method_layout.addr_zglobals_instance_p,
+        g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong);
     if (tag == g_neko_method_layout.vmconst_barrierset_g1) {
         g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_G1;
     } else if (tag == g_neko_method_layout.vmconst_barrierset_cardtable) {
         g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_CARDTABLE;
-    } else if (g_hotspot.use_zgc) {
+    } else if (tag == g_neko_method_layout.vmconst_barrierset_z
+               || g_hotspot.use_zgc
+               /* JDK 21 VMIntConstants doesn't expose BarrierSet::ZBarrierSet,
+                * but ZGC always publishes ZGlobalsForVMStructs::_instance_p as
+                * a static address. Use that as a structural fingerprint. */
+               || g_neko_method_layout.addr_zglobals_instance_p != NULL) {
         g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_Z;
-    } else if (g_hotspot.use_shenandoah_gc) {
+        /* Even when the early mask probe didn't see non-zero values
+         * (modern generational ZGC publishes masks dynamically per GC
+         * cycle and they may be zero at OnLoad), the BarrierSet tag /
+         * structural fingerprint tells us this IS ZGC. Promote use_zgc
+         * so the rest of the pipeline routes through the ZGC barrier path. */
+        g_hotspot.use_zgc = JNI_TRUE;
+    } else if (tag == g_neko_method_layout.vmconst_barrierset_shenandoah
+               || g_hotspot.use_shenandoah_gc
+               /* Shenandoah's structural fingerprint: the LRB strong runtime
+                * function is exported by libjvm under -XX:+UseShenandoahGC. */
+               || g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong != NULL) {
         g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_SHENANDOAH;
+        g_hotspot.use_shenandoah_gc = JNI_TRUE;
     }
     if (g_neko_method_layout.off_cardtablebarrierset_card_table >= 0) {
         void *ct = *(void**)((char*)bs + g_neko_method_layout.off_cardtablebarrierset_card_table);
@@ -957,16 +987,30 @@ static jboolean neko_gc_barrier_layout_ready(void) {
         (g_neko_method_layout.card_table_byte_map_base != NULL
          && g_neko_method_layout.vmconst_cardtable_dirty_card >= 0)
         ? JNI_TRUE : JNI_FALSE;
+    /* For ZGC: require either the dlsym'd barrier symbols (preferred,
+     * symbol-based dispatch through libjvm) OR the VMStructs instance
+     * pointer + offsets so the inline barrier can read masks dynamically
+     * per call. Modern generational ZGC publishes masks at runtime
+     * (zero at OnLoad), so the instance+offset path is the more general
+     * route for stripped libjvm builds. */
+    jboolean z_dlsym_ready =
+        (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded != NULL
+         && g_neko_method_layout.sym_z_load_barrier_on_oop_array != NULL
+         && g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing != NULL)
+        ? JNI_TRUE : JNI_FALSE;
+    jboolean z_instance_ready =
+        (g_neko_method_layout.addr_zglobals_instance_p != NULL
+         && g_neko_method_layout.off_zglobals_address_offset_mask >= 0
+         && g_neko_method_layout.off_zglobals_pointer_load_good_mask >= 0
+         && g_neko_method_layout.off_zglobals_pointer_load_bad_mask >= 0)
+        ? JNI_TRUE : JNI_FALSE;
     switch (g_neko_method_layout.current_barrier_kind) {
         case NEKO_GC_BARRIER_G1:
             return card_table_ready ? JNI_TRUE : JNI_FALSE;
         case NEKO_GC_BARRIER_CARDTABLE:
             return card_table_ready ? JNI_TRUE : JNI_FALSE;
         case NEKO_GC_BARRIER_Z:
-            return (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded != NULL
-                    && g_neko_method_layout.sym_z_load_barrier_on_oop_array != NULL
-                    && g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing != NULL)
-                ? JNI_TRUE : JNI_FALSE;
+            return (z_dlsym_ready || z_instance_ready) ? JNI_TRUE : JNI_FALSE;
         case NEKO_GC_BARRIER_SHENANDOAH:
             return (g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong != NULL
                     && g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry != NULL
@@ -1888,6 +1932,8 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     g_neko_method_layout.vmconst_barrierset_modref = -1;
     g_neko_method_layout.vmconst_barrierset_cardtable = -1;
     g_neko_method_layout.vmconst_barrierset_g1 = -1;
+    g_neko_method_layout.vmconst_barrierset_z = -1;
+    g_neko_method_layout.vmconst_barrierset_shenandoah = -1;
     g_neko_method_layout.vmconst_cardtable_clean_card = -1;
     g_neko_method_layout.vmconst_cardtable_dirty_card = -1;
     g_neko_method_layout.vmconst_g1_young_card = -1;
@@ -2298,6 +2344,29 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
                 (unsigned long long)g_hotspot.z_pointer_load_bad_mask,
                 (unsigned long long)g_hotspot.z_pointer_store_good_mask,
                 g_hotspot.z_pointer_load_shift);
+        }
+    }
+    /* Publish live mask pointers so the inline ZGC barrier in
+     * CCodeGenerator can read fresh values per call. The pointer-to-
+     * mask layout matches modern generational ZGC (JDK 21+) where each
+     * mask lives at a stable address but its value changes per GC
+     * cycle. Even when the early mask probe sees zero values at OnLoad,
+     * the pointers themselves are valid and readable. */
+    if (g_neko_method_layout.addr_zglobals_instance_p != NULL) {
+        void *zg = *(void**)g_neko_method_layout.addr_zglobals_instance_p;
+        if (zg != NULL) {
+            if (g_neko_method_layout.off_zglobals_address_offset_mask >= 0) {
+                g_hotspot.z_zglobals_addr_mask_p =
+                    *(void**)((char*)zg + g_neko_method_layout.off_zglobals_address_offset_mask);
+            }
+            if (g_neko_method_layout.off_zglobals_pointer_load_bad_mask >= 0) {
+                g_hotspot.z_zglobals_load_bad_mask_p =
+                    *(void**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_bad_mask);
+            }
+            if (g_neko_method_layout.off_zglobals_pointer_load_good_mask >= 0) {
+                g_hotspot.z_zglobals_load_good_mask_p =
+                    *(void**)((char*)zg + g_neko_method_layout.off_zglobals_pointer_load_good_mask);
+            }
         }
     }
     if (g_hotspot.z_address_offset_mask == 0 && g_neko_method_layout.addr_zglobals_instance_p != NULL) {

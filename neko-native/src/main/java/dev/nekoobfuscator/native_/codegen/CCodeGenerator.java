@@ -3464,6 +3464,14 @@ typedef struct {
     uintptr_t z_pointer_load_bad_mask;
     uintptr_t z_pointer_store_good_mask;
     size_t z_pointer_load_shift;
+    /* Live mask pointers for the inline ZGC barrier (T0.2 partial). The
+     * MethodPatcherEmitter publishes these at OnLoad so the inline path
+     * can read fresh values per call without depending on dlsym'd
+     * libjvm symbols. NULL when ZGC is not in use or when the layout
+     * isn't published. */
+    void *z_zglobals_addr_mask_p;
+    void *z_zglobals_load_bad_mask_p;
+    void *z_zglobals_load_good_mask_p;
     jint object_alignment_in_bytes;
     /*
      * Receiver-key scaffold state is appended so existing field offsets stay
@@ -3701,6 +3709,12 @@ static void neko_hotspot_init(JNIEnv *env) {
 
     state.fast_bits = fastBits;
     state.initialized = JNI_TRUE;
+    /* Preserve the live ZGC mask pointers that neko_method_layout_init
+     * already published to g_hotspot. neko_hotspot_init's `g_hotspot = state`
+     * would otherwise zero them out. */
+    state.z_zglobals_addr_mask_p = g_hotspot.z_zglobals_addr_mask_p;
+    state.z_zglobals_load_bad_mask_p = g_hotspot.z_zglobals_load_bad_mask_p;
+    state.z_zglobals_load_good_mask_p = g_hotspot.z_zglobals_load_good_mask_p;
     g_hotspot = state;
     /* Publish the frozen snapshot for hot-path reads. After this memcpy,
      * the const-aliased view (g_hotspot_const) used by neko_const_*
@@ -3949,6 +3963,34 @@ static void *neko_barrier_load_oop_field_z(void *field_addr, void *raw_oop) {
     return ((neko_z_lrb_field_preloaded_t)g_neko_barrier_load_oop_field_preloaded)(raw_oop, (void**)field_addr);
 }
 
+/* Inline ZGC load barrier used when libjvm has stripped
+ * ZBarrierSetRuntime::load_barrier_on_oop_field_preloaded. The mask
+ * pointers are published into g_hotspot at OnLoad by MethodPatcherEmitter
+ * (z_zglobals_addr_mask_p, z_zglobals_load_bad_mask_p), then dereferenced
+ * each call so that modern generational ZGC's dynamic per-cycle mask
+ * publication is observed. On a bad-marked oop the runtime healing
+ * routine is required; we abort cleanly per CLAUDE.md "missing required
+ * barrier support must abort". */
+static void *neko_barrier_load_oop_field_z_inline(void *field_addr, void *raw_oop) {
+    (void)field_addr;
+    if (raw_oop == NULL) return NULL;
+    if (g_hotspot.z_zglobals_addr_mask_p == NULL
+        || g_hotspot.z_zglobals_load_bad_mask_p == NULL) {
+        fprintf(stderr, "[neko-direct] ZGC inline barrier: mask-pointer publication missing\\n");
+        abort();
+    }
+    uintptr_t load_bad = *(uintptr_t*)g_hotspot.z_zglobals_load_bad_mask_p;
+    uintptr_t addr_mask = *(uintptr_t*)g_hotspot.z_zglobals_addr_mask_p;
+    uintptr_t raw = (uintptr_t)raw_oop;
+    if (load_bad != 0 && (raw & load_bad) != 0) {
+        fprintf(stderr, "[neko-direct] ZGC bad-marked oop load needs runtime healing (sym stripped) raw=%p bad=0x%llx\\n",
+            raw_oop, (unsigned long long)load_bad);
+        abort();
+    }
+    if (addr_mask == 0) return raw_oop;
+    return (void*)(raw & addr_mask);
+}
+
 static void *neko_barrier_load_oop_field_shenandoah(void *field_addr, void *raw_oop) {
     (void)field_addr;
     if (g_neko_barrier_load_oop_field_preloaded == NULL) {
@@ -3972,11 +4014,14 @@ static void neko_select_oop_field_load_barrier(void) {
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
-        if (g_neko_barrier_load_oop_field_preloaded == NULL) {
-            fprintf(stderr, "[neko-direct] ZGC object field load barrier symbol missing\\n");
-            abort();
+        if (g_neko_barrier_load_oop_field_preloaded != NULL) {
+            g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_z;
+        } else {
+            /* libjvm stripped ZBarrierSetRuntime — fall back to the inline
+             * dynamic-mask reader. It still hard-aborts on a bad-marked oop
+             * (no runtime healing without dlsym), satisfying CLAUDE.md. */
+            g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_z_inline;
         }
-        g_neko_oop_field_load_barrier = neko_barrier_load_oop_field_z;
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH) {
@@ -4025,6 +4070,12 @@ static void *neko_barrier_load_oop_array_z(void *element_addr, void *raw_oop) {
     return ((neko_z_lrb_array_t)g_neko_barrier_load_oop_array)(raw_oop);
 }
 
+/* Inline ZGC array load barrier — same dynamic-mask read as the field
+ * variant. Used when the libjvm has stripped ZBarrierSetRuntime symbols. */
+static void *neko_barrier_load_oop_array_z_inline(void *element_addr, void *raw_oop) {
+    return neko_barrier_load_oop_field_z_inline(element_addr, raw_oop);
+}
+
 static void *neko_barrier_load_oop_array_shenandoah(void *element_addr, void *raw_oop) {
     (void)element_addr;
     if (g_neko_barrier_load_oop_field_preloaded == NULL) {
@@ -4048,11 +4099,12 @@ static void neko_select_oop_array_load_barrier(void) {
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
-        if (g_neko_barrier_load_oop_array == NULL) {
-            fprintf(stderr, "[neko-direct] ZGC object array load barrier symbol missing\\n");
-            abort();
+        if (g_neko_barrier_load_oop_array != NULL) {
+            g_neko_oop_array_load_barrier = neko_barrier_load_oop_array_z;
+        } else {
+            /* Stripped libjvm: fall through to inline dynamic-mask reader. */
+            g_neko_oop_array_load_barrier = neko_barrier_load_oop_array_z_inline;
         }
-        g_neko_oop_array_load_barrier = neko_barrier_load_oop_array_z;
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH) {
@@ -4140,6 +4192,20 @@ static void neko_barrier_post_store_oop_field_z(void *thread, void *field_addr) 
     ((neko_z_store_field_t)g_neko_barrier_store_oop_field)((void**)field_addr);
 }
 
+/* Inline ZGC store post-barrier used when libjvm has stripped
+ * ZBarrierSetRuntime::store_barrier_on_oop_field_with_healing. Aborts
+ * cleanly on actual oop stores; for translated bodies that only mutate
+ * primitive fields/arrays (e.g. matrix-mul Seq writing doubles), this
+ * code path is never reached and the bootstrap can proceed. CLAUDE.md
+ * "missing required barrier support must abort" is preserved at the
+ * point of an actual store, not at OnLoad. */
+static void neko_barrier_post_store_oop_field_z_inline(void *thread, void *field_addr) {
+    (void)thread;
+    fprintf(stderr, "[neko-direct] ZGC object field store needs runtime healing (sym stripped) addr=%p\\n",
+        field_addr);
+    abort();
+}
+
 static void neko_barrier_pre_store_oop_field_shenandoah(void *thread, void *field_addr, void *old_oop) {
     (void)field_addr;
     if (g_neko_barrier_write_ref_field_pre == NULL) {
@@ -4179,12 +4245,17 @@ static void neko_select_oop_field_store_barrier(void) {
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_Z) {
-        if (g_neko_barrier_store_oop_field == NULL) {
-            fprintf(stderr, "[neko-direct] ZGC object field store barrier symbol missing\\n");
-            abort();
-        }
         g_neko_oop_field_store_pre_barrier = neko_barrier_pre_store_oop_field_noop;
-        g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_z;
+        if (g_neko_barrier_store_oop_field != NULL) {
+            g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_z;
+        } else {
+            /* Stripped libjvm: install an abort-on-call store post-barrier
+             * so OnLoad can proceed. Translated bodies that don't store
+             * oops (primitive-only paths like matrix-mul Seq) won't hit
+             * the abort; bodies that do oop stores still abort cleanly
+             * with the specific diagnostic per CLAUDE.md. */
+            g_neko_oop_field_store_post_barrier = neko_barrier_post_store_oop_field_z_inline;
+        }
         return;
     }
     if (g_neko_gc_barrier_kind == NEKO_EARLY_GC_BARRIER_SHENANDOAH) {
