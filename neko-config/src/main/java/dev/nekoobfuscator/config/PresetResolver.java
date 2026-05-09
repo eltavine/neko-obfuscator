@@ -31,6 +31,7 @@ public final class PresetResolver {
                 m.put("exceptionObfuscation", new TransformConfig(true, 0.8));
                 m.put("exceptionReturn", new TransformConfig(true, 0.8));
                 // fall through to STANDARD
+                m.put("keyDispatch", new TransformConfig(true, 1.0));
                 m.put("controlFlowFlattening", new TransformConfig(true, 1.0));
                 m.put("opaquePredicates", new TransformConfig(true, 1.0));
                 m.put("invokeDynamic", new TransformConfig(true, 1.0));
@@ -43,6 +44,7 @@ public final class PresetResolver {
                 m.put("exceptionReturn", new TransformConfig(true, 0.6));
                 m.put("outliner", new TransformConfig(true, 0.5));
                 m.put("stackObfuscation", new TransformConfig(true, 0.5));
+                m.put("keyDispatch", new TransformConfig(true, 0.8));
                 m.put("controlFlowFlattening", new TransformConfig(true, 0.8));
                 m.put("opaquePredicates", new TransformConfig(true, 0.8));
                 m.put("invokeDynamic", new TransformConfig(true, 0.8));
@@ -50,6 +52,7 @@ public final class PresetResolver {
                 m.put("numberEncryption", new TransformConfig(true, 1.0));
             }
             case STANDARD -> {
+                m.put("keyDispatch", new TransformConfig(true, 0.6));
                 m.put("controlFlowFlattening", new TransformConfig(true, 0.6));
                 m.put("opaquePredicates", new TransformConfig(true, 0.6));
                 m.put("invokeDynamic", new TransformConfig(true, 0.6));

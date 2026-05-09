@@ -5,6 +5,7 @@ import dev.nekoobfuscator.config.ConfigParser;
 import dev.nekoobfuscator.config.ConfigValidator;
 import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
+import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
 import picocli.CommandLine;
 
 import java.nio.file.Files;
@@ -52,9 +53,8 @@ public final class ObfuscateCommand implements Callable<Integer> {
                 return 2;
             }
 
-            // JVM transform passes are intentionally empty while the pass
-            // architecture is being rebuilt.
             PassRegistry registry = new PassRegistry();
+            StandardJvmPasses.register(registry);
 
             System.out.println("[NekoObfuscator] Registered " + registry.size() + " transform passes");
 
