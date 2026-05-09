@@ -95,7 +95,6 @@ public final class JarOutput {
         }
     }
 
-
     private void validateWrittenClass(L1Class l1, byte[] bytecode) {
         try {
             ClassReader reader = new ClassReader(bytecode);
@@ -129,6 +128,9 @@ public final class JarOutput {
                 || lower.contains("bad local variable type")
                 || lower.contains("invalid opcode")) {
             return false;
+        }
+        if (diagnostics.contains("ClassNotFoundException")) {
+            return true;
         }
         for (String line : diagnostics.split("\\R")) {
             String trimmed = line.trim();

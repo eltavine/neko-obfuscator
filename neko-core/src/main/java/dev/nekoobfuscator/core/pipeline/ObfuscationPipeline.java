@@ -106,6 +106,7 @@ public final class ObfuscationPipeline {
             long passElapsed = System.currentTimeMillis() - passStart;
             log.info("Pass {} completed in {}ms", pass.id(), passElapsed);
 
+            refreshHierarchy(input.classes(), hierarchy);
             // Invalidate cached IR after each pass (transforms may have changed bytecode)
             ctx.invalidateAll();
         }
@@ -141,6 +142,7 @@ public final class ObfuscationPipeline {
 
         runRuntimeControlFlow(allClasses, hierarchy, ctx, ordered);
         cleanupDirtyClasses(allClasses);
+        refreshHierarchy(allClasses, hierarchy);
 
         // Step 7.5: Native compilation
         Manifest outputManifest = input.manifest();
@@ -199,6 +201,12 @@ public final class ObfuscationPipeline {
             log.info("Wrote mapping file: {}", mapPath);
         } catch (IOException e) {
             log.warn("Failed to write mapping file {}: {}", mapPath, e.getMessage());
+        }
+    }
+
+    private void refreshHierarchy(Collection<L1Class> classes, ClassHierarchy hierarchy) {
+        for (L1Class clazz : classes) {
+            hierarchy.addClass(clazz);
         }
     }
 
@@ -267,9 +275,12 @@ public final class ObfuscationPipeline {
     private void runGeneratedHelperHardening(Collection<L1Class> classes, PipelineContext ctx,
             List<TransformPass> ordered) {
         TransformPass invoke = findPass(ordered, "invokeDynamic");
+        TransformPass string = findPass(ordered, "stringEncryption");
         TransformPass number = findPass(ordered, "numberEncryption");
         TransformPass stack = findPass(ordered, "stackObfuscation");
-        if (invoke == null && number == null && stack == null && !config.isTransformEnabled("controlFlowFlattening")) return;
+        TransformPass cff = findPass(ordered, "controlFlowFlattening");
+        if (invoke == null && string == null && number == null && stack == null
+                && !config.isTransformEnabled("controlFlowFlattening")) return;
 
         List<L1Class> targetClasses = new ArrayList<>();
         for (L1Class clazz : classes) {
@@ -282,11 +293,27 @@ public final class ObfuscationPipeline {
 
         log.info("Running generated helper hardening on {} classes", targetClasses.size());
         long passStart = System.currentTimeMillis();
-        insertGeneratedHelperStateGates(targetClasses);
+        if (cff != null && config.isTransformEnabled("controlFlowFlattening")) {
+            ctx.putPassData("controlFlowFlattening.hardenGeneratedHelpers", Boolean.TRUE);
+            runControlFlowOnUnkeyedGeneratedHelpers(cff, targetClasses, ctx);
+            ctx.putPassData("controlFlowFlattening.hardenGeneratedHelpers", Boolean.FALSE);
+        } else {
+            insertGeneratedHelperStateGates(targetClasses);
+        }
         if (invoke != null && config.isTransformEnabled("invokeDynamic")) {
             ctx.putPassData("invokeDynamic.hardenGeneratedHelpers", Boolean.TRUE);
             runPassOnGeneratedHelpers(invoke, targetClasses, ctx);
             ctx.putPassData("invokeDynamic.hardenGeneratedHelpers", Boolean.FALSE);
+            if (cff != null && config.isTransformEnabled("controlFlowFlattening")) {
+                ctx.putPassData("controlFlowFlattening.hardenGeneratedHelpers", Boolean.TRUE);
+                runControlFlowOnUnkeyedGeneratedHelpers(cff, targetClasses, ctx);
+                ctx.putPassData("controlFlowFlattening.hardenGeneratedHelpers", Boolean.FALSE);
+            }
+        }
+        if (string != null && config.isTransformEnabled("stringEncryption")) {
+            ctx.putPassData("stringEncryption.hardenGeneratedHelpers", Boolean.TRUE);
+            runPassOnGeneratedHelpers(string, targetClasses, ctx);
+            ctx.putPassData("stringEncryption.hardenGeneratedHelpers", Boolean.FALSE);
         }
         if (number != null && config.isTransformEnabled("numberEncryption")) {
             ctx.putPassData("numberEncryption.hardenGeneratedHelpers", Boolean.TRUE);
@@ -371,6 +398,34 @@ public final class ObfuscationPipeline {
                 pass.transformMethod(ctx);
             }
         }
+    }
+
+    private void runControlFlowOnUnkeyedGeneratedHelpers(TransformPass pass,
+            Collection<L1Class> classes, PipelineContext ctx) {
+        int changed = 0;
+        for (L1Class clazz : classes) {
+            ctx.setCurrentL1Class(clazz);
+            ctx.setCurrentL1Method(null);
+            if (!pass.isApplicable(ctx)) continue;
+            pass.transformClass(ctx);
+            List<L1Method> methods = new ArrayList<>(clazz.methods());
+            for (L1Method method : methods) {
+                if (!method.hasCode() || !method.name().startsWith("__neko_")) continue;
+                if (hasControlFlowKeyLocal(ctx, method)) continue;
+                ctx.setCurrentL1Method(method);
+                if (!pass.isApplicable(ctx)) continue;
+                pass.transformMethod(ctx);
+                changed++;
+            }
+        }
+        if (changed > 0) {
+            log.info("Control-flow hardened generated helpers missing flow keys: methods={}", changed);
+        }
+    }
+
+    private boolean hasControlFlowKeyLocal(PipelineContext ctx, L1Method method) {
+        Map<String, Integer> locals = ctx.getPassData("controlFlowFlattening.flowKeyLocalByMethod");
+        return locals != null && locals.containsKey(method.owner().name() + "." + method.name() + method.descriptor());
     }
 
     private boolean hasGeneratedHelperMethods(L1Class clazz) {

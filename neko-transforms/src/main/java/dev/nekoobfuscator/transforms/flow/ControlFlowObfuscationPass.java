@@ -3,6 +3,8 @@ package dev.nekoobfuscator.transforms.flow;
 import dev.nekoobfuscator.api.transform.*;
 import dev.nekoobfuscator.core.ir.l1.*;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
+import dev.nekoobfuscator.transforms.data.NumberEncryptionPass;
+import dev.nekoobfuscator.transforms.invoke.InvokeDynamicPass;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.*;
 
@@ -61,6 +63,8 @@ public final class ControlFlowObfuscationPass implements TransformPass {
             replacement.add(fakeTarget);
             replacement.add(generateBogusCode(pctx));
             replacement.add(new JumpInsnNode(Opcodes.GOTO, realTarget)); // safety fallback
+            NumberEncryptionPass.excludeGeneratedNumericInsns(pctx, replacement);
+            InvokeDynamicPass.excludeGeneratedInvokeInsns(pctx, replacement);
 
             insns.insertBefore(gotoInsn, replacement);
             insns.remove(gotoInsn);

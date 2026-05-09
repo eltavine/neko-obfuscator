@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public final class StringEncryptionPass implements TransformPass {
+    public static final String HARDEN_GENERATED_HELPERS_KEY = "stringEncryption.hardenGeneratedHelpers";
     private static final String FLOW_KEY_VALUES_KEY = "controlFlowFlattening.flowKeys";
     private static final String FLOW_KEY_LOCAL_BY_METHOD_KEY = "controlFlowFlattening.flowKeyLocalByMethod";
     private static final String DIRECT_RUNTIME_OPTION = "directRuntime";
@@ -73,9 +74,10 @@ public final class StringEncryptionPass implements TransformPass {
         Map<String, Integer> flowKeyLocalByMethod = pctx.getPassData(FLOW_KEY_LOCAL_BY_METHOD_KEY);
         var config = pctx.config().transforms().get("stringEncryption");
 
+        boolean hardenGeneratedHelpers = Boolean.TRUE.equals(pctx.getPassData(HARDEN_GENERATED_HELPERS_KEY));
         if (method.isAbstract() || method.isNative() || !method.hasCode()
                 || TransformGuards.isRuntimeClass(clazz)
-                || TransformGuards.isGeneratedMethod(method)) {
+                || (TransformGuards.isGeneratedMethod(method) && !hardenGeneratedHelpers)) {
             JvmObfuscationCoverage.get(pctx).notApplicable(id(), clazz.name(), method.name(), method.descriptor(),
                 "guarded-runtime-generated-or-no-code");
             return;
@@ -87,7 +89,7 @@ public final class StringEncryptionPass implements TransformPass {
         long methodKey = DynamicKeyDerivationEngine.mix(
             DynamicKeyDerivationEngine.mix(classKey, methodNameHash), methodDescHash);
 
-        boolean materializedConcat = materializeStringConcatRecipes(method.asmNode(), insns);
+        boolean materializedConcat = materializeStringConcatRecipes(method.asmNode(), insns, flowKeyValues);
 
         // Collect string LDC instructions
         List<AbstractInsnNode> stringLdcs = new ArrayList<>();
@@ -108,8 +110,9 @@ public final class StringEncryptionPass implements TransformPass {
             }
             return;
         }
+        boolean generatedHelperHardening = hardenGeneratedHelpers && TransformGuards.isGeneratedMethod(method);
         boolean reflectionShapeSensitive = TransformGuards.isReflectionShapeSensitive(pctx, clazz);
-        KeyDispatcherSupport.Profile keyDispatcher = !reflectionShapeSensitive && KeyDispatcherSupport.enabled(config)
+        KeyDispatcherSupport.Profile keyDispatcher = !generatedHelperHardening && !reflectionShapeSensitive && KeyDispatcherSupport.enabled(config)
             ? KeyDispatcherSupport.getOrCreate(pctx, clazz, config, "string", methodNameHash)
             : null;
 
@@ -117,6 +120,11 @@ public final class StringEncryptionPass implements TransformPass {
         Integer flowKeyLocalSlot = flowKeyLocalByMethod == null
             ? null : flowKeyLocalByMethod.get(methodKeyId);
         boolean directRuntime = booleanOption(config, DIRECT_RUNTIME_OPTION, true);
+        boolean configuredFlowKey = booleanOption(config, USE_CONTROL_FLOW_KEY_OPTION, false)
+            && requireFullControlFlowKey(pctx);
+        if (configuredFlowKey) {
+            keyDispatcher = null;
+        }
 
         // Process each string
         for (AbstractInsnNode insn : stringLdcs) {
@@ -140,12 +148,18 @@ public final class StringEncryptionPass implements TransformPass {
             long callsiteMaskA = 0L;
             long callsiteMaskB = 0L;
             boolean directKeyMode = directRuntime || reflectionShapeSensitive;
+            Long siteFlowKey = resolveCffFlowKey(insns, insn, flowKeyValues);
             boolean cffSite = directKeyMode
-                && flowKeyValues != null && flowKeyValues.containsKey(insn)
+                && siteFlowKey != null
                 && flowKeyLocalSlot != null;
+            if (directKeyMode && configuredFlowKey && !cffSite) {
+                failClosed(pctx, clazz, method, flowKeyLocalSlot == null
+                    ? "string-method-missing-cff-flow-key-local"
+                    : "string-site-missing-cff-flow-key");
+            }
             if (directKeyMode) {
                 if (cffSite) {
-                    predictedContextKey = flowKeyValues.get(insn);
+                    predictedContextKey = siteFlowKey;
                 } else {
                     callsiteMaskA = pctx.random().nextLong() | 1L;
                     callsiteMaskB = pctx.random().nextLong();
@@ -155,11 +169,13 @@ public final class StringEncryptionPass implements TransformPass {
 
             boolean indyUseFlowKey = !directRuntime
                 && booleanOption(config, USE_CONTROL_FLOW_KEY_OPTION, false)
-                && flowKeyValues != null
-                && flowKeyValues.containsKey(insn);
+                && siteFlowKey != null;
+            if (!directRuntime && configuredFlowKey && !indyUseFlowKey) {
+                failClosed(pctx, clazz, method, "indy-string-site-missing-cff-flow-key");
+            }
             long indyMixedKey = siteInsnKey;
             if (indyUseFlowKey) {
-                indyMixedKey = DynamicKeyDerivationEngine.mix(indyMixedKey, flowKeyValues.get(insn));
+                indyMixedKey = DynamicKeyDerivationEngine.mix(indyMixedKey, siteFlowKey);
             }
 
             long effectiveKey;
@@ -179,9 +195,10 @@ public final class StringEncryptionPass implements TransformPass {
             // Encrypt the string
             byte[] plainBytes = original.getBytes(StandardCharsets.UTF_8);
             byte[] encrypted = DynamicKeyDerivationEngine.encrypt(plainBytes, effectiveKey);
-            if (reflectionShapeSensitive) {
+            if (reflectionShapeSensitive || configuredFlowKey) {
                 InsnList replacement = inlineRuntimeDecryptReplacement(encrypted, effectiveKey, siteInsnKey, cffSite, flowKeyLocalSlot);
                 NumberEncryptionPass.excludeGeneratedNumericInsns(pctx, replacement);
+                dev.nekoobfuscator.transforms.invoke.InvokeDynamicPass.excludeGeneratedInvokeInsns(pctx, replacement);
                 insns.insertBefore(insn, replacement);
                 insns.remove(insn);
                 continue;
@@ -230,7 +247,7 @@ public final class StringEncryptionPass implements TransformPass {
             }
         }
 
-        if (!reflectionShapeSensitive) {
+        if (!reflectionShapeSensitive && !configuredFlowKey) {
             ensureLocalStringCodec(clazz);
         }
         clazz.markDirty();
@@ -418,7 +435,8 @@ public final class StringEncryptionPass implements TransformPass {
         return sites;
     }
 
-    private boolean materializeStringConcatRecipes(MethodNode method, InsnList insns) {
+    private boolean materializeStringConcatRecipes(MethodNode method, InsnList insns,
+            IdentityHashMap<AbstractInsnNode, Long> flowKeyValues) {
         boolean changed = false;
         List<InvokeDynamicInsnNode> concats = new ArrayList<>();
         for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
@@ -428,11 +446,68 @@ public final class StringEncryptionPass implements TransformPass {
         }
         for (InvokeDynamicInsnNode indy : concats) {
             InsnList replacement = explicitStringConcat(method, indy);
+            Long flowKey = flowKeyValues == null ? null : flowKeyValues.get(indy);
+            if (flowKey != null) {
+                for (AbstractInsnNode replacementInsn = replacement.getFirst();
+                        replacementInsn != null;
+                        replacementInsn = replacementInsn.getNext()) {
+                    flowKeyValues.put(replacementInsn, flowKey);
+                }
+            }
             insns.insertBefore(indy, replacement);
             insns.remove(indy);
             changed = true;
         }
         return changed;
+    }
+
+    private Long resolveCffFlowKey(InsnList insns, AbstractInsnNode site,
+            IdentityHashMap<AbstractInsnNode, Long> flowKeyValues) {
+        if (flowKeyValues == null || site == null) return null;
+        Long exact = flowKeyValues.get(site);
+        if (exact != null) return exact;
+
+        Long before = null;
+        int beforeDistance = Integer.MAX_VALUE;
+        int distance = 0;
+        for (AbstractInsnNode cursor = site.getPrevious(); cursor != null; cursor = cursor.getPrevious()) {
+            distance++;
+            Long flowKey = flowKeyValues.get(cursor);
+            if (flowKey != null) {
+                before = flowKey;
+                beforeDistance = distance;
+                break;
+            }
+            if (isFlowKeyInferenceBoundary(cursor)) break;
+        }
+
+        Long after = null;
+        int afterDistance = Integer.MAX_VALUE;
+        distance = 0;
+        for (AbstractInsnNode cursor = site.getNext(); cursor != null; cursor = cursor.getNext()) {
+            distance++;
+            Long flowKey = flowKeyValues.get(cursor);
+            if (flowKey != null) {
+                after = flowKey;
+                afterDistance = distance;
+                break;
+            }
+            if (isFlowKeyInferenceBoundary(cursor)) break;
+        }
+
+        if (before == null) return after;
+        if (after == null) return before;
+        return beforeDistance <= afterDistance ? before : after;
+    }
+
+    private boolean isFlowKeyInferenceBoundary(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        return opcode == Opcodes.GOTO
+            || opcode == Opcodes.TABLESWITCH
+            || opcode == Opcodes.LOOKUPSWITCH
+            || opcode == Opcodes.RET
+            || opcode == Opcodes.ATHROW
+            || (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN);
     }
 
     private boolean isStringConcatWithConstants(InvokeDynamicInsnNode indy) {
@@ -554,6 +629,14 @@ public final class StringEncryptionPass implements TransformPass {
         return value instanceof Boolean bool ? bool : defaultValue;
     }
 
+    private boolean requireFullControlFlowKey(PipelineContext pctx) {
+        if (!pctx.config().isTransformEnabled("controlFlowFlattening")) return false;
+        var cff = pctx.config().transforms().get("controlFlowFlattening");
+        return booleanOption(cff, "requireFullStateMachine", false)
+            || (!booleanOption(cff, "allowSafeFallbacks", false)
+                && booleanOption(cff, "strictCoverage", false));
+    }
+
     private int countExistingEncFields(L1Class clazz) {
         int count = 0;
         for (FieldNode fn : clazz.asmNode().fields) {
@@ -621,6 +704,12 @@ public final class StringEncryptionPass implements TransformPass {
         return (classNode.access & Opcodes.ACC_INTERFACE) != 0
             ? INTERFACE_METADATA_ACCESS
             : CLASS_METADATA_ACCESS;
+    }
+
+    private void failClosed(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
+        JvmObfuscationCoverage.get(pctx).failClosed(id(), clazz.name(), method.name(), method.descriptor(), reason);
+        throw new IllegalStateException("String encryption failed closed for "
+            + clazz.name() + "." + method.name() + method.descriptor() + ": " + reason);
     }
 
     private record SiteKeyInfo(long siteInsnKey, KeyDispatcherSupport.Profile keyDispatcher,

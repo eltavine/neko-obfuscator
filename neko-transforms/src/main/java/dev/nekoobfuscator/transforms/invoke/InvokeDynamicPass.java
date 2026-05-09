@@ -5,6 +5,7 @@ import dev.nekoobfuscator.api.transform.*;
 import dev.nekoobfuscator.core.ir.l1.*;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.data.NumberEncryptionPass;
+import dev.nekoobfuscator.transforms.flow.ControlFlowFlatteningPass;
 import dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine;
 import dev.nekoobfuscator.transforms.key.KeyDispatcherSupport;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -22,6 +23,8 @@ public final class InvokeDynamicPass implements TransformPass {
 
     public static final String HARDEN_GENERATED_HELPERS_KEY = "invokeDynamic.hardenGeneratedHelpers";
     private static final String FLOW_KEY_VALUES_KEY = "controlFlowFlattening.flowKeys";
+    private static final String FLOW_KEY_LOCAL_BY_METHOD_KEY = "controlFlowFlattening.flowKeyLocalByMethod";
+    private static final String EXCLUDED_INVOKE_INSNS_KEY = "invokeDynamic.excludedInvokeInsns";
     private static final String SKIP_TRY_CATCH_METHODS_OPTION = "skipMethodsWithTryCatch";
     private static final String SKIP_SWITCH_METHODS_OPTION = "skipMethodsWithSwitches";
     private static final String SKIP_MONITOR_METHODS_OPTION = "skipMethodsWithMonitors";
@@ -32,16 +35,12 @@ public final class InvokeDynamicPass implements TransformPass {
     private static final String MAX_BRANCH_COUNT_OPTION = "maxBranchCount";
     private static final String WRAP_SPECIAL_CALLS_OPTION = "wrapSpecialCalls";
     private static final String BOOTSTRAP_DESC =
-        "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;IIIIIIIII)Ljava/lang/invoke/CallSite;";
+        "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IIIIIIII)Ljava/lang/invoke/CallSite;";
     private static final String LOCAL_BOOTSTRAP_PREFIX = "__neko_b";
-    private static final String LOCAL_METADATA_PREFIX = "__neko_m";
     private static final String KEY_OWNER = "dev/nekoobfuscator/runtime/NekoKeyDerivation";
     private static final String STRING_DECRYPT_OWNER = "dev/nekoobfuscator/runtime/NekoStringDecryptor";
     private static final String CONTEXT_OWNER = "dev/nekoobfuscator/runtime/NekoContext";
-    private static final int CLASS_METADATA_ACCESS =
-        Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC;
-    private static final int INTERFACE_METADATA_ACCESS =
-        Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC;
+    private static final long INVOKE_FLOW_KEY_DOMAIN = 0x4E454B4F494E4459L;
 
     @Override public String id() { return "invokeDynamic"; }
     @Override public String name() { return "InvokeDynamic Obfuscation"; }
@@ -54,10 +53,32 @@ public final class InvokeDynamicPass implements TransformPass {
     private DynamicKeyDerivationEngine keyEngine;
     private long classKey;
     private int targetCounter;
-    private int metadataFieldCounter;
     private final Map<String, BootstrapProfile> bootstrapProfiles = new HashMap<>();
-    private String metadataHelperName;
-    private String metadataFieldPrefix;
+
+    public static void excludeGeneratedInvokeInsns(PipelineContext pctx, InsnList insns) {
+        Set<AbstractInsnNode> excluded = excludedInvokeInsns(pctx);
+        for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
+            excluded.add(insn);
+        }
+    }
+
+    public static void excludeGeneratedInvokeInsn(PipelineContext pctx, AbstractInsnNode insn) {
+        excludedInvokeInsns(pctx).add(insn);
+    }
+
+    public static boolean isExcludedGeneratedInvokeInsn(PipelineContext pctx, AbstractInsnNode insn) {
+        Set<AbstractInsnNode> excluded = pctx.getPassData(EXCLUDED_INVOKE_INSNS_KEY);
+        return excluded != null && excluded.contains(insn);
+    }
+
+    private static Set<AbstractInsnNode> excludedInvokeInsns(PipelineContext pctx) {
+        Set<AbstractInsnNode> excluded = pctx.getPassData(EXCLUDED_INVOKE_INSNS_KEY);
+        if (excluded == null) {
+            excluded = Collections.newSetFromMap(new IdentityHashMap<>());
+            pctx.putPassData(EXCLUDED_INVOKE_INSNS_KEY, excluded);
+        }
+        return excluded;
+    }
 
     @Override
     public void transformClass(TransformContext ctx) {
@@ -69,11 +90,7 @@ public final class InvokeDynamicPass implements TransformPass {
         }
         classKey = keyEngine.deriveClassKey(pctx.currentL1Class());
         targetCounter = 0;
-        metadataFieldPrefix = uniqueMetadataFieldPrefix(pctx.currentL1Class(), pctx);
-        metadataFieldCounter = countExistingMetadataFields(pctx.currentL1Class());
         bootstrapProfiles.clear();
-        metadataHelperName = uniqueMethodName(pctx.currentL1Class(),
-            LOCAL_METADATA_PREFIX + Integer.toUnsignedString(pctx.random().nextInt(), 36));
     }
 
     @Override
@@ -82,6 +99,7 @@ public final class InvokeDynamicPass implements TransformPass {
         L1Method method = pctx.currentL1Method();
         L1Class clazz = pctx.currentL1Class();
         IdentityHashMap<AbstractInsnNode, Long> flowKeyValues = pctx.getPassData(FLOW_KEY_VALUES_KEY);
+        Map<String, Integer> flowKeyLocalByMethod = pctx.getPassData(FLOW_KEY_LOCAL_BY_METHOD_KEY);
         TransformConfig config = pctx.config().transforms().get("invokeDynamic");
         if (!method.hasCode()) return;
         boolean hardenGeneratedHelpers = Boolean.TRUE.equals(pctx.getPassData(HARDEN_GENERATED_HELPERS_KEY));
@@ -110,6 +128,9 @@ public final class InvokeDynamicPass implements TransformPass {
         boolean wrapSpecialCalls = booleanOption(config, WRAP_SPECIAL_CALLS_OPTION, true);
         for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof MethodInsnNode mi) {
+                if (isExcludedGeneratedInvoke(pctx, mi)) {
+                    continue;
+                }
                 if (method.isConstructor() && !constructorReady) {
                     if (mi.getOpcode() == Opcodes.INVOKESPECIAL && "<init>".equals(mi.name)) {
                         constructorReady = true;
@@ -143,36 +164,50 @@ public final class InvokeDynamicPass implements TransformPass {
             }
             return;
         }
-        KeyDispatcherSupport.Profile keyDispatcher = KeyDispatcherSupport.enabled(config)
+        boolean configuredFlowKey = booleanOption(config, USE_CONTROL_FLOW_KEY_OPTION, false)
+            && requireFullControlFlowKey(pctx);
+        KeyDispatcherSupport.Profile keyDispatcher = !configuredFlowKey && KeyDispatcherSupport.enabled(config)
             ? KeyDispatcherSupport.getOrCreate(pctx, clazz, config, "invoke", methodNameHash)
             : null;
         BootstrapProfile bootstrapProfile = getOrCreateBootstrap(clazz, pctx, keyDispatcher);
+        String methodKeyId = clazz.name() + "." + method.name() + method.descriptor();
+        Integer flowKeyLocalSlot = flowKeyLocalByMethod == null
+            ? null : flowKeyLocalByMethod.get(methodKeyId);
 
         MethodNode mn = method.asmNode();
         for (MethodInsnNode mi : targets) {
             int targetId = targetCounter++;
             int siteSalt = pctx.random().nextInt();
+            Long exactFlowKey = flowKeyValues == null ? null : flowKeyValues.get(mi);
+            Long siteFlowKey = configuredFlowKey ? exactFlowKey : resolveCffFlowKey(insns, mi, flowKeyValues);
             boolean useFlowKey = booleanOption(config, USE_CONTROL_FLOW_KEY_OPTION, false)
-                && flowKeyValues != null
-                && flowKeyValues.containsKey(mi);
-            long flowKey = useFlowKey ? flowKeyValues.get(mi) : 0L;
+                && siteFlowKey != null
+                && flowKeyLocalSlot != null;
+            if (configuredFlowKey && !useFlowKey) {
+                failClosed(pctx, clazz, method, flowKeyLocalSlot == null
+                    ? "invoke-method-missing-cff-flow-key-local"
+                    : "invoke-site-missing-cff-flow-key:"
+                        + mi.owner + "." + mi.name + mi.desc + ":op=" + mi.getOpcode());
+            }
+            long flowKey = useFlowKey ? siteFlowKey : 0L;
 
-            int siteId = metadataFieldCounter++;
             long siteBaseKey = deriveSiteBaseKey(methodKey, siteSalt, targetId, mi.getOpcode(), flowKey, useFlowKey);
-            int keyComponent = siteId ^ siteSalt ^ targetId;
+            int keyComponent = pctx.random().nextInt();
             long effectiveSiteBaseKey = keyDispatcher != null
                 ? KeyDispatcherSupport.dispatch(keyDispatcher, siteBaseKey, keyComponent)
                 : siteBaseKey;
-            addEncryptedMetadataField(clazz, siteId, 0, mi.owner, deriveMetadataKey(effectiveSiteBaseKey, 1));
-            addEncryptedMetadataField(clazz, siteId, 1, mi.name, deriveMetadataKey(effectiveSiteBaseKey, 2));
-            addEncryptedMetadataField(clazz, siteId, 2, mi.desc, deriveMetadataKey(effectiveSiteBaseKey, 3));
+            String encryptedOwner = encryptMetadataString(mi.owner, deriveMetadataKey(effectiveSiteBaseKey, 1));
+            String encryptedName = encryptMetadataString(mi.name, deriveMetadataKey(effectiveSiteBaseKey, 2));
+            String encryptedDesc = encryptMetadataString(mi.desc, deriveMetadataKey(effectiveSiteBaseKey, 3));
 
             InvokeDynamicInsnNode indy = new InvokeDynamicInsnNode(
                 opaqueCallsiteName(pctx),
                 invokedynamicDescriptor(mi),
                 new Handle(Opcodes.H_INVOKESTATIC, clazz.name(), bootstrapProfile.methodName(),
                     BOOTSTRAP_DESC, (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0),
-                siteId,
+                encryptedOwner,
+                encryptedName,
+                encryptedDesc,
                 methodNameHash,
                 methodDescHash,
                 siteSalt,
@@ -182,17 +217,73 @@ public final class InvokeDynamicPass implements TransformPass {
                 keyDispatcher != null ? 1 : 0,
                 keyComponent
             );
+            if (useFlowKey) {
+                InsnList sync = new InsnList();
+                long mask = pctx.random().nextLong();
+                sync.add(new LdcInsnNode(siteFlowKey ^ mask));
+                sync.add(new LdcInsnNode(mask));
+                sync.add(new InsnNode(Opcodes.LXOR));
+                sync.add(new InsnNode(Opcodes.DUP2));
+                sync.add(new VarInsnNode(Opcodes.LSTORE, flowKeyLocalSlot));
+                sync.add(new MethodInsnNode(Opcodes.INVOKESTATIC, CONTEXT_OWNER,
+                    "setCurrentFlowKey", "(J)V", false));
+                insns.insertBefore(mi, sync);
+            }
             insns.set(mi, indy);
         }
 
-        // Regenerate the metadata helper so its switch covers every site we've
-        // added so far (including any added during this method).
-        if (!targets.isEmpty()) {
-            ensureMetadataHelper(clazz);
-        }
         pctx.currentL1Class().markDirty();
         JvmObfuscationCoverage.get(pctx).full(id(), clazz.name(), method.name(), method.descriptor(),
             "local-bootstrap-invokedynamic-sites=" + targets.size());
+    }
+
+    private Long resolveCffFlowKey(InsnList insns, AbstractInsnNode site,
+            IdentityHashMap<AbstractInsnNode, Long> flowKeyValues) {
+        if (flowKeyValues == null || site == null) return null;
+        Long exact = flowKeyValues.get(site);
+        if (exact != null) return exact;
+
+        Long before = null;
+        int beforeDistance = Integer.MAX_VALUE;
+        int distance = 0;
+        for (AbstractInsnNode cursor = site.getPrevious(); cursor != null; cursor = cursor.getPrevious()) {
+            distance++;
+            Long flowKey = flowKeyValues.get(cursor);
+            if (flowKey != null) {
+                before = flowKey;
+                beforeDistance = distance;
+                break;
+            }
+            if (isFlowKeyInferenceBoundary(cursor)) break;
+        }
+
+        Long after = null;
+        int afterDistance = Integer.MAX_VALUE;
+        distance = 0;
+        for (AbstractInsnNode cursor = site.getNext(); cursor != null; cursor = cursor.getNext()) {
+            distance++;
+            Long flowKey = flowKeyValues.get(cursor);
+            if (flowKey != null) {
+                after = flowKey;
+                afterDistance = distance;
+                break;
+            }
+            if (isFlowKeyInferenceBoundary(cursor)) break;
+        }
+
+        if (before == null) return after;
+        if (after == null) return before;
+        return beforeDistance <= afterDistance ? before : after;
+    }
+
+    private boolean isFlowKeyInferenceBoundary(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        return opcode == Opcodes.GOTO
+            || opcode == Opcodes.TABLESWITCH
+            || opcode == Opcodes.LOOKUPSWITCH
+            || opcode == Opcodes.RET
+            || opcode == Opcodes.ATHROW
+            || (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN);
     }
 
     private String invokedynamicDescriptor(MethodInsnNode mi) {
@@ -204,6 +295,11 @@ public final class InvokeDynamicPass implements TransformPass {
         indyArgs[0] = Type.getObjectType(mi.owner);
         System.arraycopy(args, 0, indyArgs, 1, args.length);
         return Type.getMethodDescriptor(Type.getReturnType(mi.desc), indyArgs);
+    }
+
+    private boolean isExcludedGeneratedInvoke(PipelineContext pctx, AbstractInsnNode insn) {
+        Set<AbstractInsnNode> excluded = pctx.getPassData(EXCLUDED_INVOKE_INSNS_KEY);
+        return excluded != null && excluded.contains(insn);
     }
 
     private void insertSafeInvokeGate(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
@@ -238,6 +334,12 @@ public final class InvokeDynamicPass implements TransformPass {
         clazz.markDirty();
         JvmObfuscationCoverage.get(pctx).safe(id(), clazz.name(), method.name(), method.descriptor(), reason);
         pctx.invalidate(method);
+    }
+
+    private void failClosed(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
+        JvmObfuscationCoverage.get(pctx).failClosed(id(), clazz.name(), method.name(), method.descriptor(), reason);
+        throw new IllegalStateException("InvokeDynamic obfuscation failed closed for "
+            + clazz.name() + "." + method.name() + method.descriptor() + ": " + reason);
     }
 
 
@@ -285,6 +387,14 @@ public final class InvokeDynamicPass implements TransformPass {
             return false;
         }
         return false;
+    }
+
+    private boolean requireFullControlFlowKey(PipelineContext pctx) {
+        if (!pctx.config().isTransformEnabled("controlFlowFlattening")) return false;
+        TransformConfig cff = pctx.config().transforms().get("controlFlowFlattening");
+        return booleanOption(cff, "requireFullStateMachine", false)
+            || (!booleanOption(cff, "allowSafeFallbacks", false)
+                && booleanOption(cff, "strictCoverage", false));
     }
 
     private boolean isGeneratedInvokeTarget(L1Method method, boolean hardenGeneratedHelpers) {
@@ -364,12 +474,14 @@ public final class InvokeDynamicPass implements TransformPass {
 
     private long deriveSiteBaseKey(long methodKey, int siteSalt, int targetId, int invokeType,
             long flowKey, boolean useFlowKey) {
+        if (useFlowKey) {
+            long siteKey = DynamicKeyDerivationEngine.mix(flowKey ^ INVOKE_FLOW_KEY_DOMAIN, siteSalt);
+            siteKey = DynamicKeyDerivationEngine.mix(siteKey, targetId);
+            return DynamicKeyDerivationEngine.mix(siteKey, invokeType);
+        }
         long siteKey = DynamicKeyDerivationEngine.mix(methodKey, siteSalt);
         siteKey = DynamicKeyDerivationEngine.mix(siteKey, targetId);
         siteKey = DynamicKeyDerivationEngine.mix(siteKey, invokeType);
-        if (useFlowKey) {
-            siteKey = DynamicKeyDerivationEngine.mix(siteKey, flowKey);
-        }
         return siteKey;
     }
 
@@ -377,65 +489,13 @@ public final class InvokeDynamicPass implements TransformPass {
         return DynamicKeyDerivationEngine.finalize_(DynamicKeyDerivationEngine.mix(siteBaseKey, componentId));
     }
 
-    private void addEncryptedMetadataField(L1Class clazz, int siteId, int component, String value, long key) {
-        String fieldName = metadataFieldName(siteId, component);
+    private String encryptMetadataString(String value, long key) {
         byte[] encrypted = DynamicKeyDerivationEngine.encrypt(value.getBytes(StandardCharsets.UTF_8), key);
-        FieldNode fn = new FieldNode(
-            metadataAccess(clazz.asmNode()),
-            fieldName, "Ljava/lang/String;", null,
-            new String(encrypted, StandardCharsets.ISO_8859_1));
-        clazz.asmNode().fields.add(fn);
-    }
-
-    private int countExistingMetadataFields(L1Class clazz) {
-        int maxSiteId = -1;
-        for (FieldNode fn : clazz.asmNode().fields) {
-            if (!fn.name.startsWith(metadataFieldPrefix)
-                    || (!"[B".equals(fn.desc) && !"Ljava/lang/String;".equals(fn.desc))) {
-                continue;
-            }
-            int suffixStart = metadataFieldPrefix.length();
-            int suffixEnd = fn.name.indexOf('_', suffixStart);
-            if (suffixEnd < 0) {
-                suffixEnd = fn.name.length() - 1;
-            }
-            if (suffixEnd <= suffixStart) continue;
-            try {
-                int siteId = Integer.parseInt(fn.name.substring(suffixStart, suffixEnd));
-                maxSiteId = Math.max(maxSiteId, siteId);
-            } catch (NumberFormatException ignored) {
-            }
-        }
-        return maxSiteId + 1;
-    }
-
-    private String metadataFieldName(int siteId, int component) {
-        return metadataFieldPrefix + siteId + "_" + component;
-    }
-
-    private String uniqueMetadataFieldPrefix(L1Class clazz, PipelineContext pctx) {
-        String prefix;
-        do {
-            prefix = "m" + Integer.toUnsignedString(pctx.random().nextInt(), 36) + "_";
-        } while (hasFieldPrefix(clazz, prefix));
-        return prefix;
-    }
-
-    private boolean hasFieldPrefix(L1Class clazz, String prefix) {
-        for (FieldNode field : clazz.asmNode().fields) {
-            if (field.name.startsWith(prefix)) return true;
-        }
-        return false;
+        return Base64.getEncoder().encodeToString(encrypted);
     }
 
     private String opaqueCallsiteName(PipelineContext pctx) {
         return "_" + Integer.toUnsignedString(pctx.random().nextInt(), 36);
-    }
-
-    private int metadataAccess(ClassNode classNode) {
-        return (classNode.access & Opcodes.ACC_INTERFACE) != 0
-            ? INTERFACE_METADATA_ACCESS
-            : CLASS_METADATA_ACCESS;
     }
 
     private BootstrapProfile getOrCreateBootstrap(L1Class clazz, PipelineContext pctx,
@@ -444,116 +504,16 @@ public final class InvokeDynamicPass implements TransformPass {
         BootstrapProfile existing = bootstrapProfiles.get(profileKey);
         if (existing != null) return existing;
 
-        ensureMetadataHelper(clazz);
         String methodName = uniqueMethodName(clazz,
             LOCAL_BOOTSTRAP_PREFIX + Integer.toUnsignedString(pctx.random().nextInt(), 36));
         BootstrapProfile profile = new BootstrapProfile(methodName, keyDispatcher);
-        emitBootstrap(clazz, profile);
+        emitBootstrap(clazz, pctx, profile);
         bootstrapProfiles.put(profileKey, profile);
         clazz.markDirty();
         return profile;
     }
 
-    /**
-     * Generate the per-class metadata-decrypt helper. Builds a switch on
-     * (siteId * 4 + component) -> direct GETSTATIC of the encrypted field,
-     * eliminating the plain LDC of the per-class field prefix that older
-     * versions exposed via StringBuilder. Regenerated each time fields are
-     * added so the switch covers all current sites.
-     */
-    private void ensureMetadataHelper(L1Class clazz) {
-        clazz.asmNode().methods.removeIf(m ->
-            m.name.equals(metadataHelperName) && "(IIJI)Ljava/lang/String;".equals(m.desc));
-
-        List<int[]> sites = new ArrayList<>();
-        for (FieldNode f : clazz.asmNode().fields) {
-            if (!f.name.startsWith(metadataFieldPrefix)) continue;
-            if (!"Ljava/lang/String;".equals(f.desc)) continue;
-            String suffix = f.name.substring(metadataFieldPrefix.length());
-            int sep = suffix.indexOf('_');
-            if (sep <= 0) continue;
-            try {
-                int siteId = Integer.parseInt(suffix.substring(0, sep));
-                int component = Integer.parseInt(suffix.substring(sep + 1));
-                sites.add(new int[] { siteId, component });
-            } catch (NumberFormatException ignored) {}
-        }
-        sites.sort((a, b) -> {
-            int c = Integer.compare(a[0], b[0]);
-            return c != 0 ? c : Integer.compare(a[1], b[1]);
-        });
-
-        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-        boolean itf = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
-        access |= itf ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
-        MethodNode method = new MethodNode(access, metadataHelperName,
-            "(IIJI)Ljava/lang/String;", null, null);
-        InsnList insns = method.instructions;
-
-        // long key = finalize_(mix(siteKey, componentId))
-        insns.add(new VarInsnNode(Opcodes.LLOAD, 2));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 4));
-        insns.add(new InsnNode(Opcodes.I2L));
-        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, KEY_OWNER, "mix", "(JJ)J", false));
-        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, KEY_OWNER, "finalize_", "(J)J", false));
-        insns.add(new VarInsnNode(Opcodes.LSTORE, 5));
-
-        int byteArrayLocal = 7;
-
-        if (!sites.isEmpty()) {
-            int[] keys = new int[sites.size()];
-            LabelNode[] labels = new LabelNode[sites.size()];
-            for (int i = 0; i < sites.size(); i++) {
-                keys[i] = sites.get(i)[0] * 4 + sites.get(i)[1];
-                labels[i] = new LabelNode();
-            }
-            LabelNode defaultLabel = new LabelNode();
-            LabelNode afterSwitch = new LabelNode();
-
-            // switchKey = siteId * 4 + component
-            insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
-            insns.add(new IntInsnNode(Opcodes.SIPUSH, 4));
-            insns.add(new InsnNode(Opcodes.IMUL));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, 1));
-            insns.add(new InsnNode(Opcodes.IADD));
-            insns.add(new LookupSwitchInsnNode(defaultLabel, keys, labels));
-
-            for (int i = 0; i < sites.size(); i++) {
-                insns.add(labels[i]);
-                String fieldName = metadataFieldPrefix + sites.get(i)[0] + "_" + sites.get(i)[1];
-                insns.add(new FieldInsnNode(Opcodes.GETSTATIC, clazz.name(),
-                    fieldName, "Ljava/lang/String;"));
-                insns.add(new FieldInsnNode(Opcodes.GETSTATIC, "java/nio/charset/StandardCharsets",
-                    "ISO_8859_1", "Ljava/nio/charset/Charset;"));
-                insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String",
-                    "getBytes", "(Ljava/nio/charset/Charset;)[B", false));
-                insns.add(new VarInsnNode(Opcodes.ASTORE, byteArrayLocal));
-                insns.add(new JumpInsnNode(Opcodes.GOTO, afterSwitch));
-            }
-
-            insns.add(defaultLabel);
-            insns.add(new InsnNode(Opcodes.ICONST_0));
-            insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
-            insns.add(new VarInsnNode(Opcodes.ASTORE, byteArrayLocal));
-            insns.add(afterSwitch);
-        } else {
-            insns.add(new InsnNode(Opcodes.ICONST_0));
-            insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
-            insns.add(new VarInsnNode(Opcodes.ASTORE, byteArrayLocal));
-        }
-
-        insns.add(new VarInsnNode(Opcodes.ALOAD, byteArrayLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, 5));
-        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, STRING_DECRYPT_OWNER, "decrypt",
-            "([BJ)Ljava/lang/String;", false));
-        insns.add(new InsnNode(Opcodes.ARETURN));
-
-        method.maxStack = 6;
-        method.maxLocals = 8;
-        clazz.asmNode().methods.add(method);
-    }
-
-    private void emitBootstrap(L1Class clazz, BootstrapProfile profile) {
+    private void emitBootstrap(L1Class clazz, PipelineContext pctx, BootstrapProfile profile) {
         int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         boolean itf = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
         access |= itf ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
@@ -561,15 +521,15 @@ public final class InvokeDynamicPass implements TransformPass {
             new String[] { "java/lang/Throwable" });
         InsnList insns = method.instructions;
 
-        int callerClassLocal = 12;
-        int siteKeyLocal = 13;
-        int ownerLocal = 15;
-        int nameLocal = 16;
-        int descLocal = 17;
-        int ownerClassLocal = 18;
-        int targetTypeLocal = 19;
-        int targetLookupLocal = 20;
-        int handleLocal = 21;
+        int callerClassLocal = 14;
+        int siteKeyLocal = 15;
+        int ownerLocal = 17;
+        int nameLocal = 18;
+        int descLocal = 19;
+        int ownerClassLocal = 20;
+        int targetTypeLocal = 21;
+        int targetLookupLocal = 22;
+        int handleLocal = 23;
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, 0));
         insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/invoke/MethodHandles$Lookup",
@@ -578,42 +538,45 @@ public final class InvokeDynamicPass implements TransformPass {
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, callerClassLocal));
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, KEY_OWNER, "classKey", "(Ljava/lang/Class;)J", false));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 4));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 6));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, KEY_OWNER, "mix", "(JJ)J", false));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 5));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 7));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, KEY_OWNER, "mix", "(JJ)J", false));
         insns.add(new VarInsnNode(Opcodes.LSTORE, siteKeyLocal));
 
-        mixSiteKey(insns, siteKeyLocal, 6);
-        mixSiteKey(insns, siteKeyLocal, 8);
-        mixSiteKey(insns, siteKeyLocal, 7);
-
         LabelNode noFlow = new LabelNode();
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 9));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 11));
         insns.add(new JumpInsnNode(Opcodes.IFEQ, noFlow));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, siteKeyLocal));
-        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, CONTEXT_OWNER, "flowKey", "()J", false));
-        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, KEY_OWNER, "mix", "(JJ)J", false));
+        MethodInsnNode inboundFlowKeyRead = new MethodInsnNode(Opcodes.INVOKESTATIC,
+            CONTEXT_OWNER, "flowKey", "()J", false);
+        ControlFlowFlatteningPass.markInboundFlowKeyRead(pctx, inboundFlowKeyRead);
+        insns.add(inboundFlowKeyRead);
+        insns.add(new LdcInsnNode(INVOKE_FLOW_KEY_DOMAIN));
+        insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LSTORE, siteKeyLocal));
         insns.add(noFlow);
 
+        mixSiteKey(insns, siteKeyLocal, 8);
+        mixSiteKey(insns, siteKeyLocal, 10);
+        mixSiteKey(insns, siteKeyLocal, 9);
+
         if (profile.keyDispatcher() != null) {
             LabelNode noKey = new LabelNode();
-            insns.add(new VarInsnNode(Opcodes.ILOAD, 10));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, 12));
             insns.add(new JumpInsnNode(Opcodes.IFEQ, noKey));
             insns.add(new VarInsnNode(Opcodes.LLOAD, siteKeyLocal));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, 11));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, 13));
             insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, clazz.name(),
                 profile.keyDispatcher().methodName(), "(JI)J", itf));
             insns.add(new VarInsnNode(Opcodes.LSTORE, siteKeyLocal));
             insns.add(noKey);
         }
 
-        emitMetadataCall(insns, clazz, 0, 1, ownerLocal, itf);
-        emitMetadataCall(insns, clazz, 1, 2, nameLocal, itf);
-        emitMetadataCall(insns, clazz, 2, 3, descLocal, itf);
+        emitMetadataDecrypt(insns, 3, 1, siteKeyLocal, ownerLocal);
+        emitMetadataDecrypt(insns, 4, 2, siteKeyLocal, nameLocal);
+        emitMetadataDecrypt(insns, 5, 3, siteKeyLocal, descLocal);
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
         insns.add(new IntInsnNode(Opcodes.BIPUSH, '/'));
@@ -644,10 +607,10 @@ public final class InvokeDynamicPass implements TransformPass {
         LabelNode specialLabel = new LabelNode();
         LabelNode virtualLabel = new LabelNode();
         LabelNode afterResolve = new LabelNode();
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 7));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 9));
         insns.add(new IntInsnNode(Opcodes.SIPUSH, Opcodes.INVOKESTATIC));
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, staticLabel));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 7));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 9));
         insns.add(new IntInsnNode(Opcodes.SIPUSH, Opcodes.INVOKESPECIAL));
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, specialLabel));
         insns.add(new JumpInsnNode(Opcodes.GOTO, virtualLabel));
@@ -699,7 +662,9 @@ public final class InvokeDynamicPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.ARETURN));
 
         method.maxStack = 8;
-        method.maxLocals = 22;
+        method.maxLocals = 24;
+        NumberEncryptionPass.excludeGeneratedNumericInsns(pctx, insns);
+        excludeGeneratedInvokeInsns(pctx, insns);
         clazz.asmNode().methods.add(method);
     }
 
@@ -711,14 +676,20 @@ public final class InvokeDynamicPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.LSTORE, siteKeyLocal));
     }
 
-    private void emitMetadataCall(InsnList insns, L1Class clazz, int component, int componentId,
-            int targetLocal, boolean itf) {
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 3));
-        insns.add(new InsnNode(Opcodes.ICONST_0 + component));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, 13));
+    private void emitMetadataDecrypt(InsnList insns, int encryptedLocal, int componentId,
+            int siteKeyLocal, int targetLocal) {
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/util/Base64",
+            "getDecoder", "()Ljava/util/Base64$Decoder;", false));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, encryptedLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/util/Base64$Decoder",
+            "decode", "(Ljava/lang/String;)[B", false));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, siteKeyLocal));
         insns.add(new InsnNode(Opcodes.ICONST_0 + componentId));
-        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, clazz.name(), metadataHelperName,
-            "(IIJI)Ljava/lang/String;", itf));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, KEY_OWNER, "mix", "(JJ)J", false));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, KEY_OWNER, "finalize_", "(J)J", false));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, STRING_DECRYPT_OWNER, "decrypt",
+            "([BJ)Ljava/lang/String;", false));
         insns.add(new VarInsnNode(Opcodes.ASTORE, targetLocal));
     }
 

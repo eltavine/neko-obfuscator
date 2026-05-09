@@ -78,6 +78,14 @@ public final class TransformGuards {
         return false;
     }
 
+    public static boolean classHasStackIntrospection(L1Class clazz) {
+        if (clazz == null) return false;
+        for (L1Method method : clazz.methods()) {
+            if (hasStackIntrospection(method)) return true;
+        }
+        return false;
+    }
+
     private static Set<String> computeReflectionShapeSensitiveClasses(PipelineContext pctx) {
         Set<String> sensitive = new HashSet<>();
         for (L1Class clazz : pctx.classMap().values()) {

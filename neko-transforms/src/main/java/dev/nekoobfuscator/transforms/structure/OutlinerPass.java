@@ -44,7 +44,8 @@ public final class OutlinerPass implements TransformPass {
         L1Method method = pctx.currentL1Method();
         L1Class clazz = pctx.currentL1Class();
         if (!method.hasCode() || method.isConstructor() || method.isClassInit()) return;
-        if (TransformGuards.hasStackIntrospection(method)
+        if (TransformGuards.classHasStackIntrospection(clazz)
+                || TransformGuards.hasStackIntrospection(method)
                 || TransformGuards.isReflectionShapeSensitive(pctx, clazz)) return;
 
         double intensity = pctx.config().getTransformIntensity("outliner");

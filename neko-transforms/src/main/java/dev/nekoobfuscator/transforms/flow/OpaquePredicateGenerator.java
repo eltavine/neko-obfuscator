@@ -28,7 +28,7 @@ public final class OpaquePredicateGenerator {
      * cannot collapse the predicate via a single template-recognition pass.
      */
     public InsnList generateAlwaysTrue() {
-        return switch (random.nextInt(13)) {
+        return switch (random.nextInt(12)) {
             case 0, 1 -> runtimeFlowTrue();
             case 2 -> arithmeticTrue();
             case 3 -> hashCodeTrue();
@@ -38,8 +38,7 @@ public final class OpaquePredicateGenerator {
             case 7 -> modSelfTrue();
             case 8 -> bitCountTrue();
             case 9 -> longSignTrue();
-            case 10 -> stringEmptyTrue();
-            case 11 -> mathAbsTrue();
+            case 10 -> mathAbsTrue();
             default -> systemNanoTrue();
         };
     }

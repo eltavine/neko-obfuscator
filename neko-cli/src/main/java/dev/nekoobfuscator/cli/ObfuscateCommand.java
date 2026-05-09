@@ -12,14 +12,16 @@ import dev.nekoobfuscator.transforms.invoke.InvokeDynamicPass;
 import dev.nekoobfuscator.transforms.structure.*;
 import picocli.CommandLine;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.Callable;
 import java.util.List;
 
 @CommandLine.Command(
     name = "obfuscate",
     description = "Obfuscate a JAR file"
 )
-public final class ObfuscateCommand implements Runnable {
+public final class ObfuscateCommand implements Callable<Integer> {
 
     @CommandLine.Option(names = {"-c", "--config"}, description = "Config YAML file", required = true)
     private Path configFile;
@@ -34,7 +36,7 @@ public final class ObfuscateCommand implements Runnable {
     private boolean verbose;
 
     @Override
-    public void run() {
+    public Integer call() {
         try {
             System.out.println("[NekoObfuscator] Starting...");
             long startTime = System.currentTimeMillis();
@@ -52,7 +54,7 @@ public final class ObfuscateCommand implements Runnable {
             if (!errors.isEmpty()) {
                 System.err.println("[NekoObfuscator] Configuration errors:");
                 errors.forEach(e -> System.err.println("  - " + e));
-                return;
+                return 2;
             }
 
             // Register all transform passes
@@ -73,16 +75,30 @@ public final class ObfuscateCommand implements Runnable {
 
             // Run pipeline
             ObfuscationPipeline pipeline = new ObfuscationPipeline(config, registry);
+            clearPreviousOutput(config.inputJar(), config.outputJar());
             pipeline.execute(config.inputJar(), config.outputJar());
 
             long elapsed = System.currentTimeMillis() - startTime;
             System.out.println("[NekoObfuscator] Done in " + elapsed + "ms");
+            return 0;
 
         } catch (Exception e) {
             System.err.println("[NekoObfuscator] Error: " + e.getMessage());
             if (verbose) {
                 e.printStackTrace();
             }
+            return 1;
         }
+    }
+
+    private void clearPreviousOutput(Path input, Path output) throws Exception {
+        if (input == null || output == null) return;
+        Path absInput = input.toAbsolutePath().normalize();
+        Path absOutput = output.toAbsolutePath().normalize();
+        if (absInput.equals(absOutput)) {
+            throw new IllegalArgumentException("Input and output JAR must be different paths");
+        }
+        Files.deleteIfExists(absOutput);
+        Files.deleteIfExists(absOutput.resolveSibling(absOutput.getFileName() + ".map"));
     }
 }

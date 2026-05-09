@@ -4,6 +4,7 @@ import dev.nekoobfuscator.api.config.TransformConfig;
 import dev.nekoobfuscator.api.transform.*;
 import dev.nekoobfuscator.core.ir.l1.*;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
+import dev.nekoobfuscator.transforms.data.NumberEncryptionPass;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.*;
 
@@ -82,6 +83,7 @@ public final class ExceptionObfuscationPass implements TransformPass {
             replacement.add(new LookupSwitchInsnNode(originalTarget,
                 new int[] { routeKey },
                 new LabelNode[] { originalTarget }));
+            NumberEncryptionPass.excludeGeneratedNumericInsns(pctx, replacement);
 
             insns.insertBefore(gotoInsn, replacement);
             insns.remove(gotoInsn);

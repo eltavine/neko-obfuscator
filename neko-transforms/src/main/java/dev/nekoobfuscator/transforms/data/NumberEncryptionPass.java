@@ -4,6 +4,7 @@ import dev.nekoobfuscator.api.config.TransformConfig;
 import dev.nekoobfuscator.api.transform.*;
 import dev.nekoobfuscator.core.ir.l1.*;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
+import dev.nekoobfuscator.transforms.invoke.InvokeDynamicPass;
 import dev.nekoobfuscator.transforms.key.DynamicKeyDerivationEngine;
 import dev.nekoobfuscator.transforms.key.KeyDispatcherSupport;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -76,6 +77,11 @@ public final class NumberEncryptionPass implements TransformPass {
         return new GeneratedLdcInsnNode(value);
     }
 
+    public static boolean isExcludedGeneratedNumericInsn(PipelineContext pctx, AbstractInsnNode insn) {
+        Set<AbstractInsnNode> excluded = pctx.getPassData(EXCLUDED_NUMERIC_INSNS_KEY);
+        return excluded != null && excluded.contains(insn);
+    }
+
     @Override
     public void transformClass(TransformContext ctx) {
         PipelineContext pctx = (PipelineContext) ctx;
@@ -108,6 +114,7 @@ public final class NumberEncryptionPass implements TransformPass {
         IdentityHashMap<AbstractInsnNode, Long> flowKeyValues = pctx.getPassData(FLOW_KEY_VALUES_KEY);
         Map<String, Integer> flowKeyLocalByMethod = pctx.getPassData(FLOW_KEY_LOCAL_BY_METHOD_KEY);
         boolean useControlFlowKey = booleanOption(config, USE_CONTROL_FLOW_KEY_OPTION, true);
+        boolean configuredFlowKey = useControlFlowKey && requireFullControlFlowKey(pctx);
         boolean generatedHelperHardening = hardenGeneratedHelpers && TransformGuards.isGeneratedMethod(method);
         boolean reflectionShapeSensitive = TransformGuards.isReflectionShapeSensitive(pctx, clazz);
         KeyDispatcherSupport.Profile keyDispatcher = !generatedHelperHardening && !reflectionShapeSensitive && KeyDispatcherSupport.enabled(config)
@@ -149,14 +156,21 @@ public final class NumberEncryptionPass implements TransformPass {
             Algorithm siteAlgorithm = algorithm == Algorithm.AES && method.isClassInit()
                 ? Algorithm.XOR
                 : algorithm;
+            if (configuredFlowKey && siteAlgorithm != Algorithm.XOR) {
+                failClosed(pctx, clazz, method, "control-flow-key-requires-xor-site-algorithm");
+            }
             boolean useFlowKey = siteAlgorithm == Algorithm.XOR
-                && !TransformGuards.hasStackIntrospection(method)
+                && (!TransformGuards.hasStackIntrospection(method) || configuredFlowKey)
                 && useControlFlowKey
-                && flowKeyValues != null
-                && flowKeyValues.containsKey(insn)
+                && resolveCffFlowKey(insns, insn, flowKeyValues) != null
                 && flowKeyLocalSlot != null;
+            if (configuredFlowKey && !useFlowKey) {
+                failClosed(pctx, clazz, method, flowKeyLocalSlot == null
+                    ? "number-method-missing-cff-flow-key-local"
+                    : "number-site-missing-cff-flow-key:" + describeNumberSite(insn, literal));
+            }
             long keyState = useFlowKey
-                ? DynamicKeyDerivationEngine.mix(insnKey, flowKeyValues.get(insn))
+                ? DynamicKeyDerivationEngine.mix(insnKey, resolveCffFlowKey(insns, insn, flowKeyValues))
                 : insnKey;
             int keyComponent = salt ^ insnIdx;
             long effectiveKey = keyDispatcher != null
@@ -169,6 +183,7 @@ public final class NumberEncryptionPass implements TransformPass {
                 case INDY -> indyReplacement(literal, effectiveKey, pctx);
             };
             if (replacement != null) {
+                InvokeDynamicPass.excludeGeneratedInvokeInsns(pctx, replacement);
                 insns.insertBefore(insn, replacement);
                 insns.remove(insn);
                 changed = true;
@@ -180,6 +195,72 @@ public final class NumberEncryptionPass implements TransformPass {
             JvmObfuscationCoverage.get(pctx).full(id(), clazz.name(), method.name(), method.descriptor(),
                 algorithm == Algorithm.AES && method.isClassInit() ? "aes-clinit-inline-xor-tier" : algorithm.name().toLowerCase(Locale.ROOT));
         }
+    }
+
+    private Long resolveCffFlowKey(InsnList insns, AbstractInsnNode site,
+            IdentityHashMap<AbstractInsnNode, Long> flowKeyValues) {
+        if (flowKeyValues == null || site == null) return null;
+        Long exact = flowKeyValues.get(site);
+        if (exact != null) return exact;
+
+        Long before = null;
+        int beforeDistance = Integer.MAX_VALUE;
+        int distance = 0;
+        for (AbstractInsnNode cursor = site.getPrevious(); cursor != null; cursor = cursor.getPrevious()) {
+            distance++;
+            Long flowKey = flowKeyValues.get(cursor);
+            if (flowKey != null) {
+                before = flowKey;
+                beforeDistance = distance;
+                break;
+            }
+            if (isFlowKeyInferenceBoundary(cursor)) break;
+        }
+
+        Long after = null;
+        int afterDistance = Integer.MAX_VALUE;
+        distance = 0;
+        for (AbstractInsnNode cursor = site.getNext(); cursor != null; cursor = cursor.getNext()) {
+            distance++;
+            Long flowKey = flowKeyValues.get(cursor);
+            if (flowKey != null) {
+                after = flowKey;
+                afterDistance = distance;
+                break;
+            }
+            if (isFlowKeyInferenceBoundary(cursor)) break;
+        }
+
+        if (before == null) return after;
+        if (after == null) return before;
+        return beforeDistance <= afterDistance ? before : after;
+    }
+
+    private boolean isFlowKeyInferenceBoundary(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        return opcode == Opcodes.GOTO
+            || opcode == Opcodes.TABLESWITCH
+            || opcode == Opcodes.LOOKUPSWITCH
+            || opcode == Opcodes.RET
+            || opcode == Opcodes.ATHROW
+            || (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN);
+    }
+
+    private String describeNumberSite(AbstractInsnNode insn, NumericLiteral literal) {
+        return "sort=" + literal.type().getSort()
+            + ",bits=" + literal.bits()
+            + ",prev=" + opcodeName(insn.getPrevious())
+            + ",next=" + opcodeName(insn.getNext())
+            + ",generated=" + isGeneratedNumericInsn(insn);
+    }
+
+    private String opcodeName(AbstractInsnNode insn) {
+        if (insn == null) return "null";
+        int opcode = insn.getOpcode();
+        if (opcode < 0 || opcode >= org.objectweb.asm.util.Printer.OPCODES.length) {
+            return insn.getClass().getSimpleName();
+        }
+        return org.objectweb.asm.util.Printer.OPCODES[opcode];
     }
 
     private boolean isMethodEligible(PipelineContext pctx, L1Method method, MethodRiskStats stats) {
@@ -281,8 +362,7 @@ public final class NumberEncryptionPass implements TransformPass {
     }
 
     private boolean isExcludedGeneratedNumeric(PipelineContext pctx, AbstractInsnNode insn) {
-        Set<AbstractInsnNode> excluded = pctx.getPassData(EXCLUDED_NUMERIC_INSNS_KEY);
-        return excluded != null && excluded.contains(insn);
+        return isExcludedGeneratedNumericInsn(pctx, insn);
     }
 
     private boolean isGeneratedNumericInsn(AbstractInsnNode insn) {
@@ -299,6 +379,14 @@ public final class NumberEncryptionPass implements TransformPass {
         if (config == null) return defaultValue;
         Object value = config.options().get(key);
         return value instanceof Number number ? number.intValue() : defaultValue;
+    }
+
+    private boolean requireFullControlFlowKey(PipelineContext pctx) {
+        if (!pctx.config().isTransformEnabled("controlFlowFlattening")) return false;
+        TransformConfig cff = pctx.config().transforms().get("controlFlowFlattening");
+        return booleanOption(cff, "requireFullStateMachine", false)
+            || (!booleanOption(cff, "allowSafeFallbacks", false)
+                && booleanOption(cff, "strictCoverage", false));
     }
 
     private int getIntValue(AbstractInsnNode insn) {
@@ -581,6 +669,12 @@ public final class NumberEncryptionPass implements TransformPass {
         if (config == null) return defaultValue;
         Object value = config.options().get(key);
         return value instanceof String text ? text : defaultValue;
+    }
+
+    private void failClosed(PipelineContext pctx, L1Class clazz, L1Method method, String reason) {
+        JvmObfuscationCoverage.get(pctx).failClosed(id(), clazz.name(), method.name(), method.descriptor(), reason);
+        throw new IllegalStateException("Number encryption failed closed for "
+            + clazz.name() + "." + method.name() + method.descriptor() + ": " + reason);
     }
 
     private record MethodRiskStats(int branchCount, int backwardBranches, boolean hasSwitch,
