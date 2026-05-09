@@ -35,6 +35,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.Collections;
 
 /**
  * Direct keyed control-flow flattening over the original method body.
@@ -396,12 +397,11 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
             }
 
-            for (LabelNode aliasHub : group.aliasHubs()) {
-                insns.add(aliasHub);
-                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            for (int alias = 0; alias < group.aliasHubs().length; alias++) {
+                insns.add(aliasHub(group, alias));
             }
             insns.add(group.hub());
-            emitDomainSwitch(insns, domainLocal, group.islandLabels(), poison);
+            emitDomainDispatch(insns, domainLocal, group, poison);
             for (int island = 0; island < group.islandLabels().length; island++) {
                 insns.add(buildIslandDispatcher(group, stateByLabel, keyLocal, guardLocal, pcLocal,
                     domainLocal, poison, island, salt));
@@ -637,10 +637,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         if (first) return insns;
         cases.put(fakeState(salt, firstState ^ island), fake);
         insns.add(group.islandLabels()[island]);
-        emitSelector(insns, pcLocal, guardLocal);
-        insns.add(new LookupSwitchInsnNode(poison,
-            cases.keySet().stream().mapToInt(Integer::intValue).toArray(),
-            cases.values().toArray(LabelNode[]::new)));
+        emitSelector(insns, pcLocal, guardLocal, group.salt() ^ island);
+        emitStateDispatch(insns, cases, poison, group.salt() ^ island);
         for (Map.Entry<LabelNode, LabelNode> stub : stubs.entrySet()) {
             insns.add(stub.getKey());
             insns.add(new JumpInsnNode(Opcodes.GOTO, stub.getValue()));
@@ -655,21 +653,112 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return insns;
     }
 
-    private void emitDomainSwitch(InsnList insns, int domainLocal, LabelNode[] islandLabels, LabelNode poison) {
+    private InsnList aliasHub(IslandGroup group, int alias) {
+        InsnList insns = new InsnList();
+        LabelNode aliasLabel = group.aliasHubs()[alias];
+        long seed = group.salt() ^ 0x414C494153485542L ^ alias;
+        insns.add(aliasLabel);
+        switch ((int) ((seed >>> 7) & 3L)) {
+            case 0 -> insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            case 1 -> {
+                LabelNode hop = new LabelNode();
+                insns.add(new JumpInsnNode(Opcodes.GOTO, hop));
+                insns.add(hop);
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            }
+            case 2 -> {
+                LabelNode pass = new LabelNode();
+                insns.add(new InsnNode(Opcodes.ICONST_0));
+                insns.add(new JumpInsnNode(Opcodes.IFEQ, pass));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(pass);
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            }
+            default -> {
+                LabelNode pass = new LabelNode();
+                JvmPassBytecode.pushInt(insns, (int) seed);
+                JvmPassBytecode.pushInt(insns, (int) seed);
+                insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, pass));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(pass);
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            }
+        }
+        return insns;
+    }
+
+    private void emitDomainDispatch(InsnList insns, int domainLocal, IslandGroup group, LabelNode poison) {
+        LabelNode[] islandLabels = group.islandLabels();
+        if (((group.salt() >>> 5) & 1L) == 0L && islandLabels.length > 1) {
+            emitDomainIfChain(insns, domainLocal, islandLabels, poison, group.salt());
+            return;
+        }
         TreeMap<Integer, LabelNode> cases = new TreeMap<>();
         for (int i = 0; i < islandLabels.length; i++) {
             cases.put(i, islandLabels[i]);
         }
         insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+        if (((group.salt() >>> 9) & 1L) == 0L) {
+            insns.add(new org.objectweb.asm.tree.TableSwitchInsnNode(0, islandLabels.length - 1,
+                poison, islandLabels));
+        } else {
+            insns.add(new LookupSwitchInsnNode(poison,
+                cases.keySet().stream().mapToInt(Integer::intValue).toArray(),
+                cases.values().toArray(LabelNode[]::new)));
+        }
+    }
+
+    private void emitDomainIfChain(InsnList insns, int domainLocal, LabelNode[] islandLabels, LabelNode poison, long seed) {
+        boolean reverse = ((seed >>> 11) & 1L) != 0L;
+        for (int n = 0; n < islandLabels.length; n++) {
+            int i = reverse ? islandLabels.length - 1 - n : n;
+            LabelNode next = new LabelNode();
+            insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            JvmPassBytecode.pushInt(insns, i);
+            insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, next));
+            insns.add(new JumpInsnNode(Opcodes.GOTO, islandLabels[i]));
+            insns.add(next);
+        }
+        insns.add(new JumpInsnNode(Opcodes.GOTO, poison));
+    }
+
+    private void emitStateDispatch(InsnList insns, TreeMap<Integer, LabelNode> cases, LabelNode poison, long seed) {
+        if (cases.size() <= 3 && ((seed >>> 13) & 1L) == 0L) {
+            emitStateIfChain(insns, cases, poison, seed);
+            return;
+        }
         insns.add(new LookupSwitchInsnNode(poison,
             cases.keySet().stream().mapToInt(Integer::intValue).toArray(),
             cases.values().toArray(LabelNode[]::new)));
     }
 
-    private void emitSelector(InsnList insns, int pcLocal, int guardLocal) {
-        // Hot selector decode is intentionally one xor: pc stores state ^ guard.
-        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+    private void emitStateIfChain(InsnList insns, TreeMap<Integer, LabelNode> cases, LabelNode poison, long seed) {
+        List<Map.Entry<Integer, LabelNode>> entries = new ArrayList<>(cases.entrySet());
+        if (((seed >>> 17) & 1L) != 0L) {
+            Collections.reverse(entries);
+        }
+        for (Map.Entry<Integer, LabelNode> entry : entries) {
+            LabelNode next = new LabelNode();
+            insns.add(new InsnNode(Opcodes.DUP));
+            JvmPassBytecode.pushInt(insns, entry.getKey());
+            insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, next));
+            insns.add(new InsnNode(Opcodes.POP));
+            insns.add(new JumpInsnNode(Opcodes.GOTO, entry.getValue()));
+            insns.add(next);
+        }
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, poison));
+    }
+
+    private void emitSelector(InsnList insns, int pcLocal, int guardLocal, long seed) {
+        // Hot selector decode stays a single xor; operand order varies per island.
+        if (((seed >>> 19) & 1L) == 0L) {
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        } else {
+            insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        }
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
@@ -714,6 +803,15 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private void emitStepKey(InsnList insns, int keyLocal, int guardLocal, long seed) {
         // Feed the evolved CFF guard back into the long method key. Keyed
         // callsites load this local, so child methods inherit the current path.
+        switch ((int) ((seed >>> 57) & 3L)) {
+            case 0 -> emitStepKeyShiftHighLow(insns, keyLocal, guardLocal, seed);
+            case 1 -> emitStepKeyLowHigh(insns, keyLocal, guardLocal, seed);
+            case 2 -> emitStepKeyAddGuard(insns, keyLocal, guardLocal, seed);
+            default -> emitStepKeySelfFold(insns, keyLocal, guardLocal, seed);
+        }
+    }
+
+    private void emitStepKeyShiftHighLow(InsnList insns, int keyLocal, int guardLocal, long seed) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
         insns.add(new InsnNode(Opcodes.I2L));
@@ -732,6 +830,71 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.DUP2));
         JvmPassBytecode.pushInt(insns, 31);
         insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+    }
+
+    private void emitStepKeyLowHigh(InsnList insns, int keyLocal, int guardLocal, long seed) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, seed ^ 0xD1B54A32D192ED03L);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 31);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0x9E3779B97F4A7C15L);
+        insns.add(new InsnNode(Opcodes.LADD));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+    }
+
+    private void emitStepKeyAddGuard(InsnList insns, int keyLocal, int guardLocal, long seed) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushLong(insns, seed);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LADD));
+        JvmPassBytecode.pushLong(insns, 0x9E3779B97F4A7C15L);
+        insns.add(new InsnNode(Opcodes.LADD));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 31);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+    }
+
+    private void emitStepKeySelfFold(InsnList insns, int keyLocal, int guardLocal, long seed) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 31);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, seed + 0x9E3779B97F4A7C15L);
+        insns.add(new InsnNode(Opcodes.LADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
     }
@@ -806,7 +969,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 islands.put(block.label(), island);
                 targets.put(block.label(), new DispatchTarget(hub, islandLabels, aliasHubs, island));
             }
-            groups.add(new IslandGroup(hub, islandLabels, aliasHubs, groupBlocks, islands));
+            long groupSalt = JvmPassBytecode.mix(groupBlocks.size(), System.identityHashCode(hub));
+            groups.add(new IslandGroup(hub, islandLabels, aliasHubs, groupBlocks, islands, groupSalt));
         }
         return new DispatchPlan(groups, targets);
     }
@@ -981,6 +1145,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
     private record DispatchTarget(LabelNode hub, LabelNode[] islandLabels, LabelNode[] aliasHubs, int island) {}
     private record IslandGroup(LabelNode hub, LabelNode[] islandLabels, LabelNode[] aliasHubs, List<Block> blocks,
-            Map<LabelNode, Integer> islands) {}
+            Map<LabelNode, Integer> islands, long salt) {}
     private record DispatchPlan(List<IslandGroup> groups, Map<LabelNode, DispatchTarget> targets) {}
 }
