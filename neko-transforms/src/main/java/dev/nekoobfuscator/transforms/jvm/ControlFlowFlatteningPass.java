@@ -10,14 +10,17 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LookupSwitchInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TableSwitchInsnNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import org.objectweb.asm.tree.analysis.Analyzer;
 import org.objectweb.asm.tree.analysis.BasicInterpreter;
@@ -27,18 +30,19 @@ import org.objectweb.asm.tree.analysis.Frame;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 
 /**
- * Keyed control-flow flattening for verifier-stable JVM methods.
+ * Direct keyed control-flow flattening over the original method body.
  *
- * <p>This pass rewrites eligible straight-line methods into a dispatcher loop.
- * Every transition stores the next state encoded with the current method key,
- * and the dispatcher decodes that value immediately before the lookup switch.
- * Existing branch-heavy methods are left for later CFG-aware flattening instead
- * of receiving shape-specific rewrites.</p>
+ * <p>The pass keeps bytecode in the original method and rewrites basic-block
+ * exits to store an encoded state and return to a dispatcher. Constructors keep
+ * the mandatory this/super initialization prefix untouched; flattening starts
+ * immediately after that prefix.</p>
  */
 public final class ControlFlowFlatteningPass implements TransformPass {
     public static final String ID = "controlFlowFlattening";
@@ -70,7 +74,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     @Override
     public void transformClass(TransformContext ctx) {
-        // Flattening is method-local; class state is supplied by key dispatch.
+        // Method-local transform.
     }
 
     @Override
@@ -79,203 +83,420 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         L1Class clazz = pctx.currentL1Class();
         L1Method method = pctx.currentL1Method();
         if (clazz == null || method == null || !method.hasCode()) return;
-
-        if (!isFlatteningCandidate(pctx, clazz, method)) {
-            JvmObfuscationCoverage.get(ctx).notApplicable(id(), clazz.name(), method.name(),
-                method.descriptor(), "method-shape-not-flattened");
-            return;
-        }
+        if (!isApplicationMethod(pctx, clazz, method)) return;
 
         MethodNode mn = method.asmNode();
-        List<AbstractInsnNode> code = bytecodeInstructions(mn);
-        if (code.size() < 8 || !lastInstructionTerminates(code)) {
-            JvmObfuscationCoverage.get(ctx).notApplicable(id(), clazz.name(), method.name(),
-                method.descriptor(), "too-small-or-open-ended");
-            return;
-        }
+        LabelNode protectedStart = protectedStartLabel(clazz, method, mn);
+        if (protectedStart == null) return;
 
-        List<List<AbstractInsnNode>> blocks = splitStackBalancedBlocks(clazz.name(), mn, code, targetBlockCount(ctx));
-        if (blocks.size() < 2) {
-            JvmObfuscationCoverage.get(ctx).safe(id(), clazz.name(), method.name(),
-                method.descriptor(), "single-balanced-block");
-            return;
-        }
+        Map<LabelNode, LabelNode> handlerBodies = splitExceptionHandlers(mn);
+        Set<LabelNode> zeroStackLabels = zeroStackLabels(clazz.name(), mn);
+        List<Block> blocks = buildBlocks(mn, protectedStart, new HashSet<>(handlerBodies.values()),
+            zeroStackLabels);
+        if (blocks.isEmpty()) return;
 
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
-        Integer recordedKeyLocal = JvmKeyDispatchPass.findMethodKeyLocal(ctx, methodKey);
-        int keyLocal = recordedKeyLocal != null ? recordedKeyLocal : mn.maxLocals;
         long methodSeed = JvmKeyDispatchPass.methodSeed(pctx.masterSeed(), clazz, method, mn);
-        if (recordedKeyLocal == null) {
-            mn.maxLocals = Math.max(mn.maxLocals, keyLocal + 2);
-            JvmKeyDispatchPass.recordMethodKeyLocal(ctx, methodKey, keyLocal, methodSeed);
-        }
-        int stateLocal = mn.maxLocals;
-        mn.maxLocals = Math.max(mn.maxLocals, stateLocal + 1);
+        int keyLocal = mn.maxLocals;
+        int stateLocal = keyLocal + 2;
+        int exceptionLocal = handlerBodies.isEmpty() ? -1 : stateLocal + 1;
+        mn.maxLocals = stateLocal + 1 + (handlerBodies.isEmpty() ? 0 : 1);
+        JvmKeyDispatchPass.recordMethodKeyLocal(pctx, methodKey, keyLocal, methodSeed);
 
         long salt = JvmPassBytecode.mix(pctx.masterSeed(), methodKey.hashCode());
         int stateMask = (int) salt;
         int[] states = uniqueStates((int) (salt >>> 32), blocks.size());
-
-        InsnList flattened = new InsnList();
-        LabelNode dispatcher = new LabelNode();
-        LabelNode dflt = new LabelNode();
-        LabelNode[] labels = new LabelNode[blocks.size()];
-        for (int i = 0; i < labels.length; i++) labels[i] = new LabelNode();
-
-        JvmKeyDispatchPass.emitKeyInit(flattened, keyLocal, methodSeed, 0x4346464B65794C31L);
-        emitStoreEncodedState(flattened, stateLocal, keyLocal, states[0], stateMask);
-        flattened.add(new JumpInsnNode(Opcodes.GOTO, dispatcher));
-        flattened.add(dispatcher);
-        emitDecodeState(flattened, stateLocal, keyLocal, stateMask);
-
-        TreeMap<Integer, LabelNode> cases = new TreeMap<>();
-        for (int i = 0; i < states.length; i++) cases.put(states[i], labels[i]);
-        flattened.add(new LookupSwitchInsnNode(dflt,
-            cases.keySet().stream().mapToInt(Integer::intValue).toArray(),
-            cases.values().toArray(LabelNode[]::new)));
-
-        flattened.add(dflt);
-        flattened.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
-        flattened.add(new InsnNode(Opcodes.DUP));
-        flattened.add(new org.objectweb.asm.tree.MethodInsnNode(Opcodes.INVOKESPECIAL,
-            "java/lang/IllegalStateException", "<init>", "()V", false));
-        flattened.add(new InsnNode(Opcodes.ATHROW));
-
+        Map<LabelNode, Integer> stateByLabel = new IdentityHashMap<>();
         for (int i = 0; i < blocks.size(); i++) {
-            flattened.add(labels[i]);
-            for (AbstractInsnNode insn : blocks.get(i)) {
-                flattened.add(insn.clone(new HashMap<>()));
-            }
-            if (i + 1 < blocks.size()) {
-                emitStoreEncodedState(flattened, stateLocal, keyLocal, states[i + 1], stateMask);
-                flattened.add(new JumpInsnNode(Opcodes.GOTO, dispatcher));
-            }
+            stateByLabel.put(blocks.get(i).label(), states[i]);
         }
 
-        mn.instructions = flattened;
-        mn.tryCatchBlocks = List.of();
+        LabelNode dispatcher = new LabelNode();
+        int[] localKinds = collectLocalKinds(mn, protectedStart, keyLocal);
+        int initializedLocalFloor = method.isConstructor() ? keyLocal : parameterLocalLimit(method);
+        InsnList dispatch = buildDispatcher(blocks, keyLocal, stateLocal, methodSeed, stateMask,
+            states, dispatcher, localKinds, initializedLocalFloor, exceptionLocal);
+        mn.instructions.insertBefore(protectedStart, dispatch);
+        insertHandlerBridges(mn, handlerBodies, exceptionLocal, dispatcher, keyLocal, stateLocal,
+            stateMask, stateByLabel, methodSeed);
+
+        for (int i = 0; i < blocks.size(); i++) {
+            Block block = blocks.get(i);
+            if (block.handler()) continue;
+            LabelNode next = i + 1 < blocks.size() ? blocks.get(i + 1).label() : null;
+            rewriteBlockExit(mn, block, next, dispatcher, keyLocal, stateLocal, stateMask, stateByLabel);
+        }
+
         mn.localVariables = null;
         mn.visibleLocalVariableAnnotations = null;
         mn.invisibleLocalVariableAnnotations = null;
-        mn.maxStack = Math.max(mn.maxStack, 5);
+        mn.maxStack = Math.max(mn.maxStack + 6, 8);
         clazz.markDirty();
         pctx.invalidate(method);
         JvmObfuscationCoverage.get(ctx).full(id(), clazz.name(), method.name(),
-            method.descriptor(), "keyed-dispatcher-blocks-" + blocks.size());
+            method.descriptor(), "direct-keyed-block-dispatcher-" + blocks.size());
     }
 
-    private boolean isFlatteningCandidate(PipelineContext pctx, L1Class clazz, L1Method method) {
-        if (!JvmKeyDispatchPass.isKeyCandidate(pctx, clazz, method)) return false;
-        if (method.isConstructor() || method.isClassInit()) return false;
-        if ((method.access() & Opcodes.ACC_SYNCHRONIZED) != 0) return false;
-        MethodNode mn = method.asmNode();
-        if (mn.tryCatchBlocks != null && !mn.tryCatchBlocks.isEmpty()) return false;
-        int parameterLocalLimit = parameterLocalLimit(method);
-        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-            int opcode = insn.getOpcode();
-            if (insn instanceof JumpInsnNode || insn instanceof TableSwitchInsnNode
-                    || insn instanceof LookupSwitchInsnNode) return false;
-            if (opcode == Opcodes.JSR || opcode == Opcodes.RET || opcode == Opcodes.MONITORENTER
-                    || opcode == Opcodes.MONITOREXIT) return false;
-            if (insn instanceof VarInsnNode varInsn && writesLocal(opcode)
-                    && varInsn.var >= parameterLocalLimit) return false;
-            if (insn instanceof org.objectweb.asm.tree.IincInsnNode iincInsn
-                    && iincInsn.var >= parameterLocalLimit) return false;
+    private boolean isApplicationMethod(PipelineContext pctx, L1Class clazz, L1Method method) {
+        if (TransformGuards.isRuntimeClass(clazz) || TransformGuards.isGeneratedMethod(method)) return false;
+        if (method.isAbstract() || method.isNative()) return false;
+        if (TransformGuards.hasStackIntrospection(method)) return false;
+        return !TransformGuards.isReflectionShapeSensitive(pctx, clazz);
+    }
+
+    private LabelNode protectedStartLabel(L1Class clazz, L1Method method, MethodNode mn) {
+        if (method.isConstructor()) {
+            AbstractInsnNode init = constructorInitInsn(clazz, mn);
+            AbstractInsnNode next = init == null ? firstReal(mn) : nextReal(init.getNext());
+            if (next == null) return null;
+            return ensureLabelBefore(mn, next);
         }
-        return !TransformGuards.isSupportMethod(method);
+        AbstractInsnNode first = firstReal(mn);
+        return first == null ? null : ensureLabelBefore(mn, first);
+    }
+
+    private AbstractInsnNode constructorInitInsn(L1Class clazz, MethodNode mn) {
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                    && call.getOpcode() == Opcodes.INVOKESPECIAL
+                    && "<init>".equals(call.name)
+                    && (clazz.name().equals(call.owner) || clazz.superName().equals(call.owner))) {
+                return insn;
+            }
+        }
+        return null;
+    }
+
+    private Map<LabelNode, LabelNode> splitExceptionHandlers(MethodNode mn) {
+        Map<LabelNode, LabelNode> bodies = new HashMap<>();
+        if (mn.tryCatchBlocks == null) return bodies;
+        for (TryCatchBlockNode tcb : mn.tryCatchBlocks) {
+            if (bodies.containsKey(tcb.handler)) continue;
+            AbstractInsnNode bodyStart = nextReal(tcb.handler.getNext());
+            if (bodyStart == null) continue;
+            LabelNode body = ensureLabelBefore(mn, bodyStart);
+            bodies.put(tcb.handler, body);
+        }
+        return bodies;
+    }
+
+    private List<Block> buildBlocks(MethodNode mn, LabelNode start, Set<LabelNode> extraLeaders,
+            Set<LabelNode> zeroStackLabels) {
+        Set<AbstractInsnNode> leaders = new HashSet<>();
+        leaders.add(start);
+        leaders.addAll(extraLeaders);
+        Set<LabelNode> handlerLabels = new HashSet<>();
+        if (mn.tryCatchBlocks != null) {
+            for (TryCatchBlockNode tcb : mn.tryCatchBlocks) {
+                leaders.add(tcb.start);
+                leaders.add(tcb.handler);
+                handlerLabels.add(tcb.handler);
+            }
+        }
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getNext()) {
+            if (insn instanceof JumpInsnNode jump) {
+                if (zeroStackLabels.contains(jump.label)) leaders.add(jump.label);
+                AbstractInsnNode next = nextReal(insn.getNext());
+                if (next != null && jump.getOpcode() != Opcodes.GOTO) {
+                    leaders.add(ensureLabelBefore(mn, next));
+                }
+            } else if (insn instanceof TableSwitchInsnNode ts) {
+                if (zeroStackLabels.contains(ts.dflt)) leaders.add(ts.dflt);
+                for (LabelNode label : ts.labels) {
+                    if (zeroStackLabels.contains(label)) leaders.add(label);
+                }
+                AbstractInsnNode next = nextReal(insn.getNext());
+                if (next != null) leaders.add(ensureLabelBefore(mn, next));
+            } else if (insn instanceof LookupSwitchInsnNode ls) {
+                if (zeroStackLabels.contains(ls.dflt)) leaders.add(ls.dflt);
+                for (LabelNode label : ls.labels) {
+                    if (zeroStackLabels.contains(label)) leaders.add(label);
+                }
+                AbstractInsnNode next = nextReal(insn.getNext());
+                if (next != null) leaders.add(ensureLabelBefore(mn, next));
+            } else if (terminates(insn.getOpcode())) {
+                AbstractInsnNode next = nextReal(insn.getNext());
+                if (next != null) leaders.add(ensureLabelBefore(mn, next));
+            }
+        }
+
+        List<LabelNode> ordered = new ArrayList<>();
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getNext()) {
+            if (insn instanceof LabelNode label && leaders.contains(label)) {
+                ordered.add(label);
+            }
+        }
+        List<Block> blocks = new ArrayList<>();
+        for (int i = 0; i < ordered.size(); i++) {
+            LabelNode label = ordered.get(i);
+            AbstractInsnNode endExclusive = i + 1 < ordered.size() ? ordered.get(i + 1) : null;
+            blocks.add(new Block(label, endExclusive, handlerLabels.contains(label)));
+        }
+        return blocks;
+    }
+
+    private Set<LabelNode> zeroStackLabels(String owner, MethodNode mn) {
+        Set<LabelNode> labels = new HashSet<>();
+        try {
+            Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicInterpreter());
+            Frame<BasicValue>[] frames = analyzer.analyze(owner, mn);
+            AbstractInsnNode[] insns = mn.instructions.toArray();
+            for (int i = 0; i < insns.length; i++) {
+                if (insns[i] instanceof LabelNode label
+                        && frames[i] != null
+                        && frames[i].getStackSize() == 0) {
+                    labels.add(label);
+                }
+            }
+        } catch (Exception ignored) {
+            for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof LabelNode label) labels.add(label);
+            }
+        }
+        return labels;
+    }
+
+    private void insertHandlerBridges(MethodNode mn, Map<LabelNode, LabelNode> handlerBodies,
+            int exceptionLocal, LabelNode dispatcher, int keyLocal, int stateLocal, int stateMask,
+            Map<LabelNode, Integer> stateByLabel, long methodSeed) {
+        if (handlerBodies.isEmpty()) return;
+        for (Map.Entry<LabelNode, LabelNode> entry : handlerBodies.entrySet()) {
+            LabelNode handler = entry.getKey();
+            LabelNode body = entry.getValue();
+            Integer bodyState = stateByLabel.get(body);
+            InsnList prefix = new InsnList();
+            JvmKeyDispatchPass.emitKeyInit(prefix, keyLocal, methodSeed, 0x4346464B65794C31L);
+            prefix.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
+            prefix.add(transition(bodyState, dispatcher, keyLocal, stateLocal, stateMask));
+            mn.instructions.insert(handler, prefix);
+
+            InsnList reload = new InsnList();
+            reload.add(new VarInsnNode(Opcodes.ALOAD, exceptionLocal));
+            mn.instructions.insert(body, reload);
+        }
+    }
+
+    private InsnList buildDispatcher(List<Block> blocks, int keyLocal, int stateLocal, long methodSeed,
+            int stateMask, int[] states, LabelNode dispatcher, int[] localKinds, int initializedLocalFloor,
+            int exceptionLocal) {
+        InsnList insns = new InsnList();
+        LabelNode dflt = new LabelNode();
+        TreeMap<Integer, LabelNode> cases = new TreeMap<>();
+        List<LabelNode> trampolines = new ArrayList<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            LabelNode trampoline = new LabelNode();
+            trampolines.add(trampoline);
+            if (!blocks.get(i).handler()) {
+                cases.put(states[i], trampoline);
+            }
+        }
+
+        JvmKeyDispatchPass.emitKeyInit(insns, keyLocal, methodSeed, 0x4346464B65794C31L);
+        emitLocalDefaults(insns, localKinds, initializedLocalFloor, keyLocal);
+        if (exceptionLocal >= 0) {
+            insns.add(new InsnNode(Opcodes.ACONST_NULL));
+            insns.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
+        }
+        emitStoreEncodedState(insns, stateLocal, keyLocal, states[0], stateMask);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, dispatcher));
+        insns.add(dispatcher);
+        emitDecodeState(insns, stateLocal, keyLocal, stateMask);
+        insns.add(new LookupSwitchInsnNode(dflt,
+            cases.keySet().stream().mapToInt(Integer::intValue).toArray(),
+            cases.values().toArray(LabelNode[]::new)));
+
+        insns.add(dflt);
+        insns.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,
+            "java/lang/IllegalStateException", "<init>", "()V", false));
+        insns.add(new InsnNode(Opcodes.ATHROW));
+
+        for (int i = 0; i < blocks.size(); i++) {
+            insns.add(trampolines.get(i));
+            insns.add(new JumpInsnNode(Opcodes.GOTO, blocks.get(i).label()));
+        }
+        return insns;
+    }
+
+    private int[] collectLocalKinds(MethodNode mn, LabelNode protectedStart, int keyLocal) {
+        int[] kinds = new int[Math.max(keyLocal, mn.maxLocals) + 2];
+        boolean active = false;
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn == protectedStart) active = true;
+            if (!active) continue;
+            if (insn instanceof VarInsnNode varInsn) {
+                int kind = localKind(varInsn.getOpcode());
+                if (kind != 0 && varInsn.var < keyLocal) {
+                    mergeLocalKind(kinds, varInsn.var, kind);
+                }
+            } else if (insn instanceof org.objectweb.asm.tree.IincInsnNode iinc && iinc.var < keyLocal) {
+                mergeLocalKind(kinds, iinc.var, 1);
+            }
+        }
+        return kinds;
+    }
+
+    private int localKind(int opcode) {
+        return switch (opcode) {
+            case Opcodes.ILOAD, Opcodes.ISTORE -> 1;
+            case Opcodes.LLOAD, Opcodes.LSTORE -> 2;
+            case Opcodes.FLOAD, Opcodes.FSTORE -> 3;
+            case Opcodes.DLOAD, Opcodes.DSTORE -> 4;
+            case Opcodes.ALOAD, Opcodes.ASTORE -> 5;
+            default -> 0;
+        };
+    }
+
+    private void mergeLocalKind(int[] kinds, int local, int kind) {
+        if (kinds[local] == 0) {
+            kinds[local] = kind;
+        } else if (kinds[local] != kind) {
+            kinds[local] = 6;
+        }
+    }
+
+    private void emitLocalDefaults(InsnList insns, int[] localKinds, int from, int to) {
+        for (int local = Math.max(0, from); local < to && local < localKinds.length; local++) {
+            switch (localKinds[local]) {
+                case 1, 6 -> {
+                    insns.add(new InsnNode(Opcodes.ICONST_0));
+                    insns.add(new VarInsnNode(Opcodes.ISTORE, local));
+                }
+                case 2 -> {
+                    insns.add(new InsnNode(Opcodes.LCONST_0));
+                    insns.add(new VarInsnNode(Opcodes.LSTORE, local));
+                    local++;
+                }
+                case 3 -> {
+                    insns.add(new InsnNode(Opcodes.FCONST_0));
+                    insns.add(new VarInsnNode(Opcodes.FSTORE, local));
+                }
+                case 4 -> {
+                    insns.add(new InsnNode(Opcodes.DCONST_0));
+                    insns.add(new VarInsnNode(Opcodes.DSTORE, local));
+                    local++;
+                }
+                case 5 -> {
+                    insns.add(new InsnNode(Opcodes.ACONST_NULL));
+                    insns.add(new VarInsnNode(Opcodes.ASTORE, local));
+                }
+                default -> { }
+            }
+        }
     }
 
     private int parameterLocalLimit(L1Method method) {
-        int slot = method.isStatic() ? 0 : 1;
-        for (org.objectweb.asm.Type argument : method.argumentTypes()) {
+        int slot = method.isStatic() || method.isClassInit() ? 0 : 1;
+        for (Type argument : Type.getArgumentTypes(method.descriptor())) {
             slot += argument.getSize();
         }
         return slot;
     }
 
-    private boolean writesLocal(int opcode) {
-        return opcode >= Opcodes.ISTORE && opcode <= Opcodes.ASTORE;
-    }
+    private void rewriteBlockExit(MethodNode mn, Block block, LabelNode next, LabelNode dispatcher,
+            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel) {
+        AbstractInsnNode last = lastRealBefore(block.endExclusive());
+        if (last == null || before(last, block.label())) return;
+        int opcode = last.getOpcode();
+        if (terminates(opcode)) return;
 
-    private int targetBlockCount(TransformContext ctx) {
-        double intensity = Math.max(0.1, Math.min(1.0, ctx.config().getTransformIntensity(id())));
-        Object configured = ctx.config().transforms().getOrDefault(id(),
-            new dev.nekoobfuscator.api.config.TransformConfig(true)).options().get("maxBlocks");
-        if (configured instanceof Number n) return Math.max(2, n.intValue());
-        return Math.max(2, (int) Math.round(3 + intensity * 9));
-    }
-
-    private List<AbstractInsnNode> bytecodeInstructions(MethodNode mn) {
-        List<AbstractInsnNode> result = new ArrayList<>();
-        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-            if (insn.getOpcode() >= 0) result.add(insn);
-        }
-        return result;
-    }
-
-    private boolean lastInstructionTerminates(List<AbstractInsnNode> code) {
-        int opcode = code.get(code.size() - 1).getOpcode();
-        return (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN) || opcode == Opcodes.ATHROW;
-    }
-
-    private List<List<AbstractInsnNode>> splitStackBalancedBlocks(String owner, MethodNode mn,
-            List<AbstractInsnNode> code, int maxBlocks) {
-        Set<AbstractInsnNode> splitAfter = stackZeroSplitPoints(owner, mn);
-        List<List<AbstractInsnNode>> blocks = new ArrayList<>();
-        List<AbstractInsnNode> current = new ArrayList<>();
-        int minBlockSize = Math.max(2, code.size() / Math.max(2, maxBlocks));
-        for (int i = 0; i < code.size(); i++) {
-            AbstractInsnNode insn = code.get(i);
-            current.add(insn);
-            boolean last = i == code.size() - 1;
-            boolean canSplit = splitAfter.contains(insn) && current.size() >= minBlockSize;
-            if (!last && canSplit && blocks.size() + 1 < maxBlocks) {
-                blocks.add(current);
-                current = new ArrayList<>();
+        if (last instanceof JumpInsnNode jump) {
+            if (opcode == Opcodes.GOTO) {
+                Integer targetState = stateByLabel.get(jump.label);
+                if (targetState == null) return;
+                mn.instructions.insertBefore(last, transition(targetState, dispatcher, keyLocal, stateLocal, stateMask));
+                mn.instructions.remove(last);
+                return;
             }
+            LabelNode taken = new LabelNode();
+            Integer targetState = stateByLabel.get(jump.label);
+            Integer fallthroughState = next == null ? null : stateByLabel.get(next);
+            if (targetState == null || fallthroughState == null) return;
+            JumpInsnNode replacement = new JumpInsnNode(opcode, taken);
+            mn.instructions.insertBefore(last, replacement);
+            mn.instructions.insertBefore(last, transition(fallthroughState, dispatcher, keyLocal, stateLocal, stateMask));
+            mn.instructions.insertBefore(last, taken);
+            mn.instructions.insertBefore(last, transition(targetState, dispatcher, keyLocal, stateLocal, stateMask));
+            mn.instructions.remove(last);
+            return;
         }
-        if (!current.isEmpty()) blocks.add(current);
-        return blocks;
+        if (last instanceof LookupSwitchInsnNode ls) {
+            rewriteLookupSwitch(mn, ls, dispatcher, keyLocal, stateLocal, stateMask, stateByLabel);
+            return;
+        }
+        if (last instanceof TableSwitchInsnNode ts) {
+            rewriteTableSwitch(mn, ts, dispatcher, keyLocal, stateLocal, stateMask, stateByLabel);
+            return;
+        }
+        if (next != null) {
+            Integer nextState = stateByLabel.get(next);
+            if (nextState == null) return;
+            mn.instructions.insert(last, transition(nextState, dispatcher, keyLocal, stateLocal, stateMask));
+        }
     }
 
-    private Set<AbstractInsnNode> stackZeroSplitPoints(String owner, MethodNode mn) {
-        Set<AbstractInsnNode> result = new HashSet<>();
-        try {
-            Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicInterpreter());
-            Frame<BasicValue>[] frames = analyzer.analyze(owner, mn);
-            AbstractInsnNode[] insns = mn.instructions.toArray();
-            for (int i = 0; i < insns.length - 1; i++) {
-                if (insns[i].getOpcode() < 0) continue;
-                int next = nextBytecodeIndex(insns, i + 1);
-                if (next < 0 || frames[next] == null) continue;
-                if (frames[next].getStackSize() == 0) result.add(insns[i]);
-            }
-        } catch (Exception ignored) {
-            result.clear();
+    private void rewriteLookupSwitch(MethodNode mn, LookupSwitchInsnNode ls, LabelNode dispatcher,
+            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel) {
+        LabelNode defaultSet = new LabelNode();
+        List<LabelNode> setLabels = new ArrayList<>();
+        for (int i = 0; i < ls.labels.size(); i++) setLabels.add(new LabelNode());
+        List<LabelNode> originalTargets = new ArrayList<>(ls.labels);
+        LabelNode originalDefault = ls.dflt;
+        if (!stateByLabel.containsKey(originalDefault)) return;
+        for (LabelNode target : originalTargets) {
+            if (!stateByLabel.containsKey(target)) return;
         }
-        return result;
+        ls.labels.clear();
+        ls.labels.addAll(setLabels);
+        ls.dflt = defaultSet;
+        InsnList tail = new InsnList();
+        tail.add(defaultSet);
+        tail.add(transition(stateByLabel.get(originalDefault), dispatcher, keyLocal, stateLocal, stateMask));
+        for (int i = 0; i < setLabels.size(); i++) {
+            tail.add(setLabels.get(i));
+            tail.add(transition(stateByLabel.get(originalTargets.get(i)), dispatcher, keyLocal, stateLocal, stateMask));
+        }
+        mn.instructions.insert(ls, tail);
     }
 
-    private int nextBytecodeIndex(AbstractInsnNode[] insns, int start) {
-        for (int i = start; i < insns.length; i++) {
-            if (insns[i].getOpcode() >= 0) return i;
+    private void rewriteTableSwitch(MethodNode mn, TableSwitchInsnNode ts, LabelNode dispatcher,
+            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel) {
+        LabelNode defaultSet = new LabelNode();
+        List<LabelNode> setLabels = new ArrayList<>();
+        for (int i = 0; i < ts.labels.size(); i++) setLabels.add(new LabelNode());
+        List<LabelNode> originalTargets = new ArrayList<>(ts.labels);
+        LabelNode originalDefault = ts.dflt;
+        if (!stateByLabel.containsKey(originalDefault)) return;
+        for (LabelNode target : originalTargets) {
+            if (!stateByLabel.containsKey(target)) return;
         }
-        return -1;
+        ts.labels.clear();
+        ts.labels.addAll(setLabels);
+        ts.dflt = defaultSet;
+        InsnList tail = new InsnList();
+        tail.add(defaultSet);
+        tail.add(transition(stateByLabel.get(originalDefault), dispatcher, keyLocal, stateLocal, stateMask));
+        for (int i = 0; i < setLabels.size(); i++) {
+            tail.add(setLabels.get(i));
+            tail.add(transition(stateByLabel.get(originalTargets.get(i)), dispatcher, keyLocal, stateLocal, stateMask));
+        }
+        mn.instructions.insert(ts, tail);
     }
 
-    private int[] uniqueStates(int seed, int count) {
-        int[] states = new int[count];
-        Set<Integer> used = new HashSet<>();
-        long state = seed;
-        for (int i = 0; i < count; i++) {
-            int candidate;
-            do {
-                state = JvmPassBytecode.mix(state, i + 0x51ED2705L);
-                candidate = (int) state;
-            } while (!used.add(candidate));
-            states[i] = candidate;
+    private InsnList transition(Integer state, LabelNode dispatcher, int keyLocal, int stateLocal, int stateMask) {
+        InsnList insns = new InsnList();
+        if (state == null) {
+            insns.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
+            insns.add(new InsnNode(Opcodes.DUP));
+            insns.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,
+                "java/lang/IllegalStateException", "<init>", "()V", false));
+            insns.add(new InsnNode(Opcodes.ATHROW));
+            return insns;
         }
-        return states;
+        emitStoreEncodedState(insns, stateLocal, keyLocal, state, stateMask);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, dispatcher));
+        return insns;
     }
 
     private void emitStoreEncodedState(InsnList insns, int stateLocal, int keyLocal, int state, int mask) {
@@ -294,4 +515,61 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IXOR));
     }
+
+    private int[] uniqueStates(int seed, int count) {
+        int[] states = new int[count];
+        Set<Integer> used = new HashSet<>();
+        long state = seed;
+        for (int i = 0; i < count; i++) {
+            int candidate;
+            do {
+                state = JvmPassBytecode.mix(state, i + 0x51ED2705L);
+                candidate = (int) state;
+            } while (!used.add(candidate));
+            states[i] = candidate;
+        }
+        return states;
+    }
+
+    private LabelNode ensureLabelBefore(MethodNode mn, AbstractInsnNode node) {
+        AbstractInsnNode previous = node.getPrevious();
+        if (previous instanceof LabelNode label) return label;
+        LabelNode label = new LabelNode();
+        mn.instructions.insertBefore(node, label);
+        return label;
+    }
+
+    private AbstractInsnNode firstReal(MethodNode mn) {
+        return nextReal(mn.instructions.getFirst());
+    }
+
+    private AbstractInsnNode nextReal(AbstractInsnNode start) {
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getNext()) {
+            if (insn.getOpcode() >= 0) return insn;
+        }
+        return null;
+    }
+
+    private AbstractInsnNode lastRealBefore(AbstractInsnNode endExclusive) {
+        AbstractInsnNode insn = endExclusive == null ? null : endExclusive.getPrevious();
+        if (insn == null) return null;
+        for (; insn != null; insn = insn.getPrevious()) {
+            if (insn.getOpcode() >= 0) return insn;
+        }
+        return null;
+    }
+
+    private boolean before(AbstractInsnNode left, AbstractInsnNode right) {
+        for (AbstractInsnNode insn = left; insn != null; insn = insn.getNext()) {
+            if (insn == right) return true;
+        }
+        return false;
+    }
+
+    private boolean terminates(int opcode) {
+        return (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN)
+            || opcode == Opcodes.ATHROW;
+    }
+
+    private record Block(LabelNode label, AbstractInsnNode endExclusive, boolean handler) {}
 }
