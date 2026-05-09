@@ -13,7 +13,6 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
-import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LookupSwitchInsnNode;
@@ -141,7 +140,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 ? blocks.get(i + 1).label()
                 : null;
             rewriteBlockExit(mn, block, next, guardLocal, pcLocal, domainLocal,
-                stateByLabel, dispatchPlan.targets(), salt);
+                keyLocal, stateByLabel, dispatchPlan.targets(), salt);
         }
         insertHandlerBridges(mn, handlerBodies, exceptionLocal, keyLocal, guardLocal, pcLocal, domainLocal,
             stateByLabel, dispatchPlan.targets(), methodSeed, salt);
@@ -368,7 +367,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             emitInitGuard(prefix, guardLocal, keyLocal);
             prefix.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
             prefix.add(transition(requireState(body, bodyState), requireTarget(body, bodyTarget),
-                guardLocal, pcLocal, domainLocal, edgeSeed, true, EdgeRole.HANDLER));
+                keyLocal, guardLocal, pcLocal, domainLocal, edgeSeed, true, EdgeRole.HANDLER));
             mn.instructions.insert(handler, prefix);
 
             InsnList reload = new InsnList();
@@ -404,11 +403,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             insns.add(group.hub());
             emitDomainSwitch(insns, domainLocal, group.islandLabels(), poison);
             for (int island = 0; island < group.islandLabels().length; island++) {
-                insns.add(buildIslandDispatcher(group, stateByLabel, guardLocal, pcLocal,
+                insns.add(buildIslandDispatcher(group, stateByLabel, keyLocal, guardLocal, pcLocal,
                     domainLocal, poison, island, salt));
             }
             insns.add(poison);
-            emitStepGuard(insns, guardLocal, edgeSeed(salt, entryBlock.label(), entryBlock.label(), 0x504F49534F4E4B31L));
+            long poisonSeed = edgeSeed(salt, entryBlock.label(), entryBlock.label(), 0x504F49534F4E4B31L);
+            emitStepGuard(insns, guardLocal, poisonSeed);
+            emitStepKey(insns, keyLocal, guardLocal, poisonSeed);
             insns.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
             insns.add(new InsnNode(Opcodes.DUP));
             insns.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,
@@ -420,7 +421,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private void rewriteBlockExit(MethodNode mn, Block block, LabelNode next,
             int guardLocal, int pcLocal, int domainLocal,
-            Map<LabelNode, Integer> stateByLabel, Map<LabelNode, DispatchTarget> dispatchByLabel, long salt) {
+            int keyLocal, Map<LabelNode, Integer> stateByLabel,
+            Map<LabelNode, DispatchTarget> dispatchByLabel, long salt) {
         AbstractInsnNode last = lastRealBefore(block.endExclusive());
         if (last == null || before(last, block.label())) return;
         int opcode = last.getOpcode();
@@ -431,7 +433,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 Integer targetState = stateByLabel.get(jump.label);
                 DispatchTarget target = dispatchByLabel.get(jump.label);
                 mn.instructions.insertBefore(last, transition(requireState(jump.label, targetState),
-                    requireTarget(jump.label, target), guardLocal, pcLocal, domainLocal,
+                    requireTarget(jump.label, target), keyLocal, guardLocal, pcLocal, domainLocal,
                     edgeSeed(salt, block.label(), jump.label, opcode),
                     true, EdgeRole.GOTO));
                 mn.instructions.remove(last);
@@ -450,33 +452,33 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 LabelNode taken = new LabelNode();
                 mn.instructions.insertBefore(last, new JumpInsnNode(opcode, taken));
                 mn.instructions.insertBefore(last, transition(requireState(next, fallthroughState),
-                    requireTarget(next, fallthrough), guardLocal, pcLocal, domainLocal,
+                    requireTarget(next, fallthrough), keyLocal, guardLocal, pcLocal, domainLocal,
                     falseSeed, true, EdgeRole.CONDITIONAL_FALSE));
                 mn.instructions.insertBefore(last, taken);
                 mn.instructions.insertBefore(last, transition(requireState(jump.label, targetState),
-                    requireTarget(jump.label, target), guardLocal, pcLocal, domainLocal,
+                    requireTarget(jump.label, target), keyLocal, guardLocal, pcLocal, domainLocal,
                     trueSeed, true, EdgeRole.CONDITIONAL_TRUE));
             } else {
                 LabelNode fallthroughLabel = new LabelNode();
                 mn.instructions.insertBefore(last, new JumpInsnNode(invertJumpOpcode(opcode), fallthroughLabel));
                 mn.instructions.insertBefore(last, transition(requireState(jump.label, targetState),
-                    requireTarget(jump.label, target), guardLocal, pcLocal, domainLocal,
+                    requireTarget(jump.label, target), keyLocal, guardLocal, pcLocal, domainLocal,
                     trueSeed, true, EdgeRole.CONDITIONAL_TRUE));
                 mn.instructions.insertBefore(last, fallthroughLabel);
                 mn.instructions.insertBefore(last, transition(requireState(next, fallthroughState),
-                    requireTarget(next, fallthrough), guardLocal, pcLocal, domainLocal,
+                    requireTarget(next, fallthrough), keyLocal, guardLocal, pcLocal, domainLocal,
                     falseSeed, true, EdgeRole.CONDITIONAL_FALSE));
             }
             mn.instructions.remove(last);
             return;
         }
         if (last instanceof LookupSwitchInsnNode ls) {
-            rewriteLookupSwitch(mn, ls, guardLocal, pcLocal, domainLocal,
+            rewriteLookupSwitch(mn, ls, keyLocal, guardLocal, pcLocal, domainLocal,
                 stateByLabel, dispatchByLabel, block.label(), salt);
             return;
         }
         if (last instanceof TableSwitchInsnNode ts) {
-            rewriteTableSwitch(mn, ts, guardLocal, pcLocal, domainLocal,
+            rewriteTableSwitch(mn, ts, keyLocal, guardLocal, pcLocal, domainLocal,
                 stateByLabel, dispatchByLabel, block.label(), salt);
             return;
         }
@@ -484,14 +486,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             Integer nextState = stateByLabel.get(next);
             DispatchTarget nextTarget = dispatchByLabel.get(next);
             mn.instructions.insert(last, transition(requireState(next, nextState),
-                requireTarget(next, nextTarget), guardLocal, pcLocal, domainLocal,
+                requireTarget(next, nextTarget), keyLocal, guardLocal, pcLocal, domainLocal,
                 edgeSeed(salt, block.label(), next, 0x46414C4C),
-                containsCall(block), EdgeRole.FALLTHROUGH));
+                true, EdgeRole.FALLTHROUGH));
         }
     }
 
     private void rewriteLookupSwitch(MethodNode mn, LookupSwitchInsnNode ls,
-            int guardLocal, int pcLocal, int domainLocal,
+            int keyLocal, int guardLocal, int pcLocal, int domainLocal,
             Map<LabelNode, Integer> stateByLabel, Map<LabelNode, DispatchTarget> dispatchByLabel,
             LabelNode source, long salt) {
         LabelNode defaultSet = new LabelNode();
@@ -506,21 +508,21 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         tail.add(defaultSet);
         tail.add(transition(requireState(originalDefault, stateByLabel.get(originalDefault)),
             requireTarget(originalDefault, dispatchByLabel.get(originalDefault)),
-            guardLocal, pcLocal, domainLocal,
+            keyLocal, guardLocal, pcLocal, domainLocal,
             edgeSeed(salt, source, originalDefault, 0x53574446), true, EdgeRole.SWITCH_DEFAULT));
         for (int i = 0; i < setLabels.size(); i++) {
             LabelNode originalTarget = originalTargets.get(i);
             tail.add(setLabels.get(i));
             tail.add(transition(requireState(originalTarget, stateByLabel.get(originalTarget)),
                 requireTarget(originalTarget, dispatchByLabel.get(originalTarget)),
-                guardLocal, pcLocal, domainLocal, edgeSeed(salt, source, originalTarget,
+                keyLocal, guardLocal, pcLocal, domainLocal, edgeSeed(salt, source, originalTarget,
                     ls.keys.get(i) ^ 0x53574C53), true, EdgeRole.SWITCH_CASE));
         }
         mn.instructions.insert(ls, tail);
     }
 
     private void rewriteTableSwitch(MethodNode mn, TableSwitchInsnNode ts,
-            int guardLocal, int pcLocal, int domainLocal,
+            int keyLocal, int guardLocal, int pcLocal, int domainLocal,
             Map<LabelNode, Integer> stateByLabel, Map<LabelNode, DispatchTarget> dispatchByLabel,
             LabelNode source, long salt) {
         LabelNode defaultSet = new LabelNode();
@@ -535,14 +537,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         tail.add(defaultSet);
         tail.add(transition(requireState(originalDefault, stateByLabel.get(originalDefault)),
             requireTarget(originalDefault, dispatchByLabel.get(originalDefault)),
-            guardLocal, pcLocal, domainLocal,
+            keyLocal, guardLocal, pcLocal, domainLocal,
             edgeSeed(salt, source, originalDefault, 0x54534446), true, EdgeRole.SWITCH_DEFAULT));
         for (int i = 0; i < setLabels.size(); i++) {
             LabelNode originalTarget = originalTargets.get(i);
             tail.add(setLabels.get(i));
             tail.add(transition(requireState(originalTarget, stateByLabel.get(originalTarget)),
                 requireTarget(originalTarget, dispatchByLabel.get(originalTarget)),
-                guardLocal, pcLocal, domainLocal, edgeSeed(salt, source, originalTarget,
+                keyLocal, guardLocal, pcLocal, domainLocal, edgeSeed(salt, source, originalTarget,
                     (ts.min + i) ^ 0x54534C53), true, EdgeRole.SWITCH_CASE));
         }
         mn.instructions.insert(ts, tail);
@@ -563,11 +565,12 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private InsnList transition(int state, DispatchTarget target,
-            int guardLocal, int pcLocal, int domainLocal, long edgeSeed,
+            int keyLocal, int guardLocal, int pcLocal, int domainLocal, long edgeSeed,
             boolean updateGuard, EdgeRole role) {
         InsnList insns = new InsnList();
         if (updateGuard) {
             emitStepGuard(insns, guardLocal, edgeSeed);
+            emitStepKey(insns, keyLocal, guardLocal, edgeSeed);
         }
         switch (chooseEdgeKind(edgeSeed, role, target)) {
             case DIRECT_ISLAND -> {
@@ -611,7 +614,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private InsnList buildIslandDispatcher(IslandGroup group, Map<LabelNode, Integer> stateByLabel,
-            int guardLocal, int pcLocal, int domainLocal, LabelNode poison, int island, long salt) {
+            int keyLocal, int guardLocal, int pcLocal, int domainLocal, LabelNode poison, int island, long salt) {
         InsnList insns = new InsnList();
         TreeMap<Integer, LabelNode> cases = new TreeMap<>();
         Map<LabelNode, LabelNode> stubs = new IdentityHashMap<>();
@@ -643,7 +646,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             insns.add(new JumpInsnNode(Opcodes.GOTO, stub.getValue()));
         }
         insns.add(fake);
-        emitStepGuard(insns, guardLocal, edgeSeed(salt, group.hub(), group.islandLabels()[island], 0x46414B4549534C45L ^ island));
+        long fakeSeed = edgeSeed(salt, group.hub(), group.islandLabels()[island], 0x46414B4549534C45L ^ island);
+        emitStepGuard(insns, guardLocal, fakeSeed);
+        emitStepKey(insns, keyLocal, guardLocal, fakeSeed);
         emitStorePc(insns, pcLocal, guardLocal, firstState);
         emitStoreDomain(insns, domainLocal, island);
         insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
@@ -706,6 +711,31 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ISTORE, guardLocal));
     }
 
+    private void emitStepKey(InsnList insns, int keyLocal, int guardLocal, long seed) {
+        // Feed the evolved CFF guard back into the long method key. Keyed
+        // callsites load this local, so child methods inherit the current path.
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, seed);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0x9E3779B97F4A7C15L);
+        insns.add(new InsnNode(Opcodes.LADD));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 31);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+    }
+
     private void emitStepGuardXor(InsnList insns, int guardLocal, long seed) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
         JvmPassBytecode.pushInt(insns, (int) seed);
@@ -742,13 +772,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, shift(seed, 23));
         insns.add(new InsnNode(Opcodes.ISHL));
         insns.add(new InsnNode(Opcodes.IXOR));
-    }
-
-    private boolean containsCall(Block block) {
-        for (AbstractInsnNode insn = block.label(); insn != null && insn != block.endExclusive(); insn = insn.getNext()) {
-            if (insn instanceof MethodInsnNode || insn instanceof InvokeDynamicInsnNode) return true;
-        }
-        return false;
     }
 
     private DispatchPlan buildDispatchPlan(List<Block> blocks, Frame<BasicValue>[] frames,
