@@ -10,7 +10,6 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
@@ -34,15 +33,14 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
 
 /**
  * Direct keyed control-flow flattening over the original method body.
  *
  * <p>The pass keeps bytecode in the original method and rewrites basic-block
- * exits to store an encoded state and return to a dispatcher. Constructors keep
- * the mandatory this/super initialization prefix untouched; flattening starts
- * immediately after that prefix.</p>
+ * exits to store an encoded state and return to a target-local dispatcher.
+ * Constructors keep the mandatory this/super initialization prefix untouched;
+ * flattening starts immediately after that prefix.</p>
  */
 public final class ControlFlowFlatteningPass implements TransformPass {
     public static final String ID = "controlFlowFlattening";
@@ -92,14 +90,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
         long methodSeed = JvmKeyDispatchPass.methodSeed(pctx.masterSeed(), clazz, method, mn);
         int keyLocal = mn.maxLocals;
-        int[] localKinds = collectLocalKinds(mn, protectedStart, keyLocal);
         Map<LabelNode, LabelNode> handlerBodies = splitExceptionHandlers(mn);
-        Set<LabelNode> zeroStackLabels = zeroStackLabels(clazz.name(), mn);
-        Set<LabelNode> linearLeaders = hasConflictingLocalKinds(localKinds)
-            ? Set.of()
-            : linearZeroStackLeaders(clazz.name(), mn, protectedStart);
-        List<Block> blocks = buildBlocks(mn, protectedStart, new HashSet<>(handlerBodies.values()),
-            zeroStackLabels, linearLeaders);
+        Frame<BasicValue>[] frames = analyzeFrames(clazz.name(), mn);
+        Map<AbstractInsnNode, Integer> instructionIndex = instructionIndex(mn);
+        Set<LabelNode> zeroStackLabels = zeroStackLabels(mn, frames, instructionIndex);
+        Set<LabelNode> linearLeaders = linearZeroStackLeaders(mn, protectedStart, frames, instructionIndex);
+        BlockPlan blockPlan = buildBlocks(mn, protectedStart, new HashSet<>(handlerBodies.values()),
+            zeroStackLabels, linearLeaders, frames, instructionIndex);
+        List<Block> blocks = blockPlan.blocks();
         if (blocks.isEmpty()) return;
 
         int stateLocal = keyLocal + 2;
@@ -111,24 +109,33 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int stateMask = (int) salt;
         int[] states = uniqueStates((int) (salt >>> 32), blocks.size());
         Map<LabelNode, Integer> stateByLabel = new IdentityHashMap<>();
+        Map<LabelNode, LabelNode> dispatcherByLabel = new IdentityHashMap<>();
         for (int i = 0; i < blocks.size(); i++) {
-            stateByLabel.put(blocks.get(i).label(), states[i]);
+            Block block = blocks.get(i);
+            stateByLabel.put(block.label(), states[i]);
+            if (!block.handler()) {
+                dispatcherByLabel.put(block.label(), new LabelNode());
+            }
         }
-
-        LabelNode dispatcher = new LabelNode();
-        int initializedLocalFloor = method.isConstructor() ? keyLocal : parameterLocalLimit(method);
-        InsnList dispatch = buildDispatcher(blocks, keyLocal, stateLocal, methodSeed, stateMask,
-            states, dispatcher, localKinds, initializedLocalFloor, exceptionLocal);
-        mn.instructions.insertBefore(protectedStart, dispatch);
-        insertHandlerBridges(mn, handlerBodies, exceptionLocal, dispatcher, keyLocal, stateLocal,
-            stateMask, stateByLabel, methodSeed);
+        for (Map.Entry<LabelNode, LabelNode> alias : blockPlan.aliases().entrySet()) {
+            LabelNode canonical = alias.getValue();
+            stateByLabel.put(alias.getKey(), stateByLabel.get(canonical));
+            dispatcherByLabel.put(alias.getKey(), dispatcherByLabel.get(canonical));
+        }
 
         for (int i = 0; i < blocks.size(); i++) {
             Block block = blocks.get(i);
             if (block.handler()) continue;
-            LabelNode next = i + 1 < blocks.size() ? blocks.get(i + 1).label() : null;
-            rewriteBlockExit(mn, block, next, dispatcher, keyLocal, stateLocal, stateMask, stateByLabel);
+            LabelNode next = i + 1 < blocks.size() && !blocks.get(i + 1).handler()
+                ? blocks.get(i + 1).label()
+                : null;
+            rewriteBlockExit(mn, block, next, keyLocal, stateLocal, stateMask,
+                stateByLabel, dispatcherByLabel);
         }
+        insertHandlerBridges(mn, handlerBodies, exceptionLocal, keyLocal, stateLocal,
+            stateMask, stateByLabel, dispatcherByLabel, methodSeed);
+        insertBlockDispatchers(mn, blocks, dispatcherByLabel, keyLocal, stateLocal, methodSeed,
+            stateMask, states, exceptionLocal);
 
         mn.localVariables = null;
         mn.visibleLocalVariableAnnotations = null;
@@ -137,7 +144,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         clazz.markDirty();
         pctx.invalidate(method);
         JvmObfuscationCoverage.get(ctx).full(id(), clazz.name(), method.name(),
-            method.descriptor(), "direct-keyed-block-dispatcher-" + blocks.size());
+            method.descriptor(), "direct-keyed-split-dispatchers-" + dispatcherByLabel.size());
     }
 
     private boolean isApplicationMethod(PipelineContext pctx, L1Class clazz, L1Method method) {
@@ -183,8 +190,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return bodies;
     }
 
-    private List<Block> buildBlocks(MethodNode mn, LabelNode start, Set<LabelNode> extraLeaders,
-            Set<LabelNode> zeroStackLabels, Set<LabelNode> linearLeaders) {
+    private BlockPlan buildBlocks(MethodNode mn, LabelNode start, Set<LabelNode> extraLeaders,
+            Set<LabelNode> zeroStackLabels, Set<LabelNode> linearLeaders,
+            Frame<BasicValue>[] frames, Map<AbstractInsnNode, Integer> instructionIndex) {
         Set<AbstractInsnNode> leaders = new HashSet<>();
         leaders.add(start);
         leaders.addAll(extraLeaders);
@@ -199,28 +207,27 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
         for (AbstractInsnNode insn = start; insn != null; insn = insn.getNext()) {
             if (insn instanceof JumpInsnNode jump) {
-                if (zeroStackLabels.contains(jump.label)) leaders.add(jump.label);
                 AbstractInsnNode next = nextReal(insn.getNext());
-                if (next != null && jump.getOpcode() != Opcodes.GOTO) {
+                boolean targetZero = zeroStackLabels.contains(jump.label);
+                if (jump.getOpcode() == Opcodes.GOTO) {
+                    if (targetZero) leaders.add(jump.label);
+                } else if (targetZero && isZeroStack(next, frames, instructionIndex)) {
+                    leaders.add(jump.label);
                     leaders.add(ensureLabelBefore(mn, next));
                 }
             } else if (insn instanceof TableSwitchInsnNode ts) {
-                if (zeroStackLabels.contains(ts.dflt)) leaders.add(ts.dflt);
-                for (LabelNode label : ts.labels) {
-                    if (zeroStackLabels.contains(label)) leaders.add(label);
+                if (allSwitchTargetsZero(ts.dflt, ts.labels, zeroStackLabels)) {
+                    leaders.add(ts.dflt);
+                    leaders.addAll(ts.labels);
                 }
-                AbstractInsnNode next = nextReal(insn.getNext());
-                if (next != null) leaders.add(ensureLabelBefore(mn, next));
             } else if (insn instanceof LookupSwitchInsnNode ls) {
-                if (zeroStackLabels.contains(ls.dflt)) leaders.add(ls.dflt);
-                for (LabelNode label : ls.labels) {
-                    if (zeroStackLabels.contains(label)) leaders.add(label);
+                if (allSwitchTargetsZero(ls.dflt, ls.labels, zeroStackLabels)) {
+                    leaders.add(ls.dflt);
+                    leaders.addAll(ls.labels);
                 }
-                AbstractInsnNode next = nextReal(insn.getNext());
-                if (next != null) leaders.add(ensureLabelBefore(mn, next));
             } else if (terminates(insn.getOpcode())) {
                 AbstractInsnNode next = nextReal(insn.getNext());
-                if (next != null) leaders.add(ensureLabelBefore(mn, next));
+                if (isZeroStack(next, frames, instructionIndex)) leaders.add(ensureLabelBefore(mn, next));
             }
         }
 
@@ -231,76 +238,112 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
         }
         List<Block> blocks = new ArrayList<>();
+        Map<LabelNode, LabelNode> aliases = new IdentityHashMap<>();
+        Map<Integer, LabelNode> canonicalByIndex = new HashMap<>();
         for (int i = 0; i < ordered.size(); i++) {
             LabelNode label = ordered.get(i);
             AbstractInsnNode endExclusive = i + 1 < ordered.size() ? ordered.get(i + 1) : null;
-            blocks.add(new Block(label, endExclusive, handlerLabels.contains(label)));
+            if (hasRealInstruction(label, endExclusive)) {
+                blocks.add(new Block(label, endExclusive, handlerLabels.contains(label)));
+                canonicalByIndex.put(i, label);
+            }
         }
-        return blocks;
+        LabelNode nextCanonical = null;
+        for (int i = ordered.size() - 1; i >= 0; i--) {
+            LabelNode label = ordered.get(i);
+            LabelNode canonical = canonicalByIndex.get(i);
+            if (canonical != null) {
+                nextCanonical = canonical;
+            } else if (nextCanonical != null) {
+                aliases.put(label, nextCanonical);
+            }
+        }
+        return new BlockPlan(blocks, aliases);
     }
 
-    private Set<LabelNode> linearZeroStackLeaders(String owner, MethodNode mn, LabelNode start) {
+    private boolean hasRealInstruction(LabelNode label, AbstractInsnNode endExclusive) {
+        for (AbstractInsnNode insn = label; insn != null && insn != endExclusive; insn = insn.getNext()) {
+            if (insn.getOpcode() >= 0) return true;
+        }
+        return false;
+    }
+
+    private Set<LabelNode> linearZeroStackLeaders(MethodNode mn, LabelNode start,
+            Frame<BasicValue>[] frames, Map<AbstractInsnNode, Integer> instructionIndex) {
         Set<LabelNode> leaders = new HashSet<>();
-        try {
-            Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicInterpreter());
-            Frame<BasicValue>[] frames = analyzer.analyze(owner, mn);
-            AbstractInsnNode[] insns = mn.instructions.toArray();
-            Map<AbstractInsnNode, Integer> index = new IdentityHashMap<>();
-            for (int i = 0; i < insns.length; i++) {
-                index.put(insns[i], i);
+        AbstractInsnNode[] insns = mn.instructions.toArray();
+        boolean active = false;
+        for (AbstractInsnNode insn : insns) {
+            if (insn == start) active = true;
+            if (!active || insn.getOpcode() < 0 || isControlTransfer(insn)) continue;
+            AbstractInsnNode next = nextReal(insn.getNext());
+            if (isZeroStack(next, frames, instructionIndex)) {
+                leaders.add(ensureLabelBefore(mn, next));
             }
-            boolean active = false;
-            for (int i = 0; i < insns.length - 1; i++) {
-                if (insns[i] == start) active = true;
-                if (!active || insns[i].getOpcode() < 0 || isControlTransfer(insns[i])) continue;
-                AbstractInsnNode next = nextReal(insns[i].getNext());
-                if (next == null) continue;
-                Integer nextIndex = index.get(next);
-                if (nextIndex == null || frames[nextIndex] == null) continue;
-                if (frames[nextIndex].getStackSize() == 0) {
-                    leaders.add(ensureLabelBefore(mn, next));
-                }
-            }
-        } catch (Exception ignored) {
-            // If analysis cannot prove stack-empty boundaries, existing CFG
-            // leaders are still flattened. No guessed split points are added.
         }
         return leaders;
     }
 
-    private Set<LabelNode> zeroStackLabels(String owner, MethodNode mn) {
-        Set<LabelNode> labels = new HashSet<>();
+    private Frame<BasicValue>[] analyzeFrames(String owner, MethodNode mn) {
         try {
             Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicInterpreter());
-            Frame<BasicValue>[] frames = analyzer.analyze(owner, mn);
-            AbstractInsnNode[] insns = mn.instructions.toArray();
-            for (int i = 0; i < insns.length; i++) {
-                if (insns[i] instanceof LabelNode label
-                        && frames[i] != null
-                        && frames[i].getStackSize() == 0) {
-                    labels.add(label);
-                }
-            }
-        } catch (Exception ignored) {
-            for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-                if (insn instanceof LabelNode label) labels.add(label);
+            return analyzer.analyze(owner, mn);
+        } catch (Exception e) {
+            throw new IllegalStateException("Cannot prove verifier-safe CFF split points for "
+                + owner + "." + mn.name + mn.desc, e);
+        }
+    }
+
+    private Map<AbstractInsnNode, Integer> instructionIndex(MethodNode mn) {
+        AbstractInsnNode[] insns = mn.instructions.toArray();
+        Map<AbstractInsnNode, Integer> index = new IdentityHashMap<>();
+        for (int i = 0; i < insns.length; i++) {
+            index.put(insns[i], i);
+        }
+        return index;
+    }
+
+    private Set<LabelNode> zeroStackLabels(MethodNode mn, Frame<BasicValue>[] frames,
+            Map<AbstractInsnNode, Integer> instructionIndex) {
+        Set<LabelNode> labels = new HashSet<>();
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof LabelNode label && isZeroStack(insn, frames, instructionIndex)) {
+                labels.add(label);
             }
         }
         return labels;
     }
 
+    private boolean isZeroStack(AbstractInsnNode insn, Frame<BasicValue>[] frames,
+            Map<AbstractInsnNode, Integer> instructionIndex) {
+        if (insn == null) return false;
+        Integer index = instructionIndex.get(insn);
+        return index != null && frames[index] != null && frames[index].getStackSize() == 0;
+    }
+
+    private boolean allSwitchTargetsZero(LabelNode dflt, List<LabelNode> labels, Set<LabelNode> zeroStackLabels) {
+        if (!zeroStackLabels.contains(dflt)) return false;
+        for (LabelNode label : labels) {
+            if (!zeroStackLabels.contains(label)) return false;
+        }
+        return true;
+    }
+
     private void insertHandlerBridges(MethodNode mn, Map<LabelNode, LabelNode> handlerBodies,
-            int exceptionLocal, LabelNode dispatcher, int keyLocal, int stateLocal, int stateMask,
-            Map<LabelNode, Integer> stateByLabel, long methodSeed) {
+            int exceptionLocal, int keyLocal, int stateLocal, int stateMask,
+            Map<LabelNode, Integer> stateByLabel, Map<LabelNode, LabelNode> dispatcherByLabel,
+            long methodSeed) {
         if (handlerBodies.isEmpty()) return;
         for (Map.Entry<LabelNode, LabelNode> entry : handlerBodies.entrySet()) {
             LabelNode handler = entry.getKey();
             LabelNode body = entry.getValue();
             Integer bodyState = stateByLabel.get(body);
+            LabelNode bodyDispatcher = dispatcherByLabel.get(body);
             InsnList prefix = new InsnList();
             JvmKeyDispatchPass.emitKeyInit(prefix, keyLocal, methodSeed, 0x4346464B65794C31L);
             prefix.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
-            prefix.add(transition(bodyState, dispatcher, keyLocal, stateLocal, stateMask));
+            prefix.add(transition(requireState(body, bodyState), requireDispatcher(body, bodyDispatcher),
+                keyLocal, stateLocal, stateMask));
             mn.instructions.insert(handler, prefix);
 
             InsnList reload = new InsnList();
@@ -309,133 +352,53 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
     }
 
-    private InsnList buildDispatcher(List<Block> blocks, int keyLocal, int stateLocal, long methodSeed,
-            int stateMask, int[] states, LabelNode dispatcher, int[] localKinds, int initializedLocalFloor,
-            int exceptionLocal) {
-        InsnList insns = new InsnList();
-        LabelNode dflt = new LabelNode();
-        TreeMap<Integer, LabelNode> cases = new TreeMap<>();
-        List<LabelNode> trampolines = new ArrayList<>();
+    private void insertBlockDispatchers(MethodNode mn, List<Block> blocks,
+            Map<LabelNode, LabelNode> dispatcherByLabel, int keyLocal, int stateLocal, long methodSeed,
+            int stateMask, int[] states, int exceptionLocal) {
         for (int i = 0; i < blocks.size(); i++) {
-            LabelNode trampoline = new LabelNode();
-            trampolines.add(trampoline);
-            if (!blocks.get(i).handler()) {
-                cases.put(states[i], trampoline);
+            Block block = blocks.get(i);
+            if (block.handler()) continue;
+            InsnList dispatcher = buildSingleBlockDispatcher(block.label(), dispatcherByLabel.get(block.label()),
+                keyLocal, stateLocal, stateMask, states[i]);
+            if (i == 0) {
+                InsnList entry = new InsnList();
+                JvmKeyDispatchPass.emitKeyInit(entry, keyLocal, methodSeed, 0x4346464B65794C31L);
+                if (exceptionLocal >= 0) {
+                    entry.add(new InsnNode(Opcodes.ACONST_NULL));
+                    entry.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
+                }
+                emitStoreEncodedState(entry, stateLocal, keyLocal, states[i], stateMask);
+                entry.add(new JumpInsnNode(Opcodes.GOTO, dispatcherByLabel.get(block.label())));
+                entry.add(dispatcher);
+                mn.instructions.insertBefore(block.label(), entry);
+            } else {
+                mn.instructions.insertBefore(block.label(), dispatcher);
             }
         }
+    }
 
-        JvmKeyDispatchPass.emitKeyInit(insns, keyLocal, methodSeed, 0x4346464B65794C31L);
-        emitLocalDefaults(insns, localKinds, initializedLocalFloor, keyLocal);
-        if (exceptionLocal >= 0) {
-            insns.add(new InsnNode(Opcodes.ACONST_NULL));
-            insns.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
-        }
-        emitStoreEncodedState(insns, stateLocal, keyLocal, states[0], stateMask);
-        insns.add(new JumpInsnNode(Opcodes.GOTO, dispatcher));
+    private InsnList buildSingleBlockDispatcher(LabelNode blockLabel, LabelNode dispatcher,
+            int keyLocal, int stateLocal, int stateMask, int state) {
+        InsnList insns = new InsnList();
+        LabelNode dflt = new LabelNode();
+        LabelNode target = new LabelNode();
         insns.add(dispatcher);
         emitDecodeState(insns, stateLocal, keyLocal, stateMask);
-        insns.add(new LookupSwitchInsnNode(dflt,
-            cases.keySet().stream().mapToInt(Integer::intValue).toArray(),
-            cases.values().toArray(LabelNode[]::new)));
-
+        insns.add(new LookupSwitchInsnNode(dflt, new int[] {state}, new LabelNode[] {target}));
         insns.add(dflt);
         insns.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
         insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,
             "java/lang/IllegalStateException", "<init>", "()V", false));
         insns.add(new InsnNode(Opcodes.ATHROW));
-
-        for (int i = 0; i < blocks.size(); i++) {
-            insns.add(trampolines.get(i));
-            insns.add(new JumpInsnNode(Opcodes.GOTO, blocks.get(i).label()));
-        }
+        insns.add(target);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, blockLabel));
         return insns;
     }
 
-    private int[] collectLocalKinds(MethodNode mn, LabelNode protectedStart, int keyLocal) {
-        int[] kinds = new int[Math.max(keyLocal, mn.maxLocals) + 2];
-        boolean active = false;
-        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-            if (insn == protectedStart) active = true;
-            if (!active) continue;
-            if (insn instanceof VarInsnNode varInsn) {
-                int kind = localKind(varInsn.getOpcode());
-                if (kind != 0 && varInsn.var < keyLocal) {
-                    mergeLocalKind(kinds, varInsn.var, kind);
-                }
-            } else if (insn instanceof org.objectweb.asm.tree.IincInsnNode iinc && iinc.var < keyLocal) {
-                mergeLocalKind(kinds, iinc.var, 1);
-            }
-        }
-        return kinds;
-    }
-
-    private int localKind(int opcode) {
-        return switch (opcode) {
-            case Opcodes.ILOAD, Opcodes.ISTORE -> 1;
-            case Opcodes.LLOAD, Opcodes.LSTORE -> 2;
-            case Opcodes.FLOAD, Opcodes.FSTORE -> 3;
-            case Opcodes.DLOAD, Opcodes.DSTORE -> 4;
-            case Opcodes.ALOAD, Opcodes.ASTORE -> 5;
-            default -> 0;
-        };
-    }
-
-    private void mergeLocalKind(int[] kinds, int local, int kind) {
-        if (kinds[local] == 0) {
-            kinds[local] = kind;
-        } else if (kinds[local] != kind) {
-            kinds[local] = 6;
-        }
-    }
-
-    private void emitLocalDefaults(InsnList insns, int[] localKinds, int from, int to) {
-        for (int local = Math.max(0, from); local < to && local < localKinds.length; local++) {
-            switch (localKinds[local]) {
-                case 1, 6 -> {
-                    insns.add(new InsnNode(Opcodes.ICONST_0));
-                    insns.add(new VarInsnNode(Opcodes.ISTORE, local));
-                }
-                case 2 -> {
-                    insns.add(new InsnNode(Opcodes.LCONST_0));
-                    insns.add(new VarInsnNode(Opcodes.LSTORE, local));
-                    local++;
-                }
-                case 3 -> {
-                    insns.add(new InsnNode(Opcodes.FCONST_0));
-                    insns.add(new VarInsnNode(Opcodes.FSTORE, local));
-                }
-                case 4 -> {
-                    insns.add(new InsnNode(Opcodes.DCONST_0));
-                    insns.add(new VarInsnNode(Opcodes.DSTORE, local));
-                    local++;
-                }
-                case 5 -> {
-                    insns.add(new InsnNode(Opcodes.ACONST_NULL));
-                    insns.add(new VarInsnNode(Opcodes.ASTORE, local));
-                }
-                default -> { }
-            }
-        }
-    }
-
-    private boolean hasConflictingLocalKinds(int[] localKinds) {
-        for (int kind : localKinds) {
-            if (kind == 6) return true;
-        }
-        return false;
-    }
-
-    private int parameterLocalLimit(L1Method method) {
-        int slot = method.isStatic() || method.isClassInit() ? 0 : 1;
-        for (Type argument : Type.getArgumentTypes(method.descriptor())) {
-            slot += argument.getSize();
-        }
-        return slot;
-    }
-
-    private void rewriteBlockExit(MethodNode mn, Block block, LabelNode next, LabelNode dispatcher,
-            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel) {
+    private void rewriteBlockExit(MethodNode mn, Block block, LabelNode next,
+            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel,
+            Map<LabelNode, LabelNode> dispatcherByLabel) {
         AbstractInsnNode last = lastRealBefore(block.endExclusive());
         if (last == null || before(last, block.label())) return;
         int opcode = last.getOpcode();
@@ -444,96 +407,114 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         if (last instanceof JumpInsnNode jump) {
             if (opcode == Opcodes.GOTO) {
                 Integer targetState = stateByLabel.get(jump.label);
-                if (targetState == null) return;
-                mn.instructions.insertBefore(last, transition(targetState, dispatcher, keyLocal, stateLocal, stateMask));
+                LabelNode targetDispatcher = dispatcherByLabel.get(jump.label);
+                mn.instructions.insertBefore(last, transition(requireState(jump.label, targetState),
+                    requireDispatcher(jump.label, targetDispatcher), keyLocal, stateLocal, stateMask));
                 mn.instructions.remove(last);
                 return;
             }
             LabelNode taken = new LabelNode();
             Integer targetState = stateByLabel.get(jump.label);
             Integer fallthroughState = next == null ? null : stateByLabel.get(next);
-            if (targetState == null || fallthroughState == null) return;
+            LabelNode targetDispatcher = dispatcherByLabel.get(jump.label);
+            LabelNode fallthroughDispatcher = next == null ? null : dispatcherByLabel.get(next);
+            if (next == null) {
+                throw new IllegalStateException("CFF conditional block has no verifier-safe fallthrough target");
+            }
             JumpInsnNode replacement = new JumpInsnNode(opcode, taken);
             mn.instructions.insertBefore(last, replacement);
-            mn.instructions.insertBefore(last, transition(fallthroughState, dispatcher, keyLocal, stateLocal, stateMask));
+            mn.instructions.insertBefore(last, transition(requireState(next, fallthroughState),
+                requireDispatcher(next, fallthroughDispatcher), keyLocal, stateLocal, stateMask));
             mn.instructions.insertBefore(last, taken);
-            mn.instructions.insertBefore(last, transition(targetState, dispatcher, keyLocal, stateLocal, stateMask));
+            mn.instructions.insertBefore(last, transition(requireState(jump.label, targetState),
+                requireDispatcher(jump.label, targetDispatcher), keyLocal, stateLocal, stateMask));
             mn.instructions.remove(last);
             return;
         }
         if (last instanceof LookupSwitchInsnNode ls) {
-            rewriteLookupSwitch(mn, ls, dispatcher, keyLocal, stateLocal, stateMask, stateByLabel);
+            rewriteLookupSwitch(mn, ls, keyLocal, stateLocal, stateMask, stateByLabel, dispatcherByLabel);
             return;
         }
         if (last instanceof TableSwitchInsnNode ts) {
-            rewriteTableSwitch(mn, ts, dispatcher, keyLocal, stateLocal, stateMask, stateByLabel);
+            rewriteTableSwitch(mn, ts, keyLocal, stateLocal, stateMask, stateByLabel, dispatcherByLabel);
             return;
         }
         if (next != null) {
             Integer nextState = stateByLabel.get(next);
-            if (nextState == null) return;
-            mn.instructions.insert(last, transition(nextState, dispatcher, keyLocal, stateLocal, stateMask));
+            LabelNode nextDispatcher = dispatcherByLabel.get(next);
+            mn.instructions.insert(last, transition(requireState(next, nextState),
+                requireDispatcher(next, nextDispatcher), keyLocal, stateLocal, stateMask));
         }
     }
 
-    private void rewriteLookupSwitch(MethodNode mn, LookupSwitchInsnNode ls, LabelNode dispatcher,
-            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel) {
+    private void rewriteLookupSwitch(MethodNode mn, LookupSwitchInsnNode ls,
+            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel,
+            Map<LabelNode, LabelNode> dispatcherByLabel) {
         LabelNode defaultSet = new LabelNode();
         List<LabelNode> setLabels = new ArrayList<>();
         for (int i = 0; i < ls.labels.size(); i++) setLabels.add(new LabelNode());
         List<LabelNode> originalTargets = new ArrayList<>(ls.labels);
         LabelNode originalDefault = ls.dflt;
-        if (!stateByLabel.containsKey(originalDefault)) return;
-        for (LabelNode target : originalTargets) {
-            if (!stateByLabel.containsKey(target)) return;
-        }
         ls.labels.clear();
         ls.labels.addAll(setLabels);
         ls.dflt = defaultSet;
         InsnList tail = new InsnList();
         tail.add(defaultSet);
-        tail.add(transition(stateByLabel.get(originalDefault), dispatcher, keyLocal, stateLocal, stateMask));
+        tail.add(transition(requireState(originalDefault, stateByLabel.get(originalDefault)),
+            requireDispatcher(originalDefault, dispatcherByLabel.get(originalDefault)),
+            keyLocal, stateLocal, stateMask));
         for (int i = 0; i < setLabels.size(); i++) {
+            LabelNode originalTarget = originalTargets.get(i);
             tail.add(setLabels.get(i));
-            tail.add(transition(stateByLabel.get(originalTargets.get(i)), dispatcher, keyLocal, stateLocal, stateMask));
+            tail.add(transition(requireState(originalTarget, stateByLabel.get(originalTarget)),
+                requireDispatcher(originalTarget, dispatcherByLabel.get(originalTarget)),
+                keyLocal, stateLocal, stateMask));
         }
         mn.instructions.insert(ls, tail);
     }
 
-    private void rewriteTableSwitch(MethodNode mn, TableSwitchInsnNode ts, LabelNode dispatcher,
-            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel) {
+    private void rewriteTableSwitch(MethodNode mn, TableSwitchInsnNode ts,
+            int keyLocal, int stateLocal, int stateMask, Map<LabelNode, Integer> stateByLabel,
+            Map<LabelNode, LabelNode> dispatcherByLabel) {
         LabelNode defaultSet = new LabelNode();
         List<LabelNode> setLabels = new ArrayList<>();
         for (int i = 0; i < ts.labels.size(); i++) setLabels.add(new LabelNode());
         List<LabelNode> originalTargets = new ArrayList<>(ts.labels);
         LabelNode originalDefault = ts.dflt;
-        if (!stateByLabel.containsKey(originalDefault)) return;
-        for (LabelNode target : originalTargets) {
-            if (!stateByLabel.containsKey(target)) return;
-        }
         ts.labels.clear();
         ts.labels.addAll(setLabels);
         ts.dflt = defaultSet;
         InsnList tail = new InsnList();
         tail.add(defaultSet);
-        tail.add(transition(stateByLabel.get(originalDefault), dispatcher, keyLocal, stateLocal, stateMask));
+        tail.add(transition(requireState(originalDefault, stateByLabel.get(originalDefault)),
+            requireDispatcher(originalDefault, dispatcherByLabel.get(originalDefault)),
+            keyLocal, stateLocal, stateMask));
         for (int i = 0; i < setLabels.size(); i++) {
+            LabelNode originalTarget = originalTargets.get(i);
             tail.add(setLabels.get(i));
-            tail.add(transition(stateByLabel.get(originalTargets.get(i)), dispatcher, keyLocal, stateLocal, stateMask));
+            tail.add(transition(requireState(originalTarget, stateByLabel.get(originalTarget)),
+                requireDispatcher(originalTarget, dispatcherByLabel.get(originalTarget)),
+                keyLocal, stateLocal, stateMask));
         }
         mn.instructions.insert(ts, tail);
     }
 
-    private InsnList transition(Integer state, LabelNode dispatcher, int keyLocal, int stateLocal, int stateMask) {
-        InsnList insns = new InsnList();
+    private int requireState(LabelNode target, Integer state) {
         if (state == null) {
-            insns.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.NEW, "java/lang/IllegalStateException"));
-            insns.add(new InsnNode(Opcodes.DUP));
-            insns.add(new MethodInsnNode(Opcodes.INVOKESPECIAL,
-                "java/lang/IllegalStateException", "<init>", "()V", false));
-            insns.add(new InsnNode(Opcodes.ATHROW));
-            return insns;
+            throw new IllegalStateException("CFF target has no state: " + target.getLabel());
         }
+        return state;
+    }
+
+    private LabelNode requireDispatcher(LabelNode target, LabelNode dispatcher) {
+        if (dispatcher == null) {
+            throw new IllegalStateException("CFF target has no dispatcher: " + target.getLabel());
+        }
+        return dispatcher;
+    }
+
+    private InsnList transition(int state, LabelNode dispatcher, int keyLocal, int stateLocal, int stateMask) {
+        InsnList insns = new InsnList();
         emitStoreEncodedState(insns, stateLocal, keyLocal, state, stateMask);
         insns.add(new JumpInsnNode(Opcodes.GOTO, dispatcher));
         return insns;
@@ -619,4 +600,5 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private record Block(LabelNode label, AbstractInsnNode endExclusive, boolean handler) {}
+    private record BlockPlan(List<Block> blocks, Map<LabelNode, LabelNode> aliases) {}
 }
