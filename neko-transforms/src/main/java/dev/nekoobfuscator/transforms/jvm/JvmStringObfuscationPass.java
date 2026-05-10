@@ -256,14 +256,24 @@ public final class JvmStringObfuscationPass implements TransformPass {
     }
 
     private void emitByteArray(InsnList insns, byte[] data) {
-        JvmPassBytecode.pushInt(insns, data.length);
-        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
-        for (int i = 0; i < data.length; i++) {
-            insns.add(new InsnNode(Opcodes.DUP));
-            JvmPassBytecode.pushInt(insns, i);
-            JvmPassBytecode.pushInt(insns, data[i]);
-            insns.add(new InsnNode(Opcodes.BASTORE));
+        StringBuilder encoded = new StringBuilder(data.length);
+        for (byte b : data) {
+            encoded.append((char) (b & 0xFF));
         }
+        insns.add(new LdcInsnNode(encoded.toString()));
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            "java/nio/charset/StandardCharsets",
+            "ISO_8859_1",
+            "Ljava/nio/charset/Charset;"
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "getBytes",
+            "(Ljava/nio/charset/Charset;)[B",
+            false
+        ));
     }
 
     private void emitFillKey(
