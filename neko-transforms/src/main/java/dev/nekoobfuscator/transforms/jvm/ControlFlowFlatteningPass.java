@@ -2118,66 +2118,57 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             keyLocal,
             seed ^ 0x424C4F434B455931L
         );
-        emitClassKeyMixIntoLocal(
+        emitClassKeyMixIntoLocals(
             insns,
             guardLocal,
-            keyLocal,
-            seed ^ 0x4755415244434B31L
-        );
-        emitClassKeyMixIntoLocal(
-            insns,
             pathKeyLocal,
-            keyLocal,
-            seed ^ 0x50415448434B31L
-        );
-        emitClassKeyMixIntoLocal(
-            insns,
             blockKeyLocal,
             keyLocal,
-            seed ^ 0x424C4F43434B31L
+            seed ^ 0x434C4153534B31L
         );
     }
 
-    private void emitClassKeyMixIntoLocal(
+    private void emitClassKeyMixIntoLocals(
         InsnList insns,
-        int targetLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
         int keyLocal,
         long seed
     ) {
         CffClassKeyTable table = activeKeyTable;
         if (table == null) return;
         int token = table.token(nonZeroInt(seed), seed);
-        switch ((int) ((seed >>> 43) & 3L)) {
-            case 0 -> {
-                insns.add(new VarInsnNode(Opcodes.ILOAD, targetLocal));
-                emitClassKeyWord(insns, table, keyLocal, token, seed);
-                insns.add(new InsnNode(Opcodes.IXOR));
-            }
-            case 1 -> {
-                insns.add(new VarInsnNode(Opcodes.ILOAD, targetLocal));
-                emitClassKeyWord(insns, table, keyLocal, token, seed);
-                insns.add(new InsnNode(Opcodes.IADD));
-            }
-            case 2 -> {
-                emitClassKeyWord(insns, table, keyLocal, token, seed);
-                insns.add(new VarInsnNode(Opcodes.ILOAD, targetLocal));
-                insns.add(new InsnNode(Opcodes.IXOR));
-                insns.add(new InsnNode(Opcodes.DUP));
-                JvmPassBytecode.pushInt(insns, shift(seed, 17));
-                insns.add(new InsnNode(Opcodes.IUSHR));
-                insns.add(new InsnNode(Opcodes.IXOR));
-            }
-            default -> {
-                insns.add(new VarInsnNode(Opcodes.ILOAD, targetLocal));
-                insns.add(new InsnNode(Opcodes.DUP));
-                JvmPassBytecode.pushInt(insns, shift(seed, 19));
-                insns.add(new InsnNode(Opcodes.IUSHR));
-                insns.add(new InsnNode(Opcodes.IXOR));
-                emitClassKeyWord(insns, table, keyLocal, token, seed);
-                insns.add(new InsnNode(Opcodes.IADD));
-            }
-        }
-        insns.add(new VarInsnNode(Opcodes.ISTORE, targetLocal));
+        emitClassKeyWord(insns, table, keyLocal, token, seed);
+
+        // guard = guard + (classWord ^ c)
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x47554152444D4958L))
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, guardLocal));
+
+        // path = (path ^ guard) + c
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x504154484D49584BL))
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pathKeyLocal));
+
+        // block = (block + path) ^ classWord
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, blockKeyLocal));
     }
 
     private void emitClassKeyWord(
