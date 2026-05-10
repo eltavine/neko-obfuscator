@@ -20,6 +20,7 @@ import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LocalVariableNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -48,8 +49,10 @@ public final class JvmKeyDispatchPass implements TransformPass {
     static final String SEED_BY_METHOD = "keyDispatch.seedByMethod";
     static final String CFF_LOCAL_BY_METHOD = "controlFlowFlattening.flowKeyLocalByMethod";
     static final String GENERATED_NODES = "jvm.generatedNodes";
+    static final long INCOMING_KEY_MIX_MASK = 0x4E4B4F4A564D4B31L;
     private static final String PREPARED = "keyDispatch.preparedInPlaceSignatures";
     private static final String KEYED_DESC_BY_METHOD = "keyDispatch.keyedDescByMethod";
+    private static final String REFLECTIVE_KEYED_ENTRIES = "keyDispatch.reflectiveKeyedEntries";
 
     @Override
     public String id() {
@@ -114,7 +117,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         long seed = methodSeed(pctx.masterSeed(), clazz, method, mn);
         InsnList prologue = new InsnList();
         if (incomingKeyLocal >= 0) {
-            emitIncomingKeyMix(prologue, keyLocal, seed, 0x4E4B4F4A564D4B31L);
+            emitIncomingKeyMix(prologue, keyLocal, seed, INCOMING_KEY_MIX_MASK);
         } else {
             emitKeyInit(prologue, keyLocal, seed, 0x4E4B4F4A564D4B31L);
         }
@@ -236,6 +239,21 @@ public final class JvmKeyDispatchPass implements TransformPass {
             ctx.putPassData(KEYED_DESC_BY_METHOD, map);
         }
         return map;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Set<String> reflectiveKeyedEntries(TransformContext ctx) {
+        Set<String> entries = ctx.getPassData(REFLECTIVE_KEYED_ENTRIES);
+        if (entries == null) {
+            entries = new java.util.LinkedHashSet<>();
+            ctx.putPassData(REFLECTIVE_KEYED_ENTRIES, entries);
+        }
+        return entries;
+    }
+
+    static boolean isReflectiveKeyedEntry(TransformContext ctx, String methodKey) {
+        Set<String> entries = ctx.getPassData(REFLECTIVE_KEYED_ENTRIES);
+        return entries != null && entries.contains(methodKey);
     }
 
     private static void publishControlFlowLocal(TransformContext ctx, String methodKey, int keyLocal) {
@@ -383,6 +401,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
                 if (rewriteInvokeDynamic(pctx, indy)) {
                     InsnList before = new InsnList();
                     before.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+                    markGenerated(pctx, before);
                     mn.instructions.insertBefore(indy, before);
                     transfers++;
                 }
@@ -478,6 +497,8 @@ public final class JvmKeyDispatchPass implements TransformPass {
     }
 
     private static void rewriteMethodLookup(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
+        recordLiteralReflectiveTargets(pctx, call);
+
         int paramsLocal = allocateLocal(mn, Type.getType(Class[].class));
         int nameLocal = allocateLocal(mn, Type.getType(String.class));
         int classLocal = allocateLocal(mn, Type.getType(Class.class));
@@ -526,6 +547,55 @@ public final class JvmKeyDispatchPass implements TransformPass {
         before.add(new VarInsnNode(Opcodes.ALOAD, newParamsLocal));
         markGenerated(pctx, before);
         mn.instructions.insertBefore(call, before);
+    }
+
+    private static void recordLiteralReflectiveTargets(PipelineContext pctx, MethodInsnNode call) {
+        ReflectiveLookup lookup = literalNoArgMethodLookup(call);
+        if (lookup == null) return;
+        L1Class clazz = pctx.classMap().get(lookup.owner());
+        if (clazz == null) return;
+        for (L1Method method : clazz.methods()) {
+            if (!method.name().equals(lookup.name())) continue;
+            Type[] args = Type.getArgumentTypes(method.descriptor());
+            if (args.length == 1 && Type.LONG_TYPE.equals(args[0])) {
+                reflectiveKeyedEntries(pctx).add(
+                    coverageKey(clazz.name(), method.name(), method.descriptor())
+                );
+                continue;
+            }
+            if (args.length != 0) continue;
+            String keyedDesc = keyedDescMap(pctx).get(
+                coverageKey(clazz.name(), method.name(), method.descriptor())
+            );
+            if (keyedDesc != null) {
+                reflectiveKeyedEntries(pctx).add(coverageKey(clazz.name(), method.name(), keyedDesc));
+            }
+        }
+    }
+
+    private static ReflectiveLookup literalNoArgMethodLookup(MethodInsnNode call) {
+        AbstractInsnNode params = previousReal(call.getPrevious());
+        if (params == null || params.getOpcode() != Opcodes.ACONST_NULL) return null;
+        AbstractInsnNode nameInsn = previousReal(params.getPrevious());
+        if (!(nameInsn instanceof LdcInsnNode nameLdc) || !(nameLdc.cst instanceof String name)) {
+            return null;
+        }
+        AbstractInsnNode classInsn = previousReal(nameInsn.getPrevious());
+        if (!(classInsn instanceof LdcInsnNode classLdc) || !(classLdc.cst instanceof Type type)) {
+            return null;
+        }
+        if (type.getSort() != Type.OBJECT) return null;
+        return new ReflectiveLookup(type.getInternalName(), name);
+    }
+
+    private static AbstractInsnNode previousReal(AbstractInsnNode start) {
+        for (AbstractInsnNode insn = start; insn != null; insn = insn.getPrevious()) {
+            if (insn.getOpcode() >= 0) return insn;
+        }
+        return null;
+    }
+
+    private record ReflectiveLookup(String owner, String name) {
     }
 
     private static void rewriteMethodInvoke(PipelineContext pctx, MethodNode mn, MethodInsnNode call, int keyLocal) {
@@ -612,7 +682,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return Type.getMethodDescriptor(returnType, keyed);
     }
 
-    private static String coverageKey(String owner, String name, String desc) {
+    static String coverageKey(String owner, String name, String desc) {
         return owner + "." + name + desc;
     }
 }

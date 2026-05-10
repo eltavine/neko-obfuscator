@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
@@ -31,6 +32,7 @@ import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LookupSwitchInsnNode;
@@ -102,6 +104,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         if (!isApplicationMethod(pctx, clazz, method)) return;
         prepareClassKeyTables(pctx);
         activeKeyTable = ensureClassKeyTable(pctx, clazz);
+        boolean externalEntrySeed = usesExternalEntrySeed(pctx, clazz, method);
 
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
         MethodNode mn = method.asmNode();
@@ -204,6 +207,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
         Map<LabelNode, CffBlockKeyState> keyStateByLabel =
             buildBlockKeyStates(blocks, blockPlan.aliases(), stateByLabel, dispatchPlan.targets(), salt);
+        rewriteKeyedCallTransfers(
+            pctx,
+            mn,
+            blocks,
+            keyLocal,
+            salt
+        );
         publishMethodMetadata(
             pctx,
             clazz,
@@ -278,6 +288,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             keyStateByLabel,
             dispatchPlan,
             exceptionLocal,
+            externalEntrySeed,
             methodSeed,
             salt
         );
@@ -1193,6 +1204,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         DispatchPlan dispatchPlan,
         int exceptionLocal,
+        boolean externalEntrySeed,
         long methodSeed,
         long salt
     ) {
@@ -1218,12 +1230,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     keyLocal,
                     group.salt()
                 );
-                JvmKeyDispatchPass.emitKeyInit(
-                    insns,
-                    keyLocal,
-                    methodSeed,
-                    0x4346464D45544831L
-                );
+                if (!externalEntrySeed) {
+                    JvmKeyDispatchPass.emitKeyInit(
+                        insns,
+                        keyLocal,
+                        methodSeed,
+                        0x4346464D45544831L
+                    );
+                }
                 emitInstallBlockKeys(
                     insns,
                     guardLocal,
@@ -2783,6 +2797,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             (nonZeroInt(JvmPassBytecode.mix(seed, 0x504D554CL)) | 1);
         x ^= keyState.blockKey() +
             nonZeroInt(JvmPassBytecode.mix(seed, 0x424B4D31L));
+        x ^= (int) methodSeed;
         x ^= x >>> shift(seed, 9);
         return x;
     }
@@ -2805,6 +2820,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x424B4D31L)));
         insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(insns, shift(seed, 9));
@@ -3339,6 +3357,138 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             if (canonical != null) keyStates.put(alias.getKey(), canonical);
         }
         return keyStates;
+    }
+
+    private void rewriteKeyedCallTransfers(
+        PipelineContext pctx,
+        MethodNode mn,
+        List<Block> blocks,
+        int keyLocal,
+        long salt
+    ) {
+        for (Block block : blocks) {
+            for (
+                AbstractInsnNode insn = block.label();
+                insn != null && insn != block.endExclusive();
+                insn = insn.getNext()
+            ) {
+                Long targetSeed = keyedTargetSeed(pctx, insn);
+                if (targetSeed == null) continue;
+                AbstractInsnNode keyLoad = previousReal(insn.getPrevious());
+                if (!isGeneratedKeyLoad(pctx, keyLoad, keyLocal)) continue;
+                long rawSeed = incomingRawForCanonical(targetSeed);
+                InsnList replacement = new InsnList();
+                emitStaticDecodedLong(
+                    replacement,
+                    rawSeed,
+                    salt ^ targetSeed ^ System.identityHashCode(insn)
+                );
+                JvmKeyDispatchPass.markGenerated(pctx, replacement);
+                mn.instructions.insertBefore(keyLoad, replacement);
+                mn.instructions.remove(keyLoad);
+            }
+        }
+    }
+
+    private Long keyedTargetSeed(PipelineContext pctx, AbstractInsnNode insn) {
+        if (insn instanceof MethodInsnNode call) {
+            if ("<init>".equals(call.name)) return null;
+            if (!isExactKeyedTarget(pctx, call.owner, call.name, call.desc)) {
+                return null;
+            }
+            return JvmKeyDispatchPass.findMethodSeed(
+                pctx,
+                JvmKeyDispatchPass.coverageKey(call.owner, call.name, call.desc)
+            );
+        }
+        if (insn instanceof InvokeDynamicInsnNode indy) {
+            for (Object arg : indy.bsmArgs) {
+                if (!(arg instanceof Handle handle)) continue;
+                if (!isExactKeyedTarget(
+                    pctx,
+                    handle.getOwner(),
+                    handle.getName(),
+                    handle.getDesc()
+                )) {
+                    continue;
+                }
+                Long seed = JvmKeyDispatchPass.findMethodSeed(
+                    pctx,
+                    JvmKeyDispatchPass.coverageKey(
+                        handle.getOwner(),
+                        handle.getName(),
+                        handle.getDesc()
+                    )
+                );
+                if (seed != null) return seed;
+            }
+        }
+        return null;
+    }
+
+    private boolean isExactKeyedTarget(
+        PipelineContext pctx,
+        String owner,
+        String name,
+        String desc
+    ) {
+        L1Class targetClass = pctx.classMap().get(owner);
+        if (targetClass == null) return false;
+        L1Method targetMethod = targetClass.findMethod(name, desc);
+        if (targetMethod == null) return false;
+        return usesExternalEntrySeed(pctx, targetClass, targetMethod);
+    }
+
+    private boolean usesExternalEntrySeed(PipelineContext pctx, L1Class clazz, L1Method method) {
+        if (JvmKeyDispatchPass.isReflectiveKeyedEntry(
+            pctx,
+            JvmKeyDispatchPass.coverageKey(clazz.name(), method.name(), method.descriptor())
+        )) {
+            return false;
+        }
+        int access = method.access();
+        if ((access & Opcodes.ACC_STATIC) != 0) return true;
+        if ((access & Opcodes.ACC_PRIVATE) != 0) return true;
+        if ((access & Opcodes.ACC_FINAL) != 0) return true;
+        return (clazz.asmNode().access & Opcodes.ACC_FINAL) != 0;
+    }
+
+    private AbstractInsnNode previousReal(AbstractInsnNode start) {
+        for (
+            AbstractInsnNode insn = start;
+            insn != null;
+            insn = insn.getPrevious()
+        ) {
+            if (insn.getOpcode() >= 0) return insn;
+        }
+        return null;
+    }
+
+    private boolean isGeneratedKeyLoad(
+        PipelineContext pctx,
+        AbstractInsnNode insn,
+        int keyLocal
+    ) {
+        return insn instanceof VarInsnNode var &&
+            var.getOpcode() == Opcodes.LLOAD &&
+            var.var == keyLocal &&
+            JvmKeyDispatchPass.isGeneratedNode(pctx, insn);
+    }
+
+    private long incomingRawForCanonical(long targetSeed) {
+        return (targetSeed - JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK) ^
+            (targetSeed ^ JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK);
+    }
+
+    private void emitStaticDecodedLong(
+        InsnList insns,
+        long value,
+        long seed
+    ) {
+        long mask = nonZeroLong(JvmPassBytecode.mix(seed, 0x524157534545444CL));
+        JvmPassBytecode.pushLong(insns, value ^ mask);
+        JvmPassBytecode.pushLong(insns, mask);
+        insns.add(new InsnNode(Opcodes.LXOR));
     }
 
     private CffBlockKeyState syntheticHandlerSourceKey(
