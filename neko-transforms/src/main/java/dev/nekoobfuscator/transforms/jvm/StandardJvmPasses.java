@@ -13,6 +13,7 @@ public final class StandardJvmPasses {
         registry.register(new JvmKeyDispatchPass());
         registry.register(new JvmMethodParameterObfuscationPass());
         registry.register(new ControlFlowFlatteningPass());
+        registry.register(new JvmInvokeDynamicObfuscationPass());
         registry.register(new JvmConstantObfuscationPass());
         registry.register(new JvmStringObfuscationPass());
     }
