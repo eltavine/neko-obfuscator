@@ -43,8 +43,10 @@ public class JvmStringObfuscationIntegrationTest {
         "gamma-aes-des-xor-31",
         "delta-domain-token-43",
         "epsilon-live-key-47",
+        "zeta-static-final-field-59",
+        "eta-unused-static-field-61",
         "STRING OBF OK",
-        "alpha-secret-cff-flow-17|tail-23|beta-state-keydispatch-29|gamma-aes-des-xor-31:delta-domain-token-43:epsilon-live-key-47"
+        "alpha-secret-cff-flow-17|tail-23|beta-state-keydispatch-29|gamma-aes-des-xor-31:delta-domain-token-43:epsilon-live-key-47:zeta-static-final-field-59"
     );
 
     @Test
@@ -110,6 +112,11 @@ public class JvmStringObfuscationIntegrationTest {
                         }
                     }
                 }
+            }
+        }
+        for (var field : clazz.asmNode().fields) {
+            if ("Ljava/lang/String;".equals(field.desc)) {
+                assertEquals(null, field.value, "String ConstantValue remained on field " + field.name);
             }
         }
 
@@ -286,6 +293,9 @@ public class JvmStringObfuscationIntegrationTest {
     private String sourceText() {
         return """
             public class StringShapes {
+                private static final String FIELD_SECRET = "zeta-static-final-field-59";
+                private static final String UNUSED_FIELD_SECRET = "eta-unused-static-field-61";
+
                 public static void main(String[] args) {
                     String a = "alpha-secret-cff-flow-17";
                     String b = "omega-flow-tail-23";
@@ -293,12 +303,23 @@ public class JvmStringObfuscationIntegrationTest {
                     String d = "gamma-aes-des-xor-31";
                     String e = "delta-domain-token-43";
                     String f = "epsilon-live-key-47";
-                    String out = a + "|" + b.substring(11) + "|" + c + "|" + d + ":" + e + ":" + f;
+                    String g = reflectedField();
+                    String out = a + "|" + b.substring(11) + "|" + c + "|" + d + ":" + e + ":" + f + ":" + g;
                     System.out.println(out);
-                    if (!out.equals("alpha-secret-cff-flow-17|tail-23|beta-state-keydispatch-29|gamma-aes-des-xor-31:delta-domain-token-43:epsilon-live-key-47")) {
+                    if (!out.equals("alpha-secret-cff-flow-17|tail-23|beta-state-keydispatch-29|gamma-aes-des-xor-31:delta-domain-token-43:epsilon-live-key-47:zeta-static-final-field-59")) {
                         throw new AssertionError(out);
                     }
                     System.out.println("STRING OBF OK");
+                }
+
+                private static String reflectedField() {
+                    try {
+                        java.lang.reflect.Field field = StringShapes.class.getDeclaredField("FIELD_SECRET");
+                        field.setAccessible(true);
+                        return (String) field.get(null);
+                    } catch (ReflectiveOperationException ex) {
+                        throw new AssertionError(ex);
+                    }
                 }
             }
             """;

@@ -61,6 +61,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         "controlFlowFlattening.classKeyTables";
     private static final String CLASS_KEY_TABLES_PREPARED =
         "controlFlowFlattening.classKeyTablesPrepared";
+    private static final String STRING_CONSTANT_VALUES_LOWERED =
+        "controlFlowFlattening.stringConstantValuesLowered";
     private static final int CLASS_KEY_TABLE_SIZE = 64;
     private CffClassKeyTable activeKeyTable;
 
@@ -92,6 +94,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     @Override
     public void transformClass(TransformContext ctx) {
         if (!(ctx instanceof PipelineContext pctx)) return;
+        lowerStringConstantValuesForStringPass(pctx);
         prepareClassKeyTables(pctx);
     }
 
@@ -337,6 +340,60 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
         }
         return false;
+    }
+
+    private void lowerStringConstantValuesForStringPass(PipelineContext pctx) {
+        if (!pctx.config().isTransformEnabled(JvmStringObfuscationPass.ID)) {
+            return;
+        }
+        if (Boolean.TRUE.equals(pctx.getPassData(STRING_CONSTANT_VALUES_LOWERED))) {
+            return;
+        }
+        for (L1Class clazz : pctx.classMap().values()) {
+            lowerStringConstantValues(clazz);
+        }
+        pctx.putPassData(STRING_CONSTANT_VALUES_LOWERED, Boolean.TRUE);
+    }
+
+    private void lowerStringConstantValues(L1Class clazz) {
+        if (TransformGuards.isRuntimeClass(clazz) || clazz.isAnnotation()) return;
+        if (clazz.asmNode().fields == null) return;
+        MethodNode clinit = null;
+        int moved = 0;
+        for (FieldNode field : clazz.asmNode().fields) {
+            if (!isStringConstantValue(field)) continue;
+            String value = (String) field.value;
+            field.value = null;
+            if (clinit == null) {
+                clinit = findOrCreateClassInit(clazz);
+            }
+            InsnList assignment = new InsnList();
+            assignment.add(new LdcInsnNode(value));
+            assignment.add(new FieldInsnNode(
+                Opcodes.PUTSTATIC,
+                clazz.name(),
+                field.name,
+                field.desc
+            ));
+            AbstractInsnNode first = firstReal(clinit);
+            if (first == null) {
+                clinit.instructions.add(assignment);
+                clinit.instructions.add(new InsnNode(Opcodes.RETURN));
+            } else {
+                clinit.instructions.insertBefore(first, assignment);
+            }
+            moved++;
+        }
+        if (moved > 0) {
+            clinit.maxStack = Math.max(clinit.maxStack, 1);
+            clazz.markDirty();
+        }
+    }
+
+    private boolean isStringConstantValue(FieldNode field) {
+        return (field.access & Opcodes.ACC_STATIC) != 0
+            && "Ljava/lang/String;".equals(field.desc)
+            && field.value instanceof String;
     }
 
     private void prepareClassKeyTables(PipelineContext pctx) {
