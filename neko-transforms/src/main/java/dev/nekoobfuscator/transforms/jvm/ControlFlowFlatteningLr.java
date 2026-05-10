@@ -161,7 +161,8 @@ final class ControlFlowFlatteningLr {
         LabelNode[] aliasHubs,
         int island,
         long selectorSeed,
-        long domainSeed
+        long domainSeed,
+        int domainToken
     ) {}
 
     record IslandGroup(

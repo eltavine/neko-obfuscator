@@ -26,9 +26,12 @@ import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Establishes hidden key material for JVM obfuscation passes.
@@ -44,6 +47,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
     static final String LOCAL_BY_METHOD = "keyDispatch.localByMethod";
     static final String SEED_BY_METHOD = "keyDispatch.seedByMethod";
     static final String CFF_LOCAL_BY_METHOD = "controlFlowFlattening.flowKeyLocalByMethod";
+    static final String GENERATED_NODES = "jvm.generatedNodes";
     private static final String PREPARED = "keyDispatch.preparedInPlaceSignatures";
     private static final String KEYED_DESC_BY_METHOD = "keyDispatch.keyedDescByMethod";
 
@@ -117,6 +121,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
         AbstractInsnNode first = firstRealInstruction(mn);
         if (first == null) return;
+        markGenerated(ctx, prologue);
         mn.instructions.insertBefore(first, prologue);
         if (incomingKeyLocal < 0) {
             mn.maxLocals = Math.max(mn.maxLocals, keyLocal + 2);
@@ -156,6 +161,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
         AbstractInsnNode first = firstRealInstruction(mn);
         if (first == null) return -1;
+        markGenerated(pctx, prologue);
         mn.instructions.insertBefore(first, prologue);
         mn.maxLocals = Math.max(mn.maxLocals, keyLocal + 2);
         mn.maxStack = Math.max(mn.maxStack, 6);
@@ -234,6 +240,27 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
     private static void publishControlFlowLocal(TransformContext ctx, String methodKey, int keyLocal) {
         localMap(ctx, CFF_LOCAL_BY_METHOD).put(methodKey, keyLocal);
+    }
+
+    static Set<AbstractInsnNode> generatedNodes(TransformContext ctx) {
+        Set<AbstractInsnNode> nodes = ctx.getPassData(GENERATED_NODES);
+        if (nodes == null) {
+            nodes = Collections.newSetFromMap(new IdentityHashMap<>());
+            ctx.putPassData(GENERATED_NODES, nodes);
+        }
+        return nodes;
+    }
+
+    static void markGenerated(TransformContext ctx, InsnList insns) {
+        Set<AbstractInsnNode> nodes = generatedNodes(ctx);
+        for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
+            nodes.add(insn);
+        }
+    }
+
+    static boolean isGeneratedNode(TransformContext ctx, AbstractInsnNode insn) {
+        Set<AbstractInsnNode> nodes = ctx.getPassData(GENERATED_NODES);
+        return nodes != null && nodes.contains(insn);
     }
 
     private static AbstractInsnNode firstRealInstruction(MethodNode mn) {
@@ -363,12 +390,12 @@ public final class JvmKeyDispatchPass implements TransformPass {
             }
             if (!(insn instanceof MethodInsnNode call)) continue;
             if (isMethodLookup(call)) {
-                rewriteMethodLookup(mn, call);
+                rewriteMethodLookup(pctx, mn, call);
                 transfers++;
                 continue;
             }
             if (isMethodInvoke(call)) {
-                rewriteMethodInvoke(mn, call, keyLocal);
+                rewriteMethodInvoke(pctx, mn, call, keyLocal);
                 transfers++;
                 continue;
             }
@@ -376,7 +403,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
             String keyedDesc = resolveKeyedDescriptor(pctx, call.owner, call.name, call.desc);
             if (keyedDesc == null) continue;
             call.desc = keyedDesc;
-            insnInsertBefore(mn, call, keyLocal);
+            insnInsertBefore(pctx, mn, call, keyLocal);
             transfers++;
         }
         if (transfers > 0) {
@@ -450,7 +477,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
             && "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc);
     }
 
-    private static void rewriteMethodLookup(MethodNode mn, MethodInsnNode call) {
+    private static void rewriteMethodLookup(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
         int paramsLocal = allocateLocal(mn, Type.getType(Class[].class));
         int nameLocal = allocateLocal(mn, Type.getType(String.class));
         int classLocal = allocateLocal(mn, Type.getType(Class.class));
@@ -497,10 +524,11 @@ public final class JvmKeyDispatchPass implements TransformPass {
         before.add(new VarInsnNode(Opcodes.ALOAD, classLocal));
         before.add(new VarInsnNode(Opcodes.ALOAD, nameLocal));
         before.add(new VarInsnNode(Opcodes.ALOAD, newParamsLocal));
+        markGenerated(pctx, before);
         mn.instructions.insertBefore(call, before);
     }
 
-    private static void rewriteMethodInvoke(MethodNode mn, MethodInsnNode call, int keyLocal) {
+    private static void rewriteMethodInvoke(PipelineContext pctx, MethodNode mn, MethodInsnNode call, int keyLocal) {
         int argsLocal = allocateLocal(mn, Type.getType(Object[].class));
         int targetLocal = allocateLocal(mn, Type.getType(Object.class));
         int methodLocal = allocateLocal(mn, Type.getType(Object.class));
@@ -549,12 +577,14 @@ public final class JvmKeyDispatchPass implements TransformPass {
         before.add(new VarInsnNode(Opcodes.ALOAD, methodLocal));
         before.add(new VarInsnNode(Opcodes.ALOAD, targetLocal));
         before.add(new VarInsnNode(Opcodes.ALOAD, newArgsLocal));
+        markGenerated(pctx, before);
         mn.instructions.insertBefore(call, before);
     }
 
-    private static void insnInsertBefore(MethodNode mn, MethodInsnNode call, int keyLocal) {
+    private static void insnInsertBefore(PipelineContext pctx, MethodNode mn, MethodInsnNode call, int keyLocal) {
         InsnList before = new InsnList();
         before.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        markGenerated(pctx, before);
         mn.instructions.insertBefore(call, before);
     }
 
