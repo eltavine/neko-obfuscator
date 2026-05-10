@@ -131,10 +131,17 @@ public class JvmStringObfuscationIntegrationTest {
         boolean sawMethodKeyLoad = false;
         boolean sawXor = false;
         boolean sawRotate = false;
+        boolean sawStringConcatFactoryRecipe = false;
 
         for (var method : clazz.asmNode().methods) {
             if (method.instructions == null) continue;
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof InvokeDynamicInsnNode indy
+                    && indy.bsm != null
+                    && "java/lang/invoke/StringConcatFactory".equals(indy.bsm.getOwner())
+                    && "makeConcatWithConstants".equals(indy.bsm.getName())) {
+                    sawStringConcatFactoryRecipe = true;
+                }
                 if (insn instanceof LdcInsnNode ldc && "AES/ECB/NoPadding".equals(ldc.cst)) {
                     sawAes = true;
                 }
@@ -190,6 +197,7 @@ public class JvmStringObfuscationIntegrationTest {
         assertTrue(sawMethodKeyLoad, "decode should depend on keyDispatch/CFF method key local");
         assertTrue(sawXor, "decode should include XOR stream unmasking");
         assertFalse(sawRotate, "string decode must not use rotate self-cancelling masks");
+        assertFalse(sawStringConcatFactoryRecipe, "concat recipe strings should be rewritten and encrypted");
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {

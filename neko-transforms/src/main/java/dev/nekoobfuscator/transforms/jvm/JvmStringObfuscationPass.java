@@ -12,16 +12,23 @@ import dev.nekoobfuscator.transforms.util.TransformGuards;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.InvalidKeyException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import javax.crypto.Cipher;
 import javax.crypto.spec.DESKeySpec;
 import javax.crypto.spec.SecretKeySpec;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -87,7 +94,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int ordinal = 0;
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!metadata.applicationInstructions().contains(insn)) continue;
-            if (!(insn instanceof LdcInsnNode ldc) || !(ldc.cst instanceof String value)) continue;
             ControlFlowFlatteningPass.CffInstructionState state =
                 metadata.instructionStates().get(insn);
             if (state == null) {
@@ -96,16 +102,41 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 );
             }
 
-            long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal);
-            Algorithm algorithm = algorithmFor(ordinal, siteSeed, metadata, state);
-            byte[] encrypted = encryptPayload(value, siteSeed, metadata, state, algorithm);
-            InsnList replacement = new InsnList();
-            emitDecodedString(replacement, encrypted, siteSeed, metadata, state, algorithm, mn);
-            JvmKeyDispatchPass.markGenerated(pctx, replacement);
-            mn.instructions.insertBefore(insn, replacement);
-            mn.instructions.remove(insn);
-            transformed++;
-            ordinal++;
+            if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String value) {
+                long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal);
+                Algorithm algorithm = algorithmFor(ordinal, siteSeed, metadata, state);
+                byte[] encrypted = encryptPayload(value, siteSeed, metadata, state, algorithm);
+                InsnList replacement = new InsnList();
+                emitDecodedString(replacement, encrypted, siteSeed, metadata, state, algorithm, mn);
+                JvmKeyDispatchPass.markGenerated(pctx, replacement);
+                mn.instructions.insertBefore(insn, replacement);
+                mn.instructions.remove(insn);
+                transformed++;
+                ordinal++;
+                continue;
+            }
+
+            if (insn instanceof InvokeDynamicInsnNode indy && isStringConcatWithConstants(indy)) {
+                ConcatPlan concat = concatPlan(indy);
+                if (concat.hasStringConstants()) {
+                    ConcatRewriteResult result = rewriteStringConcat(
+                        pctx,
+                        clazz,
+                        method,
+                        metadata,
+                        state,
+                        mn,
+                        indy,
+                        concat,
+                        ordinal
+                    );
+                    JvmKeyDispatchPass.markGenerated(pctx, result.instructions());
+                    mn.instructions.insertBefore(insn, result.instructions());
+                    mn.instructions.remove(insn);
+                    transformed += result.encryptedStrings();
+                    ordinal += result.encryptedStrings();
+                }
+            }
         }
 
         if (transformed > 0) {
@@ -120,6 +151,209 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 "cff-keyed-string-sites-" + transformed
             );
         }
+    }
+
+    private ConcatRewriteResult rewriteStringConcat(
+        PipelineContext pctx,
+        L1Class clazz,
+        L1Method method,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        MethodNode mn,
+        InvokeDynamicInsnNode indy,
+        ConcatPlan concat,
+        int ordinal
+    ) {
+        Type[] args = Type.getArgumentTypes(indy.desc);
+        int[] argLocals = new int[args.length];
+        int nextLocal = mn.maxLocals;
+        for (int i = 0; i < args.length; i++) {
+            argLocals[i] = nextLocal;
+            nextLocal += args[i].getSize();
+        }
+        mn.maxLocals = Math.max(mn.maxLocals, nextLocal);
+
+        InsnList out = new InsnList();
+        for (int i = args.length - 1; i >= 0; i--) {
+            out.add(new VarInsnNode(args[i].getOpcode(Opcodes.ISTORE), argLocals[i]));
+        }
+
+        Map<String, Integer> decodedStrings = new LinkedHashMap<>();
+        for (ConcatPiece piece : concat.pieces()) {
+            if (piece instanceof LiteralPiece literal && !literal.value().isEmpty()) {
+                decodedStrings.putIfAbsent(literal.value(), -1);
+            } else if (piece instanceof ConstPiece constant
+                && constant.value() instanceof String value
+                && !value.isEmpty()) {
+                decodedStrings.putIfAbsent(value, -1);
+            }
+        }
+
+        int encrypted = 0;
+        for (String value : new ArrayList<>(decodedStrings.keySet())) {
+            int local = mn.maxLocals++;
+            long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + encrypted);
+            Algorithm algorithm = algorithmFor(ordinal + encrypted, siteSeed, metadata, state);
+            byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm);
+            emitDecodedString(out, payload, siteSeed, metadata, state, algorithm, mn);
+            out.add(new VarInsnNode(Opcodes.ASTORE, local));
+            decodedStrings.put(value, local);
+            encrypted++;
+        }
+
+        out.add(new TypeInsnNode(Opcodes.NEW, "java/lang/StringBuilder"));
+        out.add(new InsnNode(Opcodes.DUP));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/StringBuilder",
+            "<init>",
+            "()V",
+            false
+        ));
+
+        int argIndex = 0;
+        for (ConcatPiece piece : concat.pieces()) {
+            if (piece instanceof ArgPiece) {
+                Type type = args[argIndex];
+                out.add(new VarInsnNode(type.getOpcode(Opcodes.ILOAD), argLocals[argIndex]));
+                emitAppend(out, type);
+                argIndex++;
+            } else if (piece instanceof LiteralPiece literal) {
+                emitAppendDecodedString(out, decodedStrings, literal.value());
+            } else if (piece instanceof ConstPiece constant) {
+                emitAppendConstant(out, decodedStrings, constant.value());
+            }
+        }
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "toString",
+            "()Ljava/lang/String;",
+            false
+        ));
+        return new ConcatRewriteResult(out, encrypted);
+    }
+
+    private void emitAppendDecodedString(
+        InsnList insns,
+        Map<String, Integer> decodedStrings,
+        String value
+    ) {
+        if (value.isEmpty()) return;
+        Integer local = decodedStrings.get(value);
+        if (local == null || local < 0) {
+            throw new IllegalStateException("Missing decoded concat string local");
+        }
+        insns.add(new VarInsnNode(Opcodes.ALOAD, local));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            false
+        ));
+    }
+
+    private void emitAppendConstant(
+        InsnList insns,
+        Map<String, Integer> decodedStrings,
+        Object value
+    ) {
+        if (value instanceof String string) {
+            emitAppendDecodedString(insns, decodedStrings, string);
+            return;
+        }
+        emitConstant(insns, value);
+        emitAppend(insns, valueType(value));
+    }
+
+    private void emitConstant(InsnList insns, Object value) {
+        if (value instanceof Integer v) {
+            JvmPassBytecode.pushInt(insns, v);
+        } else if (value instanceof Long v) {
+            JvmPassBytecode.pushLong(insns, v);
+        } else if (value instanceof Float || value instanceof Double || value instanceof Type || value instanceof Handle) {
+            insns.add(new LdcInsnNode(value));
+        } else {
+            throw new IllegalStateException(
+                "Unsupported StringConcatFactory constant type: " +
+                    (value == null ? "null" : value.getClass().getName())
+            );
+        }
+    }
+
+    private Type valueType(Object value) {
+        if (value instanceof Integer) return Type.INT_TYPE;
+        if (value instanceof Long) return Type.LONG_TYPE;
+        if (value instanceof Float) return Type.FLOAT_TYPE;
+        if (value instanceof Double) return Type.DOUBLE_TYPE;
+        return Type.getType(Object.class);
+    }
+
+    private void emitAppend(InsnList insns, Type type) {
+        String desc = switch (type.getSort()) {
+            case Type.BOOLEAN -> "(Z)Ljava/lang/StringBuilder;";
+            case Type.CHAR -> "(C)Ljava/lang/StringBuilder;";
+            case Type.BYTE, Type.SHORT, Type.INT -> "(I)Ljava/lang/StringBuilder;";
+            case Type.LONG -> "(J)Ljava/lang/StringBuilder;";
+            case Type.FLOAT -> "(F)Ljava/lang/StringBuilder;";
+            case Type.DOUBLE -> "(D)Ljava/lang/StringBuilder;";
+            default -> "(Ljava/lang/Object;)Ljava/lang/StringBuilder;";
+        };
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "append",
+            desc,
+            false
+        ));
+    }
+
+    private boolean isStringConcatWithConstants(InvokeDynamicInsnNode indy) {
+        return indy.bsm != null
+            && "java/lang/invoke/StringConcatFactory".equals(indy.bsm.getOwner())
+            && "makeConcatWithConstants".equals(indy.bsm.getName())
+            && indy.bsmArgs.length > 0
+            && indy.bsmArgs[0] instanceof String
+            && Type.getReturnType(indy.desc).equals(Type.getType(String.class));
+    }
+
+    private ConcatPlan concatPlan(InvokeDynamicInsnNode indy) {
+        String recipe = (String) indy.bsmArgs[0];
+        Object[] constants = new Object[Math.max(0, indy.bsmArgs.length - 1)];
+        System.arraycopy(indy.bsmArgs, 1, constants, 0, constants.length);
+        List<ConcatPiece> pieces = new ArrayList<>();
+        StringBuilder literal = new StringBuilder();
+        int argCount = 0;
+        int constCount = 0;
+        for (int i = 0; i < recipe.length(); i++) {
+            char ch = recipe.charAt(i);
+            if (ch == '\u0001' || ch == '\u0002') {
+                if (!literal.isEmpty()) {
+                    pieces.add(new LiteralPiece(literal.toString()));
+                    literal.setLength(0);
+                }
+                if (ch == '\u0001') {
+                    pieces.add(new ArgPiece());
+                    argCount++;
+                } else {
+                    if (constCount >= constants.length) {
+                        throw new IllegalStateException("Malformed StringConcatFactory recipe constant count");
+                    }
+                    pieces.add(new ConstPiece(constants[constCount++]));
+                }
+            } else {
+                literal.append(ch);
+            }
+        }
+        if (!literal.isEmpty()) {
+            pieces.add(new LiteralPiece(literal.toString()));
+        }
+        int descriptorArgs = Type.getArgumentTypes(indy.desc).length;
+        if (argCount != descriptorArgs || constCount != constants.length) {
+            throw new IllegalStateException("Malformed StringConcatFactory recipe argument count");
+        }
+        return new ConcatPlan(pieces);
     }
 
     private Algorithm algorithmFor(
@@ -537,6 +771,32 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int v = (int) value;
         return v == 0 ? 0x3D6B2A4F : v;
     }
+
+    private sealed interface ConcatPiece permits ArgPiece, LiteralPiece, ConstPiece {}
+
+    private record ArgPiece() implements ConcatPiece {}
+
+    private record LiteralPiece(String value) implements ConcatPiece {}
+
+    private record ConstPiece(Object value) implements ConcatPiece {}
+
+    private record ConcatPlan(List<ConcatPiece> pieces) {
+        boolean hasStringConstants() {
+            for (ConcatPiece piece : pieces) {
+                if (piece instanceof LiteralPiece literal && !literal.value().isEmpty()) {
+                    return true;
+                }
+                if (piece instanceof ConstPiece constant
+                    && constant.value() instanceof String value
+                    && !value.isEmpty()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private record ConcatRewriteResult(InsnList instructions, int encryptedStrings) {}
 
     private enum Algorithm {
         AES("AES", "AES/ECB/NoPadding", 16, 16),
