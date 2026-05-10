@@ -575,6 +575,11 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
     private static ReflectiveLookup literalNoArgMethodLookup(MethodInsnNode call) {
         AbstractInsnNode params = previousReal(call.getPrevious());
+        if (params instanceof TypeInsnNode cast
+                && params.getOpcode() == Opcodes.CHECKCAST
+                && "[Ljava/lang/Class;".equals(cast.desc)) {
+            params = previousReal(params.getPrevious());
+        }
         if (params == null || params.getOpcode() != Opcodes.ACONST_NULL) return null;
         AbstractInsnNode nameInsn = previousReal(params.getPrevious());
         if (!(nameInsn instanceof LdcInsnNode nameLdc) || !(nameLdc.cst instanceof String name)) {
