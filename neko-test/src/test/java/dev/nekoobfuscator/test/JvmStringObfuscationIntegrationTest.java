@@ -101,6 +101,9 @@ public class JvmStringObfuscationIntegrationTest {
         L1Class clazz = input.classMap().get("StringShapes");
         for (var method : clazz.asmNode().methods) {
             if (method.instructions == null) continue;
+            boolean classInitPath = "<clinit>".equals(method.name)
+                || method.name.startsWith("__neko_strinit$")
+                || method.name.startsWith("__neko_strcipher$");
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                 if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String value) {
                     assertFalse(SECRET_STRINGS.contains(value), "secret String LDC survived: " + value);
@@ -128,15 +131,13 @@ public class JvmStringObfuscationIntegrationTest {
     private void assertAesDesXorDecodeUsesCffState(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
         L1Class clazz = input.classMap().get("StringShapes");
-        boolean sawAes = false;
-        boolean sawDes = false;
         boolean sawCipher = false;
         boolean sawSecretKeySpec = false;
         boolean sawDoFinal = false;
         boolean sawUtf8 = false;
         boolean sawClassKeyTableLoad = false;
         boolean sawMethodKeyLoad = false;
-        boolean sawCipherCacheField = false;
+        int cipherCacheFields = 0;
         boolean sawPayloadCacheField = false;
         boolean sawPlaintextCacheField = false;
         boolean sawFingerprintCacheField = false;
@@ -152,7 +153,7 @@ public class JvmStringObfuscationIntegrationTest {
 
         for (var field : clazz.asmNode().fields) {
             if ("Ljavax/crypto/Cipher;".equals(field.desc)) {
-                sawCipherCacheField = true;
+                cipherCacheFields++;
             }
             if ("[B".equals(field.desc)) {
                 sawPayloadCacheField = true;
@@ -166,6 +167,9 @@ public class JvmStringObfuscationIntegrationTest {
         }
         for (var method : clazz.asmNode().methods) {
             if (method.instructions == null) continue;
+            boolean classInitPath = "<clinit>".equals(method.name)
+                || method.name.startsWith("__neko_strinit$")
+                || method.name.startsWith("__neko_strcipher$");
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                 if (insn instanceof InvokeDynamicInsnNode indy
                     && indy.bsm != null
@@ -173,18 +177,12 @@ public class JvmStringObfuscationIntegrationTest {
                     && "makeConcatWithConstants".equals(indy.bsm.getName())) {
                     sawStringConcatFactoryRecipe = true;
                 }
-                if (insn instanceof LdcInsnNode ldc && "AES/ECB/NoPadding".equals(ldc.cst)) {
-                    sawAes = true;
-                }
-                if (insn instanceof LdcInsnNode ldc && "DES/ECB/NoPadding".equals(ldc.cst)) {
-                    sawDes = true;
-                }
                 if (insn instanceof MethodInsnNode call
                     && "javax/crypto/Cipher".equals(call.owner)
                     && "getInstance".equals(call.name)) {
                     sawCipher = true;
                     getInstanceCalls++;
-                    if ("<clinit>".equals(method.name)) {
+                    if (classInitPath) {
                         clinitGetInstanceCalls++;
                     }
                 }
@@ -193,7 +191,7 @@ public class JvmStringObfuscationIntegrationTest {
                     && "getBytes".equals(call.name)
                     && "(Ljava/nio/charset/Charset;)[B".equals(call.desc)) {
                     getBytesCalls++;
-                    if ("<clinit>".equals(method.name)) {
+                    if (classInitPath) {
                         clinitGetBytesCalls++;
                     }
                 }
@@ -237,10 +235,8 @@ public class JvmStringObfuscationIntegrationTest {
             }
         }
 
-        assertTrue(sawAes, "string pass should emit AES decode sites");
-        assertTrue(sawDes, "string pass should emit DES decode sites");
         assertTrue(sawCipher, "string pass should use JCE Cipher without helper injection");
-        assertTrue(sawCipherCacheField, "Cipher instances should be cached in class static state");
+        assertTrue(cipherCacheFields >= 2, "AES and DES Cipher instances should be cached in class static state");
         assertTrue(sawPayloadCacheField, "encrypted payload bytes should be loaded through class static state");
         assertTrue(sawPlaintextCacheField, "plaintext cache should exist for repeated live-key matches");
         assertTrue(sawFingerprintCacheField, "plaintext cache should be guarded by live-key fingerprint state");

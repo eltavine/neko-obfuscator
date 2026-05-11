@@ -70,6 +70,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private static final String STRING_CONSTANT_VALUES_LOWERED =
         "controlFlowFlattening.stringConstantValuesLowered";
     private static final int CLASS_KEY_TABLE_SIZE = 64;
+    private static final int DISPATCH_OUTLINER_ESTIMATED_CODE_PRESSURE = 4_000;
+    private static final int DISPATCH_OUTLINER_BLOCK_THRESHOLD = 12;
+    private static final int DISPATCH_OUTLINER_EDGE_THRESHOLD = 16;
+    private static final int DISPATCH_OUTLINER_HANDLER_THRESHOLD = 4;
+    private static final int TRANSITION_OUTLINER_ESTIMATED_CODE_PRESSURE = 52_000;
+    private static final int TRANSITION_OUTLINER_BLOCK_THRESHOLD = 96;
+    private static final int TRANSITION_OUTLINER_EDGE_THRESHOLD = 160;
+    private static final int TRANSITION_OUTLINER_HANDLER_THRESHOLD = 16;
     private static final long METHOD_KEY_PC_MIX = 0x9E3779B97F4A7C15L;
     private CffClassKeyTable activeKeyTable;
 
@@ -198,9 +206,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             blocks,
             handlerBridges
         );
-        int transitionOutLocal = outlineTransitions ? mn.maxLocals++ : -1;
-        TransitionOutliner transitionOutliner = outlineTransitions
+        boolean outlineDispatchers = outlineTransitions;
+        int transitionOutLocal = outlineDispatchers ? mn.maxLocals++ : -1;
+        TransitionOutliner dispatcherOutliner = outlineDispatchers
             ? new TransitionOutliner(pctx, clazz, transitionOutLocal)
+            : null;
+        TransitionOutliner transitionOutliner = outlineTransitions
+            ? dispatcherOutliner
             : null;
 
         long salt = JvmPassBytecode.mix(
@@ -313,6 +325,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             runtimeKeyLabels,
             methodSeed,
             salt,
+            dispatcherOutliner,
             transitionOutliner
         );
         insertIslandDispatchers(
@@ -333,6 +346,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             externalEntrySeed,
             methodSeed,
             salt,
+            dispatcherOutliner,
             transitionOutliner
         );
         rebuildProtectedTryCatches(mn, protectedTryCatches);
@@ -1324,7 +1338,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Set<LabelNode> handlerLabels = new HashSet<>();
         if (mn.tryCatchBlocks != null) {
             for (TryCatchBlockNode tcb : mn.tryCatchBlocks) {
-                leaders.add(tcb.start);
+                if (frames.isZeroStack(tcb.start)) {
+                    leaders.add(tcb.start);
+                }
                 leaders.add(tcb.handler);
                 handlerLabels.add(tcb.handler);
             }
@@ -1362,7 +1378,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 );
             }
         }
-
         List<LabelNode> ordered = new ArrayList<>();
         for (
             AbstractInsnNode insn = start;
@@ -1418,10 +1433,46 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return false;
     }
 
+    private boolean useSubdispatcherOutliner(
+        MethodNode mn,
+        List<Block> blocks,
+        List<HandlerBridge> handlerBridges
+    ) {
+        return useOutliner(
+            mn,
+            blocks,
+            handlerBridges,
+            DISPATCH_OUTLINER_BLOCK_THRESHOLD,
+            DISPATCH_OUTLINER_EDGE_THRESHOLD,
+            DISPATCH_OUTLINER_HANDLER_THRESHOLD,
+            DISPATCH_OUTLINER_ESTIMATED_CODE_PRESSURE
+        );
+    }
+
     private boolean useTransitionOutliner(
         MethodNode mn,
         List<Block> blocks,
         List<HandlerBridge> handlerBridges
+    ) {
+        return useOutliner(
+            mn,
+            blocks,
+            handlerBridges,
+            TRANSITION_OUTLINER_BLOCK_THRESHOLD,
+            TRANSITION_OUTLINER_EDGE_THRESHOLD,
+            TRANSITION_OUTLINER_HANDLER_THRESHOLD,
+            TRANSITION_OUTLINER_ESTIMATED_CODE_PRESSURE
+        );
+    }
+
+    private boolean useOutliner(
+        MethodNode mn,
+        List<Block> blocks,
+        List<HandlerBridge> handlerBridges,
+        int blockThreshold,
+        int edgeThreshold,
+        int handlerThreshold,
+        int codePressureThreshold
     ) {
         int nonHandlerBlocks = 0;
         int estimatedEdges = 0;
@@ -1441,12 +1492,12 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
         }
         int protectedHandlerCost = handlerBridges.size() * 3;
-        int sizePressure = mn.instructions.size() + estimatedEdges * 220 + protectedHandlerCost * 180;
-        return (nonHandlerBlocks >= 2 && estimatedEdges > 0) ||
-            nonHandlerBlocks >= 18 ||
-            estimatedEdges >= 28 ||
-            handlerBridges.size() >= 6 ||
-            sizePressure >= 30000;
+        int codeBytes = JvmCodeSizeEstimator.estimateMethodBytes(mn);
+        int sizePressure = codeBytes + estimatedEdges * 220 + protectedHandlerCost * 180;
+        return nonHandlerBlocks >= blockThreshold ||
+            estimatedEdges >= edgeThreshold ||
+            handlerBridges.size() >= handlerThreshold ||
+            sizePressure >= codePressureThreshold;
     }
 
     private Set<LabelNode> linearZeroStackLeaders(
@@ -1795,6 +1846,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Set<LabelNode> runtimeKeyLabels,
         long methodSeed,
         long salt,
+        TransitionOutliner dispatcherOutliner,
         TransitionOutliner transitionOutliner
     ) {
         if (handlerBridges.isEmpty()) return;
@@ -1892,8 +1944,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 methodSeed,
                 bodyTarget.domainSeed()
             );
-            if (transitionOutliner != null) {
-                emitInitTransitionOut(prefix, transitionOutliner.outLocal());
+            if (dispatcherOutliner != null) {
+                emitInitTransitionOut(prefix, dispatcherOutliner.outLocal());
             }
             prefix.add(
                 transition(
@@ -1937,6 +1989,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         boolean externalEntrySeed,
         long methodSeed,
         long salt,
+        TransitionOutliner dispatcherOutliner,
         TransitionOutliner transitionOutliner
     ) {
         for (IslandGroup group : dispatchPlan.groups()) {
@@ -1945,8 +1998,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             LabelNode poison = new LabelNode();
 
             if (entryBlock == firstNonHandler(blocks)) {
-                if (transitionOutliner != null) {
-                    emitInitTransitionOut(insns, transitionOutliner.outLocal());
+                if (dispatcherOutliner != null) {
+                    emitInitTransitionOut(insns, dispatcherOutliner.outLocal());
                 }
                 if (exceptionLocal >= 0) {
                     insns.add(new InsnNode(Opcodes.ACONST_NULL));
@@ -2067,12 +2120,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         keyStateByLabel,
                         methodSeed,
                         salt,
+                        dispatcherOutliner,
                         transitionOutliner
                     )
                 );
             }
-            if (transitionOutliner != null) {
-                insns.add(transitionOutliner.emitResultRouter(group, keyTmpLocal, poison));
+            if (dispatcherOutliner != null) {
+                insns.add(dispatcherOutliner.emitResultRouter(group, keyTmpLocal, poison));
             }
             insns.add(poison);
             long poisonSeed = edgeSeed(
@@ -2598,8 +2652,14 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         DispatchTarget target
     ) {
         if (target == null) {
+            StackTraceElement caller = Thread.currentThread().getStackTrace().length > 2
+                ? Thread.currentThread().getStackTrace()[2]
+                : null;
             throw new IllegalStateException(
-                "CFF target has no dispatch target: " + label.getLabel()
+                "CFF target has no dispatch target at " +
+                    (caller == null ? "<unknown>" : caller.getMethodName() + ":" + caller.getLineNumber()) +
+                    ": " +
+                    label.getLabel()
             );
         }
         return target;
@@ -2777,6 +2837,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         long methodSeed,
         long salt,
+        TransitionOutliner dispatcherOutliner,
         TransitionOutliner transitionOutliner
     ) {
         InsnList insns = new InsnList();
@@ -2817,8 +2878,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
         if (first) return insns;
         int fakeCount = fakeCaseCount(group.salt() ^ salt ^ island);
-        if (transitionOutliner != null) {
-            return transitionOutliner.emitIslandDispatchCall(
+        if (dispatcherOutliner != null) {
+            return dispatcherOutliner.emitIslandDispatchCall(
                 group,
                 island,
                 islandBlocks,
@@ -3727,16 +3788,20 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     }
 
     private long methodKeyLongMask(CffBlockKeyState keyState, long seed) {
-        int high = controlTokenMask(keyState, seed ^ 0x4D4B4849474831L);
-        high ^= keyState.pcToken() *
-            (nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B50434831L)) | 1);
-        high += keyState.guardKey() ^
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B4755415244L));
-        int low = controlTokenMask(keyState, seed ^ 0x4D4B4C4F5731L);
-        low += keyState.pcToken() ^
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B50434C31L));
-        low ^= keyState.pathKey() *
-            (nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B50415448L)) | 1);
+        int high = keyState.guardKey() +
+            (keyState.pathKey() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B4850415448L)));
+        high ^= keyState.blockKey() *
+            (nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B48424C4F43L)) | 1);
+        high ^= keyState.pcToken() +
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B48504331L));
+        high ^= high >>> shift(seed, 9);
+        int low = keyState.blockKey() +
+            keyState.pcToken() *
+                (nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B4C504331L)) | 1);
+        low ^= keyState.pathKey() ^
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B4C50415448L));
+        low += keyState.guardKey();
+        low ^= low >>> shift(seed, 15);
         return (((long) high) << 32) | (((long) low) & 0xFFFFFFFFL);
     }
 
@@ -3748,51 +3813,56 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         int pcLocal,
         long seed
     ) {
-        emitControlTokenMask(
-            insns,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            seed ^ 0x4D4B4849474831L
-        );
-        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
-        JvmPassBytecode.pushInt(
-            insns,
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B50434831L)) | 1
-        );
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
         JvmPassBytecode.pushInt(
             insns,
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B4755415244L))
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B4850415448L))
         );
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B48424C4F43L)) | 1
+        );
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B48504331L))
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 9));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LSHL));
 
-        emitControlTokenMask(
-            insns,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            seed ^ 0x4D4B4C4F5731L
-        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
         JvmPassBytecode.pushInt(
             insns,
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B50434C31L))
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B4C504331L)) | 1
         );
-        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
         JvmPassBytecode.pushInt(
             insns,
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B50415448L)) | 1
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B4C50415448L))
         );
-        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 15));
+        insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
@@ -3900,10 +3970,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
 
     private int methodKeyFold(long keyValue, long seed) {
         int value = ((int) keyValue) ^ (int) (keyValue >>> 32);
-        value += nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B464F4C4431L));
-        value ^= value >>> shift(seed, 17);
-        value *= nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B464D554C31L)) | 1;
         value ^= (int) (seed >>> 32);
+        value += nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B464F4C4431L));
+        value ^= value >>> shift(seed, 13);
         return value;
     }
 
@@ -3915,21 +3984,16 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.LUSHR));
         insns.add(new InsnNode(Opcodes.L2I));
         insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, (int) (seed >>> 32));
+        insns.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(
             insns,
             nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B464F4C4431L))
         );
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, shift(seed, 17));
+        JvmPassBytecode.pushInt(insns, shift(seed, 13));
         insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(
-            insns,
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x4D4B464D554C31L)) | 1
-        );
-        insns.add(new InsnNode(Opcodes.IMUL));
-        JvmPassBytecode.pushInt(insns, (int) (seed >>> 32));
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
@@ -3949,14 +4013,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         EdgeRole role
     ) {
         long baseSeed = seed ^ 0x5452414E534B4559L ^ role.ordinal();
-        CffBlockKeyState bridgeKeys = transitionBridgeKeyState(
-            sourceKeys,
-            targetKeys,
-            methodSeed,
-            seed,
-            role
-        );
-        emitControlTokenBase(
+        emitCompactControlTokenBase(
             insns,
             keyLocal,
             guardLocal,
@@ -3965,121 +4022,30 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             keyBaseLocal,
             baseSeed
         );
-        emitDecodeBlockKeyWord(
-            insns,
-            keyTmpLocal,
-            bridgeKeys.guardKey(),
-            sourceKeys,
-            baseSeed,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            keyBaseLocal,
-            seed ^ 0x4252475541524431L ^ role.ordinal()
-        );
-        emitDecodeBlockKeyWord(
-            insns,
-            keyTmpLocal + 1,
-            bridgeKeys.pathKey(),
-            sourceKeys,
-            baseSeed,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            keyBaseLocal,
-            seed ^ 0x42525041544831L ^ role.ordinal()
-        );
-        emitDecodeBlockKeyWord(
-            insns,
-            keyTmpLocal + 2,
-            bridgeKeys.blockKey(),
-            sourceKeys,
-            baseSeed,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            keyBaseLocal,
-            seed ^ 0x4252424C4F434B31L ^ role.ordinal()
-        );
-        emitCommitDecodedKeys(
-            insns,
-            keyTmpLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal
-        );
-        emitEncryptedToken(
-            insns,
-            bridgeKeys.pcToken(),
-            bridgeKeys,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            seed ^ 0x42525043544F4B31L ^ role.ordinal()
-        );
-        insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
-        emitStoreMethodKey(
-            insns,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            pcLocal,
-            bridgeKeys
-        );
-
-        long finalBaseSeed = JvmPassBytecode.mix(
-            baseSeed,
-            0x46494E414C4B4559L ^ role.ordinal()
-        );
-        emitControlTokenBase(
-            insns,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            keyBaseLocal,
-            finalBaseSeed
-        );
-        emitDecodeBlockKeyWord(
+        emitDecodeBlockKeyWordCompact(
             insns,
             keyTmpLocal,
             targetKeys.guardKey(),
-            bridgeKeys,
-            finalBaseSeed,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
+            sourceKeys,
+            baseSeed,
             keyBaseLocal,
             seed ^ 0x47554152444B31L ^ role.ordinal()
         );
-        emitDecodeBlockKeyWord(
+        emitDecodeBlockKeyWordCompact(
             insns,
             keyTmpLocal + 1,
             targetKeys.pathKey(),
-            bridgeKeys,
-            finalBaseSeed,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
+            sourceKeys,
+            baseSeed,
             keyBaseLocal,
             seed ^ 0x504154484B455931L ^ role.ordinal()
         );
-        emitDecodeBlockKeyWord(
+        emitDecodeBlockKeyWordCompact(
             insns,
             keyTmpLocal + 2,
             targetKeys.blockKey(),
-            bridgeKeys,
-            finalBaseSeed,
-            keyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
+            sourceKeys,
+            baseSeed,
             keyBaseLocal,
             seed ^ 0x424C4F434B4B31L ^ role.ordinal()
         );
@@ -4090,6 +4056,24 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             pathKeyLocal,
             blockKeyLocal
         );
+    }
+
+    private void emitDecodeBlockKeyWordCompact(
+        InsnList insns,
+        int dstLocal,
+        int targetWord,
+        CffBlockKeyState sourceKeys,
+        long baseSeed,
+        int keyBaseLocal,
+        long seed
+    ) {
+        int encrypted =
+            targetWord ^
+            controlTokenMaskFromBase(compactControlTokenBase(sourceKeys, baseSeed), seed);
+        JvmPassBytecode.pushInt(insns, encrypted);
+        emitControlTokenMaskFromBase(insns, keyBaseLocal, seed);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dstLocal));
     }
 
     private void emitCommitDecodedKeys(
@@ -4199,17 +4183,61 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return x;
     }
 
+    private int compactControlTokenBase(
+        CffBlockKeyState keyState,
+        long seed
+    ) {
+        int x = keyState.guardKey() +
+            (keyState.pathKey() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x43475041544831L)));
+        x ^= keyState.blockKey() *
+            (nonZeroInt(JvmPassBytecode.mix(seed, 0x4347424C4F434B31L)) | 1);
+        x += methodKeyFold(keyState.methodKey(), seed ^ 0x43474D45544831L);
+        x ^= x >>> shift(seed, 11);
+        return x;
+    }
+
+    private void emitCompactControlTokenBase(
+        InsnList insns,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyBaseLocal,
+        long seed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x43475041544831L))
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4347424C4F434B31L)) | 1
+        );
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitMethodKeyFold(insns, keyLocal, seed ^ 0x43474D45544831L);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 11));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, keyBaseLocal));
+    }
+
     private int controlTokenMask(
         CffBlockKeyState keyState,
         long seed
     ) {
-        int x = keyState.guardKey() ^
-            nonZeroInt(JvmPassBytecode.mix(seed, 0x4354474D31L));
-        x += keyState.pathKey() *
-            (nonZeroInt(JvmPassBytecode.mix(seed, 0x4354504D31L)) | 1);
+        int x = keyState.guardKey() +
+            (keyState.pathKey() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x4354504D31L)));
         x ^= keyState.blockKey() +
             nonZeroInt(JvmPassBytecode.mix(seed, 0x4354424D31L));
-        x ^= x >>> shift(seed, 13);
+        x ^= x >>> shift(seed, 9);
         return x;
     }
 
@@ -4221,18 +4249,16 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         long seed
     ) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x4354474D31L)));
-        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x4354504D31L)) | 1);
-        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x4354504D31L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x4354424D31L)));
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, shift(seed, 13));
+        JvmPassBytecode.pushInt(insns, shift(seed, 9));
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
     }
@@ -5785,6 +5811,108 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ISTORE, dstLocal));
     }
 
+    private void emitPackedTransitionOutLoads(
+        InsnList insns,
+        int outLocal,
+        int tokenLocal,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal
+    ) {
+        emitPackedTransitionOutLoad(insns, outLocal, tokenLocal, 0, guardLocal);
+        emitPackedTransitionOutLoad(insns, outLocal, tokenLocal, 1, pathKeyLocal);
+        emitPackedTransitionOutLoad(insns, outLocal, tokenLocal, 2, blockKeyLocal);
+        emitPackedTransitionOutLoad(insns, outLocal, tokenLocal, 3, pcLocal);
+        emitPackedTransitionOutLoad(insns, outLocal, tokenLocal, 4, domainLocal);
+        emitPackedTransitionOutValue(insns, outLocal, tokenLocal, 6);
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        emitPackedTransitionOutValue(insns, outLocal, tokenLocal, 7);
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+    }
+
+    private void emitPackedTransitionOutLoad(
+        InsnList insns,
+        int outLocal,
+        int tokenLocal,
+        int index,
+        int dstLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+        JvmPassBytecode.pushInt(insns, index);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitTransitionTokenMask(insns, tokenLocal, index);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dstLocal));
+    }
+
+    private void emitPackedTransitionOutValue(
+        InsnList insns,
+        int outLocal,
+        int tokenLocal,
+        int index
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+        JvmPassBytecode.pushInt(insns, index);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitTransitionTokenMask(insns, tokenLocal, index);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitPackedTransitionOutStore(
+        InsnList insns,
+        int outLocal,
+        int tokenLocal,
+        int index,
+        int valueLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+        JvmPassBytecode.pushInt(insns, index);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, valueLocal));
+        emitTransitionTokenMask(insns, tokenLocal, index);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+    }
+
+    private void emitPackedTransitionOutStoreConst(
+        InsnList insns,
+        int outLocal,
+        int tokenLocal,
+        int index,
+        int value
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+        JvmPassBytecode.pushInt(insns, index);
+        JvmPassBytecode.pushInt(insns, value);
+        emitTransitionTokenMask(insns, tokenLocal, index);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+    }
+
+    private void emitTransitionTokenMask(
+        InsnList insns,
+        int tokenLocal,
+        int index
+    ) {
+        long seed = JvmPassBytecode.mix(0x535542444953504CL, index);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, tokenLocal));
+        JvmPassBytecode.pushLong(insns, seed);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 23 + (index & 7));
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.L2I));
+    }
+
     private final class TransitionOutliner {
         private static final String DESC = "(JIIIII[I)J";
         private final PipelineContext pctx;
@@ -6110,7 +6238,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 )
             );
             helper.instructions.add(new InsnNode(Opcodes.ATHROW));
-            helper.maxLocals = 12;
+            helper.maxLocals = 14;
             helper.maxStack = 32;
             JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
             clazz.asmNode().methods.add(helper);
@@ -6375,6 +6503,33 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             insns.add(new InsnNode(Opcodes.LRETURN));
         }
 
+        private void emitSubdispatchPackedToken(
+            InsnList insns,
+            int keyLocal,
+            int resultToken,
+            int tokenLocal
+        ) {
+            insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+            JvmPassBytecode.pushLong(
+                insns,
+                JvmPassBytecode.mix(0x5355424449535031L, resultToken)
+            );
+            insns.add(new InsnNode(Opcodes.LXOR));
+            insns.add(new InsnNode(Opcodes.DUP2));
+            JvmPassBytecode.pushInt(insns, 29);
+            insns.add(new InsnNode(Opcodes.LUSHR));
+            insns.add(new InsnNode(Opcodes.LXOR));
+            JvmPassBytecode.pushLong(insns, 0x9E3779B97F4A7C15L);
+            insns.add(new InsnNode(Opcodes.LMUL));
+            JvmPassBytecode.pushLong(
+                insns,
+                (Integer.toUnsignedLong(resultToken) << 32) ^
+                    Integer.toUnsignedLong(resultToken * 0x45D9F3B)
+            );
+            insns.add(new InsnNode(Opcodes.LXOR));
+            insns.add(new VarInsnNode(Opcodes.LSTORE, tokenLocal));
+        }
+
         InsnList emitCall(
             int state,
             DispatchTarget target,
@@ -6492,7 +6647,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             );
             helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
             helper.instructions.add(new InsnNode(Opcodes.LRETURN));
-            helper.maxLocals = 12;
+            helper.maxLocals = 14;
             helper.maxStack = 32;
             JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
             clazz.asmNode().methods.add(helper);
@@ -6542,7 +6697,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 case Type.FLOAT -> BasicValue.FLOAT_VALUE;
                 case Type.LONG -> BasicValue.LONG_VALUE;
                 case Type.DOUBLE -> BasicValue.DOUBLE_VALUE;
-                case Type.ARRAY, Type.OBJECT -> BasicValue.REFERENCE_VALUE;
+                case Type.ARRAY, Type.OBJECT -> new BasicValue(type);
                 default -> BasicValue.UNINITIALIZED_VALUE;
             };
         }
@@ -6551,7 +6706,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         public BasicValue newOperation(AbstractInsnNode insn) throws AnalyzerException {
             int opcode = insn.getOpcode();
             if (opcode == Opcodes.NEW) {
-                return BasicValue.REFERENCE_VALUE;
+                return newValue(Type.getObjectType(((TypeInsnNode) insn).desc));
             }
             if (opcode == Opcodes.GETSTATIC) {
                 return newValue(Type.getType(((FieldInsnNode) insn).desc));
@@ -6567,7 +6722,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         return BasicValue.REFERENCE_VALUE;
                     }
                 } else if (cst instanceof String) {
-                    return BasicValue.REFERENCE_VALUE;
+                    return newValue(Type.getType(String.class));
                 }
             }
             return super.newOperation(insn);
@@ -6716,6 +6871,20 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             List<BasicValue> values = new ArrayList<>();
             for (int i = 0; i < frame.getStackSize(); i++) {
                 values.add(frame.getStack(i));
+            }
+            return values;
+        }
+
+        List<BasicValue> localValues(LabelNode label) {
+            Frame<BasicValue> frame = frameAt(label);
+            if (frame == null) {
+                throw new IllegalStateException(
+                    "CFF island target has no frame: " + label.getLabel()
+                );
+            }
+            List<BasicValue> values = new ArrayList<>();
+            for (int i = 0; i < frame.getLocals(); i++) {
+                values.add(frame.getLocal(i));
             }
             return values;
         }
