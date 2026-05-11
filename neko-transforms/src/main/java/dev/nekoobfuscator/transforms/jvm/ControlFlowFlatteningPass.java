@@ -117,11 +117,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             pctx,
             methodKey
         );
-        int keyLocal =
-            recordedKeyLocal != null
-                ? recordedKeyLocal
-                : JvmKeyDispatchPass.ensureMethodKeyLocal(pctx, clazz, method);
-        if (keyLocal < 0) {
+        Long recordedMethodSeed = JvmKeyDispatchPass.findMethodSeed(pctx, methodKey);
+        if (recordedKeyLocal == null || recordedMethodSeed == null) {
             throw new IllegalStateException(
                 "CFF requires an initialized method key for " +
                     clazz.name() +
@@ -130,15 +127,8 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     method.descriptor()
             );
         }
-        long methodSeed =
-            JvmKeyDispatchPass.findMethodSeed(pctx, methodKey) != null
-                ? JvmKeyDispatchPass.findMethodSeed(pctx, methodKey)
-                : JvmKeyDispatchPass.methodSeed(
-                      pctx.masterSeed(),
-                      clazz,
-                      method,
-                      mn
-                  );
+        int keyLocal = recordedKeyLocal;
+        long methodSeed = recordedMethodSeed;
         LabelNode protectedStart = protectedStartLabel(
             clazz,
             method,
@@ -215,11 +205,22 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         }
         Map<LabelNode, CffBlockKeyState> keyStateByLabel =
             buildBlockKeyStates(blocks, blockPlan.aliases(), stateByLabel, dispatchPlan.targets(), salt);
+        installEntryKeyState(blocks, dispatchPlan, keyStateByLabel, methodSeed);
+        Set<LabelNode> runtimeKeyLabels = runtimeKeyLabels(
+            pctx,
+            mn,
+            blocks,
+            blockPlan.aliases()
+        );
         rewriteKeyedCallTransfers(
             pctx,
             mn,
             blocks,
             keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            keyStateByLabel,
             salt
         );
         publishMethodMetadata(
@@ -261,6 +262,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 stateByLabel,
                 keyStateByLabel,
                 dispatchPlan.targets(),
+                runtimeKeyLabels,
                 methodSeed,
                 salt
             );
@@ -279,6 +281,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             stateByLabel,
             keyStateByLabel,
             dispatchPlan.targets(),
+            runtimeKeyLabels,
             methodSeed,
             salt
         );
@@ -1151,20 +1154,13 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         LabelNode start,
         BytecodeFrameAnalysis frames
     ) {
-        Set<LabelNode> leaders = new HashSet<>();
-        AbstractInsnNode[] insns = mn.instructions.toArray();
-        boolean active = false;
-        for (AbstractInsnNode insn : insns) {
-            if (insn == start) active = true;
-            if (
-                !active || insn.getOpcode() < 0 || isControlTransfer(insn)
-            ) continue;
-            AbstractInsnNode next = nextReal(insn.getNext());
-            if (frames.isZeroStack(next)) {
-                leaders.add(ensureLabelBefore(mn, next));
-            }
-        }
-        return leaders;
+        // Plain linear instructions do not introduce verifier control-flow
+        // join points. Splitting after every zero-stack instruction multiplies
+        // CFF transitions and can exceed the JVM 64 KiB Code attribute limit in
+        // large methods. Leaders are instead created from real branch targets,
+        // branch fallthroughs, switch arms, exception handlers, and protected
+        // range boundaries in buildBlocks().
+        return Collections.emptySet();
     }
 
     private boolean normalizeNonZeroStackGotoTargets(
@@ -1310,6 +1306,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Set<LabelNode> runtimeKeyLabels,
         long methodSeed,
         long salt
     ) {
@@ -1322,12 +1319,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             long edgeSeed = edgeSeed(salt, handler, body, 0x45584348414E444CL);
             InsnList prefix = new InsnList();
             prefix.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
-            JvmKeyDispatchPass.emitKeyInit(
-                prefix,
-                keyLocal,
-                methodSeed,
-                0x4346464B65794C31L
-            );
             emitInitKeys(
                 prefix,
                 guardLocal,
@@ -1341,12 +1332,19 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 salt,
                 bridge.handler()
             );
-            emitInstallBlockKeys(
+            emitDecodeBlockKeys(
                 prefix,
+                keyLocal,
                 guardLocal,
                 pathKeyLocal,
                 blockKeyLocal,
-                handlerSourceKeys
+                keyTmpLocal,
+                keyTmpLocal + 3,
+                initialKeyState(methodSeed, methodSeed ^ salt),
+                handlerSourceKeys,
+                methodSeed,
+                edgeSeed ^ 0x48414E444C455249L,
+                EdgeRole.HANDLER
             );
             if (bridge.catchLocal() >= 0) {
                 prefix.add(new VarInsnNode(Opcodes.ALOAD, exceptionLocal));
@@ -1367,7 +1365,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     requireBlockKey(body, keyStateByLabel.get(body)),
                     methodSeed,
                     edgeSeed,
-                    true,
+                    runtimeKeyLabels.contains(body),
                     EdgeRole.HANDLER
                 )
             );
@@ -1407,14 +1405,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     entryBlock.label(),
                     dispatchPlan.targets().get(entryBlock.label())
                 );
-                if (!externalEntrySeed) {
-                    JvmKeyDispatchPass.emitKeyInit(
-                        insns,
-                        keyLocal,
-                        methodSeed,
-                        0x4346464D45544831L
-                    );
-                }
                 emitInitKeys(
                     insns,
                     guardLocal,
@@ -1422,16 +1412,6 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     blockKeyLocal,
                     keyLocal,
                     group.salt()
-                );
-                emitInstallBlockKeys(
-                    insns,
-                    guardLocal,
-                    pathKeyLocal,
-                    blockKeyLocal,
-                    requireBlockKey(
-                        entryBlock.label(),
-                        keyStateByLabel.get(entryBlock.label())
-                    )
                 );
                 emitStorePc(
                     insns,
@@ -1575,6 +1555,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Set<LabelNode> runtimeKeyLabels,
         long methodSeed,
         long salt
     ) {
@@ -1612,7 +1593,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         requireBlockKey(jump.label, keyStateByLabel.get(jump.label)),
                         methodSeed,
                         edgeSeed(salt, block.label(), jump.label, opcode),
-                        true,
+                        runtimeKeyLabels.contains(jump.label),
                         EdgeRole.GOTO
                     )
                 );
@@ -1664,7 +1645,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         requireBlockKey(next, keyStateByLabel.get(next)),
                         methodSeed,
                         falseSeed,
-                        true,
+                        runtimeKeyLabels.contains(next),
                         EdgeRole.CONDITIONAL_FALSE
                     )
                 );
@@ -1685,7 +1666,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         requireBlockKey(jump.label, keyStateByLabel.get(jump.label)),
                         methodSeed,
                         trueSeed,
-                        true,
+                        runtimeKeyLabels.contains(jump.label),
                         EdgeRole.CONDITIONAL_TRUE
                     )
                 );
@@ -1711,7 +1692,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         requireBlockKey(jump.label, keyStateByLabel.get(jump.label)),
                         methodSeed,
                         trueSeed,
-                        true,
+                        runtimeKeyLabels.contains(jump.label),
                         EdgeRole.CONDITIONAL_TRUE
                     )
                 );
@@ -1732,7 +1713,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         requireBlockKey(next, keyStateByLabel.get(next)),
                         methodSeed,
                         falseSeed,
-                        true,
+                        runtimeKeyLabels.contains(next),
                         EdgeRole.CONDITIONAL_FALSE
                     )
                 );
@@ -1754,6 +1735,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 stateByLabel,
                 keyStateByLabel,
                 dispatchByLabel,
+                runtimeKeyLabels,
                 block.label(),
                 methodSeed,
                 salt
@@ -1774,6 +1756,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 stateByLabel,
                 keyStateByLabel,
                 dispatchByLabel,
+                runtimeKeyLabels,
                 block.label(),
                 methodSeed,
                 salt
@@ -1799,7 +1782,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     requireBlockKey(next, keyStateByLabel.get(next)),
                     methodSeed,
                     edgeSeed(salt, block.label(), next, 0x46414C4C),
-                    true,
+                    runtimeKeyLabels.contains(next),
                     EdgeRole.FALLTHROUGH
                 )
             );
@@ -1819,6 +1802,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Set<LabelNode> runtimeKeyLabels,
         LabelNode source,
         long methodSeed,
         long salt
@@ -1856,7 +1840,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 requireBlockKey(originalDefault, keyStateByLabel.get(originalDefault)),
                 methodSeed,
                 edgeSeed(salt, source, originalDefault, 0x53574446),
-                true,
+                runtimeKeyLabels.contains(originalDefault),
                 EdgeRole.SWITCH_DEFAULT
             )
         );
@@ -1889,7 +1873,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         originalTarget,
                         ls.keys.get(i) ^ 0x53574C53
                     ),
-                    true,
+                    runtimeKeyLabels.contains(originalTarget),
                     EdgeRole.SWITCH_CASE
                 )
             );
@@ -1910,6 +1894,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Set<LabelNode> runtimeKeyLabels,
         LabelNode source,
         long methodSeed,
         long salt
@@ -1947,7 +1932,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                 requireBlockKey(originalDefault, keyStateByLabel.get(originalDefault)),
                 methodSeed,
                 edgeSeed(salt, source, originalDefault, 0x54534446),
-                true,
+                runtimeKeyLabels.contains(originalDefault),
                 EdgeRole.SWITCH_DEFAULT
             )
         );
@@ -1980,7 +1965,7 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                         originalTarget,
                         (ts.min + i) ^ 0x54534C53
                     ),
-                    true,
+                    runtimeKeyLabels.contains(originalTarget),
                     EdgeRole.SWITCH_CASE
                 )
             );
@@ -2040,22 +2025,20 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     ) {
         InsnList insns = new InsnList();
         long stepSeed = transitionKeySeed(edgeSeed, state, target, role);
-        if (updateGuard) {
-            emitDecodeBlockKeys(
-                insns,
-                keyLocal,
-                guardLocal,
-                pathKeyLocal,
-                blockKeyLocal,
-                keyTmpLocal,
-                keyTmpLocal + 3,
-                sourceKeys,
-                targetKeys,
-                methodSeed,
-                stepSeed,
-                role
-            );
-        }
+        emitDecodeBlockKeys(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            keyTmpLocal,
+            keyTmpLocal + 3,
+            sourceKeys,
+            targetKeys,
+            methodSeed,
+            stepSeed,
+            role
+        );
         switch (chooseEdgeKind(edgeSeed, role, target)) {
             case DIRECT_ISLAND -> {
                 emitStorePc(
@@ -2185,7 +2168,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             }
         }
         if (first) return insns;
-        int fakeCount = fakeCaseCount(group.salt() ^ salt ^ island);
+        int fakeCount = group.blocks().size() > 16
+            ? 0
+            : fakeCaseCount(group.salt() ^ salt ^ island);
         for (int fakeIndex = 0; fakeIndex < fakeCount; fakeIndex++) {
             LabelNode fake = new LabelNode();
             fakes.add(fake);
@@ -2275,24 +2260,101 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             island,
             keyStateByLabel
         );
-        LabelNode bounceLabel = firstIslandLabel(group, island);
-        emitInstallBlockKeys(
-            insns,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            bounceKeys
+        DispatchTarget bounceTarget = new DispatchTarget(
+            group.hub(),
+            group.islandLabels(),
+            group.aliasHubs(),
+            island,
+            group.salt() ^ island,
+            domainSeed(group),
+            domainToken(group.salt(), island)
         );
+        long domainSeed = domainSeed(group);
         switch ((int) ((seed >>> 37) & 3L)) {
             case 0 -> {
-                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    state,
+                    bounceKeys,
+                    methodSeed,
+                    bounceTarget.selectorSeed()
+                );
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
             }
             case 1 -> {
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    state,
+                    bounceKeys,
+                    methodSeed,
+                    bounceTarget.selectorSeed()
+                );
                 insns.add(new JumpInsnNode(Opcodes.GOTO, hop));
                 insns.add(hop);
-                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
             }
             case 2 -> {
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed
+                );
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    state,
+                    bounceKeys,
+                    methodSeed,
+                    bounceTarget.selectorSeed()
+                );
                 emitKeyPredicate(
                     insns,
                     guardLocal,
@@ -2301,11 +2363,23 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     seed
                 );
                 insns.add(new JumpInsnNode(Opcodes.IFNE, pass));
-                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
                 insns.add(pass);
-                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
             }
             default -> {
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    state,
+                    bounceKeys,
+                    methodSeed,
+                    bounceTarget.selectorSeed()
+                );
                 emitKeyPredicate(
                     insns,
                     guardLocal,
@@ -2314,9 +2388,35 @@ public final class ControlFlowFlatteningPass implements TransformPass {
                     seed ^ 0x504154484F504151L
                 );
                 insns.add(new JumpInsnNode(Opcodes.IFEQ, hop));
-                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
                 insns.add(hop);
-                insns.add(new JumpInsnNode(Opcodes.GOTO, bounceLabel));
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
             }
         }
     }
@@ -2451,17 +2551,20 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         LabelNode poison,
         long orderSeed
     ) {
-        boolean reverse = ((orderSeed >>> 11) & 1L) != 0L;
-        for (int n = 0; n < islandLabels.length; n++) {
-            int i = reverse ? islandLabels.length - 1 - n : n;
-            LabelNode next = new LabelNode();
-            insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
-            JvmPassBytecode.pushInt(insns, domainToken(orderSeed, i));
-            insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, next));
-            insns.add(new JumpInsnNode(Opcodes.GOTO, islandLabels[i]));
-            insns.add(next);
+        TreeMap<Integer, LabelNode> cases = new TreeMap<>();
+        for (int i = 0; i < islandLabels.length; i++) {
+            cases.put(domainToken(orderSeed, i), islandLabels[i]);
         }
-        insns.add(new JumpInsnNode(Opcodes.GOTO, poison));
+        int[] keys = new int[cases.size()];
+        LabelNode[] labels = new LabelNode[cases.size()];
+        int index = 0;
+        for (Map.Entry<Integer, LabelNode> entry : cases.entrySet()) {
+            keys[index] = entry.getKey();
+            labels[index] = entry.getValue();
+            index++;
+        }
+        insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+        insns.add(new LookupSwitchInsnNode(poison, keys, labels));
     }
 
     private void emitTokenDispatch(
@@ -2471,22 +2574,16 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         LabelNode poison,
         long orderSeed
     ) {
-        List<Map.Entry<Integer, LabelNode>> entries = new ArrayList<>(
-            cases.entrySet()
-        );
-        if (((orderSeed >>> 17) & 1L) != 0L) {
-            Collections.reverse(entries);
+        int[] keys = new int[cases.size()];
+        LabelNode[] labels = new LabelNode[cases.size()];
+        int index = 0;
+        for (Map.Entry<Integer, LabelNode> entry : cases.entrySet()) {
+            keys[index] = entry.getKey();
+            labels[index] = entry.getValue();
+            index++;
         }
-        for (int n = 0; n < entries.size(); n++) {
-            Map.Entry<Integer, LabelNode> entry = entries.get(n);
-            LabelNode next = new LabelNode();
-            insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
-            JvmPassBytecode.pushInt(insns, entry.getKey());
-            insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, next));
-            insns.add(new JumpInsnNode(Opcodes.GOTO, entry.getValue()));
-            insns.add(next);
-        }
-        insns.add(new JumpInsnNode(Opcodes.GOTO, poison));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new LookupSwitchInsnNode(poison, keys, labels));
     }
 
     private void emitInitKeys(
@@ -2761,19 +2858,75 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
-    private void emitInstallBlockKeys(
-        InsnList insns,
-        int guardLocal,
-        int pathKeyLocal,
-        int blockKeyLocal,
-        CffBlockKeyState keyState
-    ) {
-        JvmPassBytecode.pushInt(insns, keyState.guardKey());
-        insns.add(new VarInsnNode(Opcodes.ISTORE, guardLocal));
-        JvmPassBytecode.pushInt(insns, keyState.pathKey());
-        insns.add(new VarInsnNode(Opcodes.ISTORE, pathKeyLocal));
-        JvmPassBytecode.pushInt(insns, keyState.blockKey());
-        insns.add(new VarInsnNode(Opcodes.ISTORE, blockKeyLocal));
+    private CffBlockKeyState initialKeyState(long keyValue, long seed) {
+        int guardKey = initialGuardKey(keyValue, seed);
+        int pathKey = initialPathKey(keyValue, seed ^ 0x504154484B455931L);
+        int blockKey = initialBlockKey(keyValue, guardKey, seed ^ 0x424C4F434B455931L);
+        CffClassKeyTable table = activeKeyTable;
+        if (table != null) {
+            long classSeed = seed ^ 0x434C4153534B31L;
+            int classWord = classKeyWord(table, keyValue, classSeed);
+            guardKey += classWord ^ nonZeroInt(JvmPassBytecode.mix(classSeed, 0x47554152444D4958L));
+            pathKey = (pathKey ^ guardKey) + nonZeroInt(JvmPassBytecode.mix(classSeed, 0x504154484D49584BL));
+            blockKey = (blockKey + pathKey) ^ classWord;
+        }
+        long methodSalt = nonZeroLong(JvmPassBytecode.mix(seed, 0x494E49544D455448L));
+        return new CffBlockKeyState(
+            guardKey,
+            pathKey,
+            blockKey,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x494E49545043544BL)),
+            methodKeyFromBlock(guardKey, pathKey, blockKey, methodSalt),
+            methodSalt
+        );
+    }
+
+    private int initialGuardKey(long keyValue, long seed) {
+        int value;
+        switch ((int) ((seed >>> 53) & 3L)) {
+            case 0 -> value = foldInt16((int) (keyValue ^ (keyValue >>> 32)));
+            case 1 -> value = foldInt16(((int) keyValue) ^ (int) (keyValue >>> 32));
+            case 2 -> {
+                value = foldInt16((int) (keyValue ^ (keyValue >>> 32)));
+                value ^= (int) seed;
+                value = foldInt16(value);
+            }
+            default -> {
+                value = foldInt16(((int) keyValue) ^ (int) (keyValue >>> 32));
+                value += (int) (seed >>> 32);
+                value = foldInt16(value);
+            }
+        }
+        return value;
+    }
+
+    private int foldInt16(int value) {
+        return value ^ (value >>> 16);
+    }
+
+    private int initialPathKey(long keyValue, long seed) {
+        int value = ((int) keyValue) ^ (int) seed;
+        return value ^ (value >>> shift(seed, 5));
+    }
+
+    private int initialBlockKey(long keyValue, int guardKey, long seed) {
+        int value = ((int) (keyValue >>> 32)) ^ guardKey ^ (int) (seed >>> 32);
+        return value ^ (value >>> 16);
+    }
+
+    private int classKeyWord(CffClassKeyTable table, long keyValue, long seed) {
+        int token = table.token(nonZeroInt(seed), seed);
+        int index = (keyMixInt(keyValue, seed ^ 0x4944584B455931L) ^ token) &
+            (CLASS_KEY_TABLE_SIZE - 1);
+        int value = table.values()[index] ^
+            keyMixInt(keyValue, seed ^ 0x574F52444B455931L);
+        return value ^ (value >>> shift(seed, 23));
+    }
+
+    private int keyMixInt(long keyValue, long siteSeed) {
+        int value = ((int) keyValue) ^ (int) (keyValue >>> 32);
+        value += nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x4B45594D49584B31L));
+        return value ^ (value >>> shift(siteSeed, 5));
     }
 
     private void emitDecodeBlockKeys(
@@ -3509,66 +3662,466 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return keyStates;
     }
 
-    private void rewriteKeyedCallTransfers(
+    private void installEntryKeyState(
+        List<Block> blocks,
+        DispatchPlan dispatchPlan,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long methodSeed
+    ) {
+        Block entry = firstNonHandler(blocks);
+        if (entry == null) return;
+        for (IslandGroup group : dispatchPlan.groups()) {
+            if (!group.blocks().contains(entry)) continue;
+            keyStateByLabel.put(entry.label(), initialKeyState(methodSeed, group.salt()));
+            return;
+        }
+    }
+
+    private Set<LabelNode> runtimeKeyLabels(
         PipelineContext pctx,
         MethodNode mn,
         List<Block> blocks,
-        int keyLocal,
-        long salt
+        Map<LabelNode, LabelNode> aliases
     ) {
+        Set<LabelNode> labels = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Block block : blocks) {
             for (
                 AbstractInsnNode insn = block.label();
                 insn != null && insn != block.endExclusive();
                 insn = insn.getNext()
             ) {
+                if (insn.getOpcode() < 0 || JvmKeyDispatchPass.isGeneratedNode(pctx, insn)) {
+                    continue;
+                }
+                if (requiresRuntimeKeys(pctx, insn)) {
+                    labels.add(block.label());
+                    break;
+                }
+            }
+        }
+        for (Map.Entry<LabelNode, LabelNode> alias : aliases.entrySet()) {
+            if (labels.contains(alias.getValue())) {
+                labels.add(alias.getKey());
+            }
+        }
+        return labels;
+    }
+
+    private boolean requiresRuntimeKeys(PipelineContext pctx, AbstractInsnNode insn) {
+        if (
+            pctx.config().isTransformEnabled(JvmConstantObfuscationPass.ID) &&
+            isNumericConstantSite(insn)
+        ) {
+            return true;
+        }
+        if (!pctx.config().isTransformEnabled(JvmStringObfuscationPass.ID)) {
+            return false;
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String) {
+            return true;
+        }
+        return insn instanceof InvokeDynamicInsnNode indy &&
+            indy.bsm != null &&
+            "java/lang/invoke/StringConcatFactory".equals(indy.bsm.getOwner()) &&
+            "makeConcatWithConstants".equals(indy.bsm.getName()) &&
+            indy.bsmArgs.length > 0 &&
+            indy.bsmArgs[0] instanceof String &&
+            Type.getReturnType(indy.desc).equals(Type.getType(String.class));
+    }
+
+    private boolean isNumericConstantSite(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (insn instanceof IincInsnNode) return true;
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.DCONST_1) return true;
+        if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) return true;
+        return insn instanceof LdcInsnNode ldc && ldc.cst instanceof Number;
+    }
+
+    private void rewriteKeyedCallTransfers(
+        PipelineContext pctx,
+        MethodNode mn,
+        List<Block> blocks,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long salt
+    ) {
+        Map<AbstractInsnNode, Long> generatedKeyLoadSeeds = generatedKeyLoadTargetSeeds(pctx);
+        Map<AbstractInsnNode, Block> blockByInstruction = instructionBlockMap(blocks);
+        for (Block block : blocks) {
+            for (
+                AbstractInsnNode insn = block.label();
+                insn != null && insn != block.endExclusive();
+                insn = insn.getNext()
+            ) {
+                Long generatedTargetSeed = generatedKeyLoadSeeds.get(insn);
+                if (generatedTargetSeed != null) {
+                    InsnList replacement = new InsnList();
+                    emitDynamicDecodedLong(
+                        replacement,
+                        incomingRawForCanonical(generatedTargetSeed),
+                        requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        salt ^ generatedTargetSeed ^ System.identityHashCode(insn)
+                    );
+                    JvmKeyDispatchPass.markGenerated(pctx, replacement);
+                    mn.instructions.insertBefore(insn, replacement);
+                    mn.instructions.remove(insn);
+                    continue;
+                }
                 Long targetSeed = keyedTargetSeed(pctx, insn);
                 if (targetSeed == null) continue;
                 AbstractInsnNode keyLoad = previousReal(insn.getPrevious());
-                if (!isGeneratedKeyLoad(pctx, keyLoad, keyLocal)) continue;
                 long rawSeed = incomingRawForCanonical(targetSeed);
                 InsnList replacement = new InsnList();
-                emitStaticDecodedLong(
+                emitDynamicDecodedLong(
                     replacement,
                     rawSeed,
+                    requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
                     salt ^ targetSeed ^ System.identityHashCode(insn)
                 );
-                JvmKeyDispatchPass.markGenerated(pctx, replacement);
-                mn.instructions.insertBefore(keyLoad, replacement);
-                mn.instructions.remove(keyLoad);
+                if (isGeneratedKeyLoad(pctx, keyLoad, keyLocal)) {
+                    JvmKeyDispatchPass.markGenerated(pctx, replacement);
+                    mn.instructions.insertBefore(keyLoad, replacement);
+                    mn.instructions.remove(keyLoad);
+                    continue;
+                }
+                rewritePackedGeneratedKeyLoads(
+                    pctx,
+                    mn,
+                    insn,
+                    keyLocal,
+                    replacement
+                );
             }
         }
+        rewriteDetachedGeneratedKeyLoads(
+            pctx,
+            mn,
+            generatedKeyLoadSeeds,
+            blockByInstruction,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            keyStateByLabel,
+            salt
+        );
+        rewriteReflectiveGeneratedKeyLoads(
+            pctx,
+            mn,
+            generatedKeyLoadSeeds,
+            blockByInstruction,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            keyStateByLabel,
+            salt
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<AbstractInsnNode, Long> generatedKeyLoadTargetSeeds(PipelineContext pctx) {
+        Map<AbstractInsnNode, Long> map = pctx.getPassData(
+            JvmMethodParameterObfuscationPass.CFF_KEY_LOAD_TARGET_SEED
+        );
+        return map == null ? Map.of() : map;
+    }
+
+    private void rewritePackedGeneratedKeyLoads(
+        PipelineContext pctx,
+        MethodNode mn,
+        AbstractInsnNode call,
+        int keyLocal,
+        InsnList replacementTemplate
+    ) {
+        int scanned = 0;
+        for (
+            AbstractInsnNode scan = call.getPrevious();
+            scan != null && scanned++ < 160;
+            scan = scan.getPrevious()
+        ) {
+            if (!isGeneratedKeyLoad(pctx, scan, keyLocal)) continue;
+            AbstractInsnNode next = nextReal(scan.getNext());
+            if (next instanceof VarInsnNode store &&
+                store.getOpcode() == Opcodes.LSTORE &&
+                rewriteStoredPackedGeneratedKeyLoad(pctx, mn, call, store.var, replacementTemplate)) {
+                return;
+            }
+            if (!(next instanceof MethodInsnNode box) ||
+                box.getOpcode() != Opcodes.INVOKESTATIC ||
+                !"java/lang/Long".equals(box.owner) ||
+                !"valueOf".equals(box.name) ||
+                !"(J)Ljava/lang/Long;".equals(box.desc)) {
+                continue;
+            }
+            InsnList replacement = cloneInsnList(replacementTemplate);
+            JvmKeyDispatchPass.markGenerated(pctx, replacement);
+            mn.instructions.insertBefore(scan, replacement);
+            mn.instructions.remove(scan);
+            return;
+        }
+    }
+
+    private boolean rewriteStoredPackedGeneratedKeyLoad(
+        PipelineContext pctx,
+        MethodNode mn,
+        AbstractInsnNode call,
+        int storedLocal,
+        InsnList replacementTemplate
+    ) {
+        int scanned = 0;
+        for (
+            AbstractInsnNode scan = call.getPrevious();
+            scan != null && scanned++ < 160;
+            scan = scan.getPrevious()
+        ) {
+            if (!(scan instanceof VarInsnNode load) ||
+                load.getOpcode() != Opcodes.LLOAD ||
+                load.var != storedLocal ||
+                !JvmKeyDispatchPass.isGeneratedNode(pctx, scan)) {
+                continue;
+            }
+            AbstractInsnNode next = nextReal(scan.getNext());
+            if (!(next instanceof MethodInsnNode box) ||
+                box.getOpcode() != Opcodes.INVOKESTATIC ||
+                !"java/lang/Long".equals(box.owner) ||
+                !"valueOf".equals(box.name) ||
+                !"(J)Ljava/lang/Long;".equals(box.desc)) {
+                continue;
+            }
+            InsnList replacement = cloneInsnList(replacementTemplate);
+            JvmKeyDispatchPass.markGenerated(pctx, replacement);
+            mn.instructions.insertBefore(scan, replacement);
+            mn.instructions.remove(scan);
+            return true;
+        }
+        return false;
+    }
+
+    private Map<AbstractInsnNode, Block> instructionBlockMap(List<Block> blocks) {
+        Map<AbstractInsnNode, Block> out = new IdentityHashMap<>();
+        for (Block block : blocks) {
+            for (
+                AbstractInsnNode insn = block.label();
+                insn != null && insn != block.endExclusive();
+                insn = insn.getNext()
+            ) {
+                out.put(insn, block);
+            }
+        }
+        return out;
+    }
+
+    private void rewriteDetachedGeneratedKeyLoads(
+        PipelineContext pctx,
+        MethodNode mn,
+        Map<AbstractInsnNode, Long> generatedKeyLoadSeeds,
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long salt
+    ) {
+        if (generatedKeyLoadSeeds.isEmpty()) return;
+        for (Map.Entry<AbstractInsnNode, Long> entry : new ArrayList<>(generatedKeyLoadSeeds.entrySet())) {
+            AbstractInsnNode keyLoad = entry.getKey();
+            if (!isLiveInstruction(mn, keyLoad)) continue;
+            Block block = nearbyBlock(keyLoad, blockByInstruction);
+            if (block == null) continue;
+            long targetSeed = entry.getValue();
+            InsnList replacement = new InsnList();
+            emitDynamicDecodedLong(
+                replacement,
+                incomingRawForCanonical(targetSeed),
+                requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                salt ^ targetSeed ^ System.identityHashCode(keyLoad)
+            );
+            JvmKeyDispatchPass.markGenerated(pctx, replacement);
+            mn.instructions.insertBefore(keyLoad, replacement);
+            mn.instructions.remove(keyLoad);
+        }
+    }
+
+    private boolean isLiveInstruction(MethodNode mn, AbstractInsnNode insn) {
+        return insn != null &&
+            (insn == mn.instructions.getFirst() ||
+                insn.getPrevious() != null ||
+                insn.getNext() != null);
+    }
+
+    private Block nearbyBlock(
+        AbstractInsnNode insn,
+        Map<AbstractInsnNode, Block> blockByInstruction
+    ) {
+        Block block = blockByInstruction.get(insn);
+        if (block != null) return block;
+        for (AbstractInsnNode next = nextReal(insn.getNext()); next != null; next = nextReal(next.getNext())) {
+            block = blockByInstruction.get(next);
+            if (block != null) return block;
+        }
+        for (AbstractInsnNode prev = previousReal(insn.getPrevious()); prev != null; prev = previousReal(prev.getPrevious())) {
+            block = blockByInstruction.get(prev);
+            if (block != null) return block;
+        }
+        return null;
+    }
+
+    private void rewriteReflectiveGeneratedKeyLoads(
+        PipelineContext pctx,
+        MethodNode mn,
+        Map<AbstractInsnNode, Long> generatedKeyLoadSeeds,
+        Map<AbstractInsnNode, Block> blockByInstruction,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long salt
+    ) {
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (generatedKeyLoadSeeds.containsKey(insn)) continue;
+            if (!isGeneratedKeyLoad(pctx, insn, keyLocal)) continue;
+            AbstractInsnNode next = nextReal(insn.getNext());
+            if (!(next instanceof MethodInsnNode box) ||
+                box.getOpcode() != Opcodes.INVOKESTATIC ||
+                !"java/lang/Long".equals(box.owner) ||
+                !"valueOf".equals(box.name) ||
+                !"(J)Ljava/lang/Long;".equals(box.desc)) {
+                continue;
+            }
+            Long targetSeed = reflectivePackedTargetSeed(pctx, insn);
+            if (targetSeed == null) continue;
+            Block block = nearbyBlock(insn, blockByInstruction);
+            if (block == null) continue;
+            InsnList replacement = new InsnList();
+            emitDynamicDecodedLong(
+                replacement,
+                incomingRawForCanonical(targetSeed),
+                requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                salt ^ targetSeed ^ System.identityHashCode(insn)
+            );
+            JvmKeyDispatchPass.markGenerated(pctx, replacement);
+            mn.instructions.insertBefore(insn, replacement);
+            AbstractInsnNode previous = insn.getPrevious();
+            mn.instructions.remove(insn);
+            insn = previous;
+        }
+    }
+
+    private Long reflectivePackedTargetSeed(PipelineContext pctx, AbstractInsnNode keyLoad) {
+        MethodInsnNode invoke = nextReflectiveInvoke(keyLoad);
+        if (invoke == null) return null;
+        MethodInsnNode lookup = previousReflectiveLookup(invoke);
+        if (lookup == null) return null;
+        ReflectiveTarget target = reflectiveTarget(lookup);
+        if (target == null) return null;
+        L1Class clazz = pctx.classMap().get(target.owner());
+        if (clazz == null) return null;
+        L1Method matched = null;
+        for (L1Method method : clazz.methods()) {
+            if (!method.name().equals(target.name()) || !method.hasCode()) continue;
+            Type[] args = Type.getArgumentTypes(method.descriptor());
+            if (args.length != 1 || !Type.getType(Object[].class).equals(args[0])) continue;
+            if (matched != null) return null;
+            matched = method;
+        }
+        if (matched == null) return null;
+        Long seed = JvmKeyDispatchPass.findMethodSeed(
+            pctx,
+            JvmKeyDispatchPass.coverageKey(clazz.name(), matched.name(), matched.descriptor())
+        );
+        return seed != null ? seed : JvmKeyDispatchPass.methodSeed(
+            pctx,
+            clazz,
+            matched,
+            matched.asmNode()
+        );
+    }
+
+    private MethodInsnNode nextReflectiveInvoke(AbstractInsnNode keyLoad) {
+        int scanned = 0;
+        for (AbstractInsnNode scan = keyLoad.getNext(); scan != null && scanned++ < 512; scan = scan.getNext()) {
+            if (!(scan instanceof MethodInsnNode call)) continue;
+            if ("java/lang/reflect/Method".equals(call.owner) &&
+                "invoke".equals(call.name) &&
+                "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc)) {
+                return call;
+            }
+        }
+        return null;
+    }
+
+    private MethodInsnNode previousReflectiveLookup(MethodInsnNode invoke) {
+        int scanned = 0;
+        for (AbstractInsnNode scan = invoke.getPrevious(); scan != null && scanned++ < 1024; scan = scan.getPrevious()) {
+            if (!(scan instanceof MethodInsnNode call)) continue;
+            if ("java/lang/Class".equals(call.owner) &&
+                ("getMethod".equals(call.name) || "getDeclaredMethod".equals(call.name)) &&
+                "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;".equals(call.desc)) {
+                return call;
+            }
+        }
+        return null;
+    }
+
+    private ReflectiveTarget reflectiveTarget(MethodInsnNode lookup) {
+        String name = null;
+        String owner = null;
+        int scanned = 0;
+        for (AbstractInsnNode scan = lookup.getPrevious(); scan != null && scanned++ < 256; scan = scan.getPrevious()) {
+            if (!(scan instanceof LdcInsnNode ldc)) continue;
+            if (name == null && ldc.cst instanceof String value) {
+                name = value;
+                continue;
+            }
+            if (name != null && owner == null && ldc.cst instanceof Type type && type.getSort() == Type.OBJECT) {
+                owner = type.getInternalName();
+            }
+            if (name != null && owner != null) break;
+        }
+        return name != null && owner != null ? new ReflectiveTarget(owner, name) : null;
+    }
+
+    private record ReflectiveTarget(String owner, String name) {
+    }
+
+    private InsnList cloneInsnList(InsnList source) {
+        InsnList out = new InsnList();
+        Map<LabelNode, LabelNode> labels = new IdentityHashMap<>();
+        for (AbstractInsnNode insn = source.getFirst(); insn != null; insn = insn.getNext()) {
+            out.add(insn.clone(labels));
+        }
+        return out;
     }
 
     private Long keyedTargetSeed(PipelineContext pctx, AbstractInsnNode insn) {
         if (insn instanceof MethodInsnNode call) {
             if ("<init>".equals(call.name)) return null;
-            if (!isExactKeyedTarget(pctx, call.owner, call.name, call.desc)) {
-                return null;
-            }
-            return JvmKeyDispatchPass.findMethodSeed(
-                pctx,
-                JvmKeyDispatchPass.coverageKey(call.owner, call.name, call.desc)
-            );
+            return keyedTargetSeed(pctx, call.owner, call.name, call.desc);
         }
         if (insn instanceof InvokeDynamicInsnNode indy) {
             for (Object arg : indy.bsmArgs) {
                 if (!(arg instanceof Handle handle)) continue;
-                if (!isExactKeyedTarget(
+                Long seed = keyedTargetSeed(
                     pctx,
                     handle.getOwner(),
                     handle.getName(),
                     handle.getDesc()
-                )) {
-                    continue;
-                }
-                Long seed = JvmKeyDispatchPass.findMethodSeed(
-                    pctx,
-                    JvmKeyDispatchPass.coverageKey(
-                        handle.getOwner(),
-                        handle.getName(),
-                        handle.getDesc()
-                    )
                 );
                 if (seed != null) return seed;
             }
@@ -3576,17 +4129,58 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         return null;
     }
 
-    private boolean isExactKeyedTarget(
+    private Long keyedTargetSeed(
         PipelineContext pctx,
         String owner,
         String name,
         String desc
     ) {
+        Long recorded = JvmKeyDispatchPass.findMethodSeed(
+            pctx,
+            JvmKeyDispatchPass.coverageKey(owner, name, desc)
+        );
+        if (recorded != null) return recorded;
         L1Class targetClass = pctx.classMap().get(owner);
-        if (targetClass == null) return false;
-        L1Method targetMethod = targetClass.findMethod(name, desc);
-        if (targetMethod == null) return false;
-        return usesExternalEntrySeed(pctx, targetClass, targetMethod);
+        if (targetClass == null) return null;
+        L1Method targetMethod = findAsmMethod(targetClass, name, desc);
+        if (targetMethod == null) {
+            return null;
+        }
+        if (!targetMethod.hasCode() || isVirtualFamilyMethod(targetClass, targetMethod)) {
+            return JvmKeyDispatchPass.methodSeed(
+                pctx,
+                targetClass,
+                targetMethod,
+                targetMethod.asmNode()
+            );
+        }
+        if (!usesExternalEntrySeed(pctx, targetClass, targetMethod)) return null;
+        return JvmKeyDispatchPass.methodSeed(
+            pctx,
+            targetClass,
+            targetMethod,
+            targetMethod.asmNode()
+        );
+    }
+
+    private boolean isVirtualFamilyMethod(L1Class clazz, L1Method method) {
+        MethodNode mn = method.asmNode();
+        if (mn == null) return false;
+        if ("<init>".equals(mn.name) || "<clinit>".equals(mn.name)) return false;
+        if ((mn.access & Opcodes.ACC_STATIC) != 0) return false;
+        return (mn.access & Opcodes.ACC_PRIVATE) == 0;
+    }
+
+    private L1Method findAsmMethod(L1Class clazz, String name, String desc) {
+        L1Method direct = clazz.findMethod(name, desc);
+        if (direct != null) return direct;
+        for (L1Method method : clazz.methods()) {
+            MethodNode node = method.asmNode();
+            if (node != null && name.equals(node.name) && desc.equals(node.desc)) {
+                return method;
+            }
+        }
+        return null;
     }
 
     private boolean usesExternalEntrySeed(PipelineContext pctx, L1Class clazz, L1Method method) {
@@ -3630,15 +4224,40 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             (targetSeed ^ JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK);
     }
 
-    private void emitStaticDecodedLong(
+    private void emitDynamicDecodedLong(
         InsnList insns,
         long value,
+        CffBlockKeyState expectedKeys,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
         long seed
     ) {
-        long mask = nonZeroLong(JvmPassBytecode.mix(seed, 0x524157534545444CL));
-        JvmPassBytecode.pushLong(insns, value ^ mask);
-        JvmPassBytecode.pushLong(insns, mask);
-        insns.add(new InsnNode(Opcodes.LXOR));
+        emitEncryptedToken(
+            insns,
+            (int) (value >>> 32),
+            expectedKeys,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            seed ^ 0x5241574849474831L
+        );
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        emitEncryptedToken(
+            insns,
+            (int) value,
+            expectedKeys,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            seed ^ 0x5241574C4F5731L
+        );
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
     }
 
     private CffBlockKeyState syntheticHandlerSourceKey(

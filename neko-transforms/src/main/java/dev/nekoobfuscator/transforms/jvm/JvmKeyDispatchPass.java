@@ -52,7 +52,9 @@ public final class JvmKeyDispatchPass implements TransformPass {
     static final long INCOMING_KEY_MIX_MASK = 0x4E4B4F4A564D4B31L;
     private static final String PREPARED = "keyDispatch.preparedInPlaceSignatures";
     private static final String KEYED_DESC_BY_METHOD = "keyDispatch.keyedDescByMethod";
+    private static final String KEY_INDEX_BY_METHOD = "keyDispatch.keyIndexByMethod";
     private static final String REFLECTIVE_KEYED_ENTRIES = "keyDispatch.reflectiveKeyedEntries";
+    private static final String INDY_SAM_TARGETS = "keyDispatch.indySamTargets";
 
     @Override
     public String id() {
@@ -100,21 +102,29 @@ public final class JvmKeyDispatchPass implements TransformPass {
         boolean keyedDescriptor = keyedDescMap(ctx).containsKey(originalMethodKey);
         int incomingKeyLocal = -1;
         if (keyedDescriptor) {
-            incomingKeyLocal = addTrailingLongParameter(clazz, mn);
+            int keyIndex = keyIndexMap(ctx).getOrDefault(originalMethodKey, Type.getArgumentTypes(originalDesc).length);
+            incomingKeyLocal = addLongParameter(clazz, mn, keyIndex);
         }
 
         String methodKey = coverageKey(clazz, method);
+        String actualMethodKey = coverageKey(clazz.name(), mn.name, mn.desc);
         Map<String, Integer> locals = localMap(ctx, LOCAL_BY_METHOD);
         Integer existing = locals.get(methodKey);
+        if (existing == null && !actualMethodKey.equals(methodKey)) {
+            existing = locals.get(actualMethodKey);
+        }
         if (existing != null) {
             publishControlFlowLocal(ctx, methodKey, existing);
+            if (!actualMethodKey.equals(methodKey)) {
+                publishControlFlowLocal(ctx, actualMethodKey, existing);
+            }
             JvmObfuscationCoverage.get(ctx).safe(id(), clazz.name(), method.name(),
                 method.descriptor(), "key-local-already-present");
             return;
         }
 
         int keyLocal = incomingKeyLocal >= 0 ? incomingKeyLocal : mn.maxLocals;
-        long seed = methodSeed(pctx.masterSeed(), clazz, method, mn);
+        long seed = methodSeed(pctx, clazz, method, mn);
         InsnList prologue = new InsnList();
         if (incomingKeyLocal >= 0) {
             emitIncomingKeyMix(prologue, keyLocal, seed, INCOMING_KEY_MIX_MASK);
@@ -135,6 +145,9 @@ public final class JvmKeyDispatchPass implements TransformPass {
         pctx.invalidate(method);
 
         recordMethodKeyLocal(ctx, methodKey, keyLocal, seed);
+        if (!actualMethodKey.equals(methodKey)) {
+            recordMethodKeyLocal(ctx, actualMethodKey, keyLocal, seed);
+        }
         JvmObfuscationCoverage.get(ctx).full(id(), clazz.name(), method.name(),
             method.descriptor(), transfers == 0
                 ? "method-key-local"
@@ -158,7 +171,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
         MethodNode mn = method.asmNode();
         int keyLocal = mn.maxLocals;
-        long seed = methodSeed(pctx.masterSeed(), clazz, method, mn);
+        long seed = methodSeed(pctx, clazz, method, mn);
         InsnList prologue = new InsnList();
         emitKeyInit(prologue, keyLocal, seed, 0x6A766D4B65794C31L);
 
@@ -190,6 +203,10 @@ public final class JvmKeyDispatchPass implements TransformPass {
         publishControlFlowLocal(ctx, methodKey, keyLocal);
     }
 
+    static void recordMethodSeed(TransformContext ctx, String methodKey, long seed) {
+        seedMap(ctx).put(methodKey, seed);
+    }
+
     static void emitKeyInit(InsnList insns, int keyLocal, long seed, long mask) {
         JvmPassBytecode.pushLong(insns, seed ^ mask);
         JvmPassBytecode.pushLong(insns, mask);
@@ -209,6 +226,90 @@ public final class JvmKeyDispatchPass implements TransformPass {
         h = JvmPassBytecode.mix(h, mn.instructions == null ? 0 : mn.instructions.size());
         h = JvmPassBytecode.mix(h, mn.maxLocals);
         return h == 0L ? 0x5DEECE66DL : h;
+    }
+
+    static long methodSeed(PipelineContext pctx, L1Class clazz, L1Method method, MethodNode mn) {
+        if (!usesVirtualFamilySeed(mn)) {
+            return methodSeed(pctx.masterSeed(), clazz, method, mn);
+        }
+        String owner = virtualFamilyOwner(pctx, clazz, mn.name, mn.desc);
+        long h = pctx.masterSeed() ^ 0x9E3779B97F4A7C15L;
+        h = JvmPassBytecode.mix(h, owner.hashCode());
+        h = JvmPassBytecode.mix(h, mn.name.hashCode());
+        h = JvmPassBytecode.mix(h, mn.desc.hashCode());
+        h = JvmPassBytecode.mix(h, 0x5649525453454544L);
+        return h == 0L ? 0x5DEECE66DL : h;
+    }
+
+    private static boolean usesVirtualFamilySeed(MethodNode mn) {
+        if ("<init>".equals(mn.name) || "<clinit>".equals(mn.name)) return false;
+        return (mn.access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) == 0;
+    }
+
+    private static String virtualFamilyOwner(PipelineContext pctx, L1Class clazz, String name, String desc) {
+        String best = null;
+        best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, clazz.superName(), name, desc));
+        for (String iface : clazz.interfaces()) {
+            best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, iface, name, desc));
+        }
+        return best == null ? clazz.name() : best;
+    }
+
+    private static String virtualFamilyOwnerIn(PipelineContext pctx, String owner, String name, String desc) {
+        if (owner == null) return null;
+        L1Class clazz = pctx.classMap().get(owner);
+        if (clazz == null) return null;
+        String best = declaresAsmMethod(clazz, name, desc) ? clazz.name() : null;
+        best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, clazz.superName(), name, desc));
+        for (String iface : clazz.interfaces()) {
+            best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, iface, name, desc));
+        }
+        return best;
+    }
+
+    private static boolean declaresAsmMethod(L1Class clazz, String name, String desc) {
+        if (clazz.findMethod(name, desc) != null) return true;
+        for (L1Method method : clazz.methods()) {
+            MethodNode mn = method.asmNode();
+            if (mn != null && name.equals(mn.name) && desc.equals(mn.desc)) return true;
+        }
+        return false;
+    }
+
+    private static L1Method findAsmMethod(L1Class clazz, String name, String desc) {
+        L1Method direct = clazz.findMethod(name, desc);
+        if (direct != null) return direct;
+        for (L1Method method : clazz.methods()) {
+            MethodNode mn = method.asmNode();
+            if (mn != null && name.equals(mn.name) && desc.equals(mn.desc)) return method;
+        }
+        return null;
+    }
+
+    private static long pendingKeyedMethodSeed(PipelineContext pctx, L1Class clazz, L1Method method, String keyedDesc) {
+        MethodNode mn = method.asmNode();
+        if (usesVirtualFamilySeed(mn)) {
+            String owner = virtualFamilyOwner(pctx, clazz, mn.name, keyedDesc);
+            long h = pctx.masterSeed() ^ 0x9E3779B97F4A7C15L;
+            h = JvmPassBytecode.mix(h, owner.hashCode());
+            h = JvmPassBytecode.mix(h, mn.name.hashCode());
+            h = JvmPassBytecode.mix(h, keyedDesc.hashCode());
+            h = JvmPassBytecode.mix(h, 0x5649525453454544L);
+            return h == 0L ? 0x5DEECE66DL : h;
+        }
+        long h = pctx.masterSeed() ^ 0x9E3779B97F4A7C15L;
+        h = JvmPassBytecode.mix(h, clazz.name().hashCode());
+        h = JvmPassBytecode.mix(h, method.name().hashCode());
+        h = JvmPassBytecode.mix(h, keyedDesc.hashCode());
+        h = JvmPassBytecode.mix(h, mn.instructions == null ? 0 : mn.instructions.size());
+        h = JvmPassBytecode.mix(h, mn.maxLocals + 2);
+        return h == 0L ? 0x5DEECE66DL : h;
+    }
+
+    private static String betterVirtualRoot(String current, String candidate) {
+        if (candidate == null) return current;
+        if (current == null) return candidate;
+        return candidate.compareTo(current) < 0 ? candidate : current;
     }
 
     @SuppressWarnings("unchecked")
@@ -237,6 +338,16 @@ public final class JvmKeyDispatchPass implements TransformPass {
         if (map == null) {
             map = new LinkedHashMap<>();
             ctx.putPassData(KEYED_DESC_BY_METHOD, map);
+        }
+        return map;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Integer> keyIndexMap(TransformContext ctx) {
+        Map<String, Integer> map = ctx.getPassData(KEY_INDEX_BY_METHOD);
+        if (map == null) {
+            map = new LinkedHashMap<>();
+            ctx.putPassData(KEY_INDEX_BY_METHOD, map);
         }
         return map;
     }
@@ -305,20 +416,80 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
     private static void prepareKeyedDescriptors(PipelineContext pctx) {
         Map<String, String> keyed = keyedDescMap(pctx);
+        Map<String, Integer> keyIndexes = keyIndexMap(pctx);
+        Set<String> indySamTargets = indySamTargets(pctx);
+        Map<String, Integer> lambdaIndexes = lambdaKeyIndexes(pctx);
         for (L1Class clazz : pctx.classMap().values()) {
             for (L1Method method : clazz.methods()) {
                 if (TransformGuards.isRuntimeClass(clazz) || TransformGuards.isGeneratedMethod(method)) continue;
                 if (clazz.isAnnotation() || !canReceiveLongKey(method) || method.isNative()) continue;
                 if (overridesExternalMethod(pctx, clazz, method.asmNode(), method.descriptor())) continue;
+                if (indySamTargets.contains(coverageKey(clazz.name(), method.name(), method.descriptor()))) continue;
                 String original = method.descriptor();
-                String keyedDesc = appendLongParameter(original);
-                keyed.put(coverageKey(clazz.name(), method.name(), original), keyedDesc);
+                String methodKey = coverageKey(clazz.name(), method.name(), original);
+                int keyIndex = lambdaIndexes.getOrDefault(methodKey, Type.getArgumentTypes(original).length);
+                String keyedDesc = insertLongParameter(original, keyIndex);
+                keyed.put(methodKey, keyedDesc);
+                keyIndexes.put(methodKey, keyIndex);
                 if (!method.hasCode()) {
                     method.asmNode().desc = keyedDesc;
                     clazz.markDirty();
                 }
             }
         }
+    }
+
+    private static Set<String> indySamTargets(PipelineContext pctx) {
+        Set<String> targets = pctx.getPassData(INDY_SAM_TARGETS);
+        if (targets != null) return targets;
+        targets = new java.util.LinkedHashSet<>();
+        for (L1Class clazz : pctx.classMap().values()) {
+            for (L1Method method : clazz.methods()) {
+                if (!method.hasCode()) continue;
+                for (AbstractInsnNode insn = method.instructions().getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof InvokeDynamicInsnNode indy)) continue;
+                    if (!isLambdaMetafactory(indy) || indy.bsmArgs.length == 0 || !(indy.bsmArgs[0] instanceof Type samType)) {
+                        continue;
+                    }
+                    Type owner = Type.getReturnType(indy.desc);
+                    if (owner.getSort() == Type.OBJECT) {
+                        targets.add(coverageKey(owner.getInternalName(), indy.name, samType.getDescriptor()));
+                    }
+                }
+            }
+        }
+        pctx.putPassData(INDY_SAM_TARGETS, targets);
+        return targets;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Integer> lambdaKeyIndexes(PipelineContext pctx) {
+        Map<String, Integer> indexes = pctx.getPassData("keyDispatch.lambdaKeyIndexes");
+        if (indexes != null) return indexes;
+        indexes = new LinkedHashMap<>();
+        for (L1Class clazz : pctx.classMap().values()) {
+            for (L1Method method : clazz.methods()) {
+                if (!method.hasCode()) continue;
+                for (AbstractInsnNode insn = method.instructions().getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof InvokeDynamicInsnNode indy)) continue;
+                    if (!isLambdaMetafactory(indy) || indy.bsmArgs.length <= 1 || !(indy.bsmArgs[1] instanceof Handle handle)) {
+                        continue;
+                    }
+                    int captured = Type.getArgumentTypes(indy.desc).length;
+                    int keyIndex = handle.getTag() == Opcodes.H_INVOKESTATIC ? captured : Math.max(0, captured - 1);
+                    String key = coverageKey(handle.getOwner(), handle.getName(), handle.getDesc());
+                    Integer previous = indexes.putIfAbsent(key, keyIndex);
+                    if (previous != null && previous != keyIndex) {
+                        throw new IllegalStateException(
+                            "Conflicting LambdaMetafactory key insertion index for " +
+                                handle.getOwner() + "." + handle.getName() + handle.getDesc()
+                        );
+                    }
+                }
+            }
+        }
+        pctx.putPassData("keyDispatch.lambdaKeyIndexes", indexes);
+        return indexes;
     }
 
     private static boolean canReceiveLongKey(L1Method method) {
@@ -375,18 +546,23 @@ public final class JvmKeyDispatchPass implements TransformPass {
         }
     }
 
-    private static int addTrailingLongParameter(L1Class clazz, MethodNode mn) {
-        int insertLocal = argumentLocalSize(mn.access, mn.desc);
+    private static int addLongParameter(L1Class clazz, MethodNode mn, int keyIndex) {
+        int insertLocal = argumentLocalOffset(mn.access, mn.desc, keyIndex);
         shiftLocals(mn, insertLocal, 2);
-        mn.desc = appendLongParameter(mn.desc);
+        mn.desc = insertLongParameter(mn.desc, keyIndex);
         mn.maxLocals = Math.max(mn.maxLocals + 2, insertLocal + 2);
         clazz.markDirty();
         return insertLocal;
     }
 
-    private static int argumentLocalSize(int access, String desc) {
+    private static int argumentLocalOffset(int access, String desc, int endExclusive) {
         int size = (access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
-        for (Type arg : Type.getArgumentTypes(desc)) {
+        Type[] args = Type.getArgumentTypes(desc);
+        if (endExclusive < 0 || endExclusive > args.length) {
+            throw new IllegalStateException("Invalid key parameter index " + endExclusive + " for " + desc);
+        }
+        for (int i = 0; i < endExclusive; i++) {
+            Type arg = args[i];
             size += arg.getSize();
         }
         return size;
@@ -413,9 +589,16 @@ public final class JvmKeyDispatchPass implements TransformPass {
         int transfers = 0;
         for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof InvokeDynamicInsnNode indy) {
-                if (rewriteInvokeDynamic(pctx, indy)) {
+                IndyKeyRewrite rewrite = rewriteInvokeDynamic(pctx, indy);
+                if (rewrite.changed()) {
                     InsnList before = new InsnList();
-                    before.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+                    if (rewrite.canonicalSeed() == null) {
+                        before.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+                    } else {
+                        LdcInsnNode rawKey = new LdcInsnNode(incomingRawForCanonical(rewrite.canonicalSeed()));
+                        before.add(rawKey);
+                        cffKeyLoadTargetSeeds(pctx).put(rawKey, rewrite.canonicalSeed());
+                    }
                     markGenerated(pctx, before);
                     mn.instructions.insertBefore(indy, before);
                     transfers++;
@@ -436,8 +619,12 @@ public final class JvmKeyDispatchPass implements TransformPass {
             if ("<init>".equals(call.name)) continue;
             String keyedDesc = resolveKeyedDescriptor(pctx, call.owner, call.name, call.desc);
             if (keyedDesc == null) continue;
+            int keyIndex = keyIndexMap(pctx).getOrDefault(
+                coverageKey(call.owner, call.name, call.desc),
+                Type.getArgumentTypes(call.desc).length
+            );
             call.desc = keyedDesc;
-            insnInsertBefore(pctx, mn, call, keyLocal);
+            insertKeyArgumentBeforeCall(pctx, mn, call, keyLocal, keyIndex);
             transfers++;
         }
         if (transfers > 0) {
@@ -446,7 +633,43 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return transfers;
     }
 
-    private static boolean rewriteInvokeDynamic(PipelineContext pctx, InvokeDynamicInsnNode indy) {
+    private static IndyKeyRewrite rewriteInvokeDynamic(PipelineContext pctx, InvokeDynamicInsnNode indy) {
+        if (isLambdaMetafactory(indy)
+            && indy.bsmArgs.length > 1
+            && indy.bsmArgs[1] instanceof Handle lambdaHandle) {
+            String keyedDesc = keyedDescMap(pctx).get(
+                coverageKey(lambdaHandle.getOwner(), lambdaHandle.getName(), lambdaHandle.getDesc())
+            );
+            if (keyedDesc != null) {
+                indy.bsmArgs[1] = new Handle(
+                    lambdaHandle.getTag(),
+                    lambdaHandle.getOwner(),
+                    lambdaHandle.getName(),
+                    keyedDesc,
+                    lambdaHandle.isInterface()
+                );
+                indy.desc = appendLongParameter(indy.desc);
+                Long targetSeed = findMethodSeed(
+                    pctx,
+                    coverageKey(lambdaHandle.getOwner(), lambdaHandle.getName(), keyedDesc)
+                );
+                if (targetSeed == null) {
+                    L1Class targetClass = pctx.classMap().get(lambdaHandle.getOwner());
+                    L1Method targetMethod = targetClass == null
+                        ? null
+                        : findAsmMethod(targetClass, lambdaHandle.getName(), keyedDesc);
+                    if (targetClass != null && targetMethod != null && targetMethod.hasCode()) {
+                        targetSeed = methodSeed(pctx, targetClass, targetMethod, targetMethod.asmNode());
+                    } else if (targetClass != null) {
+                        targetMethod = findAsmMethod(targetClass, lambdaHandle.getName(), lambdaHandle.getDesc());
+                        if (targetMethod != null && targetMethod.hasCode()) {
+                            targetSeed = pendingKeyedMethodSeed(pctx, targetClass, targetMethod, keyedDesc);
+                        }
+                    }
+                }
+                return new IndyKeyRewrite(true, targetSeed);
+            }
+        }
         boolean changed = false;
         for (int i = 0; i < indy.bsmArgs.length; i++) {
             Object arg = indy.bsmArgs[i];
@@ -460,7 +683,20 @@ public final class JvmKeyDispatchPass implements TransformPass {
         if (changed) {
             indy.desc = appendLongParameter(indy.desc);
         }
-        return changed;
+        return new IndyKeyRewrite(changed, null);
+    }
+
+    private static long incomingRawForCanonical(long targetSeed) {
+        return (targetSeed - INCOMING_KEY_MIX_MASK) ^
+            (targetSeed ^ INCOMING_KEY_MIX_MASK);
+    }
+
+    private static boolean isLambdaMetafactory(InvokeDynamicInsnNode indy) {
+        return indy.bsm != null
+            && "java/lang/invoke/LambdaMetafactory".equals(indy.bsm.getOwner())
+            && ("metafactory".equals(indy.bsm.getName()) || "altMetafactory".equals(indy.bsm.getName()))
+            && indy.bsmArgs.length > 0
+            && indy.bsmArgs[0] instanceof Type;
     }
 
     private static String resolveKeyedDescriptor(PipelineContext pctx, String owner, String name, String desc) {
@@ -623,6 +859,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         int targetLocal = allocateLocal(mn, Type.getType(Object.class));
         int methodLocal = allocateLocal(mn, Type.getType(Object.class));
         int newArgsLocal = allocateLocal(mn, Type.getType(Object[].class));
+        Long targetSeed = reflectiveInvokeTargetSeed(pctx, call);
         LabelNode copyExisting = new LabelNode();
         LabelNode storeKey = new LabelNode();
         InsnList before = new InsnList();
@@ -659,7 +896,11 @@ public final class JvmKeyDispatchPass implements TransformPass {
         before.add(new InsnNode(Opcodes.ARRAYLENGTH));
         JvmPassBytecode.pushInt(before, 1);
         before.add(new InsnNode(Opcodes.ISUB));
-        before.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, keyLocal);
+        before.add(keyLoad);
+        if (targetSeed != null) {
+            cffKeyLoadTargetSeeds(pctx).put(keyLoad, targetSeed);
+        }
         before.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf",
             "(J)Ljava/lang/Long;", false));
         before.add(new InsnNode(Opcodes.AASTORE));
@@ -671,9 +912,106 @@ public final class JvmKeyDispatchPass implements TransformPass {
         mn.instructions.insertBefore(call, before);
     }
 
-    private static void insnInsertBefore(PipelineContext pctx, MethodNode mn, MethodInsnNode call, int keyLocal) {
+    private static Long reflectiveInvokeTargetSeed(PipelineContext pctx, MethodInsnNode invokeCall) {
+        MethodInsnNode lookupCall = previousReflectiveLookup(invokeCall);
+        if (lookupCall == null) return null;
+        ReflectiveLookup lookup = reflectiveLookupTarget(lookupCall);
+        if (lookup == null) return null;
+        L1Class clazz = pctx.classMap().get(lookup.owner());
+        if (clazz == null) return null;
+        L1Method matched = null;
+        for (L1Method method : clazz.methods()) {
+            if (!method.name().equals(lookup.name()) || !method.hasCode()) continue;
+            Type[] args = Type.getArgumentTypes(method.descriptor());
+            if (args.length == 0 || !Type.LONG_TYPE.equals(args[args.length - 1])) continue;
+            if (matched == null || method.descriptor().compareTo(matched.descriptor()) < 0) {
+                matched = method;
+            }
+        }
+        if (matched == null) return null;
+        Long seed = findMethodSeed(pctx, coverageKey(clazz.name(), matched.name(), matched.descriptor()));
+        return seed != null ? seed : methodSeed(pctx, clazz, matched, matched.asmNode());
+    }
+
+    private static MethodInsnNode previousReflectiveLookup(MethodInsnNode invokeCall) {
+        int scanned = 0;
+        for (AbstractInsnNode scan = invokeCall.getPrevious(); scan != null && scanned++ < 256; scan = scan.getPrevious()) {
+            if (!(scan instanceof MethodInsnNode call)) continue;
+            if ("java/lang/Class".equals(call.owner)
+                && ("getMethod".equals(call.name) || "getDeclaredMethod".equals(call.name))
+                && "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;".equals(call.desc)) {
+                return call;
+            }
+        }
+        return null;
+    }
+
+    private static ReflectiveLookup reflectiveLookupTarget(MethodInsnNode lookupCall) {
+        String name = null;
+        String owner = null;
+        int scanned = 0;
+        for (AbstractInsnNode scan = lookupCall.getPrevious(); scan != null && scanned++ < 96; scan = scan.getPrevious()) {
+            if (!(scan instanceof LdcInsnNode ldc)) continue;
+            if (name == null && ldc.cst instanceof String value) {
+                name = value;
+                continue;
+            }
+            if (name != null && owner == null && ldc.cst instanceof Type type && type.getSort() == Type.OBJECT) {
+                owner = type.getInternalName();
+            }
+            if (name != null && owner != null) break;
+        }
+        return name != null && owner != null ? new ReflectiveLookup(owner, name) : null;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<AbstractInsnNode, Long> cffKeyLoadTargetSeeds(PipelineContext pctx) {
+        Map<AbstractInsnNode, Long> map = pctx.getPassData(JvmMethodParameterObfuscationPass.CFF_KEY_LOAD_TARGET_SEED);
+        if (map == null) {
+            map = new IdentityHashMap<>();
+            pctx.putPassData(JvmMethodParameterObfuscationPass.CFF_KEY_LOAD_TARGET_SEED, map);
+        }
+        return map;
+    }
+
+    private static void insertKeyArgumentBeforeCall(
+        PipelineContext pctx,
+        MethodNode mn,
+        MethodInsnNode call,
+        int keyLocal,
+        int keyIndex
+    ) {
+        Type[] keyedArgs = Type.getArgumentTypes(call.desc);
+        Type[] originalArgs = new Type[keyedArgs.length - 1];
+        for (int i = 0, j = 0; i < keyedArgs.length; i++) {
+            if (i == keyIndex) continue;
+            originalArgs[j++] = keyedArgs[i];
+        }
+        int[] locals = new int[originalArgs.length];
+        for (int i = originalArgs.length - 1; i >= 0; i--) {
+            locals[i] = allocateLocal(mn, originalArgs[i]);
+        }
+        int receiverLocal = -1;
+        boolean isStatic = call.getOpcode() == Opcodes.INVOKESTATIC;
+        if (!isStatic) {
+            receiverLocal = allocateLocal(mn, Type.getType(Object.class));
+        }
         InsnList before = new InsnList();
-        before.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        for (int i = originalArgs.length - 1; i >= 0; i--) {
+            before.add(new VarInsnNode(originalArgs[i].getOpcode(Opcodes.ISTORE), locals[i]));
+        }
+        if (!isStatic) {
+            before.add(new VarInsnNode(Opcodes.ASTORE, receiverLocal));
+            before.add(new VarInsnNode(Opcodes.ALOAD, receiverLocal));
+        }
+        for (int i = 0; i < keyedArgs.length; i++) {
+            if (i == keyIndex) {
+                before.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+            } else {
+                int originalIndex = i < keyIndex ? i : i - 1;
+                before.add(new VarInsnNode(originalArgs[originalIndex].getOpcode(Opcodes.ILOAD), locals[originalIndex]));
+            }
+        }
         markGenerated(pctx, before);
         mn.instructions.insertBefore(call, before);
     }
@@ -694,15 +1032,26 @@ public final class JvmKeyDispatchPass implements TransformPass {
     }
 
     private static String appendLongParameter(String desc) {
+        return insertLongParameter(desc, Type.getArgumentTypes(desc).length);
+    }
+
+    private static String insertLongParameter(String desc, int index) {
         Type returnType = Type.getReturnType(desc);
         Type[] args = Type.getArgumentTypes(desc);
+        if (index < 0 || index > args.length) {
+            throw new IllegalStateException("Invalid key parameter index " + index + " for " + desc);
+        }
         Type[] keyed = new Type[args.length + 1];
-        System.arraycopy(args, 0, keyed, 0, args.length);
-        keyed[args.length] = Type.LONG_TYPE;
+        System.arraycopy(args, 0, keyed, 0, index);
+        keyed[index] = Type.LONG_TYPE;
+        System.arraycopy(args, index, keyed, index + 1, args.length - index);
         return Type.getMethodDescriptor(returnType, keyed);
     }
 
     static String coverageKey(String owner, String name, String desc) {
         return owner + "." + name + desc;
     }
+
+    private record IndyKeyRewrite(boolean changed, Long canonicalSeed) {}
+
 }
