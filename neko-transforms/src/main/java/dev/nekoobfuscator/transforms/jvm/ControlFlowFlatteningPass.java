@@ -74,10 +74,10 @@ public final class ControlFlowFlatteningPass implements TransformPass {
     private static final int DISPATCH_OUTLINER_BLOCK_THRESHOLD = 12;
     private static final int DISPATCH_OUTLINER_EDGE_THRESHOLD = 16;
     private static final int DISPATCH_OUTLINER_HANDLER_THRESHOLD = 4;
-    private static final int TRANSITION_OUTLINER_ESTIMATED_CODE_PRESSURE = 52_000;
-    private static final int TRANSITION_OUTLINER_BLOCK_THRESHOLD = 96;
-    private static final int TRANSITION_OUTLINER_EDGE_THRESHOLD = 160;
-    private static final int TRANSITION_OUTLINER_HANDLER_THRESHOLD = 16;
+    private static final int TRANSITION_OUTLINER_ESTIMATED_CODE_PRESSURE = 24_000;
+    private static final int TRANSITION_OUTLINER_BLOCK_THRESHOLD = 48;
+    private static final int TRANSITION_OUTLINER_EDGE_THRESHOLD = 80;
+    private static final int TRANSITION_OUTLINER_HANDLER_THRESHOLD = 8;
     private static final long METHOD_KEY_PC_MIX = 0x9E3779B97F4A7C15L;
     private CffClassKeyTable activeKeyTable;
 
