@@ -426,7 +426,6 @@ public final class JvmRenamerPass implements TransformPass {
         if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
         if ((method.access & Opcodes.ACC_NATIVE) != 0) return false;
         if (clazz.isAnnotation()) return false;
-        if (TransformGuards.isReflectionMethodNamePinned(pctx, clazz.name(), method.name)) return false;
         if ("main".equals(method.name)
             && "([Ljava/lang/String;)V".equals(method.desc)
             && (method.access & Opcodes.ACC_STATIC) != 0) {

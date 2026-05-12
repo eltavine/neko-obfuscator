@@ -13,6 +13,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.InvalidKeyException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,6 +102,9 @@ public final class JvmStringObfuscationPass implements TransformPass {
         MethodNode mn = method.asmNode();
         int transformed = 0;
         int ordinal = 0;
+        boolean hasLoopStringCacheInit = false;
+        Set<AbstractInsnNode> loopInstructions = loopRegionInstructions(mn);
+        InsnList loopStringCacheInit = new InsnList();
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!metadata.applicationInstructions().contains(insn)) continue;
             ControlFlowFlatteningPass.CffInstructionState state =
@@ -118,19 +123,39 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
                 StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, siteSeed, encrypted);
                 InsnList replacement = new InsnList();
-                emitDecodedStringCall(
-                    pctx,
-                    clazz,
-                    replacement,
-                    encrypted.length,
-                    siteSeed,
-                    metadata,
-                    state,
-                    algorithm,
-                    byteLayer,
-                    cipherCache,
-                    siteCache
-                );
+                if (loopInstructions.contains(insn)) {
+                    int cacheLocal = mn.maxLocals++;
+                    loopStringCacheInit.add(new InsnNode(Opcodes.ACONST_NULL));
+                    loopStringCacheInit.add(new VarInsnNode(Opcodes.ASTORE, cacheLocal));
+                    hasLoopStringCacheInit = true;
+                    emitLoopCachedString(replacement, cacheLocal, () -> emitDecodedStringCall(
+                        pctx,
+                        clazz,
+                        replacement,
+                        encrypted.length,
+                        siteSeed,
+                        metadata,
+                        state,
+                        algorithm,
+                        byteLayer,
+                        cipherCache,
+                        siteCache
+                    ));
+                } else {
+                    emitDecodedStringCall(
+                        pctx,
+                        clazz,
+                        replacement,
+                        encrypted.length,
+                        siteSeed,
+                        metadata,
+                        state,
+                        algorithm,
+                        byteLayer,
+                        cipherCache,
+                        siteCache
+                    );
+                }
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
                 mn.instructions.insertBefore(insn, replacement);
                 mn.instructions.remove(insn);
@@ -151,18 +176,25 @@ public final class JvmStringObfuscationPass implements TransformPass {
                         mn,
                         indy,
                         concat,
-                        ordinal
+                        ordinal,
+                        loopInstructions.contains(insn),
+                        loopStringCacheInit
                     );
                     JvmKeyDispatchPass.markGenerated(pctx, result.instructions());
                     mn.instructions.insertBefore(insn, result.instructions());
                     mn.instructions.remove(insn);
                     transformed += result.encryptedStrings();
                     ordinal += result.encryptedStrings();
+                    hasLoopStringCacheInit |= result.usesLoopCache();
                 }
             }
         }
 
         if (transformed > 0) {
+            if (hasLoopStringCacheInit) {
+                JvmKeyDispatchPass.markGenerated(pctx, loopStringCacheInit);
+                mn.instructions.insert(loopStringCacheInit);
+            }
             mn.maxStack = Math.max(mn.maxStack, 32);
             clazz.markDirty();
             pctx.invalidate(method);
@@ -185,10 +217,13 @@ public final class JvmStringObfuscationPass implements TransformPass {
         MethodNode mn,
         InvokeDynamicInsnNode indy,
         ConcatPlan concat,
-        int ordinal
+        int ordinal,
+        boolean loopSite,
+        InsnList loopStringCacheInit
     ) {
         Type[] args = Type.getArgumentTypes(indy.desc);
         long helperSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal) ^ 0x5354524341543131L;
+        List<String> externalStrings = loopSite ? concatStringConstants(concat) : List.of();
         ConcatRewriteResult helper = installConcatHelper(
             pctx,
             clazz,
@@ -199,9 +234,38 @@ public final class JvmStringObfuscationPass implements TransformPass {
             concat,
             ordinal,
             args,
-            helperSeed
+            helperSeed,
+            externalStrings
         );
         InsnList out = new InsnList();
+        int externalized = 0;
+        boolean usesLoopCache = false;
+        for (String value : externalStrings) {
+            long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + externalized);
+            Algorithm algorithm = algorithmFor(ordinal + externalized, siteSeed, metadata, state);
+            ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state);
+            byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer);
+            CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
+            StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, siteSeed, payload);
+            int cacheLocal = mn.maxLocals++;
+            loopStringCacheInit.add(new InsnNode(Opcodes.ACONST_NULL));
+            loopStringCacheInit.add(new VarInsnNode(Opcodes.ASTORE, cacheLocal));
+            usesLoopCache = true;
+            emitLoopCachedString(out, cacheLocal, () -> emitDecodedStringCall(
+                pctx,
+                clazz,
+                out,
+                payload.length,
+                siteSeed,
+                metadata,
+                state,
+                algorithm,
+                byteLayer,
+                cipherCache,
+                siteCache
+            ));
+            externalized++;
+        }
         out.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
         out.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
         out.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
@@ -210,10 +274,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
             Opcodes.INVOKESTATIC,
             clazz.name(),
             helper.helperName(),
-            concatHelperDescriptor(args),
+            concatHelperDescriptor(args, externalStrings.size()),
             (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0
         ));
-        return new ConcatRewriteResult(out, helper.encryptedStrings(), null);
+        return new ConcatRewriteResult(out, helper.encryptedStrings() + externalized, null, usesLoopCache);
     }
 
     private ConcatRewriteResult installConcatHelper(
@@ -226,7 +290,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ConcatPlan concat,
         int ordinal,
         Type[] args,
-        long helperSeed
+        long helperSeed,
+        List<String> externalStrings
     ) {
         String name = uniqueMethodName(
             clazz,
@@ -235,7 +300,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         MethodNode helper = new MethodNode(
             Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
             name,
-            concatHelperDescriptor(args),
+            concatHelperDescriptor(args, externalStrings.size()),
             null,
             null
         );
@@ -245,14 +310,14 @@ public final class JvmStringObfuscationPass implements TransformPass {
             argLocals[i] = nextLocal;
             nextLocal += args[i].getSize();
         }
+        Map<String, Integer> decodedStrings = new LinkedHashMap<>();
+        for (String value : externalStrings) {
+            decodedStrings.put(value, nextLocal++);
+        }
         int guardLocal = nextLocal++;
         int pathKeyLocal = nextLocal++;
         int blockKeyLocal = nextLocal++;
         int pcLocal = nextLocal++;
-        int methodKeyLocal = nextLocal;
-        nextLocal += 2;
-
-        Map<String, Integer> decodedStrings = new LinkedHashMap<>();
         for (ConcatPiece piece : concat.pieces()) {
             if (piece instanceof LiteralPiece literal && !literal.value().isEmpty()) {
                 decodedStrings.putIfAbsent(literal.value(), -1);
@@ -261,6 +326,11 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 && !value.isEmpty()) {
                 decodedStrings.putIfAbsent(value, -1);
             }
+        }
+        boolean hasInternalDecodedStrings = decodedStrings.containsValue(-1);
+        int methodKeyLocal = hasInternalDecodedStrings ? nextLocal : -1;
+        if (hasInternalDecodedStrings) {
+            nextLocal += 2;
         }
 
         ControlFlowFlatteningPass.CffMethodMetadata helperMetadata =
@@ -278,9 +348,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
             );
         helper.maxLocals = nextLocal;
         helper.maxStack = 32;
-        emitRecoverMethodSeedLocal(helper.instructions, helperSeed, helperMetadata, state, methodKeyLocal);
+        if (hasInternalDecodedStrings) {
+            emitRecoverMethodSeedLocal(helper.instructions, helperSeed, helperMetadata, state, methodKeyLocal);
+        }
         int encrypted = 0;
         for (String value : new ArrayList<>(decodedStrings.keySet())) {
+            if (decodedStrings.get(value) != -1) continue;
             nextLocal = Math.max(nextLocal, helper.maxLocals);
             int local = nextLocal++;
             helper.maxLocals = nextLocal;
@@ -348,17 +421,97 @@ public final class JvmStringObfuscationPass implements TransformPass {
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
         clazz.markDirty();
-        return new ConcatRewriteResult(null, encrypted, name);
+        return new ConcatRewriteResult(null, encrypted, name, false);
     }
 
     private String concatHelperDescriptor(Type[] args) {
-        Type[] helperArgs = new Type[args.length + 4];
+        return concatHelperDescriptor(args, 0);
+    }
+
+    private String concatHelperDescriptor(Type[] args, int externalStrings) {
+        Type[] helperArgs = new Type[args.length + externalStrings + 4];
         System.arraycopy(args, 0, helperArgs, 0, args.length);
-        helperArgs[args.length] = Type.INT_TYPE;
-        helperArgs[args.length + 1] = Type.INT_TYPE;
-        helperArgs[args.length + 2] = Type.INT_TYPE;
-        helperArgs[args.length + 3] = Type.INT_TYPE;
+        for (int i = 0; i < externalStrings; i++) {
+            helperArgs[args.length + i] = Type.getType(String.class);
+        }
+        int keyOffset = args.length + externalStrings;
+        helperArgs[keyOffset] = Type.INT_TYPE;
+        helperArgs[keyOffset + 1] = Type.INT_TYPE;
+        helperArgs[keyOffset + 2] = Type.INT_TYPE;
+        helperArgs[keyOffset + 3] = Type.INT_TYPE;
         return Type.getMethodDescriptor(Type.getType(String.class), helperArgs);
+    }
+
+    private List<String> concatStringConstants(ConcatPlan concat) {
+        Map<String, Boolean> values = new LinkedHashMap<>();
+        for (ConcatPiece piece : concat.pieces()) {
+            if (piece instanceof LiteralPiece literal && !literal.value().isEmpty()) {
+                values.putIfAbsent(literal.value(), Boolean.TRUE);
+            } else if (piece instanceof ConstPiece constant
+                && constant.value() instanceof String value
+                && !value.isEmpty()) {
+                values.putIfAbsent(value, Boolean.TRUE);
+            }
+        }
+        return new ArrayList<>(values.keySet());
+    }
+
+    private void emitLoopCachedString(
+        InsnList insns,
+        int cacheLocal,
+        Runnable decodeEmitter
+    ) {
+        LabelNode done = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cacheLocal));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, done));
+        insns.add(new InsnNode(Opcodes.POP));
+        decodeEmitter.run();
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, cacheLocal));
+        insns.add(done);
+    }
+
+    private Set<AbstractInsnNode> loopRegionInstructions(MethodNode mn) {
+        AbstractInsnNode[] nodes = mn.instructions.toArray();
+        Map<AbstractInsnNode, Integer> indexByNode = new IdentityHashMap<>();
+        for (int i = 0; i < nodes.length; i++) {
+            indexByNode.put(nodes[i], i);
+        }
+        Set<AbstractInsnNode> loop = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int i = 0; i < nodes.length; i++) {
+            AbstractInsnNode node = nodes[i];
+            if (node instanceof JumpInsnNode jump) {
+                markBackwardRegion(loop, nodes, indexByNode, i, jump.label);
+            } else if (node instanceof org.objectweb.asm.tree.LookupSwitchInsnNode lookup) {
+                markBackwardRegion(loop, nodes, indexByNode, i, lookup.dflt);
+                for (LabelNode label : lookup.labels) {
+                    markBackwardRegion(loop, nodes, indexByNode, i, label);
+                }
+            } else if (node instanceof org.objectweb.asm.tree.TableSwitchInsnNode table) {
+                markBackwardRegion(loop, nodes, indexByNode, i, table.dflt);
+                for (LabelNode label : table.labels) {
+                    markBackwardRegion(loop, nodes, indexByNode, i, label);
+                }
+            }
+        }
+        return loop;
+    }
+
+    private void markBackwardRegion(
+        Set<AbstractInsnNode> loop,
+        AbstractInsnNode[] nodes,
+        Map<AbstractInsnNode, Integer> indexByNode,
+        int sourceIndex,
+        LabelNode target
+    ) {
+        Integer targetIndex = indexByNode.get(target);
+        if (targetIndex == null || targetIndex > sourceIndex) {
+            return;
+        }
+        for (int i = targetIndex; i <= sourceIndex; i++) {
+            loop.add(nodes[i]);
+        }
     }
 
     private boolean emitDecodedStringLoad(
@@ -1142,10 +1295,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         );
         if (!inlinePayload) {
             installPayloadInit(pctx, clazz, cache, encrypted);
-            installInjectedFieldReflectionFilter(pctx, clazz, payloadField);
         }
-        installInjectedFieldReflectionFilter(pctx, clazz, fingerprintField);
-        installInjectedFieldReflectionFilter(pctx, clazz, stringField);
         caches.put(key, cache);
         clazz.markDirty();
         return cache;
@@ -1227,7 +1377,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
 
         CipherCache cache = new CipherCache(clazz.name(), fieldName, algorithm, false);
         installCipherCacheInit(pctx, clazz, cache);
-        installInjectedFieldReflectionFilter(pctx, clazz, fieldName);
         classCaches.put(algorithm, cache);
         clazz.markDirty();
         return cache;
@@ -1449,7 +1598,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ));
         insns.add(new JumpInsnNode(Opcodes.IFNE, skip));
         insns.add(syntheticDone);
-        emitInjectedFieldTest(insns, fieldLocal, clazz, fieldName, skip);
         insns.add(keep);
         insns.add(new VarInsnNode(Opcodes.ALOAD, filteredLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, writeLocal));
@@ -1844,7 +1992,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
         }
     }
 
-    private record ConcatRewriteResult(InsnList instructions, int encryptedStrings, String helperName) {}
+    private record ConcatRewriteResult(
+        InsnList instructions,
+        int encryptedStrings,
+        String helperName,
+        boolean usesLoopCache
+    ) {}
 
     private record CipherCache(String owner, String fieldName, Algorithm algorithm, boolean inline) {}
 

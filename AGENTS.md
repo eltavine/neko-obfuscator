@@ -1,7 +1,6 @@
 # Agent Instructions
 
-
-#Native Obfuscator Agent Instructions
+#Neko Obfuscator Agent Instructions
 
 ## Scope discipline
 
@@ -25,7 +24,7 @@
   checkbox update before continuing.
 - Do not revert or overwrite unrelated user work. Work with existing changes if
   they affect the task.
-- Use the repository/system `./gradlew`; do not create, copy, or use a
+- Ask for permission to use the repository/system `./gradlew`; do not create, copy, or use a
   temporary `gradlew`.
 
 ## Task planning and clarification
@@ -82,6 +81,29 @@
 - Hidden method keys and control-flow keys must stay semantically linked.
   Key material passed between transformed methods must match the target method's
   actual ABI, descriptor, dispatch family, and runtime entry path.
+- Hidden `long` key parameters and packed `Object[]` parameter carriers are
+  mandatory obfuscation surfaces. Do not remove, bypass, downgrade, or exclude
+  them for reflection, loaders, annotations, MethodHandle, LambdaMetafactory,
+  virtual/interface dispatch, benchmarks, tests, or compatibility fixes.
+  Reflection and dynamic invocation compatibility must be achieved by generic
+  rewriting of lookup names, lookup descriptors, argument arrays, resource
+  paths, metadata, and generated-member filters to the final obfuscated ABI.
+  Do not preserve original application descriptors or names as a workaround,
+  except for true JVM or external ABI entry points such as constructors,
+  class initializers, `main([Ljava/lang/String;)V`, and inherited external API
+  override slots.
+- Reflection, MethodHandle, loader, annotation, and dynamic-invocation
+  compatibility rewrites are not allowed to expose plaintext class/member
+  names, descriptor strings, resource paths, parameter-type constants, seed
+  material, or invoke adapters. Any inserted bytecode that represents
+  user-visible reflective data must remain eligible for CFF, constant
+  obfuscation, string obfuscation, and invokedynamic obfuscation, or must emit
+  an equivalent protected form directly. Reflection lookup names, descriptor
+  arrays, annotation element calls, resource paths, and rewritten reflective
+  invocation arguments must not remain as plain strings or plain constants after
+  compatibility rewriting. Generated markers may protect only transform
+  bookkeeping that would be invalid to reprocess; they must not be used to skip
+  obfuscation of reflective application data.
 - Dynamic key propagation is mandatory. Do not replace dynamic key transfer with
   static `stateKey`, static seed constants, descriptor-only recomputation, or
   any equivalent uncorrelated key source.

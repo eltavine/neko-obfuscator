@@ -9,7 +9,9 @@ import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -128,13 +130,16 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         HelperNames helpers = null;
         int transformed = 0;
         int ordinal = 0;
+        boolean hasFlowCacheInit = false;
+        Set<AbstractInsnNode> loopInstructions = loopRegionInstructions(mn);
+        InsnList flowCacheInit = new InsnList();
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!metadata.applicationInstructions().contains(insn)) continue;
             ControlFlowFlatteningPass.CffInstructionState state = metadata.instructionStates().get(insn);
             if (state == null) {
                 throw new IllegalStateException("invokeDynamic cannot bind CFF state for " + methodKey);
             }
-            SiteSpec spec = siteSpec(pctx, insn);
+            SiteSpec spec = siteSpec(pctx, clazz, insn);
             if (spec == null) continue;
             if (helpers == null) {
                 helpers = ensureHelpers(pctx, clazz, metadata);
@@ -161,15 +166,33 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
 
             boolean interfaceOwner = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
             InsnList replacement = new InsnList();
-            emitLiveIndyWord(
-                replacement,
-                clazz.name(),
-                helpers,
-                siteSeed,
-                metadata,
-                state,
-                interfaceOwner
-            );
+            if (loopInstructions.contains(insn)) {
+                int flowCacheLocal = mn.maxLocals;
+                mn.maxLocals += 2;
+                flowCacheInit.add(new InsnNode(Opcodes.LCONST_0));
+                flowCacheInit.add(new VarInsnNode(Opcodes.LSTORE, flowCacheLocal));
+                hasFlowCacheInit = true;
+                emitCachedLiveIndyWord(
+                    replacement,
+                    clazz.name(),
+                    helpers,
+                    siteSeed,
+                    metadata,
+                    state,
+                    interfaceOwner,
+                    flowCacheLocal
+                );
+            } else {
+                emitLiveIndyWord(
+                    replacement,
+                    clazz.name(),
+                    helpers,
+                    siteSeed,
+                    metadata,
+                    state,
+                    interfaceOwner
+                );
+            }
             replacement.add(indy);
             JvmKeyDispatchPass.markGenerated(pctx, replacement);
             mn.instructions.insertBefore(insn, replacement);
@@ -178,6 +201,10 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         }
 
         if (transformed > 0) {
+            if (hasFlowCacheInit) {
+                JvmKeyDispatchPass.markGenerated(pctx, flowCacheInit);
+                mn.instructions.insert(flowCacheInit);
+            }
             mn.maxStack = Math.max(mn.maxStack, 32);
             clazz.markDirty();
             pctx.invalidate(method);
@@ -191,14 +218,57 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         }
     }
 
+    private Set<AbstractInsnNode> loopRegionInstructions(MethodNode mn) {
+        AbstractInsnNode[] nodes = mn.instructions.toArray();
+        Map<AbstractInsnNode, Integer> indexByNode = new IdentityHashMap<>();
+        for (int i = 0; i < nodes.length; i++) {
+            indexByNode.put(nodes[i], i);
+        }
+        Set<AbstractInsnNode> loop = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int i = 0; i < nodes.length; i++) {
+            AbstractInsnNode node = nodes[i];
+            if (node instanceof JumpInsnNode jump) {
+                markBackwardRegion(loop, nodes, indexByNode, i, jump.label);
+            } else if (node instanceof LookupSwitchInsnNode lookup) {
+                markBackwardRegion(loop, nodes, indexByNode, i, lookup.dflt);
+                for (LabelNode label : lookup.labels) {
+                    markBackwardRegion(loop, nodes, indexByNode, i, label);
+                }
+            } else if (node instanceof org.objectweb.asm.tree.TableSwitchInsnNode table) {
+                markBackwardRegion(loop, nodes, indexByNode, i, table.dflt);
+                for (LabelNode label : table.labels) {
+                    markBackwardRegion(loop, nodes, indexByNode, i, label);
+                }
+            }
+        }
+        return loop;
+    }
+
+    private void markBackwardRegion(
+        Set<AbstractInsnNode> loop,
+        AbstractInsnNode[] nodes,
+        Map<AbstractInsnNode, Integer> indexByNode,
+        int sourceIndex,
+        LabelNode target
+    ) {
+        Integer targetIndex = indexByNode.get(target);
+        if (targetIndex == null || targetIndex > sourceIndex) {
+            return;
+        }
+        for (int i = targetIndex; i <= sourceIndex; i++) {
+            loop.add(nodes[i]);
+        }
+    }
+
     private String payload(SiteSpec spec) {
         return spec.kind() + "\n" + spec.owner() + "\n" + spec.name() + "\n" + spec.desc();
     }
 
-    private SiteSpec siteSpec(PipelineContext pctx, AbstractInsnNode insn) {
+    private SiteSpec siteSpec(PipelineContext pctx, L1Class caller, AbstractInsnNode insn) {
         if (insn instanceof MethodInsnNode call) {
             if ("<init>".equals(call.name) || "<clinit>".equals(call.name)) return null;
             if (TransformGuards.isRuntimeClass(call.owner) || TransformGuards.isGeneratedName(call.name)) return null;
+            if (isAnnotationElementCall(pctx, call)) return null;
             int kind = switch (call.getOpcode()) {
                 case Opcodes.INVOKEVIRTUAL -> KIND_INVOKEVIRTUAL;
                 case Opcodes.INVOKESTATIC -> KIND_INVOKESTATIC;
@@ -207,7 +277,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                 default -> 0;
             };
             if (kind == 0) return null;
-            String indyDesc = methodIndyDescriptor(call.owner, call.desc, kind == KIND_INVOKESTATIC);
+            String receiverOwner = kind == KIND_INVOKESPECIAL ? caller.name() : call.owner;
+            String indyDesc = methodIndyDescriptor(receiverOwner, call.desc, kind == KIND_INVOKESTATIC);
             return new SiteSpec(kind, call.owner, call.name, call.desc, indyDesc);
         }
         if (insn instanceof FieldInsnNode field) {
@@ -224,6 +295,21 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             return new SiteSpec(kind, field.owner, field.name, "()" + field.desc, fieldIndyDescriptor(field, kind));
         }
         return null;
+    }
+
+    private boolean isAnnotationElementCall(PipelineContext pctx, MethodInsnNode call) {
+        if (call.getOpcode() != Opcodes.INVOKEINTERFACE) return false;
+        L1Class owner = pctx.classMap().get(call.owner);
+        if (owner == null || !owner.isAnnotation()) return false;
+        if (Type.getArgumentTypes(call.desc).length != 0) return false;
+        Type returnType = Type.getReturnType(call.desc);
+        if (returnType == Type.VOID_TYPE) return false;
+        for (L1Method method : owner.methods()) {
+            if (method.name().equals(call.name) && method.descriptor().equals(call.desc)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void makeWritableFinalStoreTarget(PipelineContext pctx, FieldInsnNode field, int kind) {
@@ -301,29 +387,41 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         String decode = uniqueMethodName(clazz, "__neko_indy_decode");
         String mix = uniqueMethodName(clazz, "__neko_indy_mix");
         String flow = uniqueMethodName(clazz, "__neko_indy_flow");
+        String filterMethods = uniqueMethodName(clazz, "__neko_indy_filter_methods");
+        String filterFields = uniqueMethodName(clazz, "__neko_indy_filter_fields");
         String cache = ensureCacheField(clazz);
         boolean interfaceOwner = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
         clazz.asmNode().methods.add(emitBootstrap(clazz.name(), bootstrap, resolver, interfaceOwner));
-        clazz.asmNode().methods.add(emitResolver(clazz.name(), resolver, decode, mix, cache, interfaceOwner));
+        clazz.asmNode().methods.add(emitResolver(
+            clazz.name(),
+            resolver,
+            decode,
+            mix,
+            cache,
+            filterMethods,
+            filterFields,
+            interfaceOwner
+        ));
         clazz.asmNode().methods.add(emitDecode(clazz.name(), decode, mix, interfaceOwner));
         clazz.asmNode().methods.add(emitMix(mix));
         clazz.asmNode().methods.add(emitFlow(clazz.name(), flow, mix, metadata.classKeyTable(), interfaceOwner));
-        installInjectedMethodReflectionFilter(
-            pctx,
-            clazz.name(),
-            List.of(bootstrap, resolver, decode, mix, flow)
-        );
-        installInjectedFieldReflectionFilter(
-            pctx,
-            clazz.name(),
-            List.of(cache)
-        );
+        clazz.asmNode().methods.add(emitFilterMethods(filterMethods));
+        clazz.asmNode().methods.add(emitFilterFields(filterFields));
         installInjectedStackTraceFilter(
             pctx,
             clazz.name(),
-            List.of(bootstrap, resolver, decode, mix, flow)
+            List.of(bootstrap, resolver, decode, mix, flow, filterMethods, filterFields)
         );
-        HelperNames created = new HelperNames(bootstrap, resolver, decode, mix, flow, cache);
+        HelperNames created = new HelperNames(
+            bootstrap,
+            resolver,
+            decode,
+            mix,
+            flow,
+            cache,
+            filterMethods,
+            filterFields
+        );
         helpersByClass.put(clazz.name(), created);
         return created;
     }
@@ -656,7 +754,6 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         ));
         insns.add(new JumpInsnNode(Opcodes.IFNE, skip));
         insns.add(syntheticDone);
-        emitInjectedFieldTest(insns, fieldLocal, helperOwner, helperFields, skip);
         insns.add(new VarInsnNode(Opcodes.ALOAD, filteredLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, writeLocal));
         insns.add(new IincInsnNode(writeLocal, 1));
@@ -775,7 +872,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             "()Z",
             false
         ));
-        insns.add(new JumpInsnNode(Opcodes.IFEQ, syntheticDone));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, skip));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, syntheticDone));
         insns.add(new VarInsnNode(Opcodes.ALOAD, methodLocal));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,
@@ -793,7 +891,6 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         ));
         insns.add(new JumpInsnNode(Opcodes.IFNE, skip));
         insns.add(syntheticDone);
-        emitInjectedMethodTest(insns, methodLocal, helperOwner, helperMethods, skip);
         insns.add(new VarInsnNode(Opcodes.ALOAD, filteredLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, writeLocal));
         insns.add(new IincInsnNode(writeLocal, 1));
@@ -871,6 +968,129 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             insns.add(new JumpInsnNode(Opcodes.IFNE, skip));
             insns.add(next);
         }
+    }
+
+    private MethodNode emitFilterMethods(String name) {
+        MethodNode mn = new MethodNode(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            name,
+            "([Ljava/lang/reflect/Method;)[Ljava/lang/reflect/Method;",
+            null,
+            null
+        );
+        InsnList insns = mn.instructions;
+        emitMemberFilterLoop(
+            insns,
+            "java/lang/reflect/Method",
+            "([Ljava/lang/Object;I)[Ljava/lang/Object;",
+            "[Ljava/lang/reflect/Method;"
+        );
+        mn.maxStack = 6;
+        mn.maxLocals = 5;
+        return mn;
+    }
+
+    private MethodNode emitFilterFields(String name) {
+        MethodNode mn = new MethodNode(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            name,
+            "([Ljava/lang/reflect/Field;)[Ljava/lang/reflect/Field;",
+            null,
+            null
+        );
+        InsnList insns = mn.instructions;
+        emitMemberFilterLoop(
+            insns,
+            "java/lang/reflect/Field",
+            "([Ljava/lang/Object;I)[Ljava/lang/Object;",
+            "[Ljava/lang/reflect/Field;"
+        );
+        mn.maxStack = 6;
+        mn.maxLocals = 5;
+        return mn;
+    }
+
+    private void emitMemberFilterLoop(
+        InsnList insns,
+        String memberType,
+        String copyDesc,
+        String arrayType
+    ) {
+        int sourceLocal = 0;
+        int filteredLocal = 1;
+        int indexLocal = 2;
+        int writeLocal = 3;
+        int memberLocal = 4;
+        LabelNode loop = new LabelNode();
+        LabelNode keep = new LabelNode();
+        LabelNode skip = new LabelNode();
+        LabelNode end = new LabelNode();
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, memberType));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, filteredLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, writeLocal));
+
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, memberLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            memberType,
+            "isSynthetic",
+            "()Z",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, keep));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            memberType,
+            "getModifiers",
+            "()I",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/reflect/Modifier",
+            "isStatic",
+            "(I)Z",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, skip));
+        insns.add(keep);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, filteredLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, writeLocal));
+        insns.add(new IincInsnNode(writeLocal, 1));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(skip);
+        insns.add(new IincInsnNode(indexLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+
+        insns.add(end);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, filteredLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, writeLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/util/Arrays",
+            "copyOf",
+            copyDesc,
+            false
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, arrayType));
+        insns.add(new InsnNode(Opcodes.ARETURN));
     }
 
     private String uniqueMethodName(L1Class clazz, String base) {
@@ -958,6 +1178,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         String decodeName,
         String mixName,
         String cacheName,
+        String filterMethodsName,
+        String filterFieldsName,
         boolean interfaceOwner
     ) {
         MethodNode mn = new MethodNode(
@@ -1086,6 +1308,15 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.ATHROW));
 
         insns.add(afterResolve);
+        emitApplyReflectionArrayFilter(
+            insns,
+            owner,
+            filterMethodsName,
+            filterFieldsName,
+            typeLocal,
+            handleLocal,
+            interfaceOwner
+        );
         insns.add(new FieldInsnNode(Opcodes.GETSTATIC, owner, cacheName, "Ljava/util/concurrent/ConcurrentHashMap;"));
         insns.add(new VarInsnNode(Opcodes.ALOAD, cacheKeyLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
@@ -1108,6 +1339,58 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         mn.maxStack = 16;
         mn.maxLocals = 28;
         return mn;
+    }
+
+    private void emitApplyReflectionArrayFilter(
+        InsnList insns,
+        String owner,
+        String filterMethodsName,
+        String filterFieldsName,
+        int typeLocal,
+        int handleLocal,
+        boolean interfaceOwner
+    ) {
+        LabelNode fieldCheck = new LabelNode();
+        LabelNode done = new LabelNode();
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, typeLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, METHOD_TYPE, "returnType",
+            "()Ljava/lang/Class;", false));
+        insns.add(new LdcInsnNode(Type.getType("[Ljava/lang/reflect/Method;")));
+        insns.add(new JumpInsnNode(Opcodes.IF_ACMPNE, fieldCheck));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
+        insns.add(new LdcInsnNode(new Handle(
+            Opcodes.H_INVOKESTATIC,
+            owner,
+            filterMethodsName,
+            "([Ljava/lang/reflect/Method;)[Ljava/lang/reflect/Method;",
+            interfaceOwner
+        )));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, METHOD_HANDLES, "filterReturnValue",
+            "(Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/MethodHandle;",
+            false));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, handleLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+
+        insns.add(fieldCheck);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, typeLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, METHOD_TYPE, "returnType",
+            "()Ljava/lang/Class;", false));
+        insns.add(new LdcInsnNode(Type.getType("[Ljava/lang/reflect/Field;")));
+        insns.add(new JumpInsnNode(Opcodes.IF_ACMPNE, done));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
+        insns.add(new LdcInsnNode(new Handle(
+            Opcodes.H_INVOKESTATIC,
+            owner,
+            filterFieldsName,
+            "([Ljava/lang/reflect/Field;)[Ljava/lang/reflect/Field;",
+            interfaceOwner
+        )));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, METHOD_HANDLES, "filterReturnValue",
+            "(Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/MethodHandle;",
+            false));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, handleLocal));
+        insns.add(done);
     }
 
     private void emitAdaptTarget(InsnList insns, int handleLocal) {
@@ -1499,14 +1782,14 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffInstructionState state,
         long siteSeed
     ) {
-        int x = (state.guardKey() + nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x494E44474731L))) ^
+        int x = (state.guardKey() + seededIndyInt(siteSeed, 0x494E44474731L)) ^
             state.pathKey();
         x += x >>> shift(siteSeed, 9);
-        x = (x ^ state.blockKey()) * (nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x494E444D554CL)) | 1);
-        x ^= state.pcToken() + nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x494E44504331L));
-        int idx = (x + state.state() + nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x494E445441424CL))) &
+        x = (x ^ state.blockKey()) * seededIndyInt(siteSeed, 0x494E444D554CL);
+        x ^= state.pcToken() + seededIndyInt(siteSeed, 0x494E44504331L);
+        int idx = (x + state.state() + seededIndyInt(siteSeed, 0x494E445441424CL)) &
             (metadata.classKeyTable().values().length - 1);
-        x += metadata.classKeyTable().values()[idx] ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x494E445456414CL));
+        x += metadata.classKeyTable().values()[idx] ^ seededIndyInt(siteSeed, 0x494E445456414CL);
         x ^= x >>> shift(siteSeed, 21);
         return (((long) x) & 0xFFFFFFFFL) ^ state.methodKey() ^ siteSeed;
     }
@@ -1595,6 +1878,29 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         JvmPassBytecode.pushLong(insns, siteSeed);
         JvmPassBytecode.pushInt(insns, state.state());
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, helpers.flow(), FLOW_DESC, interfaceOwner));
+    }
+
+    private void emitCachedLiveIndyWord(
+        InsnList insns,
+        String owner,
+        HelperNames helpers,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        boolean interfaceOwner,
+        int flowCacheLocal
+    ) {
+        LabelNode done = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowCacheLocal));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new InsnNode(Opcodes.LCMP));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, done));
+        insns.add(new InsnNode(Opcodes.POP2));
+        emitLiveIndyWord(insns, owner, helpers, siteSeed, metadata, state, interfaceOwner);
+        insns.add(new InsnNode(Opcodes.DUP2));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, flowCacheLocal));
+        insns.add(done);
     }
 
     private MethodNode emitFlow(
@@ -1722,6 +2028,38 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         boolean interfaceOwner
     ) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, salt);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(salt >>> 32));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+    }
+
+    private int seededIndyInt(long seed, long salt) {
+        int value = (int) (seed ^ (seed >>> 32) ^ salt);
+        value ^= value >>> 16;
+        return (value * nonZeroInt(salt >>> 32)) | 1;
+    }
+
+    private void emitSeededIntLegacy(
+        InsnList insns,
+        String owner,
+        String mixName,
+        int seedLocal,
+        long salt,
+        boolean interfaceOwner
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
         JvmPassBytecode.pushLong(insns, salt);
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, mixName, MIX_DESC, interfaceOwner));
         insns.add(new InsnNode(Opcodes.L2I));
@@ -1781,7 +2119,16 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         return ((int) value) | 1;
     }
 
-    private record HelperNames(String bootstrap, String resolver, String decode, String mix, String flow, String cache) {}
+    private record HelperNames(
+        String bootstrap,
+        String resolver,
+        String decode,
+        String mix,
+        String flow,
+        String cache,
+        String filterMethods,
+        String filterFields
+    ) {}
 
     private record SiteSpec(int kind, String owner, String name, String desc, String indyDesc) {}
 }

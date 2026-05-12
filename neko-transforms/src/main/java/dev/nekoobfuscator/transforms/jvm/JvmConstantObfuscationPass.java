@@ -10,6 +10,8 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,9 +24,13 @@ import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 /**
@@ -33,6 +39,8 @@ import org.objectweb.asm.tree.VarInsnNode;
 public final class JvmConstantObfuscationPass implements TransformPass {
     public static final String ID = "constantObfuscation";
     private static final String NUMERIC_HELPERS = "constantObfuscation.numericHelpers";
+    private static final String NUMERIC_CACHE_TABLES = "constantObfuscation.numericCacheTables";
+    private static final int NUMERIC_CACHE_SLOTS = 1024;
     private static final int COMPACT_SITE_THRESHOLD = 32;
     private static final int COMPACT_SIZE_PRESSURE = 18_000;
     private static final int SITE_MIX_A = 0x4F1BBCDC;
@@ -98,6 +106,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
 
         MethodNode mn = method.asmNode();
         List<NumericSite> sites = new ArrayList<>();
+        Set<AbstractInsnNode> loopInstructions = loopRegionInstructions(mn);
         int ordinal = 0;
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!metadata.applicationInstructions().contains(insn)) continue;
@@ -134,10 +143,11 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int transformed = 0;
         for (NumericSite site : sites) {
             AbstractInsnNode insn = site.insn();
+            NumericCache cache = null;
             if (insn instanceof IincInsnNode iinc) {
                 InsnList replacement = new InsnList();
                 replacement.add(new VarInsnNode(Opcodes.ILOAD, iinc.var));
-                emitDecodedInt(replacement, iinc.incr, site.siteSeed(), metadata, site.state(), baseLocal, compactHelper, clazz);
+                emitDecodedInt(replacement, iinc.incr, site.siteSeed(), metadata, site.state(), baseLocal, compactHelper, clazz, null);
                 replacement.add(new InsnNode(Opcodes.IADD));
                 replacement.add(new VarInsnNode(Opcodes.ISTORE, iinc.var));
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
@@ -147,7 +157,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 continue;
             }
             InsnList replacement = new InsnList();
-            emitDecodedConstant(replacement, insn, site.kind(), site.siteSeed(), metadata, site.state(), baseLocal, compactHelper, clazz);
+            emitDecodedConstant(replacement, insn, site.kind(), site.siteSeed(), metadata, site.state(), baseLocal, compactHelper, clazz, cache);
             JvmKeyDispatchPass.markGenerated(pctx, replacement);
             mn.instructions.insertBefore(insn, replacement);
             mn.instructions.remove(insn);
@@ -250,13 +260,14 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffInstructionState state,
         int baseLocal,
         String compactHelper,
-        L1Class clazz
+        L1Class clazz,
+        NumericCache cache
     ) {
         switch (kind) {
-            case INT -> emitDecodedInt(insns, intConstant(source), siteSeed, metadata, state, baseLocal, compactHelper, clazz);
-            case LONG -> emitDecodedLong(insns, longConstant(source), siteSeed, metadata, state, baseLocal, compactHelper, clazz);
+            case INT -> emitDecodedInt(insns, intConstant(source), siteSeed, metadata, state, baseLocal, compactHelper, clazz, cache);
+            case LONG -> emitDecodedLong(insns, longConstant(source), siteSeed, metadata, state, baseLocal, compactHelper, clazz, cache);
             case FLOAT -> {
-                emitDecodedInt(insns, Float.floatToRawIntBits(floatConstant(source)), siteSeed, metadata, state, baseLocal, compactHelper, clazz);
+                emitDecodedInt(insns, Float.floatToRawIntBits(floatConstant(source)), siteSeed, metadata, state, baseLocal, compactHelper, clazz, cache);
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Float",
@@ -266,7 +277,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 ));
             }
             case DOUBLE -> {
-                emitDecodedLong(insns, Double.doubleToRawLongBits(doubleConstant(source)), siteSeed, metadata, state, baseLocal, compactHelper, clazz);
+                emitDecodedLong(insns, Double.doubleToRawLongBits(doubleConstant(source)), siteSeed, metadata, state, baseLocal, compactHelper, clazz, cache);
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Double",
@@ -280,6 +291,48 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     }
 
     private void emitDecodedInt(
+        InsnList insns,
+        int value,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int baseLocal,
+        String compactHelper,
+        L1Class clazz,
+        NumericCache cache
+    ) {
+        if (cache != null) {
+            LabelNode compute = new LabelNode();
+            LabelNode hit = new LabelNode();
+            LabelNode done = new LabelNode();
+            insns.add(new FieldInsnNode(Opcodes.GETSTATIC, cache.owner(), cache.flagField(), "[I"));
+            JvmPassBytecode.pushInt(insns, cache.index());
+            insns.add(new InsnNode(Opcodes.IALOAD));
+            insns.add(new JumpInsnNode(Opcodes.IFNE, hit));
+            insns.add(compute);
+            emitDecodedIntUncached(insns, value, siteSeed, metadata, state, baseLocal, compactHelper, clazz);
+            insns.add(new VarInsnNode(Opcodes.ISTORE, cache.tempLocal()));
+            insns.add(new FieldInsnNode(Opcodes.GETSTATIC, cache.owner(), cache.valueField(), "[I"));
+            JvmPassBytecode.pushInt(insns, cache.index());
+            insns.add(new VarInsnNode(Opcodes.ILOAD, cache.tempLocal()));
+            insns.add(new InsnNode(Opcodes.IASTORE));
+            insns.add(new FieldInsnNode(Opcodes.GETSTATIC, cache.owner(), cache.flagField(), "[I"));
+            JvmPassBytecode.pushInt(insns, cache.index());
+            insns.add(new InsnNode(Opcodes.ICONST_1));
+            insns.add(new InsnNode(Opcodes.IASTORE));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, cache.tempLocal()));
+            insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+            insns.add(hit);
+            insns.add(new FieldInsnNode(Opcodes.GETSTATIC, cache.owner(), cache.valueField(), "[I"));
+            JvmPassBytecode.pushInt(insns, cache.index());
+            insns.add(new InsnNode(Opcodes.IALOAD));
+            insns.add(done);
+            return;
+        }
+        emitDecodedIntUncached(insns, value, siteSeed, metadata, state, baseLocal, compactHelper, clazz);
+    }
+
+    private void emitDecodedIntUncached(
         InsnList insns,
         int value,
         long siteSeed,
@@ -317,13 +370,55 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffInstructionState state,
         int baseLocal,
         String compactHelper,
+        L1Class clazz,
+        NumericCache cache
+    ) {
+        if (cache != null) {
+            LabelNode compute = new LabelNode();
+            LabelNode hit = new LabelNode();
+            LabelNode done = new LabelNode();
+            insns.add(new FieldInsnNode(Opcodes.GETSTATIC, cache.owner(), cache.flagField(), "[I"));
+            JvmPassBytecode.pushInt(insns, cache.index());
+            insns.add(new InsnNode(Opcodes.IALOAD));
+            insns.add(new JumpInsnNode(Opcodes.IFNE, hit));
+            insns.add(compute);
+            emitDecodedLongUncached(insns, value, siteSeed, metadata, state, baseLocal, compactHelper, clazz);
+            insns.add(new VarInsnNode(Opcodes.LSTORE, cache.tempLocal()));
+            insns.add(new FieldInsnNode(Opcodes.GETSTATIC, cache.owner(), cache.valueField(), "[J"));
+            JvmPassBytecode.pushInt(insns, cache.index());
+            insns.add(new VarInsnNode(Opcodes.LLOAD, cache.tempLocal()));
+            insns.add(new InsnNode(Opcodes.LASTORE));
+            insns.add(new FieldInsnNode(Opcodes.GETSTATIC, cache.owner(), cache.flagField(), "[I"));
+            JvmPassBytecode.pushInt(insns, cache.index());
+            insns.add(new InsnNode(Opcodes.ICONST_1));
+            insns.add(new InsnNode(Opcodes.IASTORE));
+            insns.add(new VarInsnNode(Opcodes.LLOAD, cache.tempLocal()));
+            insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+            insns.add(hit);
+            insns.add(new FieldInsnNode(Opcodes.GETSTATIC, cache.owner(), cache.valueField(), "[J"));
+            JvmPassBytecode.pushInt(insns, cache.index());
+            insns.add(new InsnNode(Opcodes.LALOAD));
+            insns.add(done);
+            return;
+        }
+        emitDecodedLongUncached(insns, value, siteSeed, metadata, state, baseLocal, compactHelper, clazz);
+    }
+
+    private void emitDecodedLongUncached(
+        InsnList insns,
+        long value,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int baseLocal,
+        String compactHelper,
         L1Class clazz
     ) {
-        emitDecodedInt(insns, (int) (value >>> 32), siteSeed ^ 0x484947484B31L, metadata, state, baseLocal, compactHelper, clazz);
+        emitDecodedInt(insns, (int) (value >>> 32), siteSeed ^ 0x484947484B31L, metadata, state, baseLocal, compactHelper, clazz, null);
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LSHL));
-        emitDecodedInt(insns, (int) value, siteSeed ^ 0x4C4F574B31L, metadata, state, baseLocal, compactHelper, clazz);
+        emitDecodedInt(insns, (int) value, siteSeed ^ 0x4C4F574B31L, metadata, state, baseLocal, compactHelper, clazz, null);
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
@@ -353,11 +448,10 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     }
 
     private int constantMaskFromBase(int base, int seed) {
-        int x = base ^ seed ^ SITE_MIX_A;
-        x ^= x >>> 13;
+        int x = base + (seed ^ SITE_MIX_A);
+        x ^= x >>> 16;
         x *= (seed ^ SITE_MIX_B) | 1;
-        x ^= x >>> 17;
-        x += seed * SITE_MIX_C + SITE_MIX_D;
+        x ^= seed * SITE_MIX_C + SITE_MIX_D;
         return x;
     }
 
@@ -424,19 +518,15 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     private void emitSiteMaskFromBase(InsnList insns, int baseLocal, int seed) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
         JvmPassBytecode.pushInt(insns, seed ^ SITE_MIX_A);
-        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, 13);
+        JvmPassBytecode.pushInt(insns, 16);
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(insns, (seed ^ SITE_MIX_B) | 1);
         insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, 17);
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(insns, seed * SITE_MIX_C + SITE_MIX_D);
-        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     @SuppressWarnings("unchecked")
@@ -470,13 +560,13 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int xLocal = 3;
         insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
         insns.add(new VarInsnNode(Opcodes.ILOAD, 2));
-        insns.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(insns, SITE_MIX_A);
         insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
-        JvmPassBytecode.pushInt(insns, 13);
+        JvmPassBytecode.pushInt(insns, 16);
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
@@ -489,16 +579,12 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
-        JvmPassBytecode.pushInt(insns, 17);
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, 2));
         JvmPassBytecode.pushInt(insns, SITE_MIX_C);
         insns.add(new InsnNode(Opcodes.IMUL));
         JvmPassBytecode.pushInt(insns, SITE_MIX_D);
         insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     private String uniqueMethodName(L1Class clazz, String base) {
@@ -513,6 +599,90 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     private boolean hasMethod(L1Class clazz, String name) {
         for (MethodNode method : clazz.asmNode().methods) {
             if (name.equals(method.name)) return true;
+        }
+        return false;
+    }
+
+    @SuppressWarnings("unchecked")
+    private NumericCache createNumericCache(
+        PipelineContext pctx,
+        L1Class clazz,
+        MethodNode mn,
+        NumericKind kind
+    ) {
+        Map<String, NumericCacheTable> tables = pctx.getPassData(NUMERIC_CACHE_TABLES);
+        if (tables == null) {
+            tables = new LinkedHashMap<>();
+            pctx.putPassData(NUMERIC_CACHE_TABLES, tables);
+        }
+        NumericCacheTable table = tables.computeIfAbsent(
+            clazz.name(),
+            ignored -> createNumericCacheTable(pctx, clazz)
+        );
+        int index = kind.wideCache() ? table.nextLong++ : table.nextInt++;
+        if (index >= NUMERIC_CACHE_SLOTS) {
+            return null;
+        }
+        int tempLocal = mn.maxLocals;
+        mn.maxLocals += kind.wideCache() ? 2 : 1;
+        return kind.wideCache()
+            ? new NumericCache(clazz.name(), table.longFlagField, table.longValueField, index, tempLocal)
+            : new NumericCache(clazz.name(), table.intFlagField, table.intValueField, index, tempLocal);
+    }
+
+    private NumericCacheTable createNumericCacheTable(PipelineContext pctx, L1Class clazz) {
+        String base = "__neko_num_cache$";
+        String intFlags = uniqueFieldName(clazz, base + "if");
+        String intValues = uniqueFieldName(clazz, base + "iv");
+        String longFlags = uniqueFieldName(clazz, base + "lf");
+        String longValues = uniqueFieldName(clazz, base + "lv");
+        int access = Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+        clazz.asmNode().fields.add(new FieldNode(access, intFlags, "[I", null, null));
+        clazz.asmNode().fields.add(new FieldNode(access, intValues, "[I", null, null));
+        clazz.asmNode().fields.add(new FieldNode(access, longFlags, "[I", null, null));
+        clazz.asmNode().fields.add(new FieldNode(access, longValues, "[J", null, null));
+        MethodNode clinit = findOrCreateClassInit(clazz);
+        InsnList init = new InsnList();
+        emitCacheArrayInit(init, clazz.name(), intFlags, "[I", Opcodes.T_INT);
+        emitCacheArrayInit(init, clazz.name(), intValues, "[I", Opcodes.T_INT);
+        emitCacheArrayInit(init, clazz.name(), longFlags, "[I", Opcodes.T_INT);
+        emitCacheArrayInit(init, clazz.name(), longValues, "[J", Opcodes.T_LONG);
+        JvmKeyDispatchPass.markGenerated(pctx, init);
+        if (clinit.instructions.getFirst() == null) {
+            clinit.instructions.add(init);
+            clinit.instructions.add(new InsnNode(Opcodes.RETURN));
+        } else {
+            clinit.instructions.insert(init);
+        }
+        clinit.maxStack = Math.max(clinit.maxStack, 2);
+        clazz.markDirty();
+        return new NumericCacheTable(clazz.name(), intFlags, intValues, longFlags, longValues);
+    }
+
+    private void emitCacheArrayInit(
+        InsnList insns,
+        String owner,
+        String field,
+        String desc,
+        int arrayType
+    ) {
+        JvmPassBytecode.pushInt(insns, NUMERIC_CACHE_SLOTS);
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, arrayType));
+        insns.add(new FieldInsnNode(Opcodes.PUTSTATIC, owner, field, desc));
+    }
+
+    private String uniqueFieldName(L1Class clazz, String base) {
+        String candidate = base;
+        int suffix = 0;
+        while (hasField(clazz, candidate)) {
+            candidate = base + "$" + ++suffix;
+        }
+        return candidate;
+    }
+
+    private boolean hasField(L1Class clazz, String name) {
+        for (FieldNode field : clazz.asmNode().fields) {
+            if (name.equals(field.name)) return true;
         }
         return false;
     }
@@ -555,6 +725,48 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private Set<AbstractInsnNode> loopRegionInstructions(MethodNode mn) {
+        AbstractInsnNode[] nodes = mn.instructions.toArray();
+        Map<AbstractInsnNode, Integer> indexByNode = new IdentityHashMap<>();
+        for (int i = 0; i < nodes.length; i++) {
+            indexByNode.put(nodes[i], i);
+        }
+        Set<AbstractInsnNode> loop = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int i = 0; i < nodes.length; i++) {
+            AbstractInsnNode node = nodes[i];
+            if (node instanceof JumpInsnNode jump) {
+                markBackwardRegion(loop, nodes, indexByNode, i, jump.label);
+            } else if (node instanceof LookupSwitchInsnNode lookup) {
+                markBackwardRegion(loop, nodes, indexByNode, i, lookup.dflt);
+                for (LabelNode label : lookup.labels) {
+                    markBackwardRegion(loop, nodes, indexByNode, i, label);
+                }
+            } else if (node instanceof TableSwitchInsnNode table) {
+                markBackwardRegion(loop, nodes, indexByNode, i, table.dflt);
+                for (LabelNode label : table.labels) {
+                    markBackwardRegion(loop, nodes, indexByNode, i, label);
+                }
+            }
+        }
+        return loop;
+    }
+
+    private void markBackwardRegion(
+        Set<AbstractInsnNode> loop,
+        AbstractInsnNode[] nodes,
+        Map<AbstractInsnNode, Integer> indexByNode,
+        int sourceIndex,
+        LabelNode target
+    ) {
+        Integer targetIndex = indexByNode.get(target);
+        if (targetIndex == null || targetIndex > sourceIndex) {
+            return;
+        }
+        for (int i = targetIndex; i <= sourceIndex; i++) {
+            loop.add(nodes[i]);
+        }
     }
 
     private NumericKind numericKind(AbstractInsnNode insn) {
@@ -648,11 +860,21 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     }
 
     private enum NumericKind {
-        INT,
-        LONG,
-        FLOAT,
-        DOUBLE,
-        IINC
+        INT(false),
+        LONG(true),
+        FLOAT(false),
+        DOUBLE(true),
+        IINC(false);
+
+        private final boolean wideCache;
+
+        NumericKind(boolean wideCache) {
+            this.wideCache = wideCache;
+        }
+
+        boolean wideCache() {
+            return wideCache;
+        }
     }
 
     private record NumericSite(
@@ -660,5 +882,37 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         NumericKind kind,
         ControlFlowFlatteningPass.CffInstructionState state,
         long siteSeed
+    ) {}
+
+    private static final class NumericCacheTable {
+        final String owner;
+        final String intFlagField;
+        final String intValueField;
+        final String longFlagField;
+        final String longValueField;
+        int nextInt;
+        int nextLong;
+
+        NumericCacheTable(
+            String owner,
+            String intFlagField,
+            String intValueField,
+            String longFlagField,
+            String longValueField
+        ) {
+            this.owner = owner;
+            this.intFlagField = intFlagField;
+            this.intValueField = intValueField;
+            this.longFlagField = longFlagField;
+            this.longValueField = longValueField;
+        }
+    }
+
+    private record NumericCache(
+        String owner,
+        String flagField,
+        String valueField,
+        int index,
+        int tempLocal
     ) {}
 }
