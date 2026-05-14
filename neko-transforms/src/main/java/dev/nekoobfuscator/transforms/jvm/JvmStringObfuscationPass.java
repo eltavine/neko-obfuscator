@@ -47,8 +47,22 @@ import org.objectweb.asm.tree.VarInsnNode;
  */
 public final class JvmStringObfuscationPass implements TransformPass {
     public static final String ID = "stringObfuscation";
-    private static final String CIPHER_CACHES = "stringObfuscation.cipherCaches";
     private static final String STRING_SITE_CACHES = "stringObfuscation.stringSiteCaches";
+    private static final String STRING_KEY_TABLES = "stringObfuscation.stringKeyTables";
+    private static final String STRING_DECODE_TAILS = "stringObfuscation.stringDecodeTails";
+    private static final String STRING_CONCAT_HELPERS = "stringObfuscation.stringConcatHelpers";
+    private static final String STRING_TAIL_DESC = "([Ljava/lang/Object;IJI)Ljava/lang/String;";
+    private static final int STRING_PAYLOAD_TABLE_SLOT = 0;
+    private static final int STRING_CACHE_TABLE_SLOT = 1;
+    private static final int STRING_AES_CIPHER_SLOT = 2;
+    private static final int STRING_DES_CIPHER_SLOT = 3;
+    private static final int STRING_KEY_CELL_BASE_SLOT = 4;
+    private static final int STRING_KEY_CELL_PAYLOAD_SLOT = 8;
+    private static final int STRING_KEY_CELL_CACHE_SLOT = 9;
+    private static final int STRING_KEY_CELL_LENGTH = 10;
+    private static final long STRING_KEY_CELL_PAYLOAD_MASK = 0x5354525041594C44L;
+    private static final long STRING_KEY_CELL_CACHE_MASK = 0x5354524341434845L;
+    private static final long STRING_KEY_CELL_LENGTH_MASK = 0x5354524C454E3031L;
     private static final long STATIC_CHAR_STRIDE = 0x9E3779B97F4A7C15L;
 
     @Override
@@ -86,7 +100,11 @@ public final class JvmStringObfuscationPass implements TransformPass {
         L1Class clazz = pctx.currentL1Class();
         L1Method method = pctx.currentL1Method();
         if (clazz == null || method == null || !method.hasCode()) return;
-        if (TransformGuards.isRuntimeClass(clazz) || TransformGuards.isGeneratedMethod(method)) return;
+        if (TransformGuards.isRuntimeClass(clazz)) return;
+        if (
+            TransformGuards.isGeneratedMethod(method) &&
+            !Boolean.TRUE.equals(pctx.getPassData("stringObfuscation.hardenGeneratedHelpers"))
+        ) return;
         if (method.isAbstract() || method.isNative()) return;
 
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
@@ -103,6 +121,9 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int transformed = 0;
         int ordinal = 0;
         boolean hasLoopStringCacheInit = false;
+        boolean canUseCallerCarrierLocal = !"<clinit>".equals(method.name());
+        int callerCarrierLocal = -1;
+        InsnList callerCarrierInit = new InsnList();
         Set<AbstractInsnNode> loopInstructions = loopRegionInstructions(mn);
         InsnList loopStringCacheInit = new InsnList();
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
@@ -117,13 +138,24 @@ public final class JvmStringObfuscationPass implements TransformPass {
 
             if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String value) {
                 long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal);
-                Algorithm algorithm = algorithmFor(ordinal, siteSeed, metadata, state);
-                ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state);
-                byte[] encrypted = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer);
-                CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
-                StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, siteSeed, encrypted);
+                StringKeyMaterial keyMaterial = stringKeyMaterial(pctx, clazz, siteSeed);
+                Algorithm algorithm = algorithmFor(ordinal, siteSeed, metadata, state, keyMaterial);
+                ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
+                byte[] encrypted = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
+                StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, metadata, siteSeed, encrypted, keyMaterial, algorithm, byteLayer);
+                if (canUseCallerCarrierLocal && callerCarrierLocal < 0) {
+                    callerCarrierLocal = mn.maxLocals++;
+                    callerCarrierInit.add(new FieldInsnNode(
+                        Opcodes.GETSTATIC,
+                        siteCache.owner(),
+                        siteCache.keyTableFieldName(),
+                        "[Ljava/lang/Object;"
+                    ));
+                    callerCarrierInit.add(new VarInsnNode(Opcodes.ASTORE, callerCarrierLocal));
+                }
                 InsnList replacement = new InsnList();
                 if (loopInstructions.contains(insn)) {
+                    int activeCarrierLocal = callerCarrierLocal;
                     int cacheLocal = mn.maxLocals++;
                     loopStringCacheInit.add(new InsnNode(Opcodes.ACONST_NULL));
                     loopStringCacheInit.add(new VarInsnNode(Opcodes.ASTORE, cacheLocal));
@@ -132,28 +164,30 @@ public final class JvmStringObfuscationPass implements TransformPass {
                         pctx,
                         clazz,
                         replacement,
+                        mn,
                         encrypted.length,
                         siteSeed,
                         metadata,
                         state,
                         algorithm,
                         byteLayer,
-                        cipherCache,
-                        siteCache
+                        siteCache,
+                        activeCarrierLocal
                     ));
                 } else {
                     emitDecodedStringCall(
                         pctx,
                         clazz,
                         replacement,
+                        mn,
                         encrypted.length,
                         siteSeed,
                         metadata,
                         state,
                         algorithm,
                         byteLayer,
-                        cipherCache,
-                        siteCache
+                        siteCache,
+                        callerCarrierLocal
                     );
                 }
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
@@ -167,6 +201,17 @@ public final class JvmStringObfuscationPass implements TransformPass {
             if (insn instanceof InvokeDynamicInsnNode indy && isStringConcatWithConstants(indy)) {
                 ConcatPlan concat = concatPlan(indy);
                 if (concat.hasStringConstants()) {
+                    boolean loopSite = loopInstructions.contains(insn);
+                    if (loopSite && canUseCallerCarrierLocal && callerCarrierLocal < 0) {
+                        callerCarrierLocal = mn.maxLocals++;
+                        callerCarrierInit.add(new FieldInsnNode(
+                            Opcodes.GETSTATIC,
+                            metadata.classKeyTable().owner(),
+                            metadata.classKeyTable().objectFieldName(),
+                            "[Ljava/lang/Object;"
+                        ));
+                        callerCarrierInit.add(new VarInsnNode(Opcodes.ASTORE, callerCarrierLocal));
+                    }
                     ConcatRewriteResult result = rewriteStringConcat(
                         pctx,
                         clazz,
@@ -177,7 +222,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
                         indy,
                         concat,
                         ordinal,
-                        loopInstructions.contains(insn),
+                        loopSite,
+                        loopSite && canUseCallerCarrierLocal ? callerCarrierLocal : -1,
                         loopStringCacheInit
                     );
                     JvmKeyDispatchPass.markGenerated(pctx, result.instructions());
@@ -191,6 +237,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
         }
 
         if (transformed > 0) {
+            if (callerCarrierLocal >= 0) {
+                JvmKeyDispatchPass.markGenerated(pctx, callerCarrierInit);
+                mn.instructions.insert(callerCarrierInit);
+            }
             if (hasLoopStringCacheInit) {
                 JvmKeyDispatchPass.markGenerated(pctx, loopStringCacheInit);
                 mn.instructions.insert(loopStringCacheInit);
@@ -219,11 +269,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ConcatPlan concat,
         int ordinal,
         boolean loopSite,
+        int callerCarrierLocal,
         InsnList loopStringCacheInit
     ) {
         Type[] args = Type.getArgumentTypes(indy.desc);
         long helperSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal) ^ 0x5354524341543131L;
-        List<String> externalStrings = loopSite ? concatStringConstants(concat) : List.of();
+        List<String> externalStrings = concatStringConstants(concat);
         ConcatRewriteResult helper = installConcatHelper(
             pctx,
             clazz,
@@ -242,30 +293,49 @@ public final class JvmStringObfuscationPass implements TransformPass {
         boolean usesLoopCache = false;
         for (String value : externalStrings) {
             long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + externalized);
-            Algorithm algorithm = algorithmFor(ordinal + externalized, siteSeed, metadata, state);
-            ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state);
-            byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer);
-            CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
-            StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, siteSeed, payload);
-            int cacheLocal = mn.maxLocals++;
-            loopStringCacheInit.add(new InsnNode(Opcodes.ACONST_NULL));
-            loopStringCacheInit.add(new VarInsnNode(Opcodes.ASTORE, cacheLocal));
-            usesLoopCache = true;
-            emitLoopCachedString(out, cacheLocal, () -> emitDecodedStringCall(
-                pctx,
-                clazz,
-                out,
-                payload.length,
-                siteSeed,
-                metadata,
-                state,
-                algorithm,
-                byteLayer,
-                cipherCache,
-                siteCache
-            ));
+            StringKeyMaterial keyMaterial = stringKeyMaterial(pctx, clazz, siteSeed);
+            Algorithm algorithm = algorithmFor(ordinal + externalized, siteSeed, metadata, state, keyMaterial);
+            ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
+            byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
+            StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, metadata, siteSeed, payload, keyMaterial, algorithm, byteLayer);
+            if (loopSite) {
+                int cacheLocal = mn.maxLocals++;
+                loopStringCacheInit.add(new InsnNode(Opcodes.ACONST_NULL));
+                loopStringCacheInit.add(new VarInsnNode(Opcodes.ASTORE, cacheLocal));
+                usesLoopCache = true;
+                emitLoopCachedString(out, cacheLocal, () -> emitDecodedStringCall(
+                    pctx,
+                    clazz,
+                    out,
+                    mn,
+                    payload.length,
+                    siteSeed,
+                    metadata,
+                    state,
+                    algorithm,
+                    byteLayer,
+                    siteCache,
+                    callerCarrierLocal
+                ));
+            } else {
+                emitDecodedStringCall(
+                    pctx,
+                    clazz,
+                    out,
+                    mn,
+                    payload.length,
+                    siteSeed,
+                    metadata,
+                    state,
+                    algorithm,
+                    byteLayer,
+                    siteCache,
+                    callerCarrierLocal
+                );
+            }
             externalized++;
         }
+        out.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
         out.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
         out.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
         out.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
@@ -293,17 +363,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
         long helperSeed,
         List<String> externalStrings
     ) {
-        String name = uniqueMethodName(
-            clazz,
-            "__neko_strcat$" + Long.toUnsignedString(helperSeed, 36)
-        );
-        MethodNode helper = new MethodNode(
-            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-            name,
-            concatHelperDescriptor(args, externalStrings.size()),
-            null,
-            null
-        );
         int[] argLocals = new int[args.length];
         int nextLocal = 0;
         for (int i = 0; i < args.length; i++) {
@@ -314,10 +373,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
         for (String value : externalStrings) {
             decodedStrings.put(value, nextLocal++);
         }
-        int guardLocal = nextLocal++;
-        int pathKeyLocal = nextLocal++;
-        int blockKeyLocal = nextLocal++;
-        int pcLocal = nextLocal++;
         for (ConcatPiece piece : concat.pieces()) {
             if (piece instanceof LiteralPiece literal && !literal.value().isEmpty()) {
                 decodedStrings.putIfAbsent(literal.value(), -1);
@@ -328,11 +383,37 @@ public final class JvmStringObfuscationPass implements TransformPass {
             }
         }
         boolean hasInternalDecodedStrings = decodedStrings.containsValue(-1);
-        int methodKeyLocal = hasInternalDecodedStrings ? nextLocal : -1;
-        if (hasInternalDecodedStrings) {
-            nextLocal += 2;
+        String helperDesc = concatHelperDescriptor(args, externalStrings.size());
+        ConcatHelperCacheKey cacheKey = null;
+        if (!hasInternalDecodedStrings) {
+            cacheKey = new ConcatHelperCacheKey(
+                clazz.name(),
+                helperDesc,
+                concatHelperCachePieces(concat, externalStrings),
+                concatExternalStringPattern(externalStrings)
+            );
+            String cached = cachedConcatHelper(pctx, cacheKey);
+            if (cached != null) {
+                return new ConcatRewriteResult(null, 0, cached, false);
+            }
         }
-
+        int methodKeyLocal = nextLocal;
+        nextLocal += 2;
+        int guardLocal = nextLocal++;
+        int pathKeyLocal = nextLocal++;
+        int blockKeyLocal = nextLocal++;
+        int pcLocal = nextLocal++;
+        String name = uniqueMethodName(
+            clazz,
+            "__neko_strcat$" + Long.toUnsignedString(helperSeed, 36)
+        );
+        MethodNode helper = new MethodNode(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            name,
+            helperDesc,
+            null,
+            null
+        );
         ControlFlowFlatteningPass.CffMethodMetadata helperMetadata =
             new ControlFlowFlatteningPass.CffMethodMetadata(
                 state.methodKey(),
@@ -345,12 +426,22 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 Set.of(),
                 Map.of(),
                 metadata.classKeyTable()
-            );
+        );
         helper.maxLocals = nextLocal;
         helper.maxStack = 32;
-        if (hasInternalDecodedStrings) {
-            emitRecoverMethodSeedLocal(helper.instructions, helperSeed, helperMetadata, state, methodKeyLocal);
-        }
+        int helperCarrierLocal = helper.maxLocals++;
+        int selectorArrayLocal = helper.maxLocals++;
+        int classWordsLocal = helper.maxLocals++;
+        int concatPredicateLocal = helper.maxLocals++;
+        int concatResultLocal = helper.maxLocals++;
+        InsnList helperCarrierInit = new InsnList();
+        helperCarrierInit.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            metadata.classKeyTable().owner(),
+            metadata.classKeyTable().objectFieldName(),
+            "[Ljava/lang/Object;"
+        ));
+        helperCarrierInit.add(new VarInsnNode(Opcodes.ASTORE, helperCarrierLocal));
         int encrypted = 0;
         for (String value : new ArrayList<>(decodedStrings.keySet())) {
             if (decodedStrings.get(value) != -1) continue;
@@ -358,29 +449,44 @@ public final class JvmStringObfuscationPass implements TransformPass {
             int local = nextLocal++;
             helper.maxLocals = nextLocal;
             long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + encrypted);
-            Algorithm algorithm = algorithmFor(ordinal + encrypted, siteSeed, metadata, state);
-            ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state);
-            byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer);
-            CipherCache cipherCache = ensureCipherCache(pctx, clazz, algorithm);
-            StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, siteSeed, payload);
+            StringKeyMaterial keyMaterial = stringKeyMaterial(pctx, clazz, siteSeed);
+            Algorithm algorithm = algorithmFor(ordinal + encrypted, siteSeed, metadata, state, keyMaterial);
+            ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
+            byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
+            StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, helperMetadata, siteSeed, payload, keyMaterial, algorithm, byteLayer);
             emitDecodedStringCall(
                 pctx,
                 clazz,
                 helper.instructions,
+                helper,
                 payload.length,
                 siteSeed,
                 helperMetadata,
                 state,
                 algorithm,
                 byteLayer,
-                cipherCache,
-                siteCache
+                siteCache,
+                helperCarrierLocal
             );
             nextLocal = Math.max(nextLocal, helper.maxLocals);
             helper.instructions.add(new VarInsnNode(Opcodes.ASTORE, local));
             decodedStrings.put(value, local);
             encrypted++;
         }
+        emitConcatCarrierDependency(
+            helper.instructions,
+            helperCarrierLocal,
+            methodKeyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            pcLocal,
+            selectorArrayLocal,
+            classWordsLocal,
+            concatPredicateLocal
+        );
+        JvmKeyDispatchPass.markGenerated(pctx, helperCarrierInit);
+        helper.instructions.insertBefore(helper.instructions.getFirst(), helperCarrierInit);
 
         List<Type> concatArgs = new ArrayList<>();
         int argIndex = 0;
@@ -415,30 +521,212 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 false
             )
         ));
+        helper.instructions.add(new VarInsnNode(Opcodes.ASTORE, concatResultLocal));
+        LabelNode predicateZero = new LabelNode();
+        LabelNode predicateDone = new LabelNode();
+        helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, concatPredicateLocal));
+        helper.instructions.add(new JumpInsnNode(Opcodes.IFEQ, predicateZero));
+        helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, concatResultLocal));
+        helper.instructions.add(new JumpInsnNode(Opcodes.GOTO, predicateDone));
+        helper.instructions.add(predicateZero);
+        helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, concatResultLocal));
+        helper.instructions.add(predicateDone);
         helper.instructions.add(new InsnNode(Opcodes.ARETURN));
         helper.maxLocals = Math.max(helper.maxLocals, nextLocal);
         helper.maxStack = 32;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
         clazz.markDirty();
+        publishGeneratedStringHelperFlowKey(
+            pctx,
+            clazz.name(),
+            name,
+            helper.desc,
+            methodKeyLocal
+        );
+        if (cacheKey != null) {
+            cacheConcatHelper(pctx, cacheKey, name);
+        }
         return new ConcatRewriteResult(null, encrypted, name, false);
+    }
+
+    private void emitConcatCarrierDependency(
+        InsnList insns,
+        int carrierLocal,
+        int methodKeyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int selectorArrayLocal,
+        int classWordsLocal,
+        int predicateLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORDS_SELECTOR_SLOT
+        );
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, selectorArrayLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, selectorArrayLocal));
+        emitConcatCarrierSelectorIndex(
+            insns,
+            methodKeyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            pcLocal
+        );
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, classWordsLocal));
+        emitConcatCarrierSelectorIndex(
+            insns,
+            methodKeyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            pcLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, predicateLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, classWordsLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, predicateLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, classWordsLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.ISUB));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, predicateLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, predicateLocal));
+    }
+
+    private void emitConcatCarrierSelectorIndex(
+        InsnList insns,
+        int methodKeyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private List<ConcatCachePiece> concatHelperCachePieces(
+        ConcatPlan concat,
+        List<String> externalStrings
+    ) {
+        Map<String, Integer> externalSlotByValue = new LinkedHashMap<>();
+        for (int i = 0; i < externalStrings.size(); i++) {
+            externalSlotByValue.put(externalStrings.get(i), i);
+        }
+        List<ConcatCachePiece> pieces = new ArrayList<>();
+        for (ConcatPiece piece : concat.pieces()) {
+            if (piece instanceof ArgPiece) {
+                pieces.add(new CacheArgPiece());
+            } else if (piece instanceof LiteralPiece literal) {
+                if (!literal.value().isEmpty()) {
+                    pieces.add(new CacheStringPiece(externalSlotByValue.get(literal.value())));
+                }
+            } else if (piece instanceof ConstPiece constant) {
+                Object value = constant.value();
+                if (value instanceof String stringValue) {
+                    if (!stringValue.isEmpty()) {
+                        pieces.add(new CacheStringPiece(externalSlotByValue.get(stringValue)));
+                    }
+                } else {
+                    pieces.add(new CacheConstPiece(value));
+                }
+            }
+        }
+        return List.copyOf(pieces);
+    }
+
+    private List<Integer> concatExternalStringPattern(List<String> externalStrings) {
+        Map<String, Integer> patternByValue = new LinkedHashMap<>();
+        List<Integer> pattern = new ArrayList<>(externalStrings.size());
+        for (String value : externalStrings) {
+            Integer id = patternByValue.get(value);
+            if (id == null) {
+                id = patternByValue.size();
+                patternByValue.put(value, id);
+            }
+            pattern.add(id);
+        }
+        return List.copyOf(pattern);
     }
 
     private String concatHelperDescriptor(Type[] args) {
         return concatHelperDescriptor(args, 0);
     }
 
+    @SuppressWarnings("unchecked")
+    private String cachedConcatHelper(
+        PipelineContext pctx,
+        ConcatHelperCacheKey key
+    ) {
+        Map<ConcatHelperCacheKey, String> helpers =
+            pctx.getPassData(STRING_CONCAT_HELPERS);
+        if (helpers == null) return null;
+        return helpers.get(key);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void cacheConcatHelper(
+        PipelineContext pctx,
+        ConcatHelperCacheKey key,
+        String helperName
+    ) {
+        Map<ConcatHelperCacheKey, String> helpers =
+            pctx.getPassData(STRING_CONCAT_HELPERS);
+        if (helpers == null) {
+            helpers = new LinkedHashMap<>();
+            pctx.putPassData(STRING_CONCAT_HELPERS, helpers);
+        }
+        helpers.putIfAbsent(key, helperName);
+    }
+
     private String concatHelperDescriptor(Type[] args, int externalStrings) {
-        Type[] helperArgs = new Type[args.length + externalStrings + 4];
+        Type[] helperArgs = new Type[args.length + externalStrings + 5];
         System.arraycopy(args, 0, helperArgs, 0, args.length);
         for (int i = 0; i < externalStrings; i++) {
             helperArgs[args.length + i] = Type.getType(String.class);
         }
         int keyOffset = args.length + externalStrings;
-        helperArgs[keyOffset] = Type.INT_TYPE;
+        helperArgs[keyOffset] = Type.LONG_TYPE;
         helperArgs[keyOffset + 1] = Type.INT_TYPE;
         helperArgs[keyOffset + 2] = Type.INT_TYPE;
         helperArgs[keyOffset + 3] = Type.INT_TYPE;
+        helperArgs[keyOffset + 4] = Type.INT_TYPE;
         return Type.getMethodDescriptor(Type.getType(String.class), helperArgs);
     }
 
@@ -616,11 +904,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int ordinal,
         long siteSeed,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state
+        ControlFlowFlatteningPass.CffInstructionState state,
+        StringKeyMaterial keyMaterial
     ) {
         if ((ordinal & 1) == 0) return Algorithm.AES;
-        int root = liveStringWord(metadata, state, rootSeed(siteSeed));
-        byte[] key = keyBytes(root, siteSeed, Algorithm.DES);
+        int root = stringRoot(metadata, state, siteSeed, keyMaterial);
+        byte[] key = keyBytes(root, siteSeed, Algorithm.DES, stringStreamFlow(root));
         try {
             return DESKeySpec.isWeak(key, 0) ? Algorithm.AES : Algorithm.DES;
         } catch (InvalidKeyException ex) {
@@ -631,9 +920,14 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private ByteLayer byteLayerFor(
         long siteSeed,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state
+        ControlFlowFlatteningPass.CffInstructionState state,
+        StringKeyMaterial keyMaterial
     ) {
-        int selector = liveStringWord(metadata, state, byteLayerSeed(siteSeed)) ^
+        int selector = stringKeyMixedWord(
+            liveStringWord(metadata, state, byteLayerSeed(siteSeed)),
+            siteSeed ^ 0x5354524C41595231L,
+            keyMaterial
+        ) ^
             (int) (siteSeed >>> 32);
         return switch (selector & 3) {
             case 0 -> ByteLayer.ADD;
@@ -649,9 +943,11 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state,
         Algorithm algorithm,
-        ByteLayer byteLayer
+        ByteLayer byteLayer,
+        StringKeyMaterial keyMaterial
     ) {
-        int root = liveStringWord(metadata, state, rootSeed(siteSeed));
+        int root = stringRoot(metadata, state, siteSeed, keyMaterial);
+        long streamFlow = stringStreamFlow(root);
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
         int rawLength = 4 + utf8.length;
         int paddedLength = ((rawLength + algorithm.blockSize - 1) / algorithm.blockSize) * algorithm.blockSize;
@@ -666,14 +962,14 @@ public final class JvmStringObfuscationPass implements TransformPass {
             pad = JvmPassBytecode.mix(pad, i);
             payload[i] = (byte) pad;
         }
-        byte[] xor = xorBytes(root, siteSeed, payload.length);
+        byte[] xor = xorBytes(root, siteSeed, payload.length, streamFlow);
         for (int i = 0; i < payload.length; i++) {
             payload[i] = (byte) (payload[i] ^ xor[i]);
         }
-        applyByteLayer(payload, root, siteSeed, byteLayer);
+        applyByteLayer(payload, root, siteSeed, byteLayer, streamFlow);
         try {
             Cipher cipher = Cipher.getInstance(algorithm.transformation);
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(keyBytes(root, siteSeed, algorithm), algorithm.keyName));
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(keyBytes(root, siteSeed, algorithm, streamFlow), algorithm.keyName));
             return cipher.doFinal(payload);
         } catch (GeneralSecurityException ex) {
             throw new IllegalStateException("Unable to encrypt string literal with " + algorithm.keyName, ex);
@@ -683,12 +979,13 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private byte[] keyBytes(
         int root,
         long siteSeed,
-        Algorithm algorithm
+        Algorithm algorithm,
+        long streamFlow
     ) {
         byte[] out = new byte[algorithm.keySize];
         long seed = keyStreamSeed(siteSeed, algorithm);
         for (int word = 0; word < out.length / 4; word++) {
-            int value = streamWord(root, seed, word);
+            int value = streamWord(root, seed, word, streamFlow);
             writeWord(out, word * 4, value);
         }
         return out;
@@ -697,12 +994,13 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private byte[] xorBytes(
         int root,
         long siteSeed,
-        int length
+        int length,
+        long streamFlow
     ) {
         byte[] out = new byte[length];
         long seed = xorSeed(siteSeed);
         for (int offset = 0; offset < out.length; offset++) {
-            int value = streamWord(root, seed, offset >>> 2);
+            int value = streamWord(root, seed, offset >>> 2, streamFlow);
             int shift = (3 - (offset & 3)) << 3;
             out[offset] = (byte) (value >>> shift);
         }
@@ -713,11 +1011,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
         byte[] payload,
         int root,
         long siteSeed,
-        ByteLayer byteLayer
+        ByteLayer byteLayer,
+        long streamFlow
     ) {
         long seed = byteLayerSeed(siteSeed);
         for (int offset = 0; offset < payload.length; offset++) {
-            int value = streamWord(root, seed, offset >>> 2);
+            int value = streamWord(root, seed, offset >>> 2, streamFlow);
             int shift = (3 - (offset & 3)) << 3;
             int mask = (value >>> shift) & 0xFF;
             int b = payload[offset] & 0xFF;
@@ -744,71 +1043,289 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffInstructionState state,
         Algorithm algorithm,
         ByteLayer byteLayer,
-        CipherCache cipherCache,
         StringSiteCache siteCache,
+        StringDecodeTail tail,
+        int keyTableLocal,
         MethodNode mn
     ) {
-        int encryptedLocal = mn.maxLocals;
-        int keyLocal = encryptedLocal + 1;
-        int cipherLocal = keyLocal + 1;
-        int plainLocal = cipherLocal + 1;
-        int wordLocal = plainLocal + 1;
-        int lengthLocal = wordLocal + 1;
-        int rootLocal = lengthLocal + 1;
-        int indexLocal = rootLocal + 1;
-        int stringLocal = indexLocal + 1;
-        int throwableLocal = stringLocal + 1;
-        int fingerprintLocal = throwableLocal + 1;
-        mn.maxLocals = Math.max(mn.maxLocals, fingerprintLocal + 2);
-
-        emitLiveStringWord(insns, rootSeed(siteSeed), metadata, state);
-        insns.add(new VarInsnNode(Opcodes.ISTORE, rootLocal));
-        emitFingerprint(insns, siteSeed, rootLocal);
-        insns.add(new VarInsnNode(Opcodes.LSTORE, fingerprintLocal));
-        LabelNode cacheMiss = new LabelNode();
-        LabelNode done = new LabelNode();
-        if (siteCache.hasMutableCache()) {
-            insns.add(new FieldInsnNode(
-                Opcodes.GETSTATIC,
-                siteCache.owner(),
-                siteCache.stringFieldName(),
-                "Ljava/lang/String;"
-            ));
-            insns.add(new VarInsnNode(Opcodes.ASTORE, stringLocal));
-            insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
-            insns.add(new JumpInsnNode(Opcodes.IFNULL, cacheMiss));
-            insns.add(new FieldInsnNode(
-                Opcodes.GETSTATIC,
-                siteCache.owner(),
-                siteCache.fingerprintFieldName(),
-                "J"
-            ));
-            insns.add(new VarInsnNode(Opcodes.LLOAD, fingerprintLocal));
-            insns.add(new InsnNode(Opcodes.LCMP));
-            insns.add(new JumpInsnNode(Opcodes.IFNE, cacheMiss));
-            insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
-            insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        if (!siteCache.hasKeyMaterial()) {
+            throw new IllegalStateException("shared string decode tail requires key material table");
         }
-
-        insns.add(cacheMiss);
-        if (siteCache.inlinePayload() != null) {
-            emitByteArray(insns, siteCache.inlinePayload());
+        if (keyTableLocal >= 0) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, keyTableLocal));
         } else {
             insns.add(new FieldInsnNode(
                 Opcodes.GETSTATIC,
                 siteCache.owner(),
-                siteCache.payloadFieldName(),
-                "[B"
+                siteCache.keyTableFieldName(),
+                "[Ljava/lang/Object;"
             ));
         }
+        emitLiveStringWord(insns, rootSeed(siteSeed), metadata, state);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
+        JvmPassBytecode.pushInt(insns, siteCache.keySlot());
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            tail.owner(),
+            tail.name(),
+            STRING_TAIL_DESC,
+            tail.interfaceOwner()
+        ));
+    }
+
+    private void emitDecodedStringCall(
+        PipelineContext pctx,
+        L1Class clazz,
+        InsnList caller,
+        MethodNode mn,
+        int encryptedLength,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        Algorithm algorithm,
+        ByteLayer byteLayer,
+        StringSiteCache siteCache
+    ) {
+        emitDecodedStringCall(
+            pctx,
+            clazz,
+            caller,
+            mn,
+            encryptedLength,
+            siteSeed,
+            metadata,
+            state,
+            algorithm,
+            byteLayer,
+            siteCache,
+            -1
+        );
+    }
+
+    private void emitDecodedStringCall(
+        PipelineContext pctx,
+        L1Class clazz,
+        InsnList caller,
+        MethodNode mn,
+        int encryptedLength,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        Algorithm algorithm,
+        ByteLayer byteLayer,
+        StringSiteCache siteCache,
+        int carrierLocal
+    ) {
+        if (!siteCache.hasKeyMaterial()) {
+            throw new IllegalStateException(
+                "stringObfuscation requires dynamic key material table for decode helper in " + clazz.name()
+            );
+        }
+        StringDecodeTail tail = ensureStringDecodeTail(
+            pctx,
+            clazz
+        );
+        emitDecodedString(
+            caller,
+            encryptedLength,
+            siteSeed,
+            metadata,
+            state,
+            algorithm,
+            byteLayer,
+            siteCache,
+            tail,
+            carrierLocal,
+            mn
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private StringDecodeTail ensureStringDecodeTail(
+        PipelineContext pctx,
+        L1Class clazz
+    ) {
+        Map<String, StringDecodeTail> tails = pctx.getPassData(STRING_DECODE_TAILS);
+        if (tails == null) {
+            tails = new LinkedHashMap<>();
+            pctx.putPassData(STRING_DECODE_TAILS, tails);
+        }
+        String key = packageName(clazz.name());
+        StringDecodeTail existing = tails.get(key);
+        if (existing != null) return existing;
+
+        boolean interfaceOwner = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
+        String name = uniqueMethodName(
+            clazz,
+            "__neko_strtail$"
+        );
+        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+        access |= interfaceOwner ? Opcodes.ACC_PUBLIC : 0;
+        MethodNode helper = new MethodNode(
+            access,
+            name,
+            STRING_TAIL_DESC,
+            null,
+            null
+        );
+        helper.maxLocals = 12;
+        helper.maxStack = 32;
+        emitDecodedStringTail(
+            helper.instructions,
+            helper
+        );
+        helper.instructions.add(new InsnNode(Opcodes.ARETURN));
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+        clazz.markDirty();
+        publishGeneratedStringHelperFlowKey(pctx, clazz.name(), name, STRING_TAIL_DESC, 2);
+
+        StringDecodeTail tail = new StringDecodeTail(clazz.name(), name, interfaceOwner);
+        tails.put(key, tail);
+        return tail;
+    }
+
+    private void emitDecodedStringTail(
+        InsnList insns,
+        MethodNode mn
+    ) {
+        int carrierLocal = 0;
+        int rootLocal = 1;
+        int flowLocal = 2;
+        int keySlotLocal = 4;
+        int payloadSlotLocal = 5;
+        int cacheSlotLocal = 6;
+        int encryptedLengthLocal = 7;
+        int keySeedLocal = 8;
+        int byteLayerSeedLocal = 10;
+        int xorSeedLocal = 12;
+        int siteSeedLocal = 14;
+        int encryptedLocal = 16;
+        int keyLocal = 17;
+        int cipherLocal = 18;
+        int plainLocal = 19;
+        int wordLocal = 20;
+        int lengthLocal = 21;
+        int indexLocal = 22;
+        int stringLocal = 23;
+        int throwableLocal = 24;
+        int keyCellLocal = 25;
+        int oldEpochLocal = 26;
+        int nextEpochLocal = 27;
+        int fingerprintLocal = 28;
+        int selectorLocal = 30;
+        int streamFlowLocal = 31;
+        int keyTableLocal = 33;
+        int slotSelectorLocal = 34;
+        mn.maxLocals = Math.max(mn.maxLocals, 35);
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        emitRuntimeStringMaterialSlotSelection(insns, carrierLocal, rootLocal, flowLocal, keySlotLocal);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, slotSelectorLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, slotSelectorLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, keyTableLocal));
+
+        emitRuntimeStringKeyCellLoad(insns, keyTableLocal, keySlotLocal);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, keyCellLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 4);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, oldEpochLocal));
+        emitRuntimeStringSiteSeedLoad(insns, keyCellLocal, oldEpochLocal, siteSeedLocal);
+        emitRuntimeStringTailSelectorLoad(insns, keyCellLocal, oldEpochLocal, selectorLocal);
+        emitRuntimeStringSiteMetadataLoad(
+            insns,
+            keyCellLocal,
+            oldEpochLocal,
+            siteSeedLocal,
+            STRING_KEY_CELL_PAYLOAD_SLOT,
+            STRING_KEY_CELL_PAYLOAD_MASK,
+            payloadSlotLocal
+        );
+        emitRuntimeStringSiteMetadataLoad(
+            insns,
+            keyCellLocal,
+            oldEpochLocal,
+            siteSeedLocal,
+            STRING_KEY_CELL_CACHE_SLOT,
+            STRING_KEY_CELL_CACHE_MASK,
+            cacheSlotLocal
+        );
+        emitRuntimeStringSiteMetadataLoad(
+            insns,
+            keyCellLocal,
+            oldEpochLocal,
+            siteSeedLocal,
+            STRING_KEY_CELL_LENGTH,
+            STRING_KEY_CELL_LENGTH_MASK,
+            encryptedLengthLocal
+        );
+        emitRuntimeStringKeyMixedWord(insns, rootLocal, keyCellLocal, oldEpochLocal, siteSeedLocal);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, rootLocal));
+        emitRuntimeStringStreamFlow(insns, rootLocal);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, streamFlowLocal));
+        emitRuntimeStringKeyCellUpdate(insns, keyCellLocal, rootLocal, nextEpochLocal, oldEpochLocal, siteSeedLocal, selectorLocal);
+        emitRuntimeFingerprint(insns, rootLocal, streamFlowLocal, siteSeedLocal, keySeedLocal);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, fingerprintLocal));
+        emitRuntimeDerivedSeed(insns, siteSeedLocal, 0x5354524C41595231L, 0x425954454C415952L, byteLayerSeedLocal);
+        emitRuntimeDerivedSeed(insns, siteSeedLocal, 0x535452584F524B31L, 0x425954455354524DL, xorSeedLocal);
+
+        LabelNode cacheMiss = new LabelNode();
+        LabelNode done = new LabelNode();
+        emitRuntimeStringCacheTableLoad(insns, keyTableLocal);
+        emitStringCacheIndex(insns, cacheSlotLocal, false);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/String"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, stringLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, cacheMiss));
+        emitRuntimeStringCacheTableLoad(insns, keyTableLocal);
+        emitStringCacheIndex(insns, cacheSlotLocal, true);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Long"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Long",
+            "longValue",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, fingerprintLocal));
+        insns.add(new InsnNode(Opcodes.LCMP));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, cacheMiss));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+
+        insns.add(cacheMiss);
+        emitRuntimeStringPayloadTableLoad(insns, keyTableLocal);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, payloadSlotLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[B"));
         insns.add(new VarInsnNode(Opcodes.ASTORE, encryptedLocal));
-        JvmPassBytecode.pushInt(insns, algorithm.keySize);
-        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
-        insns.add(new VarInsnNode(Opcodes.ASTORE, keyLocal));
-        emitFillKey(insns, siteSeed, algorithm, keyLocal, wordLocal, rootLocal, indexLocal);
-        emitCipherDecrypt(insns, siteSeed, encryptedLocal, keyLocal, cipherLocal, plainLocal, throwableLocal, cipherCache, algorithm, mn);
-        emitByteLayerDecode(insns, siteSeed, encryptedLength, byteLayer, plainLocal, wordLocal, rootLocal, indexLocal);
-        emitXorPlaintext(insns, siteSeed, encryptedLength, plainLocal, wordLocal, rootLocal, indexLocal);
+        emitAlgorithmCipherDecrypt(
+            insns,
+            keyTableLocal,
+            selectorLocal,
+            encryptedLocal,
+            keyLocal,
+            cipherLocal,
+            plainLocal,
+            throwableLocal,
+            wordLocal,
+            rootLocal,
+            streamFlowLocal,
+            indexLocal,
+            siteSeedLocal,
+            keySeedLocal,
+            mn
+        );
+        emitByteLayerDecode(insns, selectorLocal, plainLocal, wordLocal, rootLocal, streamFlowLocal, indexLocal, encryptedLengthLocal, byteLayerSeedLocal);
+        emitXorPlaintext(insns, plainLocal, wordLocal, rootLocal, streamFlowLocal, indexLocal, encryptedLengthLocal, xorSeedLocal);
         emitStringLength(insns, plainLocal);
         insns.add(new VarInsnNode(Opcodes.ISTORE, lengthLocal));
         insns.add(new TypeInsnNode(Opcodes.NEW, "java/lang/String"));
@@ -831,119 +1348,844 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ));
         insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ASTORE, stringLocal));
-        if (siteCache.hasMutableCache()) {
-            insns.add(new VarInsnNode(Opcodes.LLOAD, fingerprintLocal));
-            insns.add(new FieldInsnNode(
-                Opcodes.PUTSTATIC,
-                siteCache.owner(),
-                siteCache.fingerprintFieldName(),
-                "J"
-            ));
-            insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
-            insns.add(new FieldInsnNode(
-                Opcodes.PUTSTATIC,
-                siteCache.owner(),
-                siteCache.stringFieldName(),
-                "Ljava/lang/String;"
-            ));
-        }
+        emitRuntimeStringCacheTableLoad(insns, keyTableLocal);
+        emitStringCacheIndex(insns, cacheSlotLocal, true);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, fingerprintLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        emitRuntimeStringCacheTableLoad(insns, keyTableLocal);
+        emitStringCacheIndex(insns, cacheSlotLocal, false);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
+        insns.add(new InsnNode(Opcodes.AASTORE));
         insns.add(done);
     }
 
-    private void emitDecodedStringCall(
-        PipelineContext pctx,
-        L1Class clazz,
-        InsnList caller,
-        int encryptedLength,
-        long siteSeed,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state,
-        Algorithm algorithm,
-        ByteLayer byteLayer,
-        CipherCache cipherCache,
-        StringSiteCache siteCache
-    ) {
-        String helperName = installDecodeHelper(
-            pctx,
-            clazz,
-            encryptedLength,
-            siteSeed,
-            metadata,
-            state,
-            algorithm,
-            byteLayer,
-            cipherCache,
-            siteCache
-        );
-        caller.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
-        caller.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
-        caller.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
-        caller.add(new VarInsnNode(Opcodes.ILOAD, metadata.pcLocal()));
-        caller.add(new MethodInsnNode(
-            Opcodes.INVOKESTATIC,
-            clazz.name(),
-            helperName,
-            "(IIII)Ljava/lang/String;",
-            (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0
-        ));
+    private void emitStringCacheIndex(InsnList insns, int cacheSlotLocal, boolean fingerprint) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, cacheSlotLocal));
+        JvmPassBytecode.pushInt(insns, 2);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        if (fingerprint) {
+            JvmPassBytecode.pushInt(insns, 1);
+            insns.add(new InsnNode(Opcodes.IADD));
+        }
     }
 
-    private String installDecodeHelper(
-        PipelineContext pctx,
-        L1Class clazz,
-        int encryptedLength,
-        long siteSeed,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state,
-        Algorithm algorithm,
-        ByteLayer byteLayer,
-        CipherCache cipherCache,
-        StringSiteCache siteCache
+    private void emitRuntimeStringMaterialSlotSelection(
+        InsnList insns,
+        int carrierLocal,
+        int rootLocal,
+        int flowLocal,
+        int keySlotLocal
     ) {
-        String name = uniqueMethodName(
-            clazz,
-            "__neko_str$" + Long.toUnsignedString(siteSeed, 36)
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.STRING_MATERIAL_SELECTOR_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, keySlotLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+    }
+
+    private void emitAlgorithmCipherDecrypt(
+        InsnList insns,
+        int keyTableLocal,
+        int selectorLocal,
+        int encryptedLocal,
+        int keyLocal,
+        int cipherLocal,
+        int plainLocal,
+        int throwableLocal,
+        int wordLocal,
+        int rootLocal,
+        int flowLocal,
+        int indexLocal,
+        int siteSeedLocal,
+        int keySeedLocal,
+        MethodNode mn
+    ) {
+        LabelNode des = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        JvmPassBytecode.pushInt(insns, Algorithm.DES.ordinal());
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, des));
+        emitRuntimeDerivedSeed(insns, siteSeedLocal, 0x5354524B45594C31L, Algorithm.AES.keySize, keySeedLocal);
+        JvmPassBytecode.pushInt(insns, Algorithm.AES.keySize);
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, keyLocal));
+        emitFillKey(insns, Algorithm.AES, selectorLocal, keyLocal, wordLocal, rootLocal, flowLocal, indexLocal, keySeedLocal);
+        emitCipherDecryptTail(insns, Algorithm.AES, keyTableLocal, encryptedLocal, keyLocal, cipherLocal, plainLocal, throwableLocal, mn);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(des);
+        emitRuntimeDerivedSeed(insns, siteSeedLocal, 0x5354524B45594C31L, Algorithm.DES.keySize, keySeedLocal);
+        JvmPassBytecode.pushInt(insns, Algorithm.DES.keySize);
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, keyLocal));
+        emitFillKey(insns, Algorithm.DES, selectorLocal, keyLocal, wordLocal, rootLocal, flowLocal, indexLocal, keySeedLocal);
+        emitCipherDecryptTail(insns, Algorithm.DES, keyTableLocal, encryptedLocal, keyLocal, cipherLocal, plainLocal, throwableLocal, mn);
+        insns.add(done);
+    }
+
+    private void emitFillKey(
+        InsnList insns,
+        Algorithm algorithm,
+        int selectorLocal,
+        int keyLocal,
+        int wordLocal,
+        int rootLocal,
+        int flowLocal,
+        int indexLocal,
+        int keySeedLocal
+    ) {
+        LabelNode reverse = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, reverse));
+        emitFillKeyLoop(insns, algorithm, false, keyLocal, wordLocal, rootLocal, flowLocal, indexLocal, keySeedLocal);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(reverse);
+        emitFillKeyLoop(insns, algorithm, true, keyLocal, wordLocal, rootLocal, flowLocal, indexLocal, keySeedLocal);
+        insns.add(done);
+    }
+
+    private void emitFillKeyLoop(
+        InsnList insns,
+        Algorithm algorithm,
+        boolean reverseBytes,
+        int keyLocal,
+        int wordLocal,
+        int rootLocal,
+        int flowLocal,
+        int indexLocal,
+        int keySeedLocal
+    ) {
+        LabelNode loop = new LabelNode();
+        LabelNode end = new LabelNode();
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        JvmPassBytecode.pushInt(insns, algorithm.keySize / 4);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
+        emitRuntimeStreamWord(insns, rootLocal, indexLocal, keySeedLocal, flowLocal);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, wordLocal));
+        for (int step = 0; step < 4; step++) {
+            int b = reverseBytes ? 3 - step : step;
+            insns.add(new VarInsnNode(Opcodes.ALOAD, keyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+            JvmPassBytecode.pushInt(insns, 4);
+            insns.add(new InsnNode(Opcodes.IMUL));
+            JvmPassBytecode.pushInt(insns, b);
+            insns.add(new InsnNode(Opcodes.IADD));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, wordLocal));
+            JvmPassBytecode.pushInt(insns, 24 - b * 8);
+            insns.add(new InsnNode(Opcodes.IUSHR));
+            insns.add(new InsnNode(Opcodes.BASTORE));
+        }
+        insns.add(new IincInsnNode(indexLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        insns.add(end);
+    }
+
+    private void emitCipherDecryptTail(
+        InsnList insns,
+        Algorithm algorithm,
+        int keyTableLocal,
+        int encryptedLocal,
+        int keyLocal,
+        int cipherLocal,
+        int plainLocal,
+        int throwableLocal,
+        MethodNode mn
+    ) {
+        LabelNode protectedStart = new LabelNode();
+        LabelNode protectedEnd = new LabelNode();
+        LabelNode handler = new LabelNode();
+        LabelNode done = new LabelNode();
+
+        emitRuntimeStringCipherLoad(insns, keyTableLocal, algorithm);
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, cipherLocal));
+        insns.add(new InsnNode(Opcodes.MONITORENTER));
+        insns.add(protectedStart);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
+        JvmPassBytecode.pushInt(insns, Cipher.DECRYPT_MODE);
+        insns.add(new TypeInsnNode(Opcodes.NEW, "javax/crypto/spec/SecretKeySpec"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyLocal));
+        emitStaticString(
+            insns,
+            algorithm.keyName,
+            JvmPassBytecode.mix(0x535452544B455931L, algorithm.ordinal())
         );
-        MethodNode helper = new MethodNode(
-            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-            name,
-            "(IIII)Ljava/lang/String;",
-            null,
-            null
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "javax/crypto/spec/SecretKeySpec",
+            "<init>",
+            "([BLjava/lang/String;)V",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "javax/crypto/Cipher",
+            "init",
+            "(ILjava/security/Key;)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, encryptedLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "javax/crypto/Cipher",
+            "doFinal",
+            "([B)[B",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, plainLocal));
+        insns.add(protectedEnd);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
+        insns.add(new InsnNode(Opcodes.MONITOREXIT));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(handler);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, throwableLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
+        insns.add(new InsnNode(Opcodes.MONITOREXIT));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, throwableLocal));
+        insns.add(new InsnNode(Opcodes.ATHROW));
+        insns.add(done);
+        mn.tryCatchBlocks.add(new TryCatchBlockNode(protectedStart, protectedEnd, handler, null));
+    }
+
+    private void emitByteLayerDecode(
+        InsnList insns,
+        int selectorLocal,
+        int plainLocal,
+        int wordLocal,
+        int rootLocal,
+        int flowLocal,
+        int indexLocal,
+        int encryptedLengthLocal,
+        int byteLayerSeedLocal
+    ) {
+        LabelNode subtract = new LabelNode();
+        LabelNode xor = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, ByteLayer.SUBTRACT.ordinal());
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, subtract));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, ByteLayer.XOR.ordinal());
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, xor));
+        insns.add(new InsnNode(Opcodes.POP));
+        emitByteLayerDecodeLoop(insns, ByteLayer.ADD, plainLocal, wordLocal, rootLocal, flowLocal, indexLocal, encryptedLengthLocal, byteLayerSeedLocal);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(subtract);
+        insns.add(new InsnNode(Opcodes.POP));
+        emitByteLayerDecodeLoop(insns, ByteLayer.SUBTRACT, plainLocal, wordLocal, rootLocal, flowLocal, indexLocal, encryptedLengthLocal, byteLayerSeedLocal);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(xor);
+        insns.add(new InsnNode(Opcodes.POP));
+        emitByteLayerDecodeLoop(insns, ByteLayer.XOR, plainLocal, wordLocal, rootLocal, flowLocal, indexLocal, encryptedLengthLocal, byteLayerSeedLocal);
+        insns.add(done);
+    }
+
+    private void emitByteLayerDecodeLoop(
+        InsnList insns,
+        ByteLayer byteLayer,
+        int plainLocal,
+        int wordLocal,
+        int rootLocal,
+        int flowLocal,
+        int indexLocal,
+        int encryptedLengthLocal,
+        int byteLayerSeedLocal
+    ) {
+        LabelNode loop = new LabelNode();
+        LabelNode end = new LabelNode();
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, encryptedLengthLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        JvmPassBytecode.pushInt(insns, 2);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, wordLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, plainLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, plainLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.BALOAD));
+        emitRuntimeStreamWord(insns, rootLocal, wordLocal, byteLayerSeedLocal, flowLocal);
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.ISUB));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        switch (byteLayer) {
+            case ADD -> insns.add(new InsnNode(Opcodes.ISUB));
+            case SUBTRACT -> insns.add(new InsnNode(Opcodes.IADD));
+            case XOR -> insns.add(new InsnNode(Opcodes.IXOR));
+        }
+        insns.add(new InsnNode(Opcodes.BASTORE));
+        insns.add(new IincInsnNode(indexLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        insns.add(end);
+    }
+
+    private void emitXorPlaintext(
+        InsnList insns,
+        int plainLocal,
+        int wordLocal,
+        int rootLocal,
+        int flowLocal,
+        int indexLocal,
+        int encryptedLengthLocal,
+        int xorSeedLocal
+    ) {
+        LabelNode loop = new LabelNode();
+        LabelNode end = new LabelNode();
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, encryptedLengthLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, end));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        JvmPassBytecode.pushInt(insns, 2);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, wordLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, plainLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, plainLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.BALOAD));
+        emitRuntimeStreamWord(insns, rootLocal, wordLocal, xorSeedLocal, flowLocal);
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.ISUB));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.BASTORE));
+        insns.add(new IincInsnNode(indexLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        insns.add(end);
+    }
+
+    private void emitRuntimeStringPayloadTableLoad(InsnList insns, int keyTableLocal) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyTableLocal));
+        JvmPassBytecode.pushInt(insns, STRING_PAYLOAD_TABLE_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+    }
+
+    private void emitRuntimeStringCacheTableLoad(InsnList insns, int keyTableLocal) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyTableLocal));
+        JvmPassBytecode.pushInt(insns, STRING_CACHE_TABLE_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+    }
+
+    private void emitRuntimeStringCipherLoad(InsnList insns, int keyTableLocal, Algorithm algorithm) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyTableLocal));
+        JvmPassBytecode.pushInt(insns, stringCipherSlot(algorithm));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "javax/crypto/Cipher"));
+    }
+
+    private int stringCipherSlot(Algorithm algorithm) {
+        return switch (algorithm) {
+            case AES -> STRING_AES_CIPHER_SLOT;
+            case DES -> STRING_DES_CIPHER_SLOT;
+        };
+    }
+
+    private void emitRuntimeStringKeyCellLoad(InsnList insns, int keyTableLocal, int keySlotLocal) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyTableLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, keySlotLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+    }
+
+    private void emitRuntimeStringSiteSeedLoad(
+        InsnList insns,
+        int keyCellLocal,
+        int epochLocal,
+        int siteSeedLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitRuntimeStringSiteTokenCellMask(insns, epochLocal, 0);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitRuntimeStringSiteTokenCellMask(insns, epochLocal, 1);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, siteSeedLocal));
+    }
+
+    private void emitRuntimeStringTailSelectorLoad(
+        InsnList insns,
+        int keyCellLocal,
+        int epochLocal,
+        int selectorLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 7);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitRuntimeStringTailSelectorCellMask(insns, epochLocal);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, selectorLocal));
+    }
+
+    private void emitRuntimeStringKeyMixedWord(
+        InsnList insns,
+        int liveWordLocal,
+        int keyCellLocal,
+        int epochLocal,
+        int siteSeedLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, liveWordLocal));
+        emitRuntimeDecodedStringKeyWord(insns, keyCellLocal, epochLocal, siteSeedLocal, 0);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, liveWordLocal));
+        emitRuntimeShift(insns, siteSeedLocal, 7);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        emitRuntimeDecodedStringKeyWord(insns, keyCellLocal, epochLocal, siteSeedLocal, 1);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, siteSeedLocal, 17);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeDecodedStringKeyWord(insns, keyCellLocal, epochLocal, siteSeedLocal, 2);
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, liveWordLocal));
+        emitRuntimeShift(insns, siteSeedLocal, 29);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        emitRuntimeDecodedStringKeyWord(insns, keyCellLocal, epochLocal, siteSeedLocal, 3);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, siteSeedLocal, 5);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeDecodedStringKeyWord(
+        InsnList insns,
+        int keyCellLocal,
+        int epochLocal,
+        int siteSeedLocal,
+        int wordIndex
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, wordIndex);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitRuntimeStringKeyCellMask(insns, siteSeedLocal, wordIndex, epochLocal);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeStringKeyCellUpdate(
+        InsnList insns,
+        int keyCellLocal,
+        int rootLocal,
+        int nextEpochLocal,
+        int oldEpochLocal,
+        int siteSeedLocal,
+        int selectorLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, oldEpochLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354524B55504431L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, siteSeedLocal, 19);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354524B55504432L);
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354524B55504433L);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, nextEpochLocal));
+        for (int i = 0; i < 4; i++) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+            JvmPassBytecode.pushInt(insns, i);
+            insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+            JvmPassBytecode.pushInt(insns, i);
+            insns.add(new InsnNode(Opcodes.IALOAD));
+            emitRuntimeStringKeyCellMask(insns, siteSeedLocal, i, oldEpochLocal);
+            insns.add(new InsnNode(Opcodes.IXOR));
+            emitRuntimeStringKeyCellMask(insns, siteSeedLocal, i, nextEpochLocal);
+            insns.add(new InsnNode(Opcodes.IXOR));
+            insns.add(new InsnNode(Opcodes.IASTORE));
+        }
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 4);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, nextEpochLocal));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, siteSeedLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        emitRuntimeStringSiteTokenCellMask(insns, nextEpochLocal, 0);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, siteSeedLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        emitRuntimeStringSiteTokenCellMask(insns, nextEpochLocal, 1);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 7);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
+        emitRuntimeStringTailSelectorCellMask(insns, nextEpochLocal);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+        emitRuntimeStringSiteMetadataCellUpdate(
+            insns,
+            keyCellLocal,
+            siteSeedLocal,
+            oldEpochLocal,
+            nextEpochLocal,
+            STRING_KEY_CELL_PAYLOAD_SLOT,
+            STRING_KEY_CELL_PAYLOAD_MASK
         );
-        helper.maxLocals = 6;
-        helper.maxStack = 32;
-        ControlFlowFlatteningPass.CffMethodMetadata helperMetadata =
-            new ControlFlowFlatteningPass.CffMethodMetadata(
-                state.methodKey(),
-                4,
-                0,
-                1,
-                2,
-                3,
-                -1,
-                Set.of(),
-                Map.of(),
-                metadata.classKeyTable()
-            );
-        emitRecoverMethodSeedLocal(helper.instructions, siteSeed, helperMetadata, state, 4);
-        emitDecodedString(
-            helper.instructions,
-            encryptedLength,
-            siteSeed,
-            helperMetadata,
-            state,
-            algorithm,
-            byteLayer,
-            cipherCache,
-            siteCache,
-            helper
+        emitRuntimeStringSiteMetadataCellUpdate(
+            insns,
+            keyCellLocal,
+            siteSeedLocal,
+            oldEpochLocal,
+            nextEpochLocal,
+            STRING_KEY_CELL_CACHE_SLOT,
+            STRING_KEY_CELL_CACHE_MASK
         );
-        helper.instructions.add(new InsnNode(Opcodes.ARETURN));
-        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
-        clazz.asmNode().methods.add(helper);
-        clazz.markDirty();
-        return name;
+        emitRuntimeStringSiteMetadataCellUpdate(
+            insns,
+            keyCellLocal,
+            siteSeedLocal,
+            oldEpochLocal,
+            nextEpochLocal,
+            STRING_KEY_CELL_LENGTH,
+            STRING_KEY_CELL_LENGTH_MASK
+        );
+    }
+
+    private void emitRuntimeStringSiteMetadataLoad(
+        InsnList insns,
+        int keyCellLocal,
+        int epochLocal,
+        int siteSeedLocal,
+        int cellIndex,
+        long maskSeed,
+        int targetLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, cellIndex);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitRuntimeStringSiteMetadataCellMask(insns, siteSeedLocal, epochLocal, maskSeed);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, targetLocal));
+    }
+
+    private void emitRuntimeStringSiteMetadataCellUpdate(
+        InsnList insns,
+        int keyCellLocal,
+        int siteSeedLocal,
+        int oldEpochLocal,
+        int nextEpochLocal,
+        int cellIndex,
+        long maskSeed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, cellIndex);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, cellIndex);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitRuntimeStringSiteMetadataCellMask(insns, siteSeedLocal, oldEpochLocal, maskSeed);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeStringSiteMetadataCellMask(insns, siteSeedLocal, nextEpochLocal, maskSeed);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+    }
+
+    private void emitRuntimeStringSiteMetadataCellMask(
+        InsnList insns,
+        int siteSeedLocal,
+        int epochLocal,
+        long maskSeed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, maskSeed);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, siteSeedLocal, 11);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, maskSeed ^ 0x5354524D45544131L);
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, maskSeed ^ 0x5354524D45544132L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeStringKeyCellMask(
+        InsnList insns,
+        int siteSeedLocal,
+        int wordIndex,
+        int epochLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354524B4D41534BL + wordIndex);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, siteSeedLocal, 9 + wordIndex);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354524B4D554C31L + wordIndex);
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354524B4D46494EL + wordIndex);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeStringSiteTokenCellMask(InsnList insns, int epochLocal, int wordIndex) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x5354525349544531L, wordIndex)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 7 + wordIndex);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x5354525349544532L, wordIndex)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x5354525349544533L, wordIndex)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeStringTailSelectorCellMask(InsnList insns, int epochLocal) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x53545253454C3131L, 0x5441494C53454CL)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 13);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x53545253454C3132L, 0x5441494C53454CL)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x53545253454C3133L, 0x5441494C53454CL)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeFingerprint(
+        InsnList insns,
+        int rootLocal,
+        int flowLocal,
+        int siteSeedLocal,
+        int seedScratchLocal
+    ) {
+        emitRuntimeDerivedSeed(insns, siteSeedLocal, 0x5354524341434845L, 0, seedScratchLocal);
+        emitRuntimeStreamWordConstant(insns, rootLocal, 0, seedScratchLocal, flowLocal);
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        emitRuntimeDerivedSeed(insns, siteSeedLocal, 0x5354524341434845L, 1, seedScratchLocal);
+        emitRuntimeStreamWordConstant(insns, rootLocal, 0, seedScratchLocal, flowLocal);
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private void emitRuntimeStreamWord(InsnList insns, int rootLocal, int wordLocal, int seedLocal, int flowLocal) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        emitRuntimeStreamWordTail(insns, () -> insns.add(new VarInsnNode(Opcodes.ILOAD, wordLocal)), seedLocal, flowLocal);
+    }
+
+    private void emitRuntimeStreamWordConstant(InsnList insns, int rootLocal, int word, int seedLocal, int flowLocal) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        emitRuntimeStreamWordTail(insns, () -> JvmPassBytecode.pushInt(insns, word), seedLocal, flowLocal);
+    }
+
+    private void emitRuntimeStreamWordTail(InsnList insns, Runnable wordEmitter, int seedLocal, int flowLocal) {
+        emitRuntimeMixToNonZeroInt(insns, seedLocal, 0x535453545245414DL);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeFlowMixToNonZeroInt(insns, flowLocal, seedLocal, 0x53545354464C4F57L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        wordEmitter.run();
+        emitRuntimeMixToNonZeroInt(insns, seedLocal, 0x53545354494E4458L);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, seedLocal, 3);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, seedLocal, 13);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeMixToNonZeroInt(insns, seedLocal, 0x53545354524D554CL);
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitRuntimeMixToNonZeroInt(insns, seedLocal, 0x5354535446494E31L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeDerivedSeed(InsnList insns, int siteSeedLocal, long xorConst, long value, int outLocal) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, siteSeedLocal));
+        JvmPassBytecode.pushLong(insns, xorConst);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, value);
+        emitRuntimeMixLong(insns);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, outLocal));
+    }
+
+    private void emitRuntimeMixLong(InsnList insns) {
+        insns.add(new InsnNode(Opcodes.LADD));
+        JvmPassBytecode.pushLong(insns, 0x9E3779B97F4A7C15L);
+        insns.add(new InsnNode(Opcodes.LADD));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 30);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xBF58476D1CE4E5B9L);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 27);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0x94D049BB133111EBL);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 31);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+    }
+
+    private void emitRuntimeMixToNonZeroInt(InsnList insns, int seedLocal, long value) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        JvmPassBytecode.pushLong(insns, value);
+        emitRuntimeMixLong(insns);
+        insns.add(new InsnNode(Opcodes.L2I));
+        LabelNode nonZero = new LabelNode();
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, nonZero));
+        insns.add(new InsnNode(Opcodes.POP));
+        JvmPassBytecode.pushInt(insns, 0x3D6B2A4F);
+        insns.add(nonZero);
+    }
+
+    private void emitRuntimeFlowMixToNonZeroInt(
+        InsnList insns,
+        int flowLocal,
+        int seedLocal,
+        long value
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, value);
+        emitRuntimeMixLong(insns);
+        insns.add(new InsnNode(Opcodes.L2I));
+        LabelNode nonZero = new LabelNode();
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, nonZero));
+        insns.add(new InsnNode(Opcodes.POP));
+        JvmPassBytecode.pushInt(insns, 0x5A17C3E9);
+        insns.add(nonZero);
+    }
+
+    private long stringStreamFlow(int root) {
+        int high = root ^ 0x53545346;
+        int low = (root * 0x45D9F3B) ^ (root >>> 16) ^ 0x464C4F57;
+        return (((long) high) << 32) | (Integer.toUnsignedLong(low));
+    }
+
+    private void emitRuntimeStringStreamFlow(InsnList insns, int rootLocal) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        JvmPassBytecode.pushInt(insns, 0x53545346);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        JvmPassBytecode.pushInt(insns, 0x45D9F3B);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, 0x464C4F57);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private void emitRuntimeShift(InsnList insns, int seedLocal, int base) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        JvmPassBytecode.pushInt(insns, base);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        JvmPassBytecode.pushLong(insns, 30L);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.L2I));
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IADD));
     }
 
     private String uniqueMethodName(L1Class clazz, String base) {
@@ -962,6 +2204,11 @@ public final class JvmStringObfuscationPass implements TransformPass {
             }
         }
         return false;
+    }
+
+    private String packageName(String owner) {
+        int slash = owner.lastIndexOf('/');
+        return slash < 0 ? "" : owner.substring(0, slash);
     }
 
     private void emitRecoverMethodSeedLocal(
@@ -991,24 +2238,30 @@ public final class JvmStringObfuscationPass implements TransformPass {
     }
 
     private void emitByteArray(InsnList insns, byte[] data) {
-        StringBuilder encoded = new StringBuilder(data.length);
-        for (byte b : data) {
-            encoded.append((char) (b & 0xFF));
+        JvmPassBytecode.pushInt(insns, data.length);
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE));
+        for (int i = 0; i < data.length; i++) {
+            insns.add(new InsnNode(Opcodes.DUP));
+            JvmPassBytecode.pushInt(insns, i);
+            JvmPassBytecode.pushInt(insns, data[i]);
+            insns.add(new InsnNode(Opcodes.BASTORE));
         }
-        insns.add(new LdcInsnNode(encoded.toString()));
-        insns.add(new FieldInsnNode(
-            Opcodes.GETSTATIC,
-            "java/nio/charset/StandardCharsets",
-            "ISO_8859_1",
-            "Ljava/nio/charset/Charset;"
-        ));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/String",
-            "getBytes",
-            "(Ljava/nio/charset/Charset;)[B",
-            false
-        ));
+    }
+
+    @SuppressWarnings("unchecked")
+    private void publishGeneratedStringHelperFlowKey(
+        PipelineContext pctx,
+        String owner,
+        String name,
+        String desc,
+        int keyLocal
+    ) {
+        Map<String, Integer> locals = pctx.getPassData(JvmKeyDispatchPass.CFF_LOCAL_BY_METHOD);
+        if (locals == null) {
+            locals = new LinkedHashMap<>();
+            pctx.putPassData(JvmKeyDispatchPass.CFF_LOCAL_BY_METHOD, locals);
+        }
+        locals.put(owner + "." + name + desc, keyLocal);
     }
 
     private void emitFingerprint(InsnList insns, long siteSeed, int rootLocal) {
@@ -1021,6 +2274,231 @@ public final class JvmStringObfuscationPass implements TransformPass {
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private StringKeyMaterial stringKeyMaterial(PipelineContext pctx, L1Class clazz, long siteSeed) {
+        long seed = JvmPassBytecode.mix(pctx.masterSeed() ^ 0x5354524B4D415431L, clazz.name().hashCode());
+        int[] words = new int[4];
+        words[0] = nonZeroInt(JvmPassBytecode.mix(seed ^ siteSeed, 0x5354524B4D415430L));
+        words[1] = nonZeroInt(JvmPassBytecode.mix(seed + siteSeed, 0x5354524B4D415431L));
+        words[2] = nonZeroInt(JvmPassBytecode.mix(seed ^ Long.rotateLeft(siteSeed, 17), 0x5354524B4D415432L));
+        words[3] = nonZeroInt(JvmPassBytecode.mix(seed + Long.rotateRight(siteSeed, 11), 0x5354524B4D415433L));
+        int epoch = nonZeroInt(JvmPassBytecode.mix(seed ^ Long.rotateLeft(siteSeed, 29), 0x5354524B45504F43L));
+        return new StringKeyMaterial(siteSeed, epoch, words);
+    }
+
+    private int[] encodedStringKeyCell(
+        StringKeyMaterial keyMaterial,
+        Algorithm algorithm,
+        ByteLayer byteLayer,
+        int payloadSlot,
+        int cacheSlot,
+        int encryptedLength
+    ) {
+        int[] cell = new int[11];
+        for (int i = 0; i < keyMaterial.words().length; i++) {
+            cell[i] = keyMaterial.words()[i] ^ stringKeyCellMask(keyMaterial.siteSeed(), i, keyMaterial.epoch());
+        }
+        cell[4] = keyMaterial.epoch();
+        cell[5] = (int) (keyMaterial.siteSeed() >>> 32) ^ stringSiteTokenCellMask(keyMaterial.epoch(), 0);
+        cell[6] = (int) keyMaterial.siteSeed() ^ stringSiteTokenCellMask(keyMaterial.epoch(), 1);
+        int selector = (algorithm.ordinal() << 3)
+            | (byteLayer.ordinal() << 1)
+            | ((keyMaterial.siteSeed() & 2L) != 0L ? 1 : 0);
+        cell[7] = selector ^ stringTailSelectorCellMask(keyMaterial.epoch());
+        cell[STRING_KEY_CELL_PAYLOAD_SLOT] = payloadSlot ^ stringSiteMetadataCellMask(
+            keyMaterial.siteSeed(),
+            keyMaterial.epoch(),
+            STRING_KEY_CELL_PAYLOAD_MASK
+        );
+        cell[STRING_KEY_CELL_CACHE_SLOT] = cacheSlot ^ stringSiteMetadataCellMask(
+            keyMaterial.siteSeed(),
+            keyMaterial.epoch(),
+            STRING_KEY_CELL_CACHE_MASK
+        );
+        cell[STRING_KEY_CELL_LENGTH] = encryptedLength ^ stringSiteMetadataCellMask(
+            keyMaterial.siteSeed(),
+            keyMaterial.epoch(),
+            STRING_KEY_CELL_LENGTH_MASK
+        );
+        return cell;
+    }
+
+    private int stringRoot(
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        long siteSeed,
+        StringKeyMaterial keyMaterial
+    ) {
+        return stringKeyMixedWord(liveStringWord(metadata, state, rootSeed(siteSeed)), siteSeed, keyMaterial);
+    }
+
+    private int stringKeyMixedWord(int liveWord, long siteSeed, StringKeyMaterial keyMaterial) {
+        if (keyMaterial == null) {
+            return liveWord;
+        }
+        int[] words = keyMaterial.words();
+        int x = liveWord ^ words[0];
+        x += (liveWord << shift(siteSeed, 7)) ^ words[1];
+        x ^= x >>> shift(siteSeed, 17);
+        x *= words[2] | 1;
+        x += (liveWord >>> shift(siteSeed, 29)) ^ words[3];
+        x ^= x >>> shift(siteSeed, 5);
+        return x;
+    }
+
+    private void emitStringKeyCellLoad(InsnList insns, StringSiteCache siteCache, int keyTableLocal) {
+        if (keyTableLocal >= 0) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, keyTableLocal));
+        } else {
+            insns.add(new FieldInsnNode(
+                Opcodes.GETSTATIC,
+                siteCache.owner(),
+                siteCache.keyTableFieldName(),
+                "[Ljava/lang/Object;"
+            ));
+        }
+        JvmPassBytecode.pushInt(insns, siteCache.keySlot());
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+    }
+
+    private void emitStringKeyMixedWord(
+        InsnList insns,
+        int liveWordLocal,
+        int keyCellLocal,
+        long siteSeed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, liveWordLocal));
+        emitDecodedStringKeyWord(insns, keyCellLocal, siteSeed, 0);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, liveWordLocal));
+        JvmPassBytecode.pushInt(insns, shift(siteSeed, 7));
+        insns.add(new InsnNode(Opcodes.ISHL));
+        emitDecodedStringKeyWord(insns, keyCellLocal, siteSeed, 1);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(siteSeed, 17));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitDecodedStringKeyWord(insns, keyCellLocal, siteSeed, 2);
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, liveWordLocal));
+        JvmPassBytecode.pushInt(insns, shift(siteSeed, 29));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        emitDecodedStringKeyWord(insns, keyCellLocal, siteSeed, 3);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(siteSeed, 5));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitDecodedStringKeyWord(
+        InsnList insns,
+        int keyCellLocal,
+        long siteSeed,
+        int wordIndex
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, wordIndex);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 4);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitStringKeyCellMask(insns, siteSeed, wordIndex);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitStringKeyCellUpdate(
+        InsnList insns,
+        int keyCellLocal,
+        int rootLocal,
+        int nextEpochLocal,
+        int oldEpochLocal,
+        long siteSeed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 4);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, oldEpochLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, oldEpochLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rootLocal));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B55504431L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(siteSeed, 19));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B55504432L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B55504433L)));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, nextEpochLocal));
+        for (int i = 0; i < 4; i++) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+            JvmPassBytecode.pushInt(insns, i);
+            insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+            JvmPassBytecode.pushInt(insns, i);
+            insns.add(new InsnNode(Opcodes.IALOAD));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, oldEpochLocal));
+            emitStringKeyCellMask(insns, siteSeed, i);
+            insns.add(new InsnNode(Opcodes.IXOR));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, nextEpochLocal));
+            emitStringKeyCellMask(insns, siteSeed, i);
+            insns.add(new InsnNode(Opcodes.IXOR));
+            insns.add(new InsnNode(Opcodes.IASTORE));
+        }
+        insns.add(new VarInsnNode(Opcodes.ALOAD, keyCellLocal));
+        JvmPassBytecode.pushInt(insns, 4);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, nextEpochLocal));
+        insns.add(new InsnNode(Opcodes.IASTORE));
+    }
+
+    private int stringKeyCellMask(long siteSeed, int wordIndex, int epoch) {
+        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D41534BL + wordIndex));
+        x ^= x >>> shift(siteSeed, 9 + wordIndex);
+        x *= nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D554C31L + wordIndex)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D46494EL + wordIndex));
+    }
+
+    private int stringSiteTokenCellMask(int epoch, int wordIndex) {
+        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(0x5354525349544531L, wordIndex));
+        x ^= x >>> (7 + wordIndex);
+        x *= nonZeroInt(JvmPassBytecode.mix(0x5354525349544532L, wordIndex)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(0x5354525349544533L, wordIndex));
+    }
+
+    private int stringTailSelectorCellMask(int epoch) {
+        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(0x53545253454C3131L, 0x5441494C53454CL));
+        x ^= x >>> 13;
+        x *= nonZeroInt(JvmPassBytecode.mix(0x53545253454C3132L, 0x5441494C53454CL)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(0x53545253454C3133L, 0x5441494C53454CL));
+    }
+
+    private int stringSiteMetadataCellMask(long siteSeed, int epoch, long maskSeed) {
+        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, maskSeed));
+        x ^= x >>> shift(siteSeed, 11);
+        x *= nonZeroInt(JvmPassBytecode.mix(siteSeed, maskSeed ^ 0x5354524D45544131L)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, maskSeed ^ 0x5354524D45544132L));
+    }
+
+    private void emitStringKeyCellMask(InsnList insns, long siteSeed, int wordIndex) {
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D41534BL + wordIndex)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(siteSeed, 9 + wordIndex));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D554C31L + wordIndex)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D46494EL + wordIndex)));
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     private void emitFillKey(
@@ -1059,88 +2537,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new IincInsnNode(indexLocal, 1));
         insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
         insns.add(end);
-    }
-
-    private void emitCipherDecrypt(
-        InsnList insns,
-        long siteSeed,
-        int encryptedLocal,
-        int keyLocal,
-        int cipherLocal,
-        int plainLocal,
-        int throwableLocal,
-        CipherCache cipherCache,
-        Algorithm algorithm,
-        MethodNode mn
-    ) {
-        LabelNode protectedStart = new LabelNode();
-        LabelNode protectedEnd = new LabelNode();
-        LabelNode handler = new LabelNode();
-        LabelNode done = new LabelNode();
-
-        if (cipherCache.inline()) {
-            emitStaticString(insns, algorithm.transformation, siteSeed ^ 0x535452434950484CL);
-            insns.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                "javax/crypto/Cipher",
-                "getInstance",
-                "(Ljava/lang/String;)Ljavax/crypto/Cipher;",
-                false
-            ));
-        } else {
-            insns.add(new FieldInsnNode(
-                Opcodes.GETSTATIC,
-                cipherCache.owner(),
-                cipherCache.fieldName(),
-                "Ljavax/crypto/Cipher;"
-            ));
-        }
-        insns.add(new InsnNode(Opcodes.DUP));
-        insns.add(new VarInsnNode(Opcodes.ASTORE, cipherLocal));
-        insns.add(new InsnNode(Opcodes.MONITORENTER));
-        insns.add(protectedStart);
-        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
-        JvmPassBytecode.pushInt(insns, Cipher.DECRYPT_MODE);
-        insns.add(new TypeInsnNode(Opcodes.NEW, "javax/crypto/spec/SecretKeySpec"));
-        insns.add(new InsnNode(Opcodes.DUP));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, keyLocal));
-        emitStaticString(insns, algorithm.keyName, siteSeed ^ 0x5354524B45594E31L);
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKESPECIAL,
-            "javax/crypto/spec/SecretKeySpec",
-            "<init>",
-            "([BLjava/lang/String;)V",
-            false
-        ));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "javax/crypto/Cipher",
-            "init",
-            "(ILjava/security/Key;)V",
-            false
-        ));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, encryptedLocal));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "javax/crypto/Cipher",
-            "doFinal",
-            "([B)[B",
-            false
-        ));
-        insns.add(new VarInsnNode(Opcodes.ASTORE, plainLocal));
-        insns.add(protectedEnd);
-        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
-        insns.add(new InsnNode(Opcodes.MONITOREXIT));
-        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
-        insns.add(handler);
-        insns.add(new VarInsnNode(Opcodes.ASTORE, throwableLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, cipherLocal));
-        insns.add(new InsnNode(Opcodes.MONITOREXIT));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, throwableLocal));
-        insns.add(new InsnNode(Opcodes.ATHROW));
-        insns.add(done);
-        mn.tryCatchBlocks.add(new TryCatchBlockNode(protectedStart, protectedEnd, handler, null));
     }
 
     private void emitByteLayerDecode(
@@ -1236,8 +2632,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private StringSiteCache ensureStringSiteCache(
         PipelineContext pctx,
         L1Class clazz,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
         long siteSeed,
-        byte[] encrypted
+        byte[] encrypted,
+        StringKeyMaterial keyMaterial,
+        Algorithm algorithm,
+        ByteLayer byteLayer
     ) {
         Map<String, StringSiteCache> caches = pctx.getPassData(STRING_SITE_CACHES);
         if (caches == null) {
@@ -1247,139 +2647,221 @@ public final class JvmStringObfuscationPass implements TransformPass {
         String key = clazz.name() + ":" + Long.toUnsignedString(siteSeed, 36);
         StringSiteCache existing = caches.get(key);
         if (existing != null) return existing;
-        if ((clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0) {
-            StringSiteCache cache = new StringSiteCache(clazz.name(), null, null, null, encrypted);
-            caches.put(key, cache);
-            return cache;
-        }
 
-        long seed = JvmPassBytecode.mix(siteSeed ^ 0x5354525349544531L, clazz.name().hashCode());
-        String base = "$" + Integer.toUnsignedString((int) seed, 36);
-        String payloadField = uniqueFieldName(clazz, base + "p");
-        String fingerprintField = uniqueFieldName(clazz, base + "f");
-        String stringField = uniqueFieldName(clazz, base + "s");
-
-        boolean inlinePayload = shouldInlinePayload(siteSeed, encrypted.length);
-        if (!inlinePayload) {
-            clazz.asmNode().fields.add(new FieldNode(
-                Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-                payloadField,
-                "[B",
-                null,
-                null
-            ));
-        } else {
-            payloadField = null;
-        }
-        clazz.asmNode().fields.add(new FieldNode(
-            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_VOLATILE | Opcodes.ACC_SYNTHETIC,
-            fingerprintField,
-            "J",
-            null,
-            null
-        ));
-        clazz.asmNode().fields.add(new FieldNode(
-            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_VOLATILE | Opcodes.ACC_SYNTHETIC,
-            stringField,
-            "Ljava/lang/String;",
-            null,
-            null
-        ));
+        StringKeyTable keyTable = ensureStringKeyTable(pctx, clazz, metadata);
+        int payloadSlot = registerStringPayload(pctx, keyTable, encrypted);
+        int cacheSlot = registerStringCacheSlot(pctx, keyTable);
+        int keySlot = registerStringKeyMaterial(
+            pctx,
+            keyTable,
+            keyMaterial,
+            algorithm,
+            byteLayer,
+            payloadSlot,
+            cacheSlot,
+            encrypted.length
+        );
 
         StringSiteCache cache = new StringSiteCache(
             clazz.name(),
-            payloadField,
-            fingerprintField,
-            stringField,
-            inlinePayload ? encrypted : null
+            keyTable.fieldName(),
+            keySlot
         );
-        if (!inlinePayload) {
-            installPayloadInit(pctx, clazz, cache, encrypted);
-        }
         caches.put(key, cache);
         clazz.markDirty();
         return cache;
     }
 
-    private boolean shouldInlinePayload(long siteSeed, int encryptedLength) {
-        return false;
-    }
-
-    private void installPayloadInit(
+    @SuppressWarnings("unchecked")
+    private StringKeyTable ensureStringKeyTable(
         PipelineContext pctx,
         L1Class clazz,
-        StringSiteCache cache,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
+    ) {
+        Map<String, StringKeyTable> tables = pctx.getPassData(STRING_KEY_TABLES);
+        if (tables == null) {
+            tables = new LinkedHashMap<>();
+            pctx.putPassData(STRING_KEY_TABLES, tables);
+        }
+        StringKeyTable existing = tables.get(clazz.name());
+        if (existing != null) return existing;
+
+        String fieldName = metadata.classKeyTable().objectFieldName();
+        boolean directClinit = true;
+        MethodNode helper = findOrCreateClassInit(clazz);
+        LabelNode initStart = new LabelNode();
+        LabelNode initEnd = new LabelNode();
+        insertClassInitSegmentAfter(helper, metadata.classKeyTable().initEnd(), initStart, initEnd);
+
+        StringKeyTable table = new StringKeyTable(
+            clazz.name(),
+            fieldName,
+            helper,
+            new ArrayList<>(),
+            new ArrayList<>(),
+            new ArrayList<>(),
+            directClinit,
+            initStart,
+            initEnd
+        );
+        tables.put(clazz.name(), table);
+        clazz.markDirty();
+        return table;
+    }
+
+    private int registerStringKeyMaterial(
+        PipelineContext pctx,
+        StringKeyTable table,
+        StringKeyMaterial keyMaterial,
+        Algorithm algorithm,
+        ByteLayer byteLayer,
+        int payloadSlot,
+        int cacheSlot,
+        int encryptedLength
+    ) {
+        if (keyMaterial == null) {
+            throw new IllegalStateException("string key material table requires encoded key material");
+        }
+        int slot = table.cells().size() + STRING_KEY_CELL_BASE_SLOT;
+        table.cells().add(encodedStringKeyCell(keyMaterial, algorithm, byteLayer, payloadSlot, cacheSlot, encryptedLength));
+        rebuildStringKeyInit(pctx, table);
+        return slot;
+    }
+
+    private int registerStringPayload(
+        PipelineContext pctx,
+        StringKeyTable table,
         byte[] encrypted
     ) {
-        String helperName = uniqueMethodName(
-            clazz,
-            "__neko_strinit$" + Integer.toUnsignedString(
-                (int) JvmPassBytecode.mix(cache.payloadFieldName().hashCode(), encrypted.length),
-                36
-            )
-        );
-        MethodNode helper = new MethodNode(
-            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-            helperName,
-            "()V",
-            null,
-            null
-        );
-        emitByteArray(helper.instructions, encrypted);
-        helper.instructions.add(new FieldInsnNode(
-            Opcodes.PUTSTATIC,
-            cache.owner(),
-            cache.payloadFieldName(),
-            "[B"
-        ));
-        helper.instructions.add(new InsnNode(Opcodes.RETURN));
-        helper.maxLocals = 0;
-        helper.maxStack = 8;
-        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
-        clazz.asmNode().methods.add(helper);
-        insertClassInitCall(pctx, clazz, helperName);
+        int slot = table.payloads().size();
+        table.payloads().add(encrypted.clone());
+        rebuildStringKeyInit(pctx, table);
+        return slot;
     }
 
-    @SuppressWarnings("unchecked")
-    private CipherCache ensureCipherCache(
-        PipelineContext pctx,
-        L1Class clazz,
-        Algorithm algorithm
-    ) {
-        Map<String, Map<Algorithm, CipherCache>> caches = pctx.getPassData(CIPHER_CACHES);
-        if (caches == null) {
-            caches = new LinkedHashMap<>();
-            pctx.putPassData(CIPHER_CACHES, caches);
+    private int registerStringCacheSlot(PipelineContext pctx, StringKeyTable table) {
+        int slot = table.cacheSlots().size();
+        table.cacheSlots().add(slot);
+        rebuildStringKeyInit(pctx, table);
+        return slot;
+    }
+
+    private void rebuildStringKeyInit(PipelineContext pctx, StringKeyTable table) {
+        InsnList insns = new InsnList();
+        int arrayLocal = table.directClinit() ? table.initHelper().maxLocals : 0;
+        JvmPassBytecode.pushInt(insns, table.cells().size() + STRING_KEY_CELL_BASE_SLOT);
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, arrayLocal));
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            table.owner(),
+            table.fieldName(),
+            "[Ljava/lang/Object;"
+        ));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.STRING_MATERIAL_SLOT);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            table.owner(),
+            table.fieldName(),
+            "[Ljava/lang/Object;"
+        ));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.STRING_MATERIAL_ALIAS_SLOT);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            table.owner(),
+            table.fieldName(),
+            "[Ljava/lang/Object;"
+        ));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.STRING_MATERIAL_SELECTOR_SLOT);
+        JvmPassBytecode.pushInt(insns, 2);
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.STRING_MATERIAL_SLOT);
+        insns.add(new InsnNode(Opcodes.IASTORE));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.STRING_MATERIAL_ALIAS_SLOT);
+        insns.add(new InsnNode(Opcodes.IASTORE));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+        JvmPassBytecode.pushInt(insns, STRING_PAYLOAD_TABLE_SLOT);
+        JvmPassBytecode.pushInt(insns, table.payloads().size());
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        for (int i = 0; i < table.payloads().size(); i++) {
+            insns.add(new InsnNode(Opcodes.DUP));
+            JvmPassBytecode.pushInt(insns, i);
+            emitByteArray(insns, table.payloads().get(i));
+            insns.add(new InsnNode(Opcodes.AASTORE));
         }
-        Map<Algorithm, CipherCache> classCaches =
-            caches.computeIfAbsent(clazz.name(), ignored -> new LinkedHashMap<>());
-        CipherCache existing = classCaches.get(algorithm);
-        if (existing != null) return existing;
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+        JvmPassBytecode.pushInt(insns, STRING_CACHE_TABLE_SLOT);
+        JvmPassBytecode.pushInt(insns, table.cacheSlots().size() * 2);
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        emitStringCipherCacheStore(insns, table, arrayLocal, Algorithm.AES);
+        emitStringCipherCacheStore(insns, table, arrayLocal, Algorithm.DES);
+        for (int i = 0; i < table.cells().size(); i++) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+            JvmPassBytecode.pushInt(insns, i + STRING_KEY_CELL_BASE_SLOT);
+            emitIntArray(insns, table.cells().get(i));
+            insns.add(new InsnNode(Opcodes.AASTORE));
+        }
+        JvmKeyDispatchPass.markGenerated(pctx, insns);
+        if (table.directClinit()) {
+            replaceClassInitSegment(table.initHelper(), table.initStart(), table.initEnd(), insns);
+        } else {
+            table.initHelper().instructions.clear();
+            table.initHelper().instructions.add(insns);
+            table.initHelper().instructions.add(new InsnNode(Opcodes.RETURN));
+            table.initHelper().maxLocals = 0;
+        }
+        table.initHelper().maxLocals = Math.max(table.initHelper().maxLocals, arrayLocal + 1);
+        table.initHelper().maxStack = 16;
+    }
+
+    private void emitStringCipherCacheStore(InsnList insns, StringKeyTable table, int tableLocal, Algorithm algorithm) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, tableLocal));
+        JvmPassBytecode.pushInt(insns, stringCipherSlot(algorithm));
+        emitStaticString(
+            insns,
+            algorithm.transformation,
+            JvmPassBytecode.mix(
+                table.owner().hashCode() ^ table.fieldName().hashCode(),
+                0x535452434950484CL ^ algorithm.ordinal()
+            )
+        );
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "javax/crypto/Cipher",
+            "getInstance",
+            "(Ljava/lang/String;)Ljavax/crypto/Cipher;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+    }
+
+    private void emitIntArray(InsnList insns, int[] values) {
+        JvmPassBytecode.pushInt(insns, values.length);
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
+        for (int i = 0; i < values.length; i++) {
+            insns.add(new InsnNode(Opcodes.DUP));
+            JvmPassBytecode.pushInt(insns, i);
+            JvmPassBytecode.pushInt(insns, values[i]);
+            insns.add(new InsnNode(Opcodes.IASTORE));
+        }
+    }
+
+    private int stringMaterialTableFieldAccess(L1Class clazz) {
         if ((clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0) {
-            CipherCache cache = new CipherCache(clazz.name(), null, algorithm, true);
-            classCaches.put(algorithm, cache);
-            return cache;
+            return Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC;
         }
-
-        long seed = JvmPassBytecode.mix(
-            pctx.masterSeed() ^ 0x535452434950484CL,
-            clazz.name().hashCode() ^ algorithm.ordinal()
-        );
-        String fieldName = uniqueFieldName(clazz, "$" + Integer.toUnsignedString((int) seed, 36));
-        FieldNode field = new FieldNode(
-            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-            fieldName,
-            "Ljavax/crypto/Cipher;",
-            null,
-            null
-        );
-        clazz.asmNode().fields.add(field);
-
-        CipherCache cache = new CipherCache(clazz.name(), fieldName, algorithm, false);
-        installCipherCacheInit(pctx, clazz, cache);
-        classCaches.put(algorithm, cache);
-        clazz.markDirty();
-        return cache;
+        return Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
     }
 
     private String uniqueFieldName(L1Class clazz, String base) {
@@ -1427,51 +2909,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
         return (int) (mixed ^ (mixed >>> 32)) & 0xFFFF;
     }
 
-    private void installCipherCacheInit(
-        PipelineContext pctx,
-        L1Class clazz,
-        CipherCache cache
-    ) {
-        String helperName = uniqueMethodName(
-            clazz,
-            "__neko_strcipher$" + Integer.toUnsignedString(
-                (int) JvmPassBytecode.mix(cache.owner().hashCode(), cache.fieldName().hashCode() ^ cache.algorithm().ordinal()),
-                36
-            )
-        );
-        MethodNode helper = new MethodNode(
-            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
-            helperName,
-            "()V",
-            null,
-            new String[] { "java/security/GeneralSecurityException" }
-        );
-        emitStaticString(
-            helper.instructions,
-            cache.algorithm().transformation,
-            JvmPassBytecode.mix(cache.owner().hashCode(), cache.fieldName().hashCode() ^ cache.algorithm().ordinal())
-        );
-        helper.instructions.add(new MethodInsnNode(
-            Opcodes.INVOKESTATIC,
-            "javax/crypto/Cipher",
-            "getInstance",
-            "(Ljava/lang/String;)Ljavax/crypto/Cipher;",
-            false
-        ));
-        helper.instructions.add(new FieldInsnNode(
-            Opcodes.PUTSTATIC,
-            cache.owner(),
-            cache.fieldName(),
-            "Ljavax/crypto/Cipher;"
-        ));
-        helper.instructions.add(new InsnNode(Opcodes.RETURN));
-        helper.maxLocals = 0;
-        helper.maxStack = 8;
-        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
-        clazz.asmNode().methods.add(helper);
-        insertClassInitCall(pctx, clazz, helperName);
-    }
-
     private MethodNode findOrCreateClassInit(L1Class clazz) {
         for (MethodNode method : clazz.asmNode().methods) {
             if ("<clinit>".equals(method.name)) return method;
@@ -1482,25 +2919,48 @@ public final class JvmStringObfuscationPass implements TransformPass {
         return clinit;
     }
 
-    private void insertClassInitCall(PipelineContext pctx, L1Class clazz, String helperName) {
-        MethodNode clinit = findOrCreateClassInit(clazz);
-        InsnList call = new InsnList();
-        call.add(new MethodInsnNode(
-            Opcodes.INVOKESTATIC,
-            clazz.name(),
-            helperName,
-            "()V",
-            (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0
-        ));
-        JvmKeyDispatchPass.markGenerated(pctx, call);
-        AbstractInsnNode first = firstReal(clinit);
+    private void insertClassInitSegment(MethodNode clinit, LabelNode start, LabelNode end) {
+        InsnList segment = new InsnList();
+        segment.add(start);
+        segment.add(end);
+        AbstractInsnNode first = clinit.instructions.getFirst();
         if (first == null) {
-            clinit.instructions.add(call);
+            clinit.instructions.add(segment);
             clinit.instructions.add(new InsnNode(Opcodes.RETURN));
         } else {
-            clinit.instructions.insertBefore(first, call);
+            clinit.instructions.insertBefore(first, segment);
         }
-        clinit.maxStack = Math.max(clinit.maxStack, 1);
+    }
+
+    private void insertClassInitSegmentAfter(
+        MethodNode clinit,
+        LabelNode anchor,
+        LabelNode start,
+        LabelNode end
+    ) {
+        if (anchor == null) {
+            insertClassInitSegment(clinit, start, end);
+            return;
+        }
+        InsnList segment = new InsnList();
+        segment.add(start);
+        segment.add(end);
+        clinit.instructions.insert(anchor, segment);
+    }
+
+    private void replaceClassInitSegment(
+        MethodNode clinit,
+        LabelNode start,
+        LabelNode end,
+        InsnList replacement
+    ) {
+        AbstractInsnNode insn = start.getNext();
+        while (insn != null && insn != end) {
+            AbstractInsnNode next = insn.getNext();
+            clinit.instructions.remove(insn);
+            insn = next;
+        }
+        clinit.instructions.insert(start, replacement);
     }
 
     private AbstractInsnNode firstReal(MethodNode method) {
@@ -1676,11 +3136,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
     }
 
     private int streamWord(int root, long seed) {
-        return streamWord(root, seed, 0);
+        return streamWord(root, seed, 0, 0L);
     }
 
-    private int streamWord(int root, long seed, int wordIndex) {
+    private int streamWord(int root, long seed, int wordIndex, long streamFlow) {
         int x = root ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x535453545245414DL));
+        x ^= nonZeroInt(JvmPassBytecode.mix(streamFlow ^ seed, 0x53545354464C4F57L));
         x += wordIndex * nonZeroInt(JvmPassBytecode.mix(seed, 0x53545354494E4458L));
         x += x << shift(seed, 3);
         x ^= x >>> shift(seed, 13);
@@ -1805,9 +3266,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new FieldInsnNode(
             Opcodes.GETSTATIC,
             metadata.classKeyTable().owner(),
-            metadata.classKeyTable().fieldName(),
-            "[I"
+            metadata.classKeyTable().objectFieldName(),
+            "[Ljava/lang/Object;"
         ));
+        emitStringClassKeyWordsSlotSelectionFromCarrier(insns, metadata, state);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
         insns.add(new InsnNode(Opcodes.SWAP));
         insns.add(new InsnNode(Opcodes.IALOAD));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x535454414256414CL)));
@@ -1846,6 +3310,23 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
         insns.add(new InsnNode(Opcodes.L2I));
         insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitStringClassKeyWordsSlotSelectionFromCarrier(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SELECTOR_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IALOAD));
     }
 
     private int methodSeedTransferWord(
@@ -1901,9 +3382,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new FieldInsnNode(
             Opcodes.GETSTATIC,
             metadata.classKeyTable().owner(),
-            metadata.classKeyTable().fieldName(),
-            "[I"
+            metadata.classKeyTable().objectFieldName(),
+            "[Ljava/lang/Object;"
         ));
+        emitStringClassKeyWordsSlotSelectionFromCarrier(insns, metadata, state);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
         insns.add(new InsnNode(Opcodes.SWAP));
         insns.add(new InsnNode(Opcodes.IALOAD));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x53544D54545631L)));
@@ -1999,19 +3483,46 @@ public final class JvmStringObfuscationPass implements TransformPass {
         boolean usesLoopCache
     ) {}
 
-    private record CipherCache(String owner, String fieldName, Algorithm algorithm, boolean inline) {}
+    private record ConcatHelperCacheKey(
+        String owner,
+        String desc,
+        List<ConcatCachePiece> pieces,
+        List<Integer> externalStringPattern
+    ) {}
+
+    private sealed interface ConcatCachePiece permits CacheArgPiece, CacheStringPiece, CacheConstPiece {}
+
+    private record CacheArgPiece() implements ConcatCachePiece {}
+
+    private record CacheStringPiece(int externalSlot) implements ConcatCachePiece {}
+
+    private record CacheConstPiece(Object value) implements ConcatCachePiece {}
 
     private record StringSiteCache(
         String owner,
-        String payloadFieldName,
-        String fingerprintFieldName,
-        String stringFieldName,
-        byte[] inlinePayload
+        String keyTableFieldName,
+        int keySlot
     ) {
-        boolean hasMutableCache() {
-            return fingerprintFieldName != null && stringFieldName != null;
+        boolean hasKeyMaterial() {
+            return keyTableFieldName != null && keySlot >= 0;
         }
     }
+
+    private record StringKeyMaterial(long siteSeed, int epoch, int[] words) {}
+
+    private record StringKeyTable(
+        String owner,
+        String fieldName,
+        MethodNode initHelper,
+        List<int[]> cells,
+        List<byte[]> payloads,
+        List<Integer> cacheSlots,
+        boolean directClinit,
+        LabelNode initStart,
+        LabelNode initEnd
+    ) {}
+
+    private record StringDecodeTail(String owner, String name, boolean interfaceOwner) {}
 
     private enum ByteLayer {
         ADD,

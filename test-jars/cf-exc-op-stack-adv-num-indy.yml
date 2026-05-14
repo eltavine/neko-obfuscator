@@ -1,5 +1,0 @@
-input: TEST.jar
-output: output/TEST-obf.jar
-
-keys:
-  masterSeed: 12345

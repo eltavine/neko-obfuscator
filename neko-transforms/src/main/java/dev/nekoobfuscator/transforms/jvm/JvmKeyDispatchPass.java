@@ -26,6 +26,8 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -45,6 +47,8 @@ import java.util.Set;
  */
 public final class JvmKeyDispatchPass implements TransformPass {
     public static final String ID = "keyDispatch";
+    public static final String CONTEXT_CENSUS_STATS = "keyDispatch.contextCensusStats";
+    private static final Logger log = LoggerFactory.getLogger(JvmKeyDispatchPass.class);
     static final String LOCAL_BY_METHOD = "keyDispatch.localByMethod";
     static final String SEED_BY_METHOD = "keyDispatch.seedByMethod";
     static final String CFF_LOCAL_BY_METHOD = "controlFlowFlattening.flowKeyLocalByMethod";
@@ -140,7 +144,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
             mn.maxLocals = Math.max(mn.maxLocals, keyLocal + 2);
         }
         mn.maxStack = Math.max(mn.maxStack, 8);
-        int transfers = instrumentKeyTransfers(pctx, mn, keyLocal);
+        int transfers = instrumentKeyTransfers(pctx, methodKey, mn, keyLocal);
         clazz.markDirty();
         pctx.invalidate(method);
 
@@ -148,6 +152,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         if (!actualMethodKey.equals(methodKey)) {
             recordMethodKeyLocal(ctx, actualMethodKey, keyLocal, seed);
         }
+        logContextCensusMethodStats(pctx, methodKey);
         JvmObfuscationCoverage.get(ctx).full(id(), clazz.name(), method.name(),
             method.descriptor(), transfers == 0
                 ? "method-key-local"
@@ -181,11 +186,12 @@ public final class JvmKeyDispatchPass implements TransformPass {
         mn.instructions.insertBefore(prologueInsertionPoint(first), prologue);
         mn.maxLocals = Math.max(mn.maxLocals, keyLocal + 2);
         mn.maxStack = Math.max(mn.maxStack, 6);
-        instrumentKeyTransfers(pctx, mn, keyLocal);
+        instrumentKeyTransfers(pctx, key, mn, keyLocal);
         clazz.markDirty();
         pctx.invalidate(method);
 
         recordMethodKeyLocal(pctx, key, keyLocal, seed);
+        logContextCensusMethodStats(pctx, key);
         return keyLocal;
     }
 
@@ -585,12 +591,16 @@ public final class JvmKeyDispatchPass implements TransformPass {
         }
     }
 
-    private static int instrumentKeyTransfers(PipelineContext pctx, MethodNode mn, int keyLocal) {
+    private static int instrumentKeyTransfers(PipelineContext pctx, String methodKey, MethodNode mn, int keyLocal) {
         int transfers = 0;
+        KeyDispatchContextCensusStats census = contextCensusStats(pctx);
         for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof InvokeDynamicInsnNode indy) {
+                boolean lambdaMetafactory = isLambdaMetafactory(indy);
+                census.recordInvokeDynamic(methodKey, lambdaMetafactory);
                 IndyKeyRewrite rewrite = rewriteInvokeDynamic(pctx, indy);
                 if (rewrite.changed()) {
+                    census.recordInvokeDynamicRewrite(methodKey, lambdaMetafactory);
                     InsnList before = new InsnList();
                     if (rewrite.canonicalSeed() == null) {
                         before.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
@@ -606,13 +616,16 @@ public final class JvmKeyDispatchPass implements TransformPass {
                 continue;
             }
             if (!(insn instanceof MethodInsnNode call)) continue;
+            census.recordBoundaryCall(methodKey, call);
             if (isMethodLookup(call)) {
                 rewriteMethodLookup(pctx, mn, call);
+                census.recordMethodLookupRewrite(methodKey);
                 transfers++;
                 continue;
             }
             if (isMethodInvoke(call)) {
                 rewriteMethodInvoke(pctx, mn, call, keyLocal);
+                census.recordReflectiveInvokeRewrite(methodKey);
                 transfers++;
                 continue;
             }
@@ -625,12 +638,97 @@ public final class JvmKeyDispatchPass implements TransformPass {
             );
             call.desc = keyedDesc;
             insertKeyArgumentBeforeCall(pctx, mn, call, keyLocal, keyIndex);
+            census.recordNormalKeyedCallRewrite(methodKey);
             transfers++;
         }
         if (transfers > 0) {
             mn.maxStack = Math.max(mn.maxStack, 8);
         }
         return transfers;
+    }
+
+    private static KeyDispatchContextCensusStats contextCensusStats(PipelineContext pctx) {
+        KeyDispatchContextCensusStats stats = pctx.getPassData(CONTEXT_CENSUS_STATS);
+        if (stats == null) {
+            stats = new KeyDispatchContextCensusStats();
+            pctx.putPassData(CONTEXT_CENSUS_STATS, stats);
+        }
+        return stats;
+    }
+
+    private static void logContextCensusMethodStats(PipelineContext pctx, String methodKey) {
+        KeyDispatchContextCensusStats stats = pctx.getPassData(CONTEXT_CENSUS_STATS);
+        if (stats == null) return;
+        KeyDispatchContextCensusMethodStats methodStats = stats.methods().get(methodKey);
+        if (methodStats == null || !methodStats.hasRelevantBoundary()) return;
+        log.info(
+            "Key-dispatch context census: method={} indySites={} lambdaMetaSites={} indyRewrites={} lambdaMetaRewrites={} normalKeyedCalls={} reflectiveLookups={} reflectiveInvokes={} asyncCalls={} stackTraceCalls={} exceptionCalls={}",
+            methodKey,
+            methodStats.invokeDynamicSites(),
+            methodStats.lambdaMetafactorySites(),
+            methodStats.invokeDynamicRewrites(),
+            methodStats.lambdaMetafactoryRewrites(),
+            methodStats.normalKeyedCallRewrites(),
+            methodStats.methodLookupRewrites(),
+            methodStats.reflectiveInvokeRewrites(),
+            methodStats.asyncBoundaryCalls(),
+            methodStats.stackTraceCalls(),
+            methodStats.exceptionBoundaryCalls()
+        );
+    }
+
+    private static boolean isAsyncBoundaryCall(MethodInsnNode call) {
+        if ("java/lang/Thread".equals(call.owner)) {
+            return "start".equals(call.name) || "<init>".equals(call.name) || "ofVirtual".equals(call.name);
+        }
+        if ("java/util/concurrent/Executor".equals(call.owner)) {
+            return "execute".equals(call.name);
+        }
+        if ("java/util/concurrent/ExecutorService".equals(call.owner)) {
+            return "execute".equals(call.name)
+                || "submit".equals(call.name)
+                || "invokeAll".equals(call.name)
+                || "invokeAny".equals(call.name);
+        }
+        if ("java/util/concurrent/ForkJoinPool".equals(call.owner)) {
+            return "execute".equals(call.name)
+                || "submit".equals(call.name)
+                || "invoke".equals(call.name);
+        }
+        if ("java/util/concurrent/CompletableFuture".equals(call.owner)) {
+            return call.name.endsWith("Async")
+                || "runAsync".equals(call.name)
+                || "supplyAsync".equals(call.name);
+        }
+        if ("java/util/concurrent/Executors".equals(call.owner)) {
+            return call.name.startsWith("new")
+                || "callable".equals(call.name)
+                || "privilegedCallable".equals(call.name)
+                || "privilegedCallableUsingCurrentClassLoader".equals(call.name);
+        }
+        return false;
+    }
+
+    private static boolean isStackTraceCall(MethodInsnNode call) {
+        if ("java/lang/Throwable".equals(call.owner)) {
+            return "getStackTrace".equals(call.name)
+                || "setStackTrace".equals(call.name)
+                || "fillInStackTrace".equals(call.name)
+                || "printStackTrace".equals(call.name);
+        }
+        if ("java/lang/Thread".equals(call.owner)) {
+            return "getStackTrace".equals(call.name)
+                || "getAllStackTraces".equals(call.name)
+                || "dumpStack".equals(call.name);
+        }
+        return "java/lang/StackWalker".equals(call.owner)
+            || call.owner.startsWith("java/lang/StackTraceElement");
+    }
+
+    private static boolean isExceptionBoundaryCall(MethodInsnNode call) {
+        return "java/lang/Throwable".equals(call.owner)
+            || call.owner.endsWith("Exception")
+            || call.owner.endsWith("Error");
     }
 
     private static IndyKeyRewrite rewriteInvokeDynamic(PipelineContext pctx, InvokeDynamicInsnNode indy) {
@@ -1054,6 +1152,205 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
     static String coverageKey(String owner, String name, String desc) {
         return owner + "." + name + desc;
+    }
+
+    public static final class KeyDispatchContextCensusStats {
+        private final Map<String, KeyDispatchContextCensusMethodStats> methods = new LinkedHashMap<>();
+        private int invokeDynamicSites;
+        private int lambdaMetafactorySites;
+        private int invokeDynamicRewrites;
+        private int lambdaMetafactoryRewrites;
+        private int normalKeyedCallRewrites;
+        private int methodLookupRewrites;
+        private int reflectiveInvokeRewrites;
+        private int asyncBoundaryCalls;
+        private int stackTraceCalls;
+        private int exceptionBoundaryCalls;
+
+        private void recordInvokeDynamic(String methodKey, boolean lambdaMetafactory) {
+            invokeDynamicSites++;
+            if (lambdaMetafactory) lambdaMetafactorySites++;
+            method(methodKey).recordInvokeDynamic(lambdaMetafactory);
+        }
+
+        private void recordInvokeDynamicRewrite(String methodKey, boolean lambdaMetafactory) {
+            invokeDynamicRewrites++;
+            if (lambdaMetafactory) lambdaMetafactoryRewrites++;
+            method(methodKey).recordInvokeDynamicRewrite(lambdaMetafactory);
+        }
+
+        private void recordBoundaryCall(String methodKey, MethodInsnNode call) {
+            boolean async = isAsyncBoundaryCall(call);
+            boolean stackTrace = isStackTraceCall(call);
+            boolean exception = isExceptionBoundaryCall(call);
+            if (async) asyncBoundaryCalls++;
+            if (stackTrace) stackTraceCalls++;
+            if (exception) exceptionBoundaryCalls++;
+            method(methodKey).recordBoundaryCall(async, stackTrace, exception);
+        }
+
+        private void recordNormalKeyedCallRewrite(String methodKey) {
+            normalKeyedCallRewrites++;
+            method(methodKey).recordNormalKeyedCallRewrite();
+        }
+
+        private void recordMethodLookupRewrite(String methodKey) {
+            methodLookupRewrites++;
+            method(methodKey).recordMethodLookupRewrite();
+        }
+
+        private void recordReflectiveInvokeRewrite(String methodKey) {
+            reflectiveInvokeRewrites++;
+            method(methodKey).recordReflectiveInvokeRewrite();
+        }
+
+        private KeyDispatchContextCensusMethodStats method(String methodKey) {
+            return methods.computeIfAbsent(methodKey, KeyDispatchContextCensusMethodStats::new);
+        }
+
+        public Map<String, KeyDispatchContextCensusMethodStats> methods() {
+            return methods;
+        }
+
+        public int invokeDynamicSites() {
+            return invokeDynamicSites;
+        }
+
+        public int lambdaMetafactorySites() {
+            return lambdaMetafactorySites;
+        }
+
+        public int invokeDynamicRewrites() {
+            return invokeDynamicRewrites;
+        }
+
+        public int lambdaMetafactoryRewrites() {
+            return lambdaMetafactoryRewrites;
+        }
+
+        public int normalKeyedCallRewrites() {
+            return normalKeyedCallRewrites;
+        }
+
+        public int methodLookupRewrites() {
+            return methodLookupRewrites;
+        }
+
+        public int reflectiveInvokeRewrites() {
+            return reflectiveInvokeRewrites;
+        }
+
+        public int asyncBoundaryCalls() {
+            return asyncBoundaryCalls;
+        }
+
+        public int stackTraceCalls() {
+            return stackTraceCalls;
+        }
+
+        public int exceptionBoundaryCalls() {
+            return exceptionBoundaryCalls;
+        }
+    }
+
+    public static final class KeyDispatchContextCensusMethodStats {
+        private final String methodKey;
+        private int invokeDynamicSites;
+        private int lambdaMetafactorySites;
+        private int invokeDynamicRewrites;
+        private int lambdaMetafactoryRewrites;
+        private int normalKeyedCallRewrites;
+        private int methodLookupRewrites;
+        private int reflectiveInvokeRewrites;
+        private int asyncBoundaryCalls;
+        private int stackTraceCalls;
+        private int exceptionBoundaryCalls;
+
+        private KeyDispatchContextCensusMethodStats(String methodKey) {
+            this.methodKey = methodKey;
+        }
+
+        private void recordInvokeDynamic(boolean lambdaMetafactory) {
+            invokeDynamicSites++;
+            if (lambdaMetafactory) lambdaMetafactorySites++;
+        }
+
+        private void recordInvokeDynamicRewrite(boolean lambdaMetafactory) {
+            invokeDynamicRewrites++;
+            if (lambdaMetafactory) lambdaMetafactoryRewrites++;
+        }
+
+        private void recordBoundaryCall(boolean async, boolean stackTrace, boolean exception) {
+            if (async) asyncBoundaryCalls++;
+            if (stackTrace) stackTraceCalls++;
+            if (exception) exceptionBoundaryCalls++;
+        }
+
+        private void recordNormalKeyedCallRewrite() {
+            normalKeyedCallRewrites++;
+        }
+
+        private void recordMethodLookupRewrite() {
+            methodLookupRewrites++;
+        }
+
+        private void recordReflectiveInvokeRewrite() {
+            reflectiveInvokeRewrites++;
+        }
+
+        private boolean hasRelevantBoundary() {
+            return invokeDynamicSites > 0
+                || normalKeyedCallRewrites > 0
+                || methodLookupRewrites > 0
+                || reflectiveInvokeRewrites > 0
+                || asyncBoundaryCalls > 0
+                || stackTraceCalls > 0
+                || exceptionBoundaryCalls > 0;
+        }
+
+        public String methodKey() {
+            return methodKey;
+        }
+
+        public int invokeDynamicSites() {
+            return invokeDynamicSites;
+        }
+
+        public int lambdaMetafactorySites() {
+            return lambdaMetafactorySites;
+        }
+
+        public int invokeDynamicRewrites() {
+            return invokeDynamicRewrites;
+        }
+
+        public int lambdaMetafactoryRewrites() {
+            return lambdaMetafactoryRewrites;
+        }
+
+        public int normalKeyedCallRewrites() {
+            return normalKeyedCallRewrites;
+        }
+
+        public int methodLookupRewrites() {
+            return methodLookupRewrites;
+        }
+
+        public int reflectiveInvokeRewrites() {
+            return reflectiveInvokeRewrites;
+        }
+
+        public int asyncBoundaryCalls() {
+            return asyncBoundaryCalls;
+        }
+
+        public int stackTraceCalls() {
+            return stackTraceCalls;
+        }
+
+        public int exceptionBoundaryCalls() {
+            return exceptionBoundaryCalls;
+        }
     }
 
     private record IndyKeyRewrite(boolean changed, Long canonicalSeed) {}

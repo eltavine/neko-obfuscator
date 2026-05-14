@@ -17,10 +17,17 @@ import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LookupSwitchInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.io.FileOutputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -34,6 +41,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -81,7 +91,8 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         String obfuscated = runJar(outputJar);
         assertEquals(original, obfuscated);
         assertTrue(obfuscated.contains("CFF AUDIT OK"), obfuscated);
-        assertRuntimeTokenDecodingUsesClassKeyTable(outputJar);
+        assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
+        assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
 
         List<Finding> findings = auditJar(outputJar);
         assertFalse(
@@ -164,10 +175,23 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         return findings;
     }
 
-    private static void assertRuntimeTokenDecodingUsesClassKeyTable(Path jar)
+    private static void assertRuntimeTokenDecodingUsesClassKeyTables(Path jar)
         throws Exception {
         JarInput input = new JarInput(jar);
+        boolean sawIntTableField = false;
+        boolean sawObjectSidecarField = false;
+        boolean sawRuntimeIntTableLoad = false;
+        boolean sawRuntimeSidecarHelperCall = false;
+        boolean sawSidecarHelperUpdate = false;
         for (var clazz : input.classes()) {
+            for (var field : clazz.asmNode().fields) {
+                if ("[I".equals(field.desc)) {
+                    sawIntTableField = true;
+                }
+                if ("[Ljava/lang/Object;".equals(field.desc)) {
+                    sawObjectSidecarField = true;
+                }
+            }
             for (var method : clazz.asmNode().methods) {
                 if (method.instructions == null || "<clinit>".equals(method.name)) {
                     continue;
@@ -177,27 +201,234 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                     insn != null;
                     insn = insn.getNext()
                 ) {
-                    if (!(insn instanceof FieldInsnNode field) ||
-                        field.getOpcode() != Opcodes.GETSTATIC ||
-                        !"[I".equals(field.desc)) {
-                        continue;
+                    if (insn instanceof FieldInsnNode field
+                        && field.getOpcode() == Opcodes.GETSTATIC
+                        && "[I".equals(field.desc)
+                        && (hasNearbyIntArrayLoad(field) || hasNearbyEncryptedTokenHelperCall(field))) {
+                            sawRuntimeIntTableLoad = true;
                     }
-                    if (hasNearbyIntArrayLoad(field)) {
-                        return;
+                    if (insn instanceof TypeInsnNode type
+                        && type.getOpcode() == Opcodes.CHECKCAST
+                        && "[I".equals(type.desc)) {
+                        sawRuntimeIntTableLoad = true;
                     }
+                    if (insn instanceof MethodInsnNode call
+                        && call.getOpcode() == Opcodes.INVOKESTATIC
+                        && call.owner.equals(clazz.asmNode().name)
+                        && "([Ljava/lang/Object;IIIIIIIII)I".equals(call.desc)) {
+                        sawRuntimeSidecarHelperCall = true;
+                    }
+                    if (insn instanceof MethodInsnNode call
+                        && call.getOpcode() == Opcodes.INVOKESTATIC
+                        && call.owner.equals(clazz.asmNode().name)
+                        && "([I[Ljava/lang/Object;IIIIIIIIIIIIIIII)I".equals(call.desc)) {
+                        sawRuntimeIntTableLoad = true;
+                    }
+                }
+                if (updatesSidecarCell(method)) {
+                    sawSidecarHelperUpdate = true;
                 }
             }
         }
-        throw new AssertionError(
-            "CFF runtime token decode did not use the class key table"
+        assertFalse(sawIntTableField, "CFF class key int[] table should be coalesced into the Object[] sidecar");
+        assertTrue(sawObjectSidecarField, "CFF class should register an Object[] sidecar key table");
+        assertTrue(sawRuntimeIntTableLoad, "CFF runtime token decode did not use the int[] class key table");
+        assertTrue(
+            sawRuntimeSidecarHelperCall || sawSidecarHelperUpdate,
+            "CFF runtime token decode did not use the Object[] sidecar path"
         );
+        assertTrue(sawSidecarHelperUpdate, "CFF sidecar helper did not update the Object[] sidecar key cell");
+    }
+
+    private static void assertStepMaterialHelperUsesLiveKeyTableDispatch(Path jar)
+        throws Exception {
+        assertStepMaterialHelperUsesRuntimeSources(jar);
+        try (URLClassLoader loader = new URLClassLoader(
+            new URL[] {jar.toUri().toURL()},
+            ClassLoader.getPlatformClassLoader()
+        )) {
+            Class<?> clazz = Class.forName("CffAuditShapes", true, loader);
+            Object[] carrier = cffObjectCarrier(clazz);
+            Method helper = cffStepMaterialHelper(clazz);
+            StepMaterialResult zero = invokeStepMaterialHelper(
+                helper,
+                carrier,
+                0L,
+                0,
+                0,
+                0
+            );
+            assertTrue(
+                zero.hasNonZeroState(),
+                "step-material helper did not execute a materialized row"
+            );
+            StepMaterialResult live = invokeStepMaterialHelper(
+                helper,
+                carrier,
+                0x1122334455667788L,
+                0x13579BDF,
+                0x2468ACE0,
+                0x10203040
+            );
+            assertTrue(
+                !zero.equals(live),
+                "step-material helper output did not depend on live key/control state"
+            );
+            StepMaterialResult pooled = invokeStepMaterialHelperFromThreadPool(
+                helper,
+                carrier,
+                0x1122334455667788L,
+                0x13579BDF,
+                0x2468ACE0,
+                0x10203040
+            );
+            assertTrue(
+                pooled.hasNonZeroState(),
+                "thread-pool path did not execute the step-material helper"
+            );
+        }
+    }
+
+    private static void assertStepMaterialHelperUsesRuntimeSources(Path jar)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        boolean sawCurrentThread = false;
+        boolean sawIdentityHash = false;
+        boolean sawThreadName = false;
+        boolean sawStackTrace = false;
+        boolean sawStackElementHash = false;
+        for (var clazz : input.classes()) {
+            for (var method : clazz.asmNode().methods) {
+                if (!"(JIII[Ljava/lang/Object;I[J)J".equals(method.desc)) {
+                    continue;
+                }
+                for (
+                    AbstractInsnNode insn = method.instructions.getFirst();
+                    insn != null;
+                    insn = insn.getNext()
+                ) {
+                    if (!(insn instanceof MethodInsnNode call)) {
+                        continue;
+                    }
+                    sawCurrentThread |= call.owner.equals("java/lang/Thread")
+                        && call.name.equals("currentThread")
+                        && call.desc.equals("()Ljava/lang/Thread;");
+                    sawIdentityHash |= call.owner.equals("java/lang/System")
+                        && call.name.equals("identityHashCode")
+                        && call.desc.equals("(Ljava/lang/Object;)I");
+                    sawThreadName |= call.owner.equals("java/lang/Thread")
+                        && call.name.equals("getName")
+                        && call.desc.equals("()Ljava/lang/String;");
+                    sawStackTrace |= call.owner.equals("java/lang/Thread")
+                        && call.name.equals("getStackTrace")
+                        && call.desc.equals("()[Ljava/lang/StackTraceElement;");
+                    sawStackElementHash |= call.owner.equals("java/lang/StackTraceElement")
+                        && call.name.equals("hashCode")
+                        && call.desc.equals("()I");
+                }
+            }
+        }
+        assertTrue(sawCurrentThread, "step-material helper does not read current thread");
+        assertTrue(sawIdentityHash, "step-material helper does not fold thread identity");
+        assertTrue(sawThreadName, "step-material helper does not fold thread name");
+        assertTrue(sawStackTrace, "step-material helper does not read stack trace");
+        assertTrue(sawStackElementHash, "step-material helper does not fold stack frame hash");
+    }
+
+    private static Object[] cffObjectCarrier(Class<?> clazz) throws Exception {
+        List<Field> carriers = new ArrayList<>();
+        for (Field field : clazz.getDeclaredFields()) {
+            if (field.getType().equals(Object[].class)
+                && Modifier.isStatic(field.getModifiers())) {
+                carriers.add(field);
+            }
+        }
+        assertEquals(1, carriers.size(), "expected one generated Object[] carrier field");
+        Field carrier = carriers.get(0);
+        carrier.setAccessible(true);
+        return (Object[]) carrier.get(null);
+    }
+
+    private static Method cffStepMaterialHelper(Class<?> clazz) {
+        Class<?>[] expected = new Class<?>[] {
+            long.class,
+            int.class,
+            int.class,
+            int.class,
+            Object[].class,
+            int.class,
+            long[].class
+        };
+        List<Method> helpers = new ArrayList<>();
+        for (Method method : clazz.getDeclaredMethods()) {
+            if (method.getReturnType().equals(long.class)
+                && java.util.Arrays.equals(method.getParameterTypes(), expected)) {
+                helpers.add(method);
+            }
+        }
+        assertEquals(1, helpers.size(), "expected one generated step-material helper");
+        Method helper = helpers.get(0);
+        helper.setAccessible(true);
+        return helper;
+    }
+
+    private static StepMaterialResult invokeStepMaterialHelper(
+        Method helper,
+        Object[] carrier,
+        long key,
+        int guard,
+        int path,
+        int block
+    ) throws Exception {
+        long[] out = new long[3];
+        long resultKey = (Long) helper.invoke(
+            null,
+            key,
+            guard,
+            path,
+            block,
+            carrier,
+            0,
+            out
+        );
+        return new StepMaterialResult(resultKey, out[0], out[1]);
+    }
+
+    private static StepMaterialResult invokeStepMaterialHelperFromThreadPool(
+        Method helper,
+        Object[] carrier,
+        long key,
+        int guard,
+        int path,
+        int block
+    ) throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor(task -> {
+            Thread thread = new Thread(task, "neko-cff-step-material-proof");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try {
+            Future<StepMaterialResult> future = executor.submit(
+                () -> invokeStepMaterialHelper(
+                    helper,
+                    carrier,
+                    key,
+                    guard,
+                    path,
+                    block
+                )
+            );
+            return future.get(30, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     private static boolean hasNearbyIntArrayLoad(AbstractInsnNode start) {
         int scanned = 0;
         for (
             AbstractInsnNode scan = start.getNext();
-            scan != null && scanned++ < 24;
+            scan != null && scanned++ < 96;
             scan = scan.getNext()
         ) {
             if (scan.getOpcode() == Opcodes.IALOAD) {
@@ -205,6 +436,93 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         return false;
+    }
+
+    private static boolean hasNearbySidecarHelperCall(AbstractInsnNode start) {
+        int scanned = 0;
+        for (
+            AbstractInsnNode scan = start.getNext();
+            scan != null && scanned++ < 24;
+            scan = scan.getNext()
+        ) {
+            if (scan instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKESTATIC
+                && "([Ljava/lang/Object;IIIIIIIII)I".equals(call.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasNearbyEncryptedTokenHelperCall(AbstractInsnNode start) {
+        int scanned = 0;
+        for (
+            AbstractInsnNode scan = start.getNext();
+            scan != null && scanned++ < 32;
+            scan = scan.getNext()
+        ) {
+            if (scan instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKESTATIC
+                && ("([I[Ljava/lang/Object;IIIIIIIIIIIIIIII)I".equals(call.desc)
+                    || "([Ljava/lang/Object;IIII)I".equals(call.desc)
+                    || "(IIII)I".equals(call.desc))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean updatesSidecarCell(MethodNode method) {
+        if (!("([Ljava/lang/Object;IIIIIIIII)I".equals(method.desc)
+            || "([Ljava/lang/Object;IIII)I".equals(method.desc))
+            || method.instructions == null) {
+            return false;
+        }
+        boolean sawAaload = false;
+        boolean sawLongCellCast = false;
+        boolean sawAtomicLongCellCast = false;
+        boolean sawAtomicLongRead = false;
+        boolean sawAtomicLongWrite = false;
+        int stores = 0;
+        for (
+            AbstractInsnNode scan = method.instructions.getFirst();
+            scan != null;
+            scan = scan.getNext()
+        ) {
+            if (scan.getOpcode() == Opcodes.AALOAD) {
+                sawAaload = true;
+            }
+            if (scan instanceof TypeInsnNode type
+                && scan.getOpcode() == Opcodes.CHECKCAST
+                && "java/lang/Long".equals(type.desc)) {
+                sawLongCellCast = true;
+            }
+            if (scan instanceof TypeInsnNode type
+                && scan.getOpcode() == Opcodes.CHECKCAST
+                && "java/util/concurrent/atomic/AtomicLong".equals(type.desc)) {
+                sawAtomicLongCellCast = true;
+            }
+            if (scan instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/util/concurrent/atomic/AtomicLong".equals(call.owner)
+                && ("get".equals(call.name) || "getPlain".equals(call.name))
+                && "()J".equals(call.desc)) {
+                sawAtomicLongRead = true;
+            }
+            if (scan instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/util/concurrent/atomic/AtomicLong".equals(call.owner)
+                && ("lazySet".equals(call.name) || "set".equals(call.name) || "setPlain".equals(call.name))
+                && "(J)V".equals(call.desc)) {
+                sawAtomicLongWrite = true;
+            }
+            if (scan.getOpcode() == Opcodes.AASTORE) {
+                stores++;
+            }
+        }
+        return sawAaload
+            && ((sawLongCellCast && stores >= 1)
+                || (sawAtomicLongCellCast && sawAtomicLongRead && sawAtomicLongWrite));
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -677,6 +995,12 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
 
         private static String firstNonNull(String first, String second) {
             return first != null ? first : second;
+        }
+    }
+
+    record StepMaterialResult(long key, long out0, long out1) {
+        boolean hasNonZeroState() {
+            return key != 0L || out0 != 0L || out1 != 0L;
         }
     }
 

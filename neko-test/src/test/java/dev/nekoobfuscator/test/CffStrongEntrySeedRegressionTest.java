@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
@@ -22,9 +23,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -78,19 +81,19 @@ public class CffStrongEntrySeedRegressionTest {
                     && "direct".equals(call.name)) {
                 sawDirect = true;
                 assertEquals("(IJ)I", call.desc);
-                assertStaticDecodedLongImmediatelyPrecedes(main, call);
+                assertDynamicFlowKeyDecodedLongImmediatelyPrecedes(main, call);
             }
             if (insn instanceof MethodInsnNode call
                     && "StrongEntrySeedShapes".equals(call.owner)
                     && "finalValue".equals(call.name)) {
                 sawFinal = true;
                 assertEquals("(IJ)I", call.desc);
-                assertStaticDecodedLongImmediatelyPrecedes(main, call);
+                assertDynamicFlowKeyDecodedLongImmediatelyPrecedes(main, call);
             }
             if (insn instanceof InvokeDynamicInsnNode indy
                     && indy.desc.endsWith("J)Ljava/util/concurrent/Callable;")) {
                 sawLambdaIndy = true;
-                assertStaticDecodedLongImmediatelyPrecedes(main, indy);
+                assertDynamicFlowKeyDecodedLongImmediatelyPrecedes(main, indy);
             }
         }
 
@@ -144,7 +147,7 @@ public class CffStrongEntrySeedRegressionTest {
         }
     }
 
-    private static void assertStaticDecodedLongImmediatelyPrecedes(
+    private static void assertDynamicFlowKeyDecodedLongImmediatelyPrecedes(
         MethodNode method,
         AbstractInsnNode call
     ) {
@@ -152,17 +155,51 @@ public class CffStrongEntrySeedRegressionTest {
         assertNotNull(p0, "missing key material before call");
         assertFalse(
             p0 instanceof VarInsnNode var && var.getOpcode() == Opcodes.LLOAD,
-            "exact call still passes caller live key in " + method.name + method.desc
+            "exact call still passes raw caller key instead of dynamically decoded target key in "
+                + method.name + method.desc
         );
         int scanned = 0;
         boolean sawLongAssembly = false;
         boolean sawEncryptedMaterial = false;
-        for (AbstractInsnNode scan = p0; scan != null && scanned++ < 32; scan = previousReal(scan.getPrevious())) {
-            sawLongAssembly |= scan.getOpcode() == Opcodes.LOR;
-            sawEncryptedMaterial |= isLongLdc(scan) || scan instanceof LdcInsnNode ldc && ldc.cst instanceof Integer;
+        boolean sawLiveMethodKeyLoad = false;
+        boolean sawNonlinearMix = false;
+        Set<Integer> liveIntStateLocals = new LinkedHashSet<>();
+        for (AbstractInsnNode scan = p0; scan != null && scanned++ < 128; scan = previousReal(scan.getPrevious())) {
+            int opcode = scan.getOpcode();
+            sawLongAssembly |= opcode == Opcodes.LOR;
+            sawEncryptedMaterial |= isLongLdc(scan) || isIntConstant(scan);
+            sawNonlinearMix |= opcode == Opcodes.IXOR
+                || opcode == Opcodes.LXOR
+                || opcode == Opcodes.IADD
+                || opcode == Opcodes.LADD
+                || opcode == Opcodes.IMUL
+                || opcode == Opcodes.LMUL
+                || opcode == Opcodes.IUSHR
+                || opcode == Opcodes.LUSHR;
+            if (scan instanceof VarInsnNode var) {
+                if (opcode == Opcodes.LLOAD) {
+                    sawLiveMethodKeyLoad = true;
+                } else if (opcode == Opcodes.ILOAD) {
+                    liveIntStateLocals.add(var.var);
+                }
+            }
         }
         assertTrue(sawLongAssembly, "callee seed should be assembled at callsite");
         assertTrue(sawEncryptedMaterial, "callee seed decode should use encrypted material");
+        assertTrue(
+            sawLiveMethodKeyLoad,
+            "callee seed decode must depend on the live method-key flowkey local in "
+                + method.name + method.desc
+        );
+        assertTrue(
+            liveIntStateLocals.size() >= 3,
+            "callee seed decode must depend on live CFF guard/path/block state in "
+                + method.name + method.desc
+        );
+        assertTrue(
+            sawNonlinearMix,
+            "callee seed decode must mix live state nonlinearly in " + method.name + method.desc
+        );
     }
 
     private static AbstractInsnNode previousReal(AbstractInsnNode start) {
@@ -183,6 +220,17 @@ public class CffStrongEntrySeedRegressionTest {
 
     private static boolean isLongLdc(AbstractInsnNode insn) {
         return insn instanceof LdcInsnNode ldc && ldc.cst instanceof Long;
+    }
+
+    private static boolean isIntConstant(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) {
+            return true;
+        }
+        if ((opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) && insn instanceof IntInsnNode) {
+            return true;
+        }
+        return insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer;
     }
 
     private static ClassNode classNode(Path jar, String name) throws Exception {

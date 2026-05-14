@@ -16,20 +16,39 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Handle;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
 
 public class JvmInvokeDynamicObfuscationIntegrationTest {
+    private static final int INDY_MATERIAL_SLOT = 67;
+    private static final int INDY_MATERIAL_SELECTOR_SLOT = 71;
+    private static final int CLASS_KEY_WORDS_SLOT = 65;
+    private static final int CLASS_KEY_WORDS_SELECTOR_SLOT = 73;
+    private static final int INDY_CACHE_SLOT = 74;
+    private static final String RESOLVER_DESC =
+        "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/invoke/MutableCallSite;Ljava/lang/invoke/MethodType;" +
+        "Ljava/lang/String;I[Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;";
+    private static final String OLD_RESOLVER_DESC =
+        "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/invoke/MutableCallSite;Ljava/lang/invoke/MethodType;" +
+        "Ljava/lang/String;I[Ljava/lang/Object;)Ljava/lang/Object;";
+
     @Test
     void invokeDynamicObfuscatesCffKeyedMethodAndFieldReferences() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
@@ -74,13 +93,96 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         var clazz = input.classMap().get("IndyReferenceShapes");
         boolean sawIndy = false;
         boolean sawLongLongDescriptor = false;
+        boolean sawInlineResolverDecode = false;
+        boolean sawFlowHelperLoadsIndyMaterialSelectorSlot = false;
+        boolean sawFlowHelperDirectIndyMaterialSlotLoad = false;
+        boolean sawFlowHelperLoadsClassKeySelectorSlot = false;
+        boolean sawFlowHelperDirectClassKeySlotLoad = false;
+        boolean sawResolverNewDesc = false;
+        boolean sawResolverOldDesc = false;
+        boolean sawResolverLoadsCacheSlot = false;
+        boolean sawResolverGetsStaticCarrier = false;
+        boolean sawResolverGetsStaticCache = false;
+        boolean sawResolverSetTarget = false;
+        boolean sawResolverGuardWithTest = false;
+        boolean sawResolverPrimitiveGuardHandle = false;
+        boolean sawResolverBoxedEqualsGuard = false;
+        boolean sawResolverGetTarget = false;
+        boolean sawCacheField = false;
+        boolean sawMixCall = false;
+        int indySites = 0;
+        Set<String> bootstrapHelpers = new LinkedHashSet<>();
+        Map<String, Integer> helperCounts = new LinkedHashMap<>();
+        for (String helper : List.of(
+            "__neko_indy_bsm",
+            "__neko_indy_resolve",
+            "__neko_indy_flow",
+            "__neko_indy_guard"
+        )) {
+            helperCounts.put(helper, 0);
+        }
+        for (var field : clazz.asmNode().fields) {
+            if ("Ljava/util/concurrent/ConcurrentHashMap;".equals(field.desc)) {
+                sawCacheField = true;
+            }
+        }
         for (var method : clazz.asmNode().methods) {
+            for (String helper : helperCounts.keySet()) {
+                if (method.name.startsWith(helper)) {
+                    helperCounts.put(helper, helperCounts.get(helper) + 1);
+                }
+            }
+            assertFalse(method.name.startsWith("__neko_indy_mix"), "indy mix helper should be inlined");
+            assertFalse(method.name.startsWith("__neko_indy_decode"), "indy decode helper should be inlined into resolver");
+            assertFalse(method.name.startsWith("__neko_indy_filter_methods"), "indy Method[] filter helper should be inlined into resolver");
+            assertFalse(method.name.startsWith("__neko_indy_filter_fields"), "indy Field[] filter helper should be inlined into resolver");
+            if (method.name.startsWith("__neko_indy_resolve")) {
+                sawResolverNewDesc |= RESOLVER_DESC.equals(method.desc);
+                sawResolverOldDesc |= OLD_RESOLVER_DESC.equals(method.desc);
+                sawInlineResolverDecode |= resolverInlinesDecode(method);
+                sawResolverLoadsCacheSlot |= methodLoadsMaterialSlot(method, INDY_CACHE_SLOT);
+                sawResolverGetsStaticCarrier |= methodGetsStatic(method, "[Ljava/lang/Object;");
+                sawResolverGetsStaticCache |= methodGetsStatic(method, "Ljava/util/concurrent/ConcurrentHashMap;");
+                sawResolverSetTarget |= methodCalls(
+                    method,
+                    "java/lang/invoke/MutableCallSite",
+                    "setTarget",
+                    "(Ljava/lang/invoke/MethodHandle;)V"
+                );
+                sawResolverGuardWithTest |= methodCalls(
+                    method,
+                    "java/lang/invoke/MethodHandles",
+                    "guardWithTest",
+                    "(Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/MethodHandle;"
+                );
+                sawResolverPrimitiveGuardHandle |= methodLoadsHandle(
+                    method,
+                    clazz.name(),
+                    "__neko_indy_guard",
+                    "(JJ)Z"
+                );
+                sawResolverBoxedEqualsGuard |= methodLoadsString(method, "equals");
+                sawResolverGetTarget |= methodCalls(
+                    method,
+                    "java/lang/invoke/CallSite",
+                    "getTarget",
+                    "()Ljava/lang/invoke/MethodHandle;"
+                );
+            }
+            if (method.name.startsWith("__neko_indy_flow")) {
+                sawFlowHelperLoadsIndyMaterialSelectorSlot |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SELECTOR_SLOT);
+                sawFlowHelperDirectIndyMaterialSlotLoad |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SLOT);
+                sawFlowHelperLoadsClassKeySelectorSlot |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SELECTOR_SLOT);
+                sawFlowHelperDirectClassKeySlotLoad |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SLOT);
+            }
             if (method.instructions == null || method.name.startsWith("__neko_")) continue;
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                 if (insn instanceof InvokeDynamicInsnNode indy
                     && indy.bsm != null
                     && "IndyReferenceShapes".equals(indy.bsm.getOwner())) {
                     sawIndy = true;
+                    indySites++;
+                    bootstrapHelpers.add(indy.bsm.getName());
                     sawLongLongDescriptor |= indy.desc.contains("JJ)");
                     for (Object arg : indy.bsmArgs) {
                         if (arg instanceof String value) {
@@ -90,6 +192,11 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
                             assertFalse(value.equals("value"), "plaintext field name survived in bootstrap args");
                         }
                     }
+                }
+                if (insn instanceof MethodInsnNode call
+                    && "IndyReferenceShapes".equals(call.owner)
+                    && "(JJ)J".equals(call.desc)) {
+                    sawMixCall = true;
                 }
                 if (insn instanceof MethodInsnNode call
                     && "IndyReferenceShapes".equals(call.owner)
@@ -106,7 +213,113 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
             }
         }
         assertTrue(sawIndy, "no invokeDynamic reference sites found");
+        assertTrue(indySites > 1, "fixture should exercise multiple indy sites");
+        assertEquals(1, bootstrapHelpers.size(), "indy sites should share one per-class bootstrap helper");
+        for (var entry : helperCounts.entrySet()) {
+            assertEquals(1, entry.getValue(), "indy helper should be per-class, not per-site: " + entry.getKey());
+        }
+        assertTrue(sawResolverNewDesc, "indy resolver should use the carrier-bound ABI");
+        assertFalse(sawResolverOldDesc, "old indy resolver ABI without bound carrier should be absent");
+        assertFalse(sawCacheField, "indy cache should live in the CFF object carrier, not a separate ConcurrentHashMap field");
+        assertTrue(sawResolverLoadsCacheSlot, "indy resolver should load cache from the CFF carrier slot");
+        assertFalse(sawResolverGetsStaticCarrier, "indy resolver should not load the CFF carrier through GETSTATIC");
+        assertFalse(sawResolverGetsStaticCache, "indy resolver should not load a separate cache field through GETSTATIC");
+        assertTrue(sawResolverSetTarget, "indy resolver should install a live-flow guarded call-site target");
+        assertTrue(sawResolverGuardWithTest, "indy resolver setTarget should be guarded by live flow");
+        assertTrue(sawResolverPrimitiveGuardHandle, "indy resolver should use primitive guard helper for live flow");
+        assertFalse(sawResolverBoxedEqualsGuard, "indy resolver should not build boxed Long.equals guard");
+        assertFalse(sawResolverGetTarget, "indy resolver should not chain guarded call-site targets");
+        assertTrue(sawInlineResolverDecode, "indy resolver should inline payload decode");
+        assertTrue(sawFlowHelperLoadsIndyMaterialSelectorSlot, "indy flow helper should load a material selector from the passed CFF object carrier");
+        assertFalse(sawFlowHelperDirectIndyMaterialSlotLoad, "indy flow helper should not directly load the fixed material slot");
+        assertTrue(sawFlowHelperLoadsClassKeySelectorSlot, "indy flow helper should load class-key selector from the CFF object carrier");
+        assertFalse(sawFlowHelperDirectClassKeySlotLoad, "indy flow helper should not directly load the fixed class-key slot");
+        assertFalse(sawMixCall, "indy mix helper calls should be inlined");
         assertTrue(sawLongLongDescriptor, "indy reference sites should carry keyed long arguments");
+    }
+
+    private static boolean methodLoadsMaterialSlot(MethodNode method, int slot) {
+        if (method.instructions == null) return false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof IntInsnNode intInsn
+                && intInsn.operand == slot
+                && insn.getNext() != null
+                && insn.getNext().getOpcode() == Opcodes.AALOAD) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean methodGetsStatic(MethodNode method, String desc) {
+        if (method.instructions == null) return false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof FieldInsnNode field
+                && field.getOpcode() == Opcodes.GETSTATIC
+                && desc.equals(field.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean methodCalls(MethodNode method, String owner, String name, String desc) {
+        if (method.instructions == null) return false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && owner.equals(call.owner)
+                && name.equals(call.name)
+                && desc.equals(call.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean methodLoadsHandle(MethodNode method, String owner, String namePrefix, String desc) {
+        if (method.instructions == null) return false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof LdcInsnNode ldc
+                && ldc.cst instanceof Handle handle
+                && owner.equals(handle.getOwner())
+                && handle.getName().startsWith(namePrefix)
+                && desc.equals(handle.getDesc())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean methodLoadsString(MethodNode method, String value) {
+        if (method.instructions == null) return false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof LdcInsnNode ldc && value.equals(ldc.cst)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean resolverInlinesDecode(MethodNode method) {
+        boolean sawToCharArray = false;
+        boolean sawStringFromChars = false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/lang/String".equals(call.owner)
+                && "toCharArray".equals(call.name)
+                && "()[C".equals(call.desc)) {
+                sawToCharArray = true;
+            }
+            if (insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKESPECIAL
+                && "java/lang/String".equals(call.owner)
+                && "<init>".equals(call.name)
+                && "([C)V".equals(call.desc)) {
+                sawStringFromChars = true;
+            }
+        }
+        return sawToCharArray && sawStringFromChars;
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {
