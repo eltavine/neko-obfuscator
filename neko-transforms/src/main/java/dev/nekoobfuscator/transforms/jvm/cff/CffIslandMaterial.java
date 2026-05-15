@@ -989,16 +989,19 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         insns.add(new InsnNode(Opcodes.IAND));
         insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
         insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLong"));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLongArray"));
         insns.add(new VarInsnNode(Opcodes.ASTORE, cellLocal));
+        LabelNode retry = new LabelNode();
+        insns.add(retry);
         insns.add(new VarInsnNode(Opcodes.ALOAD, cellLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,
-            "java/util/concurrent/atomic/AtomicLong",
-            "getPlain",
-            "()J",
+            "java/util/concurrent/atomic/AtomicLongArray",
+            "get",
+            "(I)J",
             false
         ));
         insns.add(new VarInsnNode(Opcodes.LSTORE, packedLocal));
@@ -1049,6 +1052,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, nextEncodedLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, cellLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, packedLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, nextEncodedLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
@@ -1060,11 +1065,12 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,
-            "java/util/concurrent/atomic/AtomicLong",
-            "setPlain",
-            "(J)V",
+            "java/util/concurrent/atomic/AtomicLongArray",
+            "compareAndSet",
+            "(IJJ)Z",
             false
         ));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, retry));
         insns.add(new VarInsnNode(Opcodes.ILOAD, resultLocal));
     }
 

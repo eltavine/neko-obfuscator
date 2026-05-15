@@ -36,17 +36,19 @@ User requested analysis of current JVM obfuscation performance hotspots, especia
   - Completion criteria: concrete implementation plan with forbidden/fallback risks ruled out.
   - Plan/evidence: implement only proven boundary/representation removals. Do not merge PC/domain/method-key masks or reuse non-identical mask bases, because those are security-relevant independent derivations. Inline the generated method-key helper by always emitting the existing direct method-key bytecode. Inline the class int-table helper by emitting the same `IALOAD` plus digest arithmetic directly. Inline token object mask/update at call sites instead of generated token helper calls, but preserve the class object mask/update equation. Preserve item 4/runtime-source materialized-step behavior unchanged. For cross-thread consistency, replace per-cell `AtomicLong` object cells with one `AtomicLongArray` in the class material carrier and use `get`/`compareAndSet` retry loops for linearizable old-state emission plus mutation; this is stronger than the current `getPlain`/`setPlain` pair and removes per-cell object/cast overhead. Validation still requires user permission for repository `./gradlew`.
 
-- [ ] Implement inline transitions
+- [x] Implement inline transitions
   - Scope: implement direct inline transition token/key update for eligible per-edge hot path, keeping block coverage and live key propagation unchanged and not introducing helper/fallback paths.
   - Required evidence: source diff showing helper calls removed only where computations are proven redundant/useless, with remaining independent key material preserved.
   - Validation command or runtime target: compile/runtime validation only after user grants permission to use repository `./gradlew`.
   - Completion criteria: code builds and generated artifact shows fewer per-edge helper calls without plaintext/static key leaks.
+  - Evidence/validation: removed generated token-material helper call from `emitEncryptedToken`, removed generated method-key helper call from `emitMethodKeyFromDecodedState`, and replaced generated int-table helper use in `emitClassTokenMask` with equivalent inline `IALOAD` plus digest arithmetic. The independent PC/domain/method-key/class/object/control mask equations remain separate; no shared non-useless mask base was introduced. User granted `./gradlew` permission; `./gradlew :neko-transforms:compileJava` passed.
 
-- [ ] Implement atomic scheme
+- [x] Implement atomic scheme
   - Scope: replace AtomicLong key-table cells with a more performant atomic-order-preserving representation if evidence proves equivalent cross-thread consistency.
   - Required evidence: exact read/write sites and required Java Memory Model ordering; replacement must preserve atomic 64-bit value semantics and ordering.
   - Validation command or runtime target: compile/runtime validation only after user grants permission to use repository `./gradlew`.
   - Completion criteria: source no longer uses slow object-cell AtomicLong path for hot key table while preserving required atomic consistency and failing closed on unsupported paths.
+  - Evidence/validation: class object key material initialization now stores packed cell values in one `AtomicLongArray` instead of 64 per-cell `AtomicLong` objects. Runtime object mask/update paths load slot 0 as `AtomicLongArray` and use `get` plus `compareAndSet` retry loops, preserving linearizable atomic old-state emission plus mutation and removing per-cell object/cast overhead. Remaining `AtomicLong` references are in the separate g18 global/class helper path, not the class object key-table hot cells changed here. User granted `./gradlew` permission; `./gradlew :neko-transforms:compileJava` passed.
 
 - [ ] Validate performance changes
   - Scope: regenerate fresh artifacts and run required runtime/performance checks for changed CFF and key-table paths.
