@@ -216,10 +216,8 @@ public final class JvmKeyDispatchPass implements TransformPass {
     }
 
     public static void emitKeyInit(InsnList insns, int keyLocal, long seed, long mask) {
-        JvmPassBytecode.pushLong(insns, seed ^ mask);
-        JvmPassBytecode.pushLong(insns, mask);
-        insns.add(new InsnNode(Opcodes.LXOR));
-        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+        JvmPassBytecode.pushLong(insns, incomingRawFor(seed, seed, mask));
+        emitIncomingKeyMixFromStack(insns, keyLocal, seed, mask);
     }
 
     public static String coverageKey(L1Class clazz, L1Method method) {
@@ -824,9 +822,26 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return new IndyKeyRewrite(changed, null);
     }
 
-    private static long incomingRawForCanonical(long targetSeed) {
-        return (targetSeed - INCOMING_KEY_MIX_MASK) ^
-            (targetSeed ^ INCOMING_KEY_MIX_MASK);
+    public static long incomingRawForCanonical(long targetSeed) {
+        return incomingRawFor(targetSeed, targetSeed, INCOMING_KEY_MIX_MASK);
+    }
+
+    public static long incomingRawFor(long targetValue, long seed, long mask) {
+        return ((targetValue ^ incomingMixXorB(seed, mask)) - incomingMixAddend(seed, mask)) ^
+            incomingMixXorA(seed, mask);
+    }
+
+    private static long incomingMixXorA(long seed, long mask) {
+        return JvmPassBytecode.mix(seed ^ 0x474B4D49584131L, Long.rotateLeft(mask, 17));
+    }
+
+    private static long incomingMixAddend(long seed, long mask) {
+        long value = JvmPassBytecode.mix(seed + 0x474B4D41444431L, mask ^ 0x4B4D4144444D534BL);
+        return value == 0L ? 0x4B4D4144444D534BL : value;
+    }
+
+    private static long incomingMixXorB(long seed, long mask) {
+        return JvmPassBytecode.mix(seed ^ Long.rotateLeft(mask, 41), 0x474B4D49584231L);
     }
 
     private static boolean isLambdaMetafactory(InvokeDynamicInsnNode indy) {
@@ -1166,10 +1181,16 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
     public static void emitIncomingKeyMix(InsnList insns, int sourceLocal, int targetLocal, long seed, long mask) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, sourceLocal));
-        JvmPassBytecode.pushLong(insns, seed ^ mask);
+        emitIncomingKeyMixFromStack(insns, targetLocal, seed, mask);
+    }
+
+    private static void emitIncomingKeyMixFromStack(InsnList insns, int targetLocal, long seed, long mask) {
+        JvmPassBytecode.pushLong(insns, incomingMixXorA(seed, mask));
         insns.add(new InsnNode(Opcodes.LXOR));
-        JvmPassBytecode.pushLong(insns, mask);
+        JvmPassBytecode.pushLong(insns, incomingMixAddend(seed, mask));
         insns.add(new InsnNode(Opcodes.LADD));
+        JvmPassBytecode.pushLong(insns, incomingMixXorB(seed, mask));
+        insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LSTORE, targetLocal));
     }
 

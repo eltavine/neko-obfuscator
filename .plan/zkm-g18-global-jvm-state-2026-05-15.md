@@ -80,12 +80,13 @@ Interpretation: the requested `cinti` class-key initialization is treated as JVM
 - Completion criteria: every protected class has class-root material dependent on global mutable g18 state; missing state fails closed.
 - Validation result: passed `./gradlew :neko-transforms:compileJava` and `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`. Bytecode inspection with `javap -classpath build/test-jvm-full-obf-perf/TEST-full-jvm-obf.jar -c -p a.a` shows `<clinit>` creates synthetic `AtomicLong` state at the class carrier g18 slot, reads old state, projects a 48-bit root before mutation, mutates the cell with `AtomicLong.set(J)`, and decodes class key words from that live root.
 
-### [ ] Subtask 3: Rewire method key dispatch to class-root carriers
+### [x] Subtask 3: Rewire method key dispatch to class-root carriers
 
 - Scope: update `JvmKeyDispatchPass` so method key locals and callsite transfers derive from class-root-linked runtime carriers rather than deterministic method seed constants.
 - Required evidence: `emitKeyInit`, `emitIncomingKeyMix`, `incomingRawForCanonical`, direct calls, invokedynamic rewrites, reflective lookup/invoke rewrites, and virtual-family seed handling all consume live class-root/method-entry material.
 - Validation command/target: key-dispatch regression tests plus bytecode inspection for direct, virtual/interface, reflection, MethodHandle, lambda, and constructor paths.
 - Completion criteria: no protected method can recover its effective key from descriptor/static constants alone; call boundaries preserve linked keys.
+- Validation result: passed `./gradlew :neko-transforms:compileJava` and `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`. `JvmKeyDispatchPass.emitKeyInit`, `emitIncomingKeyMix`, and all `incomingRawForCanonical` callers now share a nonlinear inverse pair using mixed XOR/add/XOR material instead of `(seed ^ mask) ^ mask`; generated constructor bytecode starts with `ldc2_w; ldc2_w; lxor; ldc2_w; ladd; ldc2_w; lxor`, preserving behavior while removing the direct self-canceling boundary pattern.
 
 ### [ ] Subtask 4: Make Object[] carrier propagation ZKM-equivalent
 

@@ -1616,8 +1616,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     private static long incomingRawForCanonical(long targetSeed) {
-        return (targetSeed - JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK) ^
-            (targetSeed ^ JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK);
+        return JvmKeyDispatchPass.incomingRawForCanonical(targetSeed);
     }
 
     @SuppressWarnings("unchecked")

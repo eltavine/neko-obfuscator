@@ -723,8 +723,7 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
     }
 
     protected long incomingRawForCanonical(long targetSeed) {
-        return (targetSeed - JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK) ^
-            (targetSeed ^ JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK);
+        return JvmKeyDispatchPass.incomingRawForCanonical(targetSeed);
     }
 
     protected void emitMaterializedDynamicBoundDecodedLong(
