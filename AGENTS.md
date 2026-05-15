@@ -29,17 +29,21 @@
 
 ## Task planning and clarification
 
-- Every user request that requires investigation, code changes, validation, or
-  commits must be split into concrete subtasks before implementation starts.
-  The subtasks must be written both in the active Codex todo list and in a
-  matching `.plan/` todo document in the repository.
-- Each subtask must include its scope, required evidence, validation command or
-  runtime target, and completion criteria. Do not start implementation for a
-  subtask until those fields are recorded.
-- When one subtask is completed and freshly validated, immediately update both
-  todo locations and create a git commit containing only that subtask's
-  implementation plus its matching todo update. This commit is the required
-  checkpoint and rollback point before starting the next subtask.
+- Requests that are non-trivial, explicitly require planning/subtasking, require
+  investigation or runtime/code validation, or contain multiple dependent changes
+  must be split into concrete subtasks before implementation starts. The
+  subtasks must be written both in the active Codex todo list and in a matching
+  `.plan/` todo document in the repository.
+- Simple tasks are exempt from the Codex todo and `.plan/` subtask workflow when
+  the user did not explicitly ask for it. The final change still requires a git
+  commit.
+- Each recorded subtask must include its scope, required evidence, validation
+  command or runtime target, and completion criteria. Do not start
+  implementation for a recorded subtask until those fields are recorded.
+- When one recorded subtask is completed and freshly validated, immediately
+  update both todo locations and create a git commit containing only that
+  subtask's implementation plus its matching todo update. This commit is the
+  required checkpoint and rollback point before starting the next subtask.
 - If any implementation detail, required behavior, acceptance condition, task
   boundary, or user intent is unclear, do not infer or invent the missing
   details. Use the ask tool to ask the user for the missing information before
@@ -81,6 +85,16 @@
 - Hidden method keys and control-flow keys must stay semantically linked.
   Key material passed between transformed methods must match the target method's
   actual ABI, descriptor, dispatch family, and runtime entry path.
+- Full-obfuscation coverage is mandatory for original application classes:
+  enabled transforms must cover every eligible original class, method, member,
+  constant, string, reflective datum, and call path.
+- True JVM ABI surfaces that must retain JVM-required shape are exempt from name
+  or descriptor obfuscation only to the extent required by the ABI, including
+  constructors (`<init>`), class initializers (`<clinit>`),
+  `main([Ljava/lang/String;)V`, and inherited external API override slots. This
+  ABI exemption must not disable method-parameter obfuscation, control-flow
+  parameter changes, hidden keys, packed `Object[]` carriers, or protected
+  callsite rewriting for non-ABI original application paths.
 - Hidden `long` key parameters and packed `Object[]` parameter carriers are
   mandatory obfuscation surfaces. Do not remove, bypass, downgrade, or exclude
   them for reflection, loaders, annotations, MethodHandle, LambdaMetafactory,
@@ -89,9 +103,7 @@
   rewriting of lookup names, lookup descriptors, argument arrays, resource
   paths, metadata, and generated-member filters to the final obfuscated ABI.
   Do not preserve original application descriptors or names as a workaround,
-  except for true JVM or external ABI entry points such as constructors,
-  class initializers, `main([Ljava/lang/String;)V`, and inherited external API
-  override slots.
+  except for the true JVM ABI surfaces listed above.
 - Reflection, MethodHandle, loader, annotation, and dynamic-invocation
   compatibility rewrites are not allowed to expose plaintext class/member
   names, descriptor strings, resource paths, parameter-type constants, seed
@@ -104,6 +116,10 @@
   compatibility rewriting. Generated markers may protect only transform
   bookkeeping that would be invalid to reprocess; they must not be used to skip
   obfuscation of reflective application data.
+- Injected helper classes and helper members may be obfuscated as needed for
+  correctness, security, and compatibility, but they do not require mandatory
+  full-obfuscation coverage. Injected outliner code is not a helper exemption:
+  outliners must receive full obfuscation coverage.
 - Dynamic key propagation is mandatory. Do not replace dynamic key transfer with
   static `stateKey`, static seed constants, descriptor-only recomputation, or
   any equivalent uncorrelated key source.
@@ -243,7 +259,7 @@ The following are explicitly out of scope and must not be introduced:
 
 - JNI fallback.
 - JVMTI.
-- JVM helper classes.
+- JVM helper classes outside the existing planned transform surface.
 - Calc-only shipping proof.
 - ZGC/Shenandoah skip behavior.
 - Never create any files/folders in /tmp folder.
