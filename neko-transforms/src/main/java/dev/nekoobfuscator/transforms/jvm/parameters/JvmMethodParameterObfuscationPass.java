@@ -188,10 +188,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     || reflectiveLookupTargets.contains(clazz.name() + "." + oldName)
                     || reflectiveLookupTargets.contains("*." + oldName)
                     || reflectiveLookupTargets.contains(clazz.name() + ".*");
-                boolean splitHiddenKey = canUseSplitHiddenKeyAbi(clazz, mn)
-                    && !reflectionKeyed
-                    && !reflectionLookupTarget
-                    && hiddenKeyArgumentIndex(argumentTypes, argumentLocals, keyLocal) >= 0;
+                boolean splitHiddenKey = false;
                 String packedDesc = packedDescriptor(oldDesc, splitHiddenKey);
                 MethodPlan plan = new MethodPlan(
                     clazz.name(),

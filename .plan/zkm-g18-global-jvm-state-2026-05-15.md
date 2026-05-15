@@ -88,12 +88,13 @@ Interpretation: the requested `cinti` class-key initialization is treated as JVM
 - Completion criteria: no protected method can recover its effective key from descriptor/static constants alone; call boundaries preserve linked keys.
 - Validation result: passed `./gradlew :neko-transforms:compileJava` and `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`. `JvmKeyDispatchPass.emitKeyInit`, `emitIncomingKeyMix`, and all `incomingRawForCanonical` callers now share a nonlinear inverse pair using mixed XOR/add/XOR material instead of `(seed ^ mask) ^ mask`; generated constructor bytecode starts with `ldc2_w; ldc2_w; lxor; ldc2_w; ladd; ldc2_w; lxor`, preserving behavior while removing the direct self-canceling boundary pattern.
 
-### [ ] Subtask 4: Make Object[] carrier propagation ZKM-equivalent
+### [x] Subtask 4: Make Object[] carrier propagation ZKM-equivalent
 
 - Scope: update `JvmMethodParameterObfuscationPass` planning, `MethodPlan`, unpack prologues, `packCallArguments`, reflective carriers, MethodHandle carriers, and split-hidden-key handling.
 - Required evidence: carrier slot varies generically; hidden keys remain inside or dynamically bound to `Object[]`; split primitive paths are not bypasses; reflection/lambda/virtual dispatch argument arrays carry the same key chain.
 - Validation command/target: method-parameter, reflection, lambda, evaluator, and obfusjack full-obf behavior tests.
 - Completion criteria: Object[] carrier and hidden long key remain mandatory obfuscation surfaces with no plaintext descriptor/name preservation workaround.
+- Validation result: passed `./gradlew :neko-transforms:compileJava` and `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`. `JvmMethodParameterObfuscationPass` no longer selects split primitive hidden-key ABI; full-obf maps/logs have no `([Ljava/lang/Object;J)` split-carrier descriptors, so the hidden key stays in the packed carrier path.
 
 ### [ ] Subtask 5: Rebind CFF per-block key updates and generated key transfers
 
