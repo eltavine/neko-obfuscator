@@ -12,6 +12,8 @@ import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -2564,6 +2566,58 @@ public final class ControlFlowFlatteningPass implements TransformPass {
             keyLocal
         );
     }
+    private void installCffIslandRuntimeSourceHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access
+    ) {
+        MethodNode helper = new MethodNode(
+            access,
+            helperName,
+            CFF_ISLAND_RUNTIME_SOURCE_HELPER_DESC,
+            null,
+            null
+        );
+        int keyLocal = 0;
+        int guardLocal = 2;
+        int pathLocal = 3;
+        int blockLocal = 4;
+        int cursorLocal = 5;
+        int modeLocal = 6;
+        int sourceLocal = 7;
+        int threadLocal = 8;
+        int stackLocal = 9;
+        int stackLengthLocal = 10;
+        InsnList insns = helper.instructions;
+        emitCffIslandRuntimeSourceCursor(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            cursorLocal,
+            modeLocal,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, cursorLocal));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 11;
+        helper.maxStack = 10;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+        publishGeneratedHelperFlowKey(
+            pctx,
+            clazz.name(),
+            helperName,
+            CFF_ISLAND_RUNTIME_SOURCE_HELPER_DESC,
+            keyLocal
+        );
+    }
+
 
     private void emitCffIslandRuntimeSourceCursorFromLocal(
         InsnList insns,
@@ -13120,6 +13174,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         String keyTransferMaterialHelperName,
         String keyTransferMaterialHelperOwner,
         boolean keyTransferMaterialHelperInterfaceOwner,
+        String islandRuntimeSourceHelperName,
+        String islandRuntimeSourceHelperOwner,
+        boolean islandRuntimeSourceHelperInterfaceOwner,
         String islandMaterialHelperName,
         String islandMaterialHelperOwner,
         boolean islandMaterialHelperInterfaceOwner,
@@ -13170,6 +13227,9 @@ public final class ControlFlowFlatteningPass implements TransformPass {
         String stepMaterialHelperOwner,
         String stepMaterialHelperName,
         boolean stepMaterialHelperInterfaceOwner,
+        String islandRuntimeSourceHelperOwner,
+        String islandRuntimeSourceHelperName,
+        boolean islandRuntimeSourceHelperInterfaceOwner,
         String islandMaterialHelperOwner,
         String islandMaterialHelperName,
         boolean islandMaterialHelperInterfaceOwner,

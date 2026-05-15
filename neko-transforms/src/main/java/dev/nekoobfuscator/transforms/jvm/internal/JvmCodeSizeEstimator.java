@@ -1,4 +1,4 @@
-package dev.nekoobfuscator.transforms.jvm;
+package dev.nekoobfuscator.transforms.jvm.internal;
 
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -16,11 +16,11 @@ import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
-final class JvmCodeSizeEstimator {
+public final class JvmCodeSizeEstimator {
     private JvmCodeSizeEstimator() {
     }
 
-    static int estimateMethodBytes(MethodNode method) {
+    public static int estimateMethodBytes(MethodNode method) {
         if (method == null || method.instructions == null) return 0;
         int offset = 0;
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {

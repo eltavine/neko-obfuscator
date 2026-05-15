@@ -1,0 +1,60 @@
+# JVM obfuscation structural decomposition plan
+
+## Non-negotiable constraints
+
+- Preserve every JVM obfuscation invariant from `AGENTS.md`: no fallback behavior, no reduced obfuscation coverage, no static key exposure, no descriptor-only key recomputation, no JNI/JVMTI/helper-layer escape hatch.
+- This plan is structural unless a separate subtask records concrete runtime/artifact evidence for a behavioral change.
+- Keep `StandardJvmPasses` as the central JVM pass registration boundary unless a later subtask records concrete evidence for moving it safely.
+- Do not use repository `./gradlew` until the user grants permission.
+- Do not touch unrelated current native-code/test changes shown by `git status --short`.
+
+## Current evidence
+
+- The JVM transform directory is flat and oversized: `ControlFlowFlatteningPass.java` is about 481.7KB, `JvmStringObfuscationPass.java` about 145.1KB, `JvmInvokeDynamicObfuscationPass.java` about 129.7KB, `JvmMethodParameterObfuscationPass.java` about 68.8KB, `JvmKeyDispatchPass.java` about 58.4KB, `JvmRenamerPass.java` about 47.3KB, and `JvmConstantObfuscationPass.java` about 30.4KB.
+- `StandardJvmPasses.register()` is the public JVM registration boundary and instantiates the JVM passes in order.
+- Static dependency mapping shows `JvmPassBytecode` is consumed by CFF, key-dispatch, parameter, constant, invokedynamic, and string passes. `JvmCodeSizeEstimator` is consumed only by the constant pass.
+- Static dependency mapping shows direct subpackage moves of pass classes are blocked by package-private coupling: `JvmKeyDispatchPass` helper APIs, CFF metadata records/constants, and `JvmMethodParameterObfuscationPass.CFF_KEY_LOAD_TARGET_SEED` are package-private today.
+
+## Target layout
+
+- `dev.nekoobfuscator.transforms.jvm` keeps `StandardJvmPasses`.
+- `dev.nekoobfuscator.transforms.jvm.internal` owns shared JVM bytecode utilities.
+- Later subtasks may split functional passes into:
+  - `dev.nekoobfuscator.transforms.jvm.renamer`
+  - `dev.nekoobfuscator.transforms.jvm.key`
+  - `dev.nekoobfuscator.transforms.jvm.parameters`
+  - `dev.nekoobfuscator.transforms.jvm.cff`
+  - `dev.nekoobfuscator.transforms.jvm.invoke`
+  - `dev.nekoobfuscator.transforms.jvm.constants`
+  - `dev.nekoobfuscator.transforms.jvm.strings`
+
+## Subtasks
+
+[x] JVMSPLIT-1: Move shared bytecode helpers
+
+- Scope: Move `JvmPassBytecode` and `JvmCodeSizeEstimator` into `dev.nekoobfuscator.transforms.jvm.internal`, make only their existing helper methods/classes public, update existing callers, and repair the existing CFF shared island-runtime-source helper declaration mismatch that blocked compilation. Do not alter key material, CFF block construction, pass order, transform eligibility, or fallback behavior.
+- Required evidence: Static reference map showed `JvmPassBytecode` callers in CFF, key-dispatch, parameter, constant, invokedynamic, and string passes; `JvmCodeSizeEstimator` callers in CFF and constant passes. Compile evidence exposed a CFF invariant mismatch: `ensureSharedClassHelpers` created and consumed island-runtime-source helper metadata and called `installCffIslandRuntimeSourceHelper`, but `CffSharedClassHelpers`/`CffClassKeyTable` did not carry those fields and the install method was absent.
+- Validation command/runtime target: `env GRADLE_USER_HOME=.gradle-user-home ./gradlew :neko-transforms:compileJava --rerun-tasks`.
+- Completion criteria: Compilation succeeds; shared helper references resolve through `dev.nekoobfuscator.transforms.jvm.internal`; the CFF island-runtime-source shared helper has matching metadata fields and generated-helper installation; unrelated native-code changes are not modified.
+- Completion evidence: After user approval for `./gradlew`, the first compile failed at `ControlFlowFlatteningPass.java:843-845`, `:966`, and `:975` with missing island-runtime-source shared-helper accessors/install method/record constructor shape. The source now adds the missing CFF metadata fields and a generated helper with descriptor `(JIIIIII)I` driven by the existing live key/guard/path/block runtime-source cursor logic. Rerunning the same compile command succeeded with `BUILD SUCCESSFUL in 1s`, `5 actionable tasks: 5 executed`.
+
+[ ] JVMSPLIT-2: Extract explicit shared JVM-obfuscation APIs
+
+- Scope: Introduce narrow public/internal APIs for currently package-private coupling between key-dispatch, CFF metadata, parameter carrier metadata, constants, invokedynamic, and string passes. This subtask is API-only unless concrete evidence justifies implementation movement.
+- Required evidence: Exact symbols and callsites that require cross-package access, including `JvmKeyDispatchPass` helper APIs, CFF metadata records/constants, and `CFF_KEY_LOAD_TARGET_SEED` consumers.
+- Validation command/runtime target: After user approval for repository `./gradlew`, compile `neko-transforms` and run targeted JVM obfuscation tests covering key-dispatch/CFF/string/indy interactions if any behavior-bearing API changes are made.
+- Completion criteria: API boundaries are explicit, minimal, documented by names/types, and do not expose raw keys, plaintext reflective material, fallback behavior, or transform skip paths.
+
+[ ] JVMSPLIT-3: Move functional pass families
+
+- Scope: Move pass implementations into functional subpackages after JVMSPLIT-2 removes package-private blockers. Preserve `StandardJvmPasses.register()` order and public registry IDs.
+- Required evidence: LSP references for each exported pass class before moving; import/caller update list; source diff showing pass order and IDs unchanged.
+- Validation command/runtime target: After user approval for repository `./gradlew`, compile transforms and run targeted JVM obfuscation integration tests that exercise full pass composition.
+- Completion criteria: Functional source files are no longer flat in the root `jvm` directory, all callers compile, pass behavior and ordering remain unchanged, and no fallback/static-key/coverage weakening is introduced.
+
+[ ] JVMSPLIT-4: Decompose oversized pass internals
+
+- Scope: Split large pass internals into cohesive implementation classes under their functional packages, starting with non-behavioral data/metadata/material helpers where access boundaries are already explicit.
+- Required evidence: For each extraction, identify the exact cohesive responsibility, all moved methods/types, all callers, and why the extraction is behavior-preserving.
+- Validation command/runtime target: After user approval for repository `./gradlew`, run the targeted compile/tests for the changed pass family and inspect generated output if bytecode emission logic moved.
+- Completion criteria: File sizes and responsibilities are reduced without changing generated semantics, key propagation, CFF coverage, helper ABI, or runtime artifacts except for permitted source organization effects.

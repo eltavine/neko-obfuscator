@@ -9,6 +9,7 @@ import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
