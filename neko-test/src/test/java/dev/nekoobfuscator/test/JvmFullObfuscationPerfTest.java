@@ -50,10 +50,10 @@ class JvmFullObfuscationPerfTest {
         assertTrue(Files.exists(config), () -> "Missing full JVM obfuscation config: " + config);
 
         List<Fixture> fixtures = List.of(
-            new Fixture("TEST", "TEST.jar", true, true),
-            new Fixture("obfusjack", "obfusjack-test21.jar", true, false),
-            new Fixture("SnakeGame", "SnakeGame.jar", false, false),
-            new Fixture("evaluator", "evaluator-unobf.jar", false, false)
+            new Fixture("TEST", "TEST.jar", BehaviorMode.TEST_PERF),
+            new Fixture("obfusjack", "obfusjack-test21.jar", BehaviorMode.OBFUSJACK_PERF),
+            new Fixture("SnakeGame", "SnakeGame.jar", BehaviorMode.HEADLESS_GUI),
+            new Fixture("evaluator", "evaluator-unobf.jar", BehaviorMode.EVALUATOR)
         );
 
         List<PerfRecord> records = new ArrayList<>();
@@ -64,11 +64,9 @@ class JvmFullObfuscationPerfTest {
             NativeObfuscationHelper.ObfuscationRunResult obfuscation =
                 NativeObfuscationHelper.obfuscateJar(input, output, config, Duration.ofMinutes(2));
             assertNoStaticGeneratedHelperHardening(fixture, obfuscation);
-            RunRecord originalRun = null;
-            RunRecord obfuscatedRun = null;
-            if (fixture.runAfterObfuscation()) {
-                originalRun = runFixture(workDir, fixture, input, "original");
-                obfuscatedRun = runFixture(workDir, fixture, output, "full-obf");
+            RunRecord originalRun = runFixture(workDir, fixture, input, "original");
+            RunRecord obfuscatedRun = runFixture(workDir, fixture, output, "full-obf");
+            if (fixture.strictStructuralAudit()) {
                 assertNoForbiddenFullObfMarkers(output);
             }
             records.add(new PerfRecord(fixture, input, output, obfuscation, originalRun, obfuscatedRun));
@@ -90,25 +88,99 @@ class JvmFullObfuscationPerfTest {
         Path stderr = workDir.resolve(fixture.name() + "." + variant + ".run.stderr.log");
         NativeObfuscationHelper.JarRunResult run = NativeObfuscationHelper.runJar(
             jar,
-            List.of("-XX:-UsePerfData"),
+            fixture.jvmArgs(),
             List.of(),
             stdout,
             stderr,
             Duration.ofMinutes(2)
         );
         String combined = NativeObfuscationHelper.combinedOutput(run);
-        assertEquals(0, run.exitCode(), () -> fixture.name() + " " + variant + " run failed\n" + combined);
+        Long calcMillis = validateRun(fixture, variant, run, combined);
+        return new RunRecord(run, calcMillis, extractPerformanceTimingLines(combined));
+    }
 
-        Long calcMillis = null;
-        if (fixture.parseCalc()) {
-            calcMillis = NativeObfuscationHelper.parseCalcMillis(combined);
-        } else {
+    private static Long validateRun(
+        Fixture fixture,
+        String variant,
+        NativeObfuscationHelper.JarRunResult run,
+        String combined
+    ) {
+        return switch (fixture.behaviorMode()) {
+            case TEST_PERF -> {
+                assertEquals(0, run.exitCode(), () -> fixture.name() + " " + variant + " run failed\n" + combined);
+                assertTestRows(fixture, variant, combined);
+                yield NativeObfuscationHelper.parseCalcMillis(combined);
+            }
+            case OBFUSJACK_PERF -> {
+                assertEquals(0, run.exitCode(), () -> fixture.name() + " " + variant + " run failed\n" + combined);
+                assertTrue(
+                    combined.contains("=== All tests completed ==="),
+                    () -> fixture.name() + " " + variant + " run did not complete\n" + combined
+                );
+                yield null;
+            }
+            case HEADLESS_GUI -> {
+                assertEquals(1, run.exitCode(), () -> fixture.name() + " " + variant + " should fail closed in headless AWT\n" + combined);
+                assertTrue(
+                    combined.contains("java.awt.HeadlessException"),
+                    () -> fixture.name() + " " + variant + " did not preserve headless GUI startup behavior\n" + combined
+                );
+                yield null;
+            }
+            case EVALUATOR -> {
+                assertEquals(0, run.exitCode(), () -> fixture.name() + " " + variant + " run failed\n" + combined);
+                assertEvaluatorRows(fixture, variant, combined);
+                yield null;
+            }
+        };
+    }
+
+    private static void assertTestRows(Fixture fixture, String variant, String combined) {
+        for (String expected : List.of(
+            "Test 1.1: Inheritance PASS",
+            "Test 1.2: Cross PASS",
+            "Test 1.3: Throw PASS",
+            "Test 1.4: Accuracy PASS",
+            "Test 1.5: SubClass PASS",
+            "Test 1.6: Pool PASS",
+            "Test 1.7: InnerClass PASS",
+            "Test 2.1: Counter PASS",
+            "Test 2.3: Resource PASS",
+            "Test 2.4: Field PASS",
+            "Test 2.5: Loader PASS",
+            "Test 2.6: ReTrace PASS",
+            "Test 2.7: Annotation PASS",
+            "Test 2.8: Sec ERROR",
+            "-------------Tests r Finished-------------"
+        )) {
             assertTrue(
-                combined.contains("=== All tests completed ==="),
-                () -> fixture.name() + " " + variant + " run did not complete\n" + combined
+                combined.contains(expected),
+                () -> fixture.name() + " " + variant + " missing baseline row " + expected + "\n" + combined
             );
         }
-        return new RunRecord(run, calcMillis, extractPerformanceTimingLines(combined));
+    }
+
+    private static void assertEvaluatorRows(Fixture fixture, String variant, String combined) {
+        for (String expected : List.of(
+            "Today's date is",
+            "Performing small int test...",
+            "Performing random math operations...",
+            "Computing statistics",
+            "Loaded 4 tests",
+            "Testing annotations",
+            "Original Text:Hello World",
+            "Descrypted Text:Hello World",
+            "Passed string encryption test with",
+            "Testing cryptography (Blowfish)",
+            "Testing large string",
+            "Successfully compared strings",
+            "Successfully decrypted hello world 123 1605479835458"
+        )) {
+            assertTrue(
+                combined.contains(expected),
+                () -> fixture.name() + " " + variant + " missing baseline marker " + expected + "\n" + combined
+            );
+        }
     }
 
     private static void assertNoForbiddenFullObfMarkers(Path jar) throws Exception {
@@ -345,12 +417,30 @@ class JvmFullObfuscationPerfTest {
         return sb.toString();
     }
 
+    private enum BehaviorMode {
+        TEST_PERF,
+        OBFUSJACK_PERF,
+        HEADLESS_GUI,
+        EVALUATOR
+    }
+
     private record Fixture(
         String name,
         String jarName,
-        boolean runAfterObfuscation,
-        boolean parseCalc
-    ) {}
+        BehaviorMode behaviorMode
+    ) {
+        List<String> jvmArgs() {
+            List<String> args = new ArrayList<>();
+            args.add("-XX:-UsePerfData");
+            if (behaviorMode == BehaviorMode.HEADLESS_GUI) {
+                args.add("-Djava.awt.headless=true");
+            }
+            return args;
+        }
+        boolean strictStructuralAudit() {
+            return behaviorMode == BehaviorMode.TEST_PERF || behaviorMode == BehaviorMode.OBFUSJACK_PERF;
+        }
+    }
 
     private record RunRecord(
         NativeObfuscationHelper.JarRunResult result,
