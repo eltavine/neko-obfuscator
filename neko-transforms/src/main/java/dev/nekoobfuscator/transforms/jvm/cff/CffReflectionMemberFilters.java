@@ -196,8 +196,7 @@ final class CffReflectionMemberFilters {
             "()Z",
             false
         ));
-        insns.add(new JumpInsnNode(Opcodes.IFNE, skip));
-        insns.add(new JumpInsnNode(Opcodes.GOTO, syntheticDone));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, syntheticDone));
         insns.add(new VarInsnNode(Opcodes.ALOAD, methodLocal));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,

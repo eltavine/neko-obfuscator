@@ -463,10 +463,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         String resolver = uniqueMethodName(clazz, "__neko_indy_resolve");
         String bootstrapCore = uniqueMethodName(clazz, "__neko_indy_core");
         String bootstrap = uniqueMethodName(clazz, "__neko_indy_bsm");
-        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-        if (interfaceOwner) {
-            access |= Opcodes.ACC_PUBLIC;
-        }
+        int access = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         clazz.asmNode().methods.add(emitBootstrapTrampoline(
             bootstrap,
             access,

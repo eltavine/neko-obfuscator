@@ -1162,8 +1162,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             clazz,
             "__neko_strtail$"
         );
-        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-        access |= interfaceOwner ? Opcodes.ACC_PUBLIC : 0;
+        int access = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         MethodNode helper = new MethodNode(
             access,
             name,

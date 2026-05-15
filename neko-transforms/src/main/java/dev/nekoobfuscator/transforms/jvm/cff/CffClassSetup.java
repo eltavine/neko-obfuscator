@@ -498,10 +498,7 @@ abstract class CffClassSetup extends CffSharedState {
             "__neko_cff_mkey$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x4D4B48454C534831L), 36),
             "(IIIIJJ)J"
         );
-        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-        if (clazz.isInterface()) {
-            access |= Opcodes.ACC_PUBLIC;
-        }
+        int access = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         installClassKeyIntHelper(pctx, clazz, intHelperName, access);
         installEncryptedTokenMaterialHelper(pctx, clazz, tokenMaterialHelperName, access);
         installTransitionMaterialHelper(
