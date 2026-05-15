@@ -1,0 +1,1672 @@
+package dev.nekoobfuscator.transforms.jvm.cff;
+
+import static dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningLr.*;
+import static dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningVerify.*;
+
+import dev.nekoobfuscator.api.transform.IRLevel;
+import dev.nekoobfuscator.api.transform.TransformContext;
+import dev.nekoobfuscator.api.transform.TransformPass;
+import dev.nekoobfuscator.api.transform.TransformPhase;
+import dev.nekoobfuscator.core.ir.l1.L1Class;
+import dev.nekoobfuscator.core.ir.l1.L1Method;
+import dev.nekoobfuscator.core.pipeline.PipelineContext;
+import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
+import dev.nekoobfuscator.transforms.util.TransformGuards;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
+import dev.nekoobfuscator.transforms.jvm.strings.JvmStringObfuscationPass;
+import dev.nekoobfuscator.transforms.jvm.constants.JvmConstantObfuscationPass;
+import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.Handle;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.FieldInsnNode;
+import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.IincInsnNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
+import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
+import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.analysis.BasicValue;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+
+abstract class CffDispatchEmitter extends CffBlockBuilder {
+
+    protected void insertIslandDispatchers(
+        MethodNode mn,
+        List<Block> blocks,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        int methodSeedLocal,
+        Map<LabelNode, Integer> stateByLabel,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        DispatchPlan dispatchPlan,
+        int exceptionLocal,
+        boolean externalEntrySeed,
+        long methodSeed,
+        long salt,
+        int smallTokenDispatchCases,
+        CffTransitionOutliner.TransitionOutliner dispatcherOutliner,
+        CffTransitionOutliner.TransitionOutliner transitionOutliner
+    ) {
+        for (IslandGroup group : dispatchPlan.groups()) {
+            Block entryBlock = group.blocks().get(0);
+            InsnList insns = new InsnList();
+            LabelNode poison = new LabelNode();
+
+            if (entryBlock == firstNonHandler(blocks)) {
+                if (dispatcherOutliner != null) {
+                    emitInitTransitionOut(insns, dispatcherOutliner.outLocal());
+                }
+                if (exceptionLocal >= 0) {
+                    insns.add(new InsnNode(Opcodes.ACONST_NULL));
+                    insns.add(new VarInsnNode(Opcodes.ASTORE, exceptionLocal));
+                }
+                DispatchTarget entryTarget = requireTarget(
+                    entryBlock.label(),
+                    dispatchPlan.targets().get(entryBlock.label())
+                );
+                long entrySeed = entryInitSeed(
+                    group.salt(),
+                    externalEntrySeed,
+                    methodSeed
+                );
+                emitInitKeys(
+                    insns,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    entrySeed,
+                    keyTmpLocal
+                );
+                if (methodSeedLocal >= 0) {
+                    insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+                    insns.add(new VarInsnNode(Opcodes.LSTORE, methodSeedLocal));
+                }
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    requireState(
+                        entryBlock.label(),
+                        stateByLabel.get(entryBlock.label())
+                    ),
+                    requireBlockKey(
+                        entryBlock.label(),
+                        keyStateByLabel.get(entryBlock.label())
+                    ),
+                    methodSeed,
+                    entryTarget.selectorSeed(),
+                    keyTmpLocal
+                );
+                CffBlockKeyState entryKeys = requireBlockKey(
+                    entryBlock.label(),
+                    keyStateByLabel.get(entryBlock.label())
+                );
+                emitStoreMethodKey(
+                    insns,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    entryKeys
+                );
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    entryTarget.island(),
+                    entryTarget.domainToken(),
+                    entryKeys,
+                    methodSeed,
+                    entryTarget.domainSeed(),
+                    keyTmpLocal
+                );
+                if (entryTarget.islandLabels().length == 1) {
+                    insns.add(
+                        new JumpInsnNode(
+                            Opcodes.GOTO,
+                            entryTarget.islandLabels()[entryTarget.island()]
+                        )
+                    );
+                } else {
+                    insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                }
+            }
+
+            for (int alias = 0; alias < group.aliasHubs().length; alias++) {
+                insns.add(
+                    aliasHub(
+                        group,
+                        alias,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal
+                    )
+                );
+            }
+            insns.add(group.hub());
+            emitDomainDispatch(
+                insns,
+                domainLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                group,
+                poison
+            );
+            for (
+                int island = 0;
+                island < group.islandLabels().length;
+                island++
+            ) {
+                insns.add(
+                    buildIslandDispatcher(
+                        group,
+                        stateByLabel,
+                        keyLocal,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        pcLocal,
+                        domainLocal,
+                        keyTmpLocal,
+                        poison,
+                        island,
+                        keyStateByLabel,
+                        methodSeed,
+                        salt,
+                        smallTokenDispatchCases,
+                        dispatcherOutliner,
+                        transitionOutliner
+                    )
+                );
+            }
+            if (dispatcherOutliner != null) {
+                insns.add(
+                    dispatcherOutliner.emitResultRouter(
+                        group,
+                        keyLocal,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        pcLocal,
+                        domainLocal,
+                        keyTmpLocal,
+                        poison
+                    )
+                );
+            }
+            insns.add(poison);
+            long poisonSeed = edgeSeed(
+                salt,
+                entryBlock.label(),
+                entryBlock.label(),
+                0x504F49534F4E4B31L
+            );
+            emitStepKeys(
+                insns,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                poisonSeed,
+                EdgeRole.POISON
+            );
+            insns.add(
+                new org.objectweb.asm.tree.TypeInsnNode(
+                    Opcodes.NEW,
+                    "java/lang/IllegalStateException"
+                )
+            );
+            insns.add(new InsnNode(Opcodes.DUP));
+            insns.add(
+                new MethodInsnNode(
+                    Opcodes.INVOKESPECIAL,
+                    "java/lang/IllegalStateException",
+                    "<init>",
+                    "()V",
+                    false
+                )
+            );
+            insns.add(new InsnNode(Opcodes.ATHROW));
+            mn.instructions.insertBefore(entryBlock.label(), insns);
+        }
+    }
+
+    protected void rewriteBlockExit(
+        MethodNode mn,
+        Block block,
+        LabelNode next,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        int keyLocal,
+        Map<LabelNode, Integer> stateByLabel,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Set<LabelNode> runtimeKeyLabels,
+        long methodSeed,
+        long salt,
+        CffTransitionOutliner.TransitionOutliner transitionOutliner
+    ) {
+        AbstractInsnNode last = lastRealBefore(mn, block.endExclusive());
+        if (last == null || before(last, block.label())) return;
+        int opcode = last.getOpcode();
+        if (terminates(opcode)) return;
+
+        if (last instanceof JumpInsnNode jump) {
+            if (opcode == Opcodes.GOTO) {
+                Integer targetState = labelValue(stateByLabel, jump.label);
+                DispatchTarget target = labelValue(dispatchByLabel, jump.label);
+                if (targetState == null || target == null) {
+                    throw new IllegalStateException(
+                        "CFF goto target has no dispatch state in " +
+                            mn.name +
+                            mn.desc +
+                            ": " +
+                            jump.label.getLabel()
+                    );
+                }
+                mn.instructions.insertBefore(
+                    last,
+                    transition(
+                        targetState,
+                        target,
+                        keyLocal,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        pcLocal,
+                        domainLocal,
+                        keyTmpLocal,
+                        requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                        requireBlockKey(jump.label, labelValue(keyStateByLabel, jump.label)),
+                        methodSeed,
+                        edgeSeed(salt, block.label(), jump.label, opcode),
+                        runtimeKeyLabels.contains(jump.label),
+                        EdgeRole.GOTO,
+                        transitionOutliner
+                    )
+                );
+                mn.instructions.remove(last);
+                return;
+            }
+            Integer targetState = labelValue(stateByLabel, jump.label);
+            Integer fallthroughState =
+                next == null ? null : labelValue(stateByLabel, next);
+            DispatchTarget target = labelValue(dispatchByLabel, jump.label);
+            DispatchTarget fallthrough =
+                next == null ? null : labelValue(dispatchByLabel, next);
+            if (next == null) {
+                throw new IllegalStateException(
+                    "CFF conditional block has no verifier-safe fallthrough target"
+                );
+            }
+            long trueSeed = edgeSeed(
+                salt,
+                block.label(),
+                jump.label,
+                opcode ^ 0x54525545
+            );
+            long falseSeed = edgeSeed(
+                salt,
+                block.label(),
+                next,
+                opcode ^ 0x46534C53
+            );
+            if ((trueSeed & 1L) == 0L) {
+                LabelNode taken = new LabelNode();
+                mn.instructions.insertBefore(
+                    last,
+                    new JumpInsnNode(opcode, taken)
+                );
+                mn.instructions.insertBefore(
+                    last,
+                    transition(
+                        requireState(next, fallthroughState),
+                        requireTarget(next, fallthrough),
+                        keyLocal,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        pcLocal,
+                        domainLocal,
+                        keyTmpLocal,
+                        requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                        requireBlockKey(next, labelValue(keyStateByLabel, next)),
+                        methodSeed,
+                        falseSeed,
+                        runtimeKeyLabels.contains(next),
+                        EdgeRole.CONDITIONAL_FALSE,
+                        transitionOutliner
+                    )
+                );
+                mn.instructions.insertBefore(last, taken);
+                mn.instructions.insertBefore(
+                    last,
+                    transition(
+                        requireState(jump.label, targetState),
+                        requireTarget(jump.label, target),
+                        keyLocal,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        pcLocal,
+                        domainLocal,
+                        keyTmpLocal,
+                        requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                        requireBlockKey(jump.label, labelValue(keyStateByLabel, jump.label)),
+                        methodSeed,
+                        trueSeed,
+                        runtimeKeyLabels.contains(jump.label),
+                        EdgeRole.CONDITIONAL_TRUE,
+                        transitionOutliner
+                    )
+                );
+            } else {
+                LabelNode fallthroughLabel = new LabelNode();
+                mn.instructions.insertBefore(
+                    last,
+                    new JumpInsnNode(invertJumpOpcode(opcode), fallthroughLabel)
+                );
+                mn.instructions.insertBefore(
+                    last,
+                    transition(
+                        requireState(jump.label, targetState),
+                        requireTarget(jump.label, target),
+                        keyLocal,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        pcLocal,
+                        domainLocal,
+                        keyTmpLocal,
+                        requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                        requireBlockKey(jump.label, labelValue(keyStateByLabel, jump.label)),
+                        methodSeed,
+                        trueSeed,
+                        runtimeKeyLabels.contains(jump.label),
+                        EdgeRole.CONDITIONAL_TRUE,
+                        transitionOutliner
+                    )
+                );
+                mn.instructions.insertBefore(last, fallthroughLabel);
+                mn.instructions.insertBefore(
+                    last,
+                    transition(
+                        requireState(next, fallthroughState),
+                        requireTarget(next, fallthrough),
+                        keyLocal,
+                        guardLocal,
+                        pathKeyLocal,
+                        blockKeyLocal,
+                        pcLocal,
+                        domainLocal,
+                        keyTmpLocal,
+                        requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                        requireBlockKey(next, labelValue(keyStateByLabel, next)),
+                        methodSeed,
+                        falseSeed,
+                        runtimeKeyLabels.contains(next),
+                        EdgeRole.CONDITIONAL_FALSE,
+                        transitionOutliner
+                    )
+                );
+            }
+            mn.instructions.remove(last);
+            return;
+        }
+        if (last instanceof LookupSwitchInsnNode ls) {
+            rewriteLookupSwitch(
+                mn,
+                ls,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal,
+                keyTmpLocal,
+                stateByLabel,
+                keyStateByLabel,
+                dispatchByLabel,
+                runtimeKeyLabels,
+                block.label(),
+                methodSeed,
+                salt,
+                transitionOutliner
+            );
+            return;
+        }
+        if (last instanceof TableSwitchInsnNode ts) {
+            rewriteTableSwitch(
+                mn,
+                ts,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal,
+                keyTmpLocal,
+                stateByLabel,
+                keyStateByLabel,
+                dispatchByLabel,
+                runtimeKeyLabels,
+                block.label(),
+                methodSeed,
+                salt,
+                transitionOutliner
+            );
+            return;
+        }
+        if (next != null) {
+            Integer nextState = labelValue(stateByLabel, next);
+            DispatchTarget nextTarget = labelValue(dispatchByLabel, next);
+            mn.instructions.insert(
+                last,
+                transition(
+                    requireState(next, nextState),
+                    requireTarget(next, nextTarget),
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    keyTmpLocal,
+                    requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
+                    requireBlockKey(next, labelValue(keyStateByLabel, next)),
+                    methodSeed,
+                    edgeSeed(salt, block.label(), next, 0x46414C4C),
+                    runtimeKeyLabels.contains(next),
+                    EdgeRole.FALLTHROUGH,
+                    transitionOutliner
+                )
+            );
+        }
+    }
+
+    protected void rewriteLookupSwitch(
+        MethodNode mn,
+        LookupSwitchInsnNode ls,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        Map<LabelNode, Integer> stateByLabel,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Set<LabelNode> runtimeKeyLabels,
+        LabelNode source,
+        long methodSeed,
+        long salt,
+        CffTransitionOutliner.TransitionOutliner transitionOutliner
+    ) {
+        LabelNode defaultSet = new LabelNode();
+        List<LabelNode> setLabels = new ArrayList<>();
+        for (int i = 0; i < ls.labels.size(); i++) setLabels.add(
+            new LabelNode()
+        );
+        List<LabelNode> originalTargets = new ArrayList<>(ls.labels);
+        LabelNode originalDefault = ls.dflt;
+        ls.labels.clear();
+        ls.labels.addAll(setLabels);
+        ls.dflt = defaultSet;
+        InsnList tail = new InsnList();
+        tail.add(defaultSet);
+        tail.add(
+            transition(
+                requireState(
+                    originalDefault,
+                    labelValue(stateByLabel, originalDefault)
+                ),
+                requireTarget(
+                    originalDefault,
+                    labelValue(dispatchByLabel, originalDefault)
+                ),
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal,
+                keyTmpLocal,
+                requireBlockKey(source, keyStateByLabel.get(source)),
+                requireBlockKey(originalDefault, labelValue(keyStateByLabel, originalDefault)),
+                methodSeed,
+                edgeSeed(salt, source, originalDefault, 0x53574446),
+                runtimeKeyLabels.contains(originalDefault),
+                EdgeRole.SWITCH_DEFAULT,
+                transitionOutliner
+            )
+        );
+        for (int i = 0; i < setLabels.size(); i++) {
+            LabelNode originalTarget = originalTargets.get(i);
+            tail.add(setLabels.get(i));
+            tail.add(
+                transition(
+                    requireState(
+                        originalTarget,
+                        labelValue(stateByLabel, originalTarget)
+                    ),
+                    requireTarget(
+                        originalTarget,
+                        labelValue(dispatchByLabel, originalTarget)
+                    ),
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    keyTmpLocal,
+                    requireBlockKey(source, keyStateByLabel.get(source)),
+                    requireBlockKey(originalTarget, labelValue(keyStateByLabel, originalTarget)),
+                    methodSeed,
+                    edgeSeed(
+                        salt,
+                        source,
+                        originalTarget,
+                        ls.keys.get(i) ^ 0x53574C53
+                    ),
+                    runtimeKeyLabels.contains(originalTarget),
+                    EdgeRole.SWITCH_CASE,
+                    transitionOutliner
+                )
+            );
+        }
+        mn.instructions.insert(ls, tail);
+    }
+
+    protected void rewriteTableSwitch(
+        MethodNode mn,
+        TableSwitchInsnNode ts,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        Map<LabelNode, Integer> stateByLabel,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Set<LabelNode> runtimeKeyLabels,
+        LabelNode source,
+        long methodSeed,
+        long salt,
+        CffTransitionOutliner.TransitionOutliner transitionOutliner
+    ) {
+        LabelNode defaultSet = new LabelNode();
+        List<LabelNode> setLabels = new ArrayList<>();
+        for (int i = 0; i < ts.labels.size(); i++) setLabels.add(
+            new LabelNode()
+        );
+        List<LabelNode> originalTargets = new ArrayList<>(ts.labels);
+        LabelNode originalDefault = ts.dflt;
+        ts.labels.clear();
+        ts.labels.addAll(setLabels);
+        ts.dflt = defaultSet;
+        InsnList tail = new InsnList();
+        tail.add(defaultSet);
+        tail.add(
+            transition(
+                requireState(
+                    originalDefault,
+                    labelValue(stateByLabel, originalDefault)
+                ),
+                requireTarget(
+                    originalDefault,
+                    labelValue(dispatchByLabel, originalDefault)
+                ),
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal,
+                keyTmpLocal,
+                requireBlockKey(source, keyStateByLabel.get(source)),
+                requireBlockKey(originalDefault, labelValue(keyStateByLabel, originalDefault)),
+                methodSeed,
+                edgeSeed(salt, source, originalDefault, 0x54534446),
+                runtimeKeyLabels.contains(originalDefault),
+                EdgeRole.SWITCH_DEFAULT,
+                transitionOutliner
+            )
+        );
+        for (int i = 0; i < setLabels.size(); i++) {
+            LabelNode originalTarget = originalTargets.get(i);
+            tail.add(setLabels.get(i));
+            tail.add(
+                transition(
+                    requireState(
+                        originalTarget,
+                        labelValue(stateByLabel, originalTarget)
+                    ),
+                    requireTarget(
+                        originalTarget,
+                        labelValue(dispatchByLabel, originalTarget)
+                    ),
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    keyTmpLocal,
+                    requireBlockKey(source, keyStateByLabel.get(source)),
+                    requireBlockKey(originalTarget, labelValue(keyStateByLabel, originalTarget)),
+                    methodSeed,
+                    edgeSeed(
+                        salt,
+                        source,
+                        originalTarget,
+                        (ts.min + i) ^ 0x54534C53
+                    ),
+                    runtimeKeyLabels.contains(originalTarget),
+                    EdgeRole.SWITCH_CASE,
+                    transitionOutliner
+                )
+            );
+        }
+        mn.instructions.insert(ts, tail);
+    }
+
+    protected <T> T labelValue(Map<LabelNode, T> values, LabelNode label) {
+        T value = values.get(label);
+        if (value != null) return value;
+        for (
+            AbstractInsnNode scan = label.getPrevious();
+            scan != null && scan.getOpcode() < 0;
+            scan = scan.getPrevious()
+        ) {
+            if (scan instanceof LabelNode alias) {
+                value = values.get(alias);
+                if (value != null) return value;
+            }
+        }
+        for (
+            AbstractInsnNode scan = label.getNext();
+            scan != null && scan.getOpcode() < 0;
+            scan = scan.getNext()
+        ) {
+            if (scan instanceof LabelNode alias) {
+                value = values.get(alias);
+                if (value != null) return value;
+            }
+        }
+        return null;
+    }
+
+    protected int requireState(LabelNode target, Integer state) {
+        if (state == null) {
+            throw new IllegalStateException(
+                "CFF target has no state: " + target.getLabel()
+            );
+        }
+        return state;
+    }
+
+    protected DispatchTarget requireTarget(
+        LabelNode label,
+        DispatchTarget target
+    ) {
+        if (target == null) {
+            StackTraceElement caller = Thread.currentThread().getStackTrace().length > 2
+                ? Thread.currentThread().getStackTrace()[2]
+                : null;
+            throw new IllegalStateException(
+                "CFF target has no dispatch target at " +
+                    (caller == null ? "<unknown>" : caller.getMethodName() + ":" + caller.getLineNumber()) +
+                    ": " +
+                    label.getLabel()
+            );
+        }
+        return target;
+    }
+
+    protected CffBlockKeyState requireBlockKey(
+        LabelNode label,
+        CffBlockKeyState keyState
+    ) {
+        if (keyState == null) {
+            throw new IllegalStateException(
+                "CFF target has no key state: " + label.getLabel()
+            );
+        }
+        return keyState;
+    }
+
+    protected InsnList transition(
+        int state,
+        DispatchTarget target,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        CffBlockKeyState sourceKeys,
+        CffBlockKeyState targetKeys,
+        long methodSeed,
+        long edgeSeed,
+        boolean updateGuard,
+        EdgeRole role,
+        CffTransitionOutliner.TransitionOutliner transitionOutliner
+    ) {
+        long stepSeed = transitionKeySeed(edgeSeed, state, target, role);
+        EdgeKind edgeKind = chooseEdgeKind(edgeSeed, role, target);
+        LabelNode jumpTarget = transitionJumpTarget(target, edgeKind, edgeSeed);
+        if (transitionOutliner != null) {
+            return transitionOutliner.emitCall(
+                state,
+                target,
+                edgeKind,
+                jumpTarget,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal,
+                keyTmpLocal,
+                sourceKeys,
+                targetKeys,
+                methodSeed,
+                stepSeed,
+                role
+            );
+        }
+        InsnList insns = new InsnList();
+        emitTransitionCore(
+            insns,
+            state,
+            target,
+            edgeKind,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            pcLocal,
+            domainLocal,
+            keyTmpLocal,
+            sourceKeys,
+            targetKeys,
+            methodSeed,
+            stepSeed,
+            role,
+            updateGuard
+        );
+        insns.add(new JumpInsnNode(Opcodes.GOTO, jumpTarget));
+        return insns;
+    }
+
+    protected LabelNode transitionJumpTarget(
+        DispatchTarget target,
+        EdgeKind edgeKind,
+        long edgeSeed
+    ) {
+        return switch (edgeKind) {
+            case DIRECT_ISLAND -> target.islandLabels()[target.island()];
+            case ALIAS_HUB -> selectAliasHub(target, edgeSeed);
+            case HUB -> target.hub();
+        };
+    }
+
+    protected void emitTransitionCore(
+        InsnList insns,
+        int state,
+        DispatchTarget target,
+        EdgeKind edgeKind,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        CffBlockKeyState sourceKeys,
+        CffBlockKeyState targetKeys,
+        long methodSeed,
+        long stepSeed,
+        EdgeRole role,
+        boolean updateGuard
+    ) {
+        emitDecodeBlockKeys(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            pcLocal,
+            keyTmpLocal,
+            keyTmpLocal + 3,
+            sourceKeys,
+            targetKeys,
+            methodSeed,
+            stepSeed,
+            role
+        );
+        long transitionBaseSeed = transitionBaseSeed(stepSeed, role);
+        emitStoreTransitionBaseToken(
+            insns,
+            pcLocal,
+            targetKeys.pcToken(),
+            sourceKeys,
+            keyTmpLocal + 3,
+            transitionBaseSeed,
+            target.selectorSeed() ^ state ^ 0x5043544F4B454E31L
+        );
+        emitStoreMethodKeyFromBase(
+            insns,
+            keyLocal,
+            keyTmpLocal + 3,
+            sourceKeys,
+            targetKeys,
+            transitionBaseSeed,
+            stepSeed ^ 0x4D45544844454331L ^ role.ordinal()
+        );
+        if (edgeKind != EdgeKind.DIRECT_ISLAND) {
+            emitStoreTransitionBaseToken(
+                insns,
+                domainLocal,
+                target.domainToken(),
+                sourceKeys,
+                keyTmpLocal + 3,
+                transitionBaseSeed,
+                target.domainSeed() ^ target.island() ^ 0x444F4D544F4B31L
+            );
+        }
+    }
+
+    protected InsnList buildIslandDispatcher(
+        IslandGroup group,
+        Map<LabelNode, Integer> stateByLabel,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        LabelNode poison,
+        int island,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long methodSeed,
+        long salt,
+        int smallTokenDispatchCases,
+        CffTransitionOutliner.TransitionOutliner dispatcherOutliner,
+        CffTransitionOutliner.TransitionOutliner transitionOutliner
+    ) {
+        InsnList insns = new InsnList();
+        TreeMap<Integer, LabelNode> cases = new TreeMap<>();
+        Map<LabelNode, LabelNode> stubs = new IdentityHashMap<>();
+        List<LabelNode> fakes = new ArrayList<>();
+        List<Block> islandBlocks = new ArrayList<>();
+        int firstState = 0;
+        boolean first = true;
+        long dispatchSeed = tokenDispatchSeed(group, island, keyStateByLabel);
+        for (Block block : group.blocks()) {
+            Integer blockIsland = group.islands().get(block.label());
+            if (blockIsland != null && blockIsland == island) {
+                islandBlocks.add(block);
+                LabelNode stub = new LabelNode();
+                stubs.put(stub, block.label());
+                int state = requireState(
+                    block.label(),
+                    stateByLabel.get(block.label())
+                );
+                CffBlockKeyState blockKeys = requireBlockKey(
+                    block.label(),
+                    keyStateByLabel.get(block.label())
+                );
+                cases.put(
+                    maskedDispatchToken(
+                        blockKeys.pcToken(),
+                        blockKeys,
+                        dispatchSeed
+                    ),
+                    stub
+                );
+                if (first) {
+                    firstState = state;
+                    first = false;
+                }
+            }
+        }
+        if (first) return insns;
+        int fakeCount = fakeCaseCount(group.salt() ^ salt ^ island);
+        if (dispatcherOutliner != null) {
+            return dispatcherOutliner.emitIslandDispatchCall(
+                group,
+                island,
+                islandBlocks,
+                firstState,
+                fakeCount,
+                dispatchSeed,
+                stateByLabel,
+                keyStateByLabel,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal,
+                keyTmpLocal,
+                poison,
+                methodSeed,
+                salt
+            );
+        }
+        for (int fakeIndex = 0; fakeIndex < fakeCount; fakeIndex++) {
+            LabelNode fake = new LabelNode();
+            fakes.add(fake);
+            int fakeState = fakeState(
+                salt,
+                firstState ^ island ^ (fakeIndex * 0x45D9F3B)
+            );
+            while (cases.containsKey(fakeState)) {
+                fakeState = fakeState(
+                    salt ^ 0x9E3779B97F4A7C15L,
+                    fakeState + fakeIndex + 1
+                );
+            }
+            int fakeToken = fakeDispatchToken(group.salt(), fakeState, island, fakeIndex);
+            while (cases.containsKey(fakeToken)) {
+                fakeToken = nonZeroInt(JvmPassBytecode.mix(fakeToken, fakeIndex + 1L));
+            }
+            cases.put(fakeToken, fake);
+        }
+        insns.add(group.islandLabels()[island]);
+        emitTokenDispatch(
+            insns,
+            pcLocal,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            cases,
+            poison,
+            dispatchSeed,
+            keyTmpLocal,
+            smallTokenDispatchCases
+        );
+        for (Map.Entry<LabelNode, LabelNode> stub : stubs.entrySet()) {
+            insns.add(stub.getKey());
+            insns.add(new JumpInsnNode(Opcodes.GOTO, stub.getValue()));
+        }
+        for (int fakeIndex = 0; fakeIndex < fakes.size(); fakeIndex++) {
+            insns.add(fakes.get(fakeIndex));
+            long fakeSeed = edgeSeed(
+                salt,
+                group.hub(),
+                group.islandLabels()[island],
+                0x46414B4549534C45L ^ island ^ fakeIndex
+            );
+            emitStepKeys(
+                insns,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                fakeSeed,
+                EdgeRole.FAKE
+            );
+            emitFakeCaseBounce(
+                insns,
+                group,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal,
+                keyTmpLocal,
+                firstState,
+                island,
+                keyStateByLabel,
+                methodSeed,
+                fakeSeed,
+                transitionOutliner
+            );
+        }
+        return insns;
+    }
+
+    protected void emitFakeCaseBounce(
+        InsnList insns,
+        IslandGroup group,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int domainLocal,
+        int keyTmpLocal,
+        int state,
+        int island,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long methodSeed,
+        long seed,
+        CffTransitionOutliner.TransitionOutliner transitionOutliner
+    ) {
+        LabelNode hop = new LabelNode();
+        LabelNode pass = new LabelNode();
+        CffBlockKeyState bounceKeys = firstIslandKeyState(
+            group,
+            island,
+            keyStateByLabel
+        );
+        DispatchTarget bounceTarget = new DispatchTarget(
+            group.hub(),
+            group.islandLabels(),
+            group.aliasHubs(),
+            island,
+            group.salt() ^ island,
+            domainSeed(group),
+            domainToken(group.salt(), island)
+        );
+        long domainSeed = domainSeed(group);
+        if (transitionOutliner != null) {
+            long fakeStepSeed = transitionKeySeed(seed, state, bounceTarget, EdgeRole.FAKE);
+            EdgeKind fakeEdgeKind = chooseEdgeKind(seed, EdgeRole.FAKE, bounceTarget);
+            LabelNode jumpTarget = transitionJumpTarget(bounceTarget, fakeEdgeKind, seed);
+            insns.add(
+                transitionOutliner.emitCall(
+                    state,
+                    bounceTarget,
+                    fakeEdgeKind,
+                    jumpTarget,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    keyTmpLocal,
+                    bounceKeys,
+                    bounceKeys,
+                    methodSeed,
+                    fakeStepSeed,
+                    EdgeRole.FAKE
+                )
+            );
+            return;
+        }
+        switch ((int) ((seed >>> 37) & 3L)) {
+            case 0 -> {
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    state,
+                    bounceKeys,
+                    methodSeed,
+                    bounceTarget.selectorSeed(),
+                    keyTmpLocal
+                );
+                emitStoreMethodKey(
+                    insns,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    bounceKeys
+                );
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed,
+                    keyTmpLocal
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            }
+            case 1 -> {
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    state,
+                    bounceKeys,
+                    methodSeed,
+                    bounceTarget.selectorSeed(),
+                    keyTmpLocal
+                );
+                emitStoreMethodKey(
+                    insns,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    bounceKeys
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, hop));
+                insns.add(hop);
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed,
+                    keyTmpLocal
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            }
+            case 2 -> {
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed,
+                    keyTmpLocal
+                );
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    state,
+                    bounceKeys,
+                    methodSeed,
+                    bounceTarget.selectorSeed(),
+                    keyTmpLocal
+                );
+                emitStoreMethodKey(
+                    insns,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    bounceKeys
+                );
+                emitKeyPredicate(
+                    insns,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    seed
+                );
+                insns.add(new JumpInsnNode(Opcodes.IFNE, pass));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(pass);
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            }
+            default -> {
+                emitStorePc(
+                    insns,
+                    pcLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    state,
+                    bounceKeys,
+                    methodSeed,
+                    bounceTarget.selectorSeed(),
+                    keyTmpLocal
+                );
+                emitStoreMethodKey(
+                    insns,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    bounceKeys
+                );
+                emitKeyPredicate(
+                    insns,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    seed ^ 0x504154484F504151L
+                );
+                insns.add(new JumpInsnNode(Opcodes.IFEQ, hop));
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed,
+                    keyTmpLocal
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(hop);
+                emitStoreDomain(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    keyLocal,
+                    island,
+                    bounceTarget.domainToken(),
+                    bounceKeys,
+                    methodSeed,
+                    domainSeed,
+                    keyTmpLocal
+                );
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            }
+        }
+    }
+
+    protected long caseSelectorSeed(
+        IslandGroup group,
+        LabelNode label,
+        int state,
+        int island
+    ) {
+        long seed = JvmPassBytecode.mix(
+            group.salt() ^ 0x4341534553454C31L ^ island,
+            state
+        );
+        seed = JvmPassBytecode.mix(seed, System.identityHashCode(label));
+        return seed == 0L ? group.salt() ^ 0x53454C45435431L : seed;
+    }
+
+    protected long fakeCaseSelectorSeed(
+        IslandGroup group,
+        int fakeState,
+        int island,
+        int fakeIndex
+    ) {
+        long seed = JvmPassBytecode.mix(
+            group.salt() ^ 0x46414B4553454C31L ^ island,
+            fakeState
+        );
+        seed = JvmPassBytecode.mix(seed, fakeIndex);
+        return seed == 0L ? group.salt() ^ 0x46414B45534C31L : seed;
+    }
+
+    protected InsnList aliasHub(
+        IslandGroup group,
+        int alias,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal
+    ) {
+        InsnList insns = new InsnList();
+        LabelNode aliasLabel = group.aliasHubs()[alias];
+        long seed = group.salt() ^ 0x414C494153485542L ^ alias;
+        insns.add(aliasLabel);
+        switch ((int) ((seed >>> 7) & 7L)) {
+            case 0 -> insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            case 1 -> {
+                LabelNode hop = new LabelNode();
+                insns.add(new JumpInsnNode(Opcodes.GOTO, hop));
+                insns.add(hop);
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            }
+            case 2, 4, 6 -> emitOpaqueHubBranch(
+                insns,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                seed,
+                group.hub()
+            );
+            case 5 -> {
+                LabelNode hopA = new LabelNode();
+                LabelNode hopB = new LabelNode();
+                insns.add(new JumpInsnNode(Opcodes.GOTO, hopA));
+                insns.add(hopB);
+                insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                insns.add(hopA);
+                insns.add(new JumpInsnNode(Opcodes.GOTO, hopB));
+            }
+            default -> emitOpaqueHubBranch(
+                insns,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                seed ^ 0x4855424252414E43L,
+                group.hub()
+            );
+        }
+        return insns;
+    }
+
+    protected void emitOpaqueHubBranch(
+        InsnList insns,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        long seed,
+        LabelNode hub
+    ) {
+        LabelNode left = new LabelNode();
+        LabelNode right = new LabelNode();
+        emitKeyPredicate(insns, guardLocal, pathKeyLocal, blockKeyLocal, seed);
+        insns.add(
+            new JumpInsnNode(
+                ((seed >>> 3) & 1L) == 0L ? Opcodes.IFEQ : Opcodes.IFNE,
+                left
+            )
+        );
+        insns.add(new JumpInsnNode(Opcodes.GOTO, right));
+        insns.add(left);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, hub));
+        insns.add(right);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, hub));
+    }
+
+    protected void emitDomainDispatch(
+        InsnList insns,
+        int domainLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        IslandGroup group,
+        LabelNode poison
+    ) {
+        LabelNode[] islandLabels = group.islandLabels();
+        if (islandLabels.length == 1) {
+            insns.add(new JumpInsnNode(Opcodes.GOTO, islandLabels[0]));
+            return;
+        }
+        emitEncodedDomainIfChain(
+            insns,
+            domainLocal,
+            islandLabels,
+            poison,
+            group.salt()
+        );
+    }
+
+    protected void emitEncodedDomainIfChain(
+        InsnList insns,
+        int domainLocal,
+        LabelNode[] islandLabels,
+        LabelNode poison,
+        long orderSeed
+    ) {
+        TreeMap<Integer, LabelNode> cases = new TreeMap<>();
+        for (int i = 0; i < islandLabels.length; i++) {
+            cases.put(domainToken(orderSeed, i), islandLabels[i]);
+        }
+        int[] keys = new int[cases.size()];
+        LabelNode[] labels = new LabelNode[cases.size()];
+        int index = 0;
+        for (Map.Entry<Integer, LabelNode> entry : cases.entrySet()) {
+            keys[index] = entry.getKey();
+            labels[index] = entry.getValue();
+            index++;
+        }
+        insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+        insns.add(new LookupSwitchInsnNode(poison, keys, labels));
+    }
+
+    protected void emitTokenDispatch(
+        InsnList insns,
+        int pcLocal,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        TreeMap<Integer, LabelNode> cases,
+        LabelNode poison,
+        long seed,
+        int scratchLocal,
+        int smallTokenDispatchCases
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        emitDispatchTokenMask(
+            insns,
+            pcLocal,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            seed
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+        if (cases.size() <= smallTokenDispatchCases) {
+            emitSmallTokenDispatch(insns, cases, poison, seed);
+            return;
+        }
+        int[] keys = new int[cases.size()];
+        LabelNode[] labels = new LabelNode[cases.size()];
+        int index = 0;
+        for (Map.Entry<Integer, LabelNode> entry : cases.entrySet()) {
+            keys[index] = entry.getKey();
+            labels[index] = entry.getValue();
+            index++;
+        }
+        insns.add(new LookupSwitchInsnNode(poison, keys, labels));
+    }
+
+    protected void emitSmallTokenDispatch(
+        InsnList insns,
+        TreeMap<Integer, LabelNode> cases,
+        LabelNode poison,
+        long seed
+    ) {
+        if (cases.size() == 1) {
+            Map.Entry<Integer, LabelNode> entry = cases.firstEntry();
+            JvmPassBytecode.pushInt(insns, entry.getKey());
+            insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, poison));
+            insns.add(new JumpInsnNode(Opcodes.GOTO, entry.getValue()));
+            return;
+        }
+        List<Map.Entry<Integer, LabelNode>> ordered = new ArrayList<>(cases.entrySet());
+        ordered.sort((left, right) -> Long.compare(
+            JvmPassBytecode.mix(seed, left.getKey()),
+            JvmPassBytecode.mix(seed, right.getKey())
+        ));
+        List<LabelNode> matches = new ArrayList<>(ordered.size() - 1);
+        for (int i = 0; i < ordered.size() - 1; i++) {
+            Map.Entry<Integer, LabelNode> entry = ordered.get(i);
+            LabelNode match = new LabelNode();
+            matches.add(match);
+            insns.add(new InsnNode(Opcodes.DUP));
+            JvmPassBytecode.pushInt(insns, entry.getKey());
+            insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, match));
+        }
+        Map.Entry<Integer, LabelNode> last = ordered.get(ordered.size() - 1);
+        JvmPassBytecode.pushInt(insns, last.getKey());
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, poison));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, last.getValue()));
+        for (int i = 0; i < matches.size(); i++) {
+            insns.add(matches.get(i));
+            insns.add(new InsnNode(Opcodes.POP));
+            insns.add(new JumpInsnNode(Opcodes.GOTO, ordered.get(i).getValue()));
+        }
+    }
+
+    protected long tokenDispatchSeed(long groupSalt, int island) {
+        return JvmPassBytecode.mix(groupSalt ^ 0x544F4B4449535031L, island);
+    }
+
+    protected long tokenDispatchSeed(
+        IslandGroup group,
+        int island,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel
+    ) {
+        long seed = tokenDispatchSeed(group.salt(), island);
+        for (int attempt = 0; attempt < 32; attempt++) {
+            Set<Integer> seen = new HashSet<>();
+            boolean collision = false;
+            for (Block block : group.blocks()) {
+                Integer blockIsland = group.islands().get(block.label());
+                if (blockIsland == null || blockIsland != island) {
+                    continue;
+                }
+                CffBlockKeyState keyState = requireBlockKey(
+                    block.label(),
+                    keyStateByLabel.get(block.label())
+                );
+                int masked = maskedDispatchToken(keyState.pcToken(), keyState, seed);
+                if (!seen.add(masked)) {
+                    collision = true;
+                    break;
+                }
+            }
+            if (!collision) {
+                return seed;
+            }
+            seed = JvmPassBytecode.mix(seed, attempt + 1L);
+        }
+        throw new IllegalStateException("CFF token dispatch seed collision for island");
+    }
+
+    protected int maskedDispatchToken(
+        int token,
+        CffBlockKeyState keyState,
+        long seed
+    ) {
+        return token ^ dispatchTokenMask(token, keyState, seed);
+    }
+
+    protected int dispatchTokenMask(
+        int token,
+        CffBlockKeyState keyState,
+        long seed
+    ) {
+        int x = keyState.guardKey() +
+            (keyState.pathKey() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x44545041544831L)));
+        x ^= keyState.blockKey() *
+            (nonZeroInt(JvmPassBytecode.mix(seed, 0x4454424C4F434B31L)) | 1);
+        x ^= token + nonZeroInt(JvmPassBytecode.mix(seed, 0x44545043544F4B31L));
+        return x;
+    }
+
+    protected int dispatchMethodKeyFold(long keyValue, long seed) {
+        return ((int) keyValue) ^
+            ((int) (keyValue >>> 32)) ^
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x444953504D4B31L));
+    }
+
+    protected void emitDispatchTokenMask(
+        InsnList insns,
+        int pcLocal,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        long seed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x44545041544831L))
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4454424C4F434B31L)) | 1
+        );
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x44545043544F4B31L))
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    protected void emitDispatchMethodKeyFold(InsnList insns, int keyLocal, long seed) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x444953504D4B31L))
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+}
