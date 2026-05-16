@@ -2,6 +2,7 @@ package dev.nekoobfuscator.native_.translator;
 
 import dev.nekoobfuscator.core.ir.l3.CStatement;
 import dev.nekoobfuscator.native_.codegen.CCodeGenerator;
+import dev.nekoobfuscator.native_.codegen.CStringLiteral;
 import dev.nekoobfuscator.native_.codegen.emit.SignaturePlan;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.NativeMethodBinding;
 import org.objectweb.asm.ConstantDynamic;
@@ -862,7 +863,7 @@ public final class OpcodeTranslator {
             sb.append("jobject obj = POP_O(); jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
             sb.append(pushForType(type, "neko_fast_get_" + primitive + "_field(env, obj, fid, "
                     + codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false) + ", \""
-                    + cStringLiteral(fi.owner) + "\", \"" + cStringLiteral(fi.name) + "\")"));
+                    + CStringLiteral.escape(fi.owner) + "\", \"" + CStringLiteral.escape(fi.name) + "\")"));
         }
         sb.append("}");
         return sb.toString();
@@ -883,7 +884,7 @@ public final class OpcodeTranslator {
             sb.append("jobject obj = POP_O(); jfieldID fid = ").append(cachedFieldExpression(fi.owner, fi.name, fi.desc, false)).append("; ");
             sb.append("neko_fast_set_").append(primitive).append("_field(env, obj, fid, ")
                 .append(codeGenerator.fieldOffsetSlotName(fi.owner, fi.name, fi.desc, false)).append(", val, \"")
-                .append(cStringLiteral(fi.owner)).append("\", \"").append(cStringLiteral(fi.name)).append("\"); ");
+                .append(CStringLiteral.escape(fi.owner)).append("\", \"").append(CStringLiteral.escape(fi.name)).append("\"); ");
         }
         sb.append("}");
         return sb.toString();
@@ -920,11 +921,11 @@ public final class OpcodeTranslator {
         String classLookupName = classLookupName(desc);
         if (classLookupName == null) {
             codeGenerator.registerOwnerPrimitiveClassReference(currentOwnerInternalName, desc);
-            return "neko_bound_class(env, " + codeGenerator.primitiveClassSlotName(desc) + ", \"" + cStringLiteral(desc) + "\")";
+            return "neko_bound_class(env, " + codeGenerator.primitiveClassSlotName(desc) + ", \"" + CStringLiteral.escape(desc) + "\")";
         }
         if (classLookupName.equals(currentOwnerInternalName)) {
             return "neko_bound_current_owner_class(thread, env, " + codeGenerator.classSlotName(classLookupName)
-                + ", \"" + cStringLiteral(classLookupName) + "\", "
+                + ", \"" + CStringLiteral.escape(classLookupName) + "\", "
                 + "(jobject)clazz"
                 + ", JNI_TRUE)";
         }
@@ -1015,13 +1016,13 @@ public final class OpcodeTranslator {
             sb.append("__dims[").append(i).append("] = POP_I(); ");
         }
         sb.append("PUSH_O(neko_multi_new_array(thread, env, ").append(insn.dims).append(", __dims, \"")
-            .append(cStringLiteral(insn.desc)).append("\", ").append(currentOwnerClassExpression()).append(")); }");
+            .append(CStringLiteral.escape(insn.desc)).append("\", ").append(currentOwnerClassExpression()).append(")); }");
         return sb.toString();
     }
 
     private String currentOwnerClassExpression() {
         return "neko_bound_current_owner_class(thread, env, " + codeGenerator.classSlotName(currentOwnerInternalName)
-            + ", \"" + cStringLiteral(currentOwnerInternalName) + "\", "
+            + ", \"" + CStringLiteral.escape(currentOwnerInternalName) + "\", "
             + "(jobject)clazz"
             + ", JNI_TRUE)";
     }
@@ -1305,8 +1306,8 @@ public final class OpcodeTranslator {
         }
         if (arg instanceof Type type) {
             return type.getSort() == Type.METHOD
-                ? "neko_method_type_from_descriptor(env, \"" + cStringLiteral(type.getDescriptor()) + "\")"
-                : "neko_class_for_descriptor(env, \"" + cStringLiteral(type.getDescriptor()) + "\")";
+                ? "neko_method_type_from_descriptor(env, \"" + CStringLiteral.escape(type.getDescriptor()) + "\")"
+                : "neko_class_for_descriptor(env, \"" + CStringLiteral.escape(type.getDescriptor()) + "\")";
         }
         if (arg instanceof Handle handle) {
             throw new IllegalStateException("Unsupported bootstrap MethodHandle argument after invokedynamic lowering: "
@@ -1321,7 +1322,7 @@ public final class OpcodeTranslator {
             String elementClassExpr = componentType != null && componentType.getSort() != Type.BOOLEAN && componentType.getSort() != Type.BYTE
                 && componentType.getSort() != Type.CHAR && componentType.getSort() != Type.SHORT && componentType.getSort() != Type.INT
                 && componentType.getSort() != Type.FLOAT && componentType.getSort() != Type.LONG && componentType.getSort() != Type.DOUBLE
-                ? "neko_class_for_descriptor(env, \"" + cStringLiteral(componentType.getDescriptor()) + "\")"
+                ? "neko_class_for_descriptor(env, \"" + CStringLiteral.escape(componentType.getDescriptor()) + "\")"
                 : "__objCls";
             // T3.20: inline JNI NewObjectArray (function-table index 172) so
             // the deleted opcode-side wrapper is no longer referenced.
@@ -1348,9 +1349,9 @@ public final class OpcodeTranslator {
             appendBootstrapArgAssignment(sb, argsVar, i, constantDynamic.getBootstrapMethodArgument(i), tempCounter, bootstrapArgTypes[i + 3]);
         }
         Handle bsm = constantDynamic.getBootstrapMethod();
-        return "neko_resolve_constant_dynamic(env, \"" + cStringLiteral(currentOwnerInternalName) + "\", \"" + cStringLiteral(constantDynamic.getName()) + "\", \""
-            + cStringLiteral(constantDynamic.getDescriptor()) + "\", \"" + cStringLiteral(bsm.getOwner()) + "\", \""
-            + cStringLiteral(bsm.getName()) + "\", \"" + cStringLiteral(bsm.getDesc()) + "\", " + argsVar + ")";
+        return "neko_resolve_constant_dynamic(env, \"" + CStringLiteral.escape(currentOwnerInternalName) + "\", \"" + CStringLiteral.escape(constantDynamic.getName()) + "\", \""
+            + CStringLiteral.escape(constantDynamic.getDescriptor()) + "\", \"" + CStringLiteral.escape(bsm.getOwner()) + "\", \""
+            + CStringLiteral.escape(bsm.getName()) + "\", \"" + CStringLiteral.escape(bsm.getDesc()) + "\", " + argsVar + ")";
     }
 
     private String boxValueExpression(Type type, String valueExpr) {
@@ -1414,19 +1415,19 @@ public final class OpcodeTranslator {
 
     private String cachedClassExpression(String owner) {
         codeGenerator.registerOwnerClassReference(currentOwnerInternalName, owner);
-        return "neko_bound_class(env, " + classCacheVar(owner) + ", \"" + cStringLiteral(owner) + "\")";
+        return "neko_bound_class(env, " + classCacheVar(owner) + ", \"" + CStringLiteral.escape(owner) + "\")";
     }
 
     private String cachedMethodExpression(String owner, String name, String desc, boolean isStatic) {
         codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, owner, name, desc, isStatic);
-        return "neko_bound_method(env, " + methodCacheVar(owner, name, desc, isStatic) + ", \"" + cStringLiteral(owner) + "\", \""
-            + cStringLiteral(name) + "\", \"" + cStringLiteral(desc) + "\", " + (isStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
+        return "neko_bound_method(env, " + methodCacheVar(owner, name, desc, isStatic) + ", \"" + CStringLiteral.escape(owner) + "\", \""
+            + CStringLiteral.escape(name) + "\", \"" + CStringLiteral.escape(desc) + "\", " + (isStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
     }
 
     private String cachedFieldExpression(String owner, String name, String desc, boolean isStatic) {
         codeGenerator.registerOwnerFieldReference(currentOwnerInternalName, owner, name, desc, isStatic);
-        return "neko_bound_field(env, " + fieldCacheVar(owner, name, desc, isStatic) + ", \"" + cStringLiteral(owner) + "\", \""
-            + cStringLiteral(name) + "\", \"" + cStringLiteral(desc) + "\", " + (isStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
+        return "neko_bound_field(env, " + fieldCacheVar(owner, name, desc, isStatic) + ", \"" + CStringLiteral.escape(owner) + "\", \""
+            + CStringLiteral.escape(name) + "\", \"" + CStringLiteral.escape(desc) + "\", " + (isStatic ? "JNI_TRUE" : "JNI_FALSE") + ")";
     }
 
     private String classCacheVar(String owner) {
@@ -1434,7 +1435,7 @@ public final class OpcodeTranslator {
     }
 
     private String staticClassInitExpression(String owner) {
-        return "neko_ensure_class_initialized_once(env, cls, \"" + cStringLiteral(owner) + "\", &"
+        return "neko_ensure_class_initialized_once(env, cls, \"" + CStringLiteral.escape(owner) + "\", &"
             + codeGenerator.classInitializedSlotName(owner) + ");";
     }
 
@@ -1451,8 +1452,8 @@ public final class OpcodeTranslator {
         codeGenerator.registerOwnerMethodReference(currentOwnerInternalName, owner, name, desc, isStatic);
         return "neko_bound_method_i_entry(" + codeGenerator.methodPtrSlotName(owner, name, desc, isStatic)
             + ", &" + codeGenerator.methodIEntrySlotName(owner, name, desc, isStatic)
-            + ", \"" + cStringLiteral(owner) + "\", \"" + cStringLiteral(name) + "\", \""
-            + cStringLiteral(desc) + "\")";
+            + ", \"" + CStringLiteral.escape(owner) + "\", \"" + CStringLiteral.escape(name) + "\", \""
+            + CStringLiteral.escape(desc) + "\")";
     }
 
     private String raiseImplicitException(String owner) {
@@ -1462,7 +1463,7 @@ public final class OpcodeTranslator {
             + cachedClassExpression(owner) + ", "
             + cachedMethodPtrExpression(owner, "<init>", ctorDesc, false) + ", "
             + cachedMethodIEntryExpression(owner, "<init>", ctorDesc, false) + ", "
-            + dispatcher + ", \"" + cStringLiteral(owner) + "\")";
+            + dispatcher + ", \"" + CStringLiteral.escape(owner) + "\")";
     }
 
     private String fieldCacheVar(String owner, String name, String desc, boolean isStatic) {
@@ -1472,7 +1473,7 @@ public final class OpcodeTranslator {
     private String cachedStringExpression(String value) {
         String cacheVar = stringCacheVar(value);
         codeGenerator.registerOwnerStringReference(currentOwnerInternalName, value, cacheVar);
-        return "neko_bound_string(thread, env, &" + cacheVar + ", \"" + cStringLiteral(value) + "\")";
+        return "neko_bound_string(thread, env, &" + cacheVar + ", \"" + CStringLiteral.escape(value) + "\")";
     }
 
     private String stringCacheVar(String value) {
@@ -1518,13 +1519,6 @@ public final class OpcodeTranslator {
         return owner + '#' + name + desc;
     }
 
-    private String cStringLiteral(String s) {
-        return s.replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\t", "\\t");
-    }
 
     private String floatLiteral(float value) {
         if (Float.isNaN(value)) {

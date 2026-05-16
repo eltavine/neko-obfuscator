@@ -1,5 +1,6 @@
 package dev.nekoobfuscator.native_.codegen.emit;
 
+import dev.nekoobfuscator.native_.codegen.CStringLiteral;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.NativeMethodBinding;
 
 import java.util.ArrayList;
@@ -69,9 +70,9 @@ public final class ManifestEmitter {
             NativeMethodBinding b = bindings.get(i);
             int sigId = plan.signatureIdFor(i);
             sb.append("    { \"")
-                .append(escape(b.ownerInternalName())).append("\", \"")
-                .append(escape(b.methodName())).append("\", \"")
-                .append(escape(b.descriptor())).append("\", (void*)&")
+                .append(CStringLiteral.escape(b.ownerInternalName())).append("\", \"")
+                .append(CStringLiteral.escape(b.methodName())).append("\", \"")
+                .append(CStringLiteral.escape(b.descriptor())).append("\", (void*)&")
                 .append(b.rawFunctionName()).append(", ")
                 .append(sigId).append("u, ")
                 .append(b.isStatic() ? '1' : '0').append(", NEKO_PATCH_STATE_NONE, 0, 0, NULL },\n");
@@ -238,7 +239,7 @@ public final class ManifestEmitter {
         sb.append("    if (env == NULL || owner_cls == NULL || g_neko_manifest_method_count == 0u) return JNI_TRUE;\n");
         sb.append("    if (!neko_manifest_internal_name(env, owner_cls, owner_name, sizeof(owner_name))) return JNI_FALSE;\n");
         for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
-            sb.append("    if (strcmp(owner_name, \"").append(escape(e.getKey())).append("\") == 0) {\n");
+            sb.append("    if (strcmp(owner_name, \"").append(CStringLiteral.escape(e.getKey())).append("\") == 0) {\n");
             Integer bindId = ownerBindIds.get(e.getKey());
             if (bindId != null) {
                 sb.append("        neko_bind_owner_").append(bindId).append("(env, owner_cls);\n");
@@ -274,7 +275,7 @@ public final class ManifestEmitter {
             }
             sb.append("    if (anchor_cls == NULL) {\n");
             sb.append("        anchor_cls = neko_try_resolve_class_mirror_with_env(env, \"")
-                .append(escape(e.getKey())).append("\", NULL);\n");
+                .append(CStringLiteral.escape(e.getKey())).append("\", NULL);\n");
             sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
             sb.append("    }\n");
         }
@@ -286,7 +287,7 @@ public final class ManifestEmitter {
             if (e.getKey().contains("$NekoLambda$")) {
                 continue;
             }
-            sb.append("    owner_cls = neko_resolve_class_mirror_with_env(env, \"").append(escape(e.getKey())).append("\", anchor_cls, NULL);\n");
+            sb.append("    owner_cls = neko_resolve_class_mirror_with_env(env, \"").append(CStringLiteral.escape(e.getKey())).append("\", anchor_cls, NULL);\n");
             sb.append("    if (owner_cls == NULL || neko_exception_check(env)) {\n");
             sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
             sb.append("    } else {\n");
@@ -308,7 +309,4 @@ public final class ManifestEmitter {
         return sb.toString();
     }
 
-    private static String escape(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"");
-    }
 }

@@ -6,6 +6,7 @@ import dev.nekoobfuscator.core.ir.l3.CStatement;
 import dev.nekoobfuscator.core.ir.l3.CType;
 import dev.nekoobfuscator.core.ir.l3.CVariable;
 import dev.nekoobfuscator.native_.codegen.CCodeGenerator;
+import dev.nekoobfuscator.native_.codegen.CStringLiteral;
 import dev.nekoobfuscator.native_.translator.NativeTranslator;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.MethodSelection;
 import dev.nekoobfuscator.native_.translator.NativeTranslator.NativeMethodBinding;
@@ -27,10 +28,24 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CCodeGeneratorTest {
+    @Test
+    void cStringLiteralEscapingIsCentralizedAndComplete() {
+        assertEquals("plain/Owner", CStringLiteral.escape("plain/Owner"));
+        assertEquals("\\\\", CStringLiteral.escape("\\"));
+        assertEquals("\\\"", CStringLiteral.escape("\""));
+        assertEquals("\\n", CStringLiteral.escape("\n"));
+        assertEquals("\\r", CStringLiteral.escape("\r"));
+        assertEquals("\\t", CStringLiteral.escape("\t"));
+        assertEquals("\\b", CStringLiteral.escape("\b"));
+        assertEquals("\\f", CStringLiteral.escape("\f"));
+        assertEquals("a\\\\b\\\"c\\nd\\re\\tf\\bg\\f", CStringLiteral.escape("a\\b\"c\nd\re\tf\bg\f"));
+    }
+
     @Test
     void primitiveOnlyStaticMethodsUseNoHandleDispatcherOnlyWhenBodyProofIsComplete() {
         ClassNode classNode = new ClassNode();

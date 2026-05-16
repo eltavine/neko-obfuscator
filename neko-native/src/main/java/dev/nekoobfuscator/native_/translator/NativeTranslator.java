@@ -7,6 +7,7 @@ import dev.nekoobfuscator.core.ir.l3.CStatement;
 import dev.nekoobfuscator.core.ir.l3.CType;
 import dev.nekoobfuscator.core.ir.l3.CVariable;
 import dev.nekoobfuscator.native_.codegen.CCodeGenerator;
+import dev.nekoobfuscator.native_.codegen.CStringLiteral;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -163,8 +164,8 @@ public final class NativeTranslator {
             fn.addStatement(new CStatement.RawC(codeGenerator.ownerStringBindCall(selection.owner().name())));
         }
         fn.addStatement(new CStatement.RawC(
-            "neko_shadow_push(\"" + c(selection.owner().name()) + "\", \"" + c(selection.method().name()) + "\", \""
-                + c(OpcodeTranslator.simpleSourceFileName(selection.owner().name())) + "\");"
+            "neko_shadow_push(\"" + CStringLiteral.escape(selection.owner().name()) + "\", \"" + CStringLiteral.escape(selection.method().name()) + "\", \""
+                + CStringLiteral.escape(OpcodeTranslator.simpleSourceFileName(selection.owner().name())) + "\");"
         ));
         /* Tail-call landing pad: tryTailRecursion rewrites self-recursion
          * into `goto __neko_tco_entry`. Emitted unconditionally so unrelated
@@ -239,7 +240,7 @@ public final class NativeTranslator {
             fn.body().add(ownerKlassInsertIndex, new CStatement.RawC(
                 "void *__neko_current_owner_klass = neko_class_mirror_to_klass(clazz); "
                     + "if (__neko_current_owner_klass == NULL) { fprintf(stderr, \"[neko-bind] current translated owner Klass unavailable: "
-                    + c(selection.owner().name()) + "." + c(selection.method().name()) + c(selection.method().descriptor())
+                    + CStringLiteral.escape(selection.owner().name()) + "." + CStringLiteral.escape(selection.method().name()) + CStringLiteral.escape(selection.method().descriptor())
                     + "\\n\"); abort(); }"
             ));
         }
@@ -787,7 +788,7 @@ public final class NativeTranslator {
     private StringProducer literalStringProducer(String value) {
         String literalVar = "__neko_concat_lit_" + concatLiteralIndex++;
         String prefix = "static jstring " + literalVar + " = NULL; "
-            + "neko_bind_string_slot(thread, env, &" + literalVar + ", \"" + c(value) + "\"); ";
+            + "neko_bind_string_slot(thread, env, &" + literalVar + ", \"" + CStringLiteral.escape(value) + "\"); ";
         return new StringProducer(prefix, literalVar);
     }
 
@@ -832,7 +833,7 @@ public final class NativeTranslator {
 
     private String cachedHandlerClassExpression(String bindingOwner, String exceptionType) {
         codeGenerator.registerOwnerClassReference(bindingOwner, exceptionType);
-        return "neko_bound_class(env, " + codeGenerator.classSlotName(exceptionType) + ", \"" + c(exceptionType) + "\")";
+        return "neko_bound_class(env, " + codeGenerator.classSlotName(exceptionType) + ", \"" + CStringLiteral.escape(exceptionType) + "\")";
     }
 
     private boolean isPotentiallyExcepting(AbstractInsnNode insn) {
@@ -969,9 +970,6 @@ public final class NativeTranslator {
         return false;
     }
 
-    private String c(String s) {
-        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
-    }
 
     public record MethodSelection(L1Class owner, L1Method method) {}
 
