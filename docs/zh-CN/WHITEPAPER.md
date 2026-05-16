@@ -54,53 +54,68 @@ Pipeline 后续还会执行 generated-helper API renaming。它会把 CFF class 
 
 ### 适用条件
 
-该 pass 跳过 runtime class、生成的 helper 方法、abstract/native 方法、stack introspection 形态和反射敏感 class。构造器、类初始化器和 Java `main` 签名不会被拓宽。
+Descriptor widening 只用于可以安全承载隐藏 JVM `long` 且不破坏 ABI surface 的应用方法：
+
+- runtime class 和 generated helper 方法会被忽略；
+- annotation class、native 方法、构造器、类初始化器、Java `main`、外部 override slot、LambdaMetafactory SAM slot 保持原描述符；
+- abstract/interface 应用方法仍可被 descriptor-widened，使应用内 implementor 和 call site 的 ABI 一致，但它们没有方法体本地 key prologue。
 
 ### 签名拓宽
 
-对可处理的非边界方法：
+对可处理方法：
 
 ```text
 original:  owner.name(args)ret
-rewritten: owner.name(args, long hiddenKey)ret
+rewritten: owner.name(args[0:keyIndex], long hiddenKey, args[keyIndex:])ret
 ```
 
-隐藏 key slot 插入到原参数区末尾。slot 之后的 local variable index 后移两个 slot。frame 和 debug locals 会清空，让 ASM 重算方法形态。
+`keyIndex` 通常是原参数数量。LambdaMetafactory implementation target 使用为该 bootstrap target 记录的 captured-argument-aware index，以保留 unbound receiver 形态。插入 slot 之后的 local variable index 后移两个 slot。frame 和 debug locals 会清空，让 ASM 重算方法形态。
 
-调用被拓宽应用方法的 call site 会改写为：
+调用被拓宽应用方法的 call site 会 spill receiver 和原始参数，然后围绕 `keyIndex` 重新加载隐藏 key 并调用 keyed descriptor：
 
 ```text
+reload args before keyIndex
 load callerKey
-invoke owner.name(args, long)ret
+reload args after keyIndex
+invoke owner.name(args..., long, args...)ret
 ```
 
-可行时会通过类层级解析继承应用调用。
+可行时会通过类层级解析继承应用调用。该 pass 不拓宽 direct constructor call。
 
-### 边界 key 初始化
+### 方法 key 初始化
 
-边界方法保持描述符，并在本地生成 key：
+本地方法 key 始终来自同一个三步 incoming-key mixer：
 
 ```text
-key = (seed ^ mask) ^ mask
+A = mix(seed ^ 0x474B4D49584131, rotl(mask, 17))
+B = mix(seed + 0x474B4D41444431, mask ^ 0x4B4D4144444D534B)
+B = B != 0 ? B : 0x4B4D4144444D534B
+C = mix(seed ^ rotl(mask, 41), 0x474B4D49584231)
+
+mixed(raw, seed, mask) = ((raw ^ A) + B) ^ C
+rawFor(target, seed, mask) = ((target ^ C) - B) ^ A
 ```
 
-接收 incoming key 的方法从隐藏参数派生本地 key：
+边界方法保持描述符，并在 mixer 前压入 `rawFor(seed, seed, mask)`，因此初始化后的本地 key 是 canonical method seed。接收 incoming key 的方法使用 `mask = 0x4E4B4F4A564D4B31` 原地混合隐藏 long 参数。后续 CFF key-transfer 重写可以把静态 raw 常量替换为动态解码 material，但 callee 侧 mixer 不变。
+
+方法 seed 在同一次构建内确定。非 static、非 private 的 virtual family 使用选定的应用 family root，使 override 参与者一致：
 
 ```text
-key = incomingKey ^ seed
-key = key + 0x9E3779B97F4A7C15
-key = key ^ (key >>> 31)
-```
+normal:
+  h = masterSeed ^ 0x9E3779B97F4A7C15
+  h = mix(h, hash(className))
+  h = mix(h, hash(methodName))
+  h = mix(h, hash(methodDescriptor))
+  h = mix(h, instructionCount)
+  h = mix(h, maxLocals)
 
-方法 seed 在同一次构建内确定：
+virtual family:
+  h = masterSeed ^ 0x9E3779B97F4A7C15
+  h = mix(h, hash(familyRootOwner))
+  h = mix(h, hash(methodName))
+  h = mix(h, hash(methodDescriptor))
+  h = mix(h, 0x5649525453454544)
 
-```text
-h = masterSeed ^ 0x9E3779B97F4A7C15
-h = mix(h, hash(className))
-h = mix(h, hash(methodName))
-h = mix(h, hash(methodDescriptor))
-h = mix(h, instructionCount)
-h = mix(h, maxLocals)
 seed = h != 0 ? h : 0x5DEECE66D
 ```
 
@@ -113,7 +128,6 @@ mix(state, value):
   z = (z ^ (z >>> 27)) * 0x94D049BB133111EB
   return z ^ (z >>> 31)
 ```
-
 ## Method Parameter Obfuscation
 
 `JvmMethodParameterObfuscationPass` 在 key dispatch 后运行。它把可处理描述符替换成单个 object-array carrier：
@@ -140,7 +154,7 @@ hiddenKey = ((Long) carrier[n]).longValue()
 ### 方法形态保持
 
 - 构造器只在强制 `this(...)` 或 `super(...)` 调用之后平坦化。
-- 跳过 runtime class、生成方法、abstract/native 方法、stack introspection 方法和反射敏感 class 形态。
+- 跳过 runtime class、生成方法、abstract 方法、native 方法和 generated class-key-table `<clinit>` 方法体。
 - 按 local-frame signature 分组 dispatcher target，保持 verifier 兼容。
 
 ### Locals
@@ -150,11 +164,11 @@ CFF 分配：
 | Local | 含义 |
 |---|---|
 | `keyLocal` | 来自 `keyDispatch` 的 long key。 |
-| `pcLocal` | 编码后的目标 state。 |
+| `pcLocal` | 目标 block 的加密 `pcToken`。 |
 | `guardLocal` | 从 `keyLocal` 派生的方法 guard。 |
 | `pathKeyLocal` | 演化中的 edge/path key。 |
 | `blockKeyLocal` | 演化中的 block key。 |
-| `domainLocal` | 编码后的 island selector。 |
+| `domainLocal` | 加密后的 island-domain token。 |
 | `exceptionLocal` | 存在 handler bridge 时的临时异常对象。 |
 
 ### State 分配
@@ -197,7 +211,7 @@ aliasHubCount = min(3, 1 + n / 6)  otherwise
 
 ### Key 初始化
 
-初始 key triad 从方法 key 派生：
+CFF 从 `keyDispatch` 的 long local 开始，派生活跃 control-key triad：
 
 ```text
 guard = fold32(keyLocal)                         具体变体由 seed bits 选择
@@ -212,66 +226,67 @@ blockKey = fold16(((int)(keyLocal >>> 32) ^ guard ^ (int)(seed >>> 32)))
 x = x ^ (x >>> 16)
 ```
 
-### State 和 domain 编码
-
-state 与 domain 使用相同 keyed value encoder，但 seed domain 不同：
+如果存在 class key table，初始化会立即把 table word 混入三个 local：
 
 ```text
-encodedState(state)  = encodedKeyedValue(state,  selectorSeed ^ 0x53544154454B5631)
-encodedDomain(idx)   = encodedKeyedValue(idx,    domainSeed   ^ 0x444F4D41494B5631)
+classWord = table[index(keyLocal, token, seed)] ^ keyMix(keyLocal, seed)
+guard   = guard + (classWord ^ mix(seed, GUARD_MIX))
+pathKey = (pathKey ^ guard) + mix(seed, PATH_MIX)
+blockKey = (blockKey + pathKey) ^ classWord
 ```
 
-`encodedKeyedValue(value, seed)` 通过 `(seed >>> 41) & 3` 选择四种算术形态之一：
+### State、domain 和 token 编码
+
+CFF 区分逻辑 block state 和 dispatcher local 中实际保存的值：
+
+- `stateByLabel` 为每个受保护 block 分配唯一 int state。
+- 每个 block 还会得到一个 `CffBlockKeyState`：`guardKey`、`pathKey`、`blockKey`、`pcToken`、`methodKey`、`methodSalt`。
+- `pcLocal` 保存加密后的 `pcToken`，不是 raw state。`domainLocal` 保存加密后的 island-domain token。
+
+旧的 direct `encodedState(state)` 模型已经被 token materialization 取代。transition 用预期目标 key state 派生的 mask 加密每个 stored token：
 
 ```text
-case 0:
-  ((value + low(seed) + guard) ^ pathKey) ^
-  (blockKey + high(seed))
+encryptedToken =
+  token
+  ^ classTokenMask(targetKeys, seed)
+  ^ classObjectTokenMask(targetKeys, seed)
+  ^ controlTokenMask(targetKeys, seed)
 
-case 1:
-  (((blockKey + low(seed)) ^ (value ^ high(seed))) + guard) ^
-  (pathKey ^ low(mix(seed, 0x50415448)))
-
-case 2:
-  tmp = pathKey + value + high(seed)
-  tmp = tmp ^ (tmp >>> shift(seed, 7))
-  (tmp ^ guard) + (blockKey + low(mix(seed, 0x424C4F43)))
-
-case 3:
-  ((((value ^ low(mix(seed, 0x56414C5545))) + guard) ^
-    (pathKey + high(seed))) + blockKey) ^ low(seed)
+controlTokenMask(keys, seed):
+  x = keys.guardKey + (keys.pathKey ^ mix(seed, 0x4354504D31))
+  x = x ^ (keys.blockKey + mix(seed, 0x4354424D31))
+  return x ^ (x >>> shift(seed, 9))
 ```
 
-全部算术都是 JVM `int` 算术。
+Class mask 使用 `guardKey`、`pathKey`、`blockKey` 索引 class key table，并把选中的 table word 与同一 key state 的 digest 混合。大型或 shared material 路径会把加密 row 放入 class material table，并通过 generated helper 解码，而不是在 bytecode 中留下明文 dispatch token。
 
-### Edge key 演化
+Dispatcher 比较解码后的 route token，而不是原始 bytecode label。token 或 domain 不匹配会进入 poison path，不会回到原始 bytecode。
 
-每条 transition 计算：
+### Edge key transfer
+
+每条 transition 计算 relation seed：
 
 ```text
 stepSeed = mix(edgeSeed ^ selectorSeed, state)
 stepSeed = mix(stepSeed ^ domainSeed, island ^ roleOrdinal)
 if stepSeed == 0:
   stepSeed = edgeSeed ^ 0x4346465354455031
+
+baseSeed = stepSeed ^ 0x5452414E534B4559 ^ roleOrdinal
 ```
 
-当 edge 更新 key 时，它会修改 `guard`、`pathKey`、`blockKey` 中的一到两个，有时也会修改 long method key。tiny operation 由 seed bits 选择：
+当前 hot transition path 不再用彼此独立的 tiny operation 增量修改 live triad。它先从 source live locals 和 method key 计算 compact control-token base：
 
 ```text
-dst = dst + (source ^ c)
-dst = (dst ^ c) + source
-dst = (dst + source) ^ c
-dst = (dst ^ source) + c
+base =
+  classTokenMask(sourceKeys, baseSeed ^ 0x4347434C41535331)
+  ^ (guard + (pathKey ^ mix(baseSeed, 0x43475041544831)))
+  ^ (blockKey * (mix(baseSeed, 0x4347424C4F434B31) | 1))
+base = base + methodKeyFold(keyLocal, baseSeed ^ 0x43474D45544831)
+base = base ^ (base >>> shift(baseSeed, 11))
 ```
 
-method-key mutation 变体包括：
-
-```text
-key = (key + (source & 0xffffffffL)) ^ c
-key = (key ^ c) + source
-key = (key ^ ((long)source << 32)) + c
-key = (key + c) ^ source
-```
+随后它用该 base 从加密常量或 material-table row 解码目标 `guardKey`、`pathKey`、`blockKey`、`pcToken`、可选 domain token 和目标 method-key word。提交后的 live triad 与 long method key 因此作为一次 keyed transfer 移动到目标 block 的 key state；它们不是仅凭 descriptor、label 或静态 seed 重新计算出来的。
 
 ### Edge 类型
 
@@ -279,15 +294,15 @@ key = (key + c) ^ source
 
 | Edge kind | 行为 |
 |---|---|
-| `DIRECT_ISLAND` | 保存编码 `pc`，直接跳到 island dispatcher。 |
-| `ALIAS_HUB` | 保存编码 `pc` 和 domain，然后跳到 alias hub。 |
-| `HUB` | 保存编码 `pc` 和 domain，然后跳到 group hub。 |
+| `DIRECT_ISLAND` | 解码目标 keys，保存加密 `pcToken`，然后直接跳到 island dispatcher。 |
+| `ALIAS_HUB` | 解码目标 keys，保存加密 `pcToken` 和加密 domain token，然后跳到 alias hub。 |
+| `HUB` | 解码目标 keys，保存加密 `pcToken` 和加密 domain token，然后跳到 group hub。 |
 
 Handler 优先选择 hub 或 alias-hub。普通 edge 由 seed bits 选择，并在可行时混入 direct-island edge。
 
 ### Poison 路径
 
-Dispatcher 比较编码值。state 或 domain 无匹配时进入 poison path，而不是回到原始 bytecode。
+Dispatcher 比较 keyed token。`pcToken` 或 domain token 无匹配时进入 poison path，而不是回到原始 bytecode。
 
 ## Numeric Constant Obfuscation
 

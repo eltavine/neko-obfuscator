@@ -89,10 +89,10 @@ Because CFF and string obfuscation add synthetic helper fields after this pass, 
 
 `JvmKeyDispatchPass` runs before CFF. It prepares hidden method key material:
 
-- Eligible non-constructor, non-`main`, non-reflection-sensitive application methods have their descriptor rewritten from `(...args)R` to `(...args, long)R`.
-- Call sites to rewritten application methods push the caller key before invocation.
-- Boundary methods keep their JVM-mandated signature and seed a local key directly.
-- Constructors and shape-sensitive methods are left with valid JVM signatures.
+- ABI-widenable application methods have a hidden `long` inserted at a recorded `keyIndex`; constructors, class initializers, Java `main`, external override slots, annotations, native methods, and LambdaMetafactory SAM slots keep their JVM-required shape.
+- Call sites to rewritten application methods spill and reload arguments around the hidden key so the final stack matches the keyed descriptor.
+- Boundary methods keep their JVM-mandated signature and initialize the local key through the same incoming-key mixer used by hidden-key callees.
+- Abstract/interface application methods may be descriptor-widened for ABI consistency but do not receive a body-local prologue.
 
 The pass publishes the local key slot under `controlFlowFlattening.flowKeyLocalByMethod`, so CFF and call-chain key dispatch share the same local.
 
@@ -104,7 +104,7 @@ The pass publishes the local key slot under `controlFlowFlattening.flowKeyLocalB
 - Basic blocks are built only at labels with compatible verifier state.
 - Dispatch groups are split by frame signature so a dispatcher never merges incompatible local states.
 - Each group is split into islands with optional alias hubs.
-- The active program counter (`pcLocal`) and island domain (`domainLocal`) are encoded using `guardLocal`, `pathKeyLocal`, and `blockKeyLocal`.
+- `pcLocal` stores an encrypted `pcToken` and `domainLocal` stores an encrypted island-domain token; transitions decode the target `guardKey`, `pathKey`, `blockKey`, and method key from live source state plus class-key/material-table masks.
 - Exception handlers receive bridges into the same keyed dispatcher model.
 
 CFF also installs one synthetic class key table field per class that has protected application code. Reflection calls to `Class.getFields()` and `Class.getDeclaredFields()` are filtered so generated table fields are hidden, including cross-class reflection sites that inspect a different protected class.

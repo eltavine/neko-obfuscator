@@ -54,53 +54,68 @@ The pipeline later performs a generated-helper API renaming step. It renames syn
 
 ### Eligibility
 
-The pass skips runtime classes, generated helper methods, abstract/native methods, stack-introspection shapes, and reflection-sensitive classes. Constructor, class initializer, and Java `main` signatures are not widened.
+Descriptor widening is applied to application methods that can carry a hidden JVM `long` without breaking an ABI surface:
+
+- runtime classes and generated helper methods are ignored;
+- annotation classes, native methods, constructors, class initializers, Java `main`, external override slots, and LambdaMetafactory SAM slots keep their descriptors;
+- abstract/interface application methods can still be descriptor-widened so application implementors and call sites agree, but they do not receive a body-local key prologue.
 
 ### Signature widening
 
-For an eligible non-boundary method:
+For an eligible method:
 
 ```text
 original:  owner.name(args)ret
-rewritten: owner.name(args, long hiddenKey)ret
+rewritten: owner.name(args[0:keyIndex], long hiddenKey, args[keyIndex:])ret
 ```
 
-The hidden key slot is inserted at the end of the original parameter area. Local variable indexes at or after the slot are shifted by two slots. Frames and debug locals are cleared so ASM can recompute the method shape.
+`keyIndex` is normally the original argument count. LambdaMetafactory implementation targets use the captured-argument-aware index recorded for that bootstrap target, so unbound receiver shapes are preserved. Local variable indexes at or after the inserted slot are shifted by two slots. Frames and debug locals are cleared so ASM can recompute the method shape.
 
-Every application call to a widened method is rewritten:
+Every application call to a widened method is rewritten by spilling the receiver and original arguments, reloading them around the hidden key at `keyIndex`, and invoking the keyed descriptor:
 
 ```text
+reload args before keyIndex
 load callerKey
-invoke owner.name(args, long)ret
+reload args after keyIndex
+invoke owner.name(args..., long, args...)ret
 ```
 
-Inherited application calls are resolved through the class hierarchy when possible.
+Inherited application calls are resolved through the class hierarchy when possible. Direct constructor calls are not descriptor-widened by this pass.
 
-### Boundary key initialization
+### Method key initialization
 
-Boundary methods keep their descriptor and seed a local key:
+The local method key is always the result of the same three-step incoming-key mixer:
 
 ```text
-key = (seed ^ mask) ^ mask
+A = mix(seed ^ 0x474B4D49584131, rotl(mask, 17))
+B = mix(seed + 0x474B4D41444431, mask ^ 0x4B4D4144444D534B)
+B = B != 0 ? B : 0x4B4D4144444D534B
+C = mix(seed ^ rotl(mask, 41), 0x474B4D49584231)
+
+mixed(raw, seed, mask) = ((raw ^ A) + B) ^ C
+rawFor(target, seed, mask) = ((target ^ C) - B) ^ A
 ```
 
-Incoming-key methods derive their local key from the hidden argument:
+Boundary methods keep their descriptor and push `rawFor(seed, seed, mask)` before the mixer, so their initialized local key is the canonical method seed. Incoming-key methods mix the hidden long argument in place with `mask = 0x4E4B4F4A564D4B31`. Later CFF key-transfer rewriting may replace static raw constants with dynamically decoded material, but the callee-side mixer remains the same.
+
+The method seed is deterministic for a build. Non-static, non-private virtual families use the selected application family root so override participants agree:
 
 ```text
-key = incomingKey ^ seed
-key = key + 0x9E3779B97F4A7C15
-key = key ^ (key >>> 31)
-```
+normal:
+  h = masterSeed ^ 0x9E3779B97F4A7C15
+  h = mix(h, hash(className))
+  h = mix(h, hash(methodName))
+  h = mix(h, hash(methodDescriptor))
+  h = mix(h, instructionCount)
+  h = mix(h, maxLocals)
 
-The method seed is deterministic for a build:
+virtual family:
+  h = masterSeed ^ 0x9E3779B97F4A7C15
+  h = mix(h, hash(familyRootOwner))
+  h = mix(h, hash(methodName))
+  h = mix(h, hash(methodDescriptor))
+  h = mix(h, 0x5649525453454544)
 
-```text
-h = masterSeed ^ 0x9E3779B97F4A7C15
-h = mix(h, hash(className))
-h = mix(h, hash(methodName))
-h = mix(h, hash(methodDescriptor))
-h = mix(h, instructionCount)
-h = mix(h, maxLocals)
 seed = h != 0 ? h : 0x5DEECE66D
 ```
 
@@ -113,7 +128,6 @@ mix(state, value):
   z = (z ^ (z >>> 27)) * 0x94D049BB133111EB
   return z ^ (z >>> 31)
 ```
-
 ## Method Parameter Obfuscation
 
 `JvmMethodParameterObfuscationPass` runs after key dispatch. It replaces eligible descriptors with a single object-array carrier:
@@ -140,7 +154,7 @@ The pass migrates key-dispatch metadata so CFF still sees the correct `keyLocal`
 ### Method shape preservation
 
 - Constructors are flattened only after the mandatory `this(...)` or `super(...)` call.
-- Runtime classes, generated methods, abstract/native methods, stack-introspection methods, and reflection-sensitive class shapes are skipped.
+- Runtime classes, generated methods, abstract methods, native methods, and generated class-key-table `<clinit>` bodies are skipped.
 - Verifier compatibility is preserved by grouping dispatcher targets by local-frame signature.
 
 ### Locals
@@ -150,11 +164,11 @@ CFF allocates:
 | Local | Meaning |
 |---|---|
 | `keyLocal` | Long key from `keyDispatch`. |
-| `pcLocal` | Encoded target state. |
+| `pcLocal` | Encrypted `pcToken` for the target block. |
 | `guardLocal` | Method guard derived from `keyLocal`. |
 | `pathKeyLocal` | Evolving edge/path key. |
 | `blockKeyLocal` | Evolving block key. |
-| `domainLocal` | Encoded island selector. |
+| `domainLocal` | Encrypted island-domain token. |
 | `exceptionLocal` | Temporary exception object when handler bridges exist. |
 
 ### State assignment
@@ -197,7 +211,7 @@ aliasHubCount = min(3, 1 + n / 6)  otherwise
 
 ### Key initialization
 
-The initial key triad is derived from the method key:
+CFF starts from the `keyDispatch` long local and derives the live control-key triad:
 
 ```text
 guard = fold32(keyLocal)                         variant selected by seed bits
@@ -212,66 +226,67 @@ blockKey = fold16(((int)(keyLocal >>> 32) ^ guard ^ (int)(seed >>> 32)))
 x = x ^ (x >>> 16)
 ```
 
-### Encoded state and domain values
-
-Both state and domain use the same keyed value encoder with different seed domains:
+When a class key table is available, initialization immediately folds a table word into all three locals:
 
 ```text
-encodedState(state)  = encodedKeyedValue(state,  selectorSeed ^ 0x53544154454B5631)
-encodedDomain(idx)   = encodedKeyedValue(idx,    domainSeed   ^ 0x444F4D41494B5631)
+classWord = table[index(keyLocal, token, seed)] ^ keyMix(keyLocal, seed)
+guard   = guard + (classWord ^ mix(seed, GUARD_MIX))
+pathKey = (pathKey ^ guard) + mix(seed, PATH_MIX)
+blockKey = (blockKey + pathKey) ^ classWord
 ```
 
-`encodedKeyedValue(value, seed)` chooses one of four arithmetic forms from `(seed >>> 41) & 3`:
+### State, domain, and token encoding
+
+CFF distinguishes the logical block state from the values stored in dispatcher locals:
+
+- `stateByLabel` assigns each protected block a unique integer state.
+- Each block also receives a `CffBlockKeyState`: `guardKey`, `pathKey`, `blockKey`, `pcToken`, `methodKey`, and `methodSalt`.
+- `pcLocal` stores an encrypted `pcToken`, not the raw state. `domainLocal` stores an encrypted island-domain token.
+
+The older direct `encodedState(state)` model has been replaced by token materialization. A transition encrypts each stored token with masks derived from the expected target key state:
 
 ```text
-case 0:
-  ((value + low(seed) + guard) ^ pathKey) ^
-  (blockKey + high(seed))
+encryptedToken =
+  token
+  ^ classTokenMask(targetKeys, seed)
+  ^ classObjectTokenMask(targetKeys, seed)
+  ^ controlTokenMask(targetKeys, seed)
 
-case 1:
-  (((blockKey + low(seed)) ^ (value ^ high(seed))) + guard) ^
-  (pathKey ^ low(mix(seed, 0x50415448)))
-
-case 2:
-  tmp = pathKey + value + high(seed)
-  tmp = tmp ^ (tmp >>> shift(seed, 7))
-  (tmp ^ guard) + (blockKey + low(mix(seed, 0x424C4F43)))
-
-case 3:
-  ((((value ^ low(mix(seed, 0x56414C5545))) + guard) ^
-    (pathKey + high(seed))) + blockKey) ^ low(seed)
+controlTokenMask(keys, seed):
+  x = keys.guardKey + (keys.pathKey ^ mix(seed, 0x4354504D31))
+  x = x ^ (keys.blockKey + mix(seed, 0x4354424D31))
+  return x ^ (x >>> shift(seed, 9))
 ```
 
-All arithmetic is JVM `int` arithmetic.
+Class masks index the class key table with `guardKey`, `pathKey`, and `blockKey`, then mix the selected table word with a digest for the same key state. Large or shared material paths store encrypted rows in the class material table and decode them through generated helper methods rather than leaving plaintext dispatch tokens in bytecode.
 
-### Edge key evolution
+Dispatchers compare decoded route tokens, not original bytecode labels. No matching token or domain goes to the poison path rather than original bytecode.
 
-Each transition calculates:
+### Edge key transfer
+
+Each transition calculates the relation seed:
 
 ```text
 stepSeed = mix(edgeSeed ^ selectorSeed, state)
 stepSeed = mix(stepSeed ^ domainSeed, island ^ roleOrdinal)
 if stepSeed == 0:
   stepSeed = edgeSeed ^ 0x4346465354455031
+
+baseSeed = stepSeed ^ 0x5452414E534B4559 ^ roleOrdinal
 ```
 
-When the edge updates keys, it mutates one or two of `guard`, `pathKey`, `blockKey`, and sometimes the long method key. The exact tiny operation is selected by seed bits:
+The hot transition path no longer mutates the live triad with independent tiny operations. It first computes a compact control-token base from the source live locals and method key:
 
 ```text
-dst = dst + (source ^ c)
-dst = (dst ^ c) + source
-dst = (dst + source) ^ c
-dst = (dst ^ source) + c
+base =
+  classTokenMask(sourceKeys, baseSeed ^ 0x4347434C41535331)
+  ^ (guard + (pathKey ^ mix(baseSeed, 0x43475041544831)))
+  ^ (blockKey * (mix(baseSeed, 0x4347424C4F434B31) | 1))
+base = base + methodKeyFold(keyLocal, baseSeed ^ 0x43474D45544831)
+base = base ^ (base >>> shift(baseSeed, 11))
 ```
 
-Method-key mutation variants include:
-
-```text
-key = (key + (source & 0xffffffffL)) ^ c
-key = (key ^ c) + source
-key = (key ^ ((long)source << 32)) + c
-key = (key + c) ^ source
-```
+It then decodes the target `guardKey`, `pathKey`, `blockKey`, `pcToken`, optional domain token, and target method-key words from encrypted constants or material-table rows using that base. The committed live triad and long method key therefore move to the target block's key state as one keyed transfer; they are not recomputed from descriptors, labels, or static seeds alone.
 
 ### Edge kinds
 
@@ -279,15 +294,15 @@ For each transition, CFF chooses one path:
 
 | Edge kind | Behavior |
 |---|---|
-| `DIRECT_ISLAND` | Store encoded `pc`, then jump directly to an island dispatcher. |
-| `ALIAS_HUB` | Store encoded `pc` and encoded domain, then jump to an alias hub. |
-| `HUB` | Store encoded `pc` and encoded domain, then jump to the group hub. |
+| `DIRECT_ISLAND` | Decode target keys, store encrypted `pcToken`, then jump directly to an island dispatcher. |
+| `ALIAS_HUB` | Decode target keys, store encrypted `pcToken` and encrypted domain token, then jump to an alias hub. |
+| `HUB` | Decode target keys, store encrypted `pcToken` and encrypted domain token, then jump to the group hub. |
 
 Handlers prefer hub or alias-hub routing. Normal edges choose from seed bits, with direct-island edges mixed in when possible.
 
 ### Poison path
 
-Dispatchers compare encoded values. No matching state or domain goes to a poison path rather than original bytecode.
+Dispatchers compare keyed tokens. No matching `pcToken` or domain token goes to a poison path rather than original bytecode.
 
 ## Numeric Constant Obfuscation
 

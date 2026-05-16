@@ -89,10 +89,10 @@ stringObfuscation
 
 `JvmKeyDispatchPass` 在 CFF 之前运行，用于准备隐藏方法 key：
 
-- 可安全承载 key 的非构造器、非 `main`、非反射敏感应用方法，其描述符从 `(...args)R` 改写为 `(...args, long)R`。
-- 调用这些应用方法的 call site 会先压入 caller key。
-- 边界方法保持 JVM 规定签名，并在本地生成 root key。
-- 构造器和形态敏感方法保持合法 JVM 签名。
+- 可安全拓宽 ABI 的应用方法会在记录的 `keyIndex` 处插入隐藏 `long`；构造器、类初始化器、Java `main`、外部 override slot、annotation、native 方法和 LambdaMetafactory SAM slot 保持 JVM 要求的形态。
+- 调用被改写应用方法的 call site 会 spill 并围绕隐藏 key 重新加载参数，使最终 operand stack 匹配 keyed descriptor。
+- 边界方法保持 JVM 规定签名，并通过与 hidden-key callee 相同的 incoming-key mixer 初始化本地 key。
+- abstract/interface 应用方法可以为 ABI 一致性拓宽 descriptor，但没有方法体本地 prologue。
 
 该 pass 通过 `controlFlowFlattening.flowKeyLocalByMethod` 发布本地 key slot，使 CFF 和调用链 key dispatch 共享同一个 local。
 
@@ -104,7 +104,7 @@ stringObfuscation
 - 只在 verifier 状态兼容的 label 处构建基本块。
 - dispatcher group 按 frame signature 拆分，避免合并不兼容 local 状态。
 - 每个 group 拆成 island，并可生成 alias hub。
-- 活跃程序计数器 `pcLocal` 和 island 域 `domainLocal` 使用 `guardLocal`、`pathKeyLocal`、`blockKeyLocal` 编码。
+- `pcLocal` 保存加密 `pcToken`，`domainLocal` 保存加密 island-domain token；transition 使用 live source state 加上 class-key/material-table mask 解码目标 `guardKey`、`pathKey`、`blockKey` 和 method key。
 - 异常 handler 通过 bridge 接入同一 keyed dispatcher 模型。
 
 CFF 还会为每个存在受保护应用代码的类安装一个 synthetic class key table 字段。对 `Class.getFields()` 和 `Class.getDeclaredFields()` 的反射调用会被过滤，使生成的 table 字段不可见，包括检查另一个受保护类的跨类反射点。
