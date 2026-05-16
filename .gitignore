@@ -59,6 +59,10 @@ test-jars/*.log
 # Native translation build cache (neko-native / Zig)
 native-build/
 *.zig.cache/
+.gradle-cache/
+.gradle-codex/
+.gradle-user-home/
+
 
 # Secrets / credentials (belt and braces — never commit these)
 *.key
@@ -74,6 +78,22 @@ native-build/
 # ──────────────────────────────────────────
 _reference_native_obfuscator/
 _refs/
+
+# Local planning / scratch notes
+/.plan/
+/CLAUDE.md
+/PLAN.md
+/calculations.txt
+
+# Local rendered/decompiled class reference dumps
+/dev.nekoobfuscator.*
+/org.objectweb.asm.*
+/org.junit.jupiter.api.Assertions.*
+/java.util.*
+
+# Local source/reference snapshots
+/neko-transforms/src.tar.gz
+/docs/*.pdf
 
 # embedded dev-impl worktree (reference only — not part of main)
 worktree/
