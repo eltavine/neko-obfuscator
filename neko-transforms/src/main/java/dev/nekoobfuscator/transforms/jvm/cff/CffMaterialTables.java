@@ -182,7 +182,7 @@ abstract class CffMaterialTables extends CffClassSetup {
     }
 
     private long nextExpectedG18ClassRoot(CffClassKeyTable table, long initialState, long delta) {
-        long ownerContext = Integer.toUnsignedLong(table.owner().replace('/', '.').hashCode());
+        long ownerContext = table.owner().replace('/', '.').hashCode();
         return g18ClassRoot(
             initialState ^
                 table.g18GlobalState().rootMask() ^
@@ -1196,12 +1196,23 @@ abstract class CffMaterialTables extends CffClassSetup {
             stackMixName,
             stackMixInterfaceOwner
         );
-        insns.add(new VarInsnNode(Opcodes.ILOAD, lowBaseCursorLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, baseCursorLocal));
-        insns.add(new InsnNode(Opcodes.ISUB));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, lowCursorLocal));
+        emitKeyTransferRuntimeSourceCursor(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            lowBaseCursorLocal,
+            modeLocal,
+            lowCursorLocal,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
+        );
         emitKeyTransferMaterialDecodedWord(
             insns,
             keyLocal,

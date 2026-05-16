@@ -50,17 +50,17 @@ class JvmFullObfuscationPerfTest {
         assertTrue(Files.exists(config), () -> "Missing full JVM obfuscation config: " + config);
 
         List<Fixture> fixtures = List.of(
-            new Fixture("TEST", "TEST.jar", BehaviorMode.TEST_PERF),
-            new Fixture("obfusjack", "obfusjack-test21.jar", BehaviorMode.OBFUSJACK_PERF),
-            new Fixture("SnakeGame", "SnakeGame.jar", BehaviorMode.HEADLESS_GUI),
-            new Fixture("evaluator", "evaluator-unobf.jar", BehaviorMode.EVALUATOR)
+            new Fixture("TEST", "test.jar", BehaviorMode.TEST_PERF),
+            new Fixture("obfusjack", "test21.jar", BehaviorMode.OBFUSJACK_PERF),
+            new Fixture("SnakeGame", "snake.jar", BehaviorMode.HEADLESS_GUI),
+            new Fixture("evaluator", "evaluator.jar", BehaviorMode.EVALUATOR)
         );
 
         List<PerfRecord> records = new ArrayList<>();
         for (Fixture fixture : fixtures) {
             Path input = NativeObfuscationHelper.jarsDir().resolve(fixture.jarName());
             assertTrue(Files.exists(input), () -> "Missing fixture jar: " + input);
-            Path output = workDir.resolve(fixture.name() + "-full-jvm-obf.jar");
+            Path output = workDir.resolve(stripJarExtension(input.getFileName().toString()) + "-obf.jar");
             NativeObfuscationHelper.ObfuscationRunResult obfuscation =
                 NativeObfuscationHelper.obfuscateJar(input, output, config, Duration.ofMinutes(2));
             assertNoStaticGeneratedHelperHardening(fixture, obfuscation);
@@ -325,6 +325,10 @@ class JvmFullObfuscationPerfTest {
             .filter(line -> PERF_TOPIC_PATTERN.matcher(line).find())
             .filter(line -> PERF_TIME_PATTERN.matcher(line).find())
             .toList();
+    }
+
+    private static String stripJarExtension(String fileName) {
+        return fileName.endsWith(".jar") ? fileName.substring(0, fileName.length() - 4) : fileName;
     }
 
     private static String renderReport(Path config, List<PerfRecord> records)

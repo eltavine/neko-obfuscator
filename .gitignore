@@ -50,7 +50,6 @@ IK
 /local/
 
 # Test JAR binaries (keep the YAML configs, ignore generated jars)
-test-jars/*.jar
 test-jars/out/
 test-jars/output/
 test-jars/zkm_example/
