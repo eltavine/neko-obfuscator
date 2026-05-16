@@ -79,7 +79,8 @@ class OpcodeTranslatorUnitTest {
             translator.translate(new VarInsnNode(Opcodes.ASTORE, 3)).getFirst()
         ));
 
-        assertContains(code, "locals[1].i = POP_I();", "locals[2].j = POP_L();", "locals[3].o = POP_O();");
+        assertContains(code, "locals[1].i = POP_I();", "locals[2].j = POP_L();",
+            "{ jobject __ref = POP_O(); locals[3].o = neko_store_local_oop_ref(thread, &__neko_local_roots[3], __ref); }");
     }
 
     @Test

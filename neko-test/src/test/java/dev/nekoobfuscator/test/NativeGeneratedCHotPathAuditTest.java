@@ -54,8 +54,8 @@ class NativeGeneratedCHotPathAuditTest {
     @Timeout(value = 4, unit = TimeUnit.MINUTES)
     void generatedCHotPathAudit_reportsCountsByArtifactAndFunctionRegion() throws Exception {
         List<GeneratedArtifact> artifacts = List.of(
-            regenerateArtifact("TEST", "TEST.jar", "audit-TEST-native.jar", "native-test.yml"),
-            regenerateArtifact("obfusjack", "obfusjack-test21.jar", "audit-obfusjack-native.jar", "native-obfusjack.yml")
+            regenerateArtifact("TEST", "audit-TEST-native.jar", "native-test.yml"),
+            regenerateArtifact("obfusjack", "audit-obfusjack-native.jar", "native-obfusjack.yml")
         );
 
         List<ArtifactAudit> audits = new ArrayList<>();
@@ -74,9 +74,9 @@ class NativeGeneratedCHotPathAuditTest {
         assertTrue(Files.exists(report), () -> "Missing generated-C hot-path audit report: " + report);
     }
 
-    private static GeneratedArtifact regenerateArtifact(String fixture, String inputJarName, String outputJarName, String configName) throws Exception {
+    private static GeneratedArtifact regenerateArtifact(String fixture, String outputJarName, String configName) throws Exception {
         NativeObfuscationHelper.ObfuscationRunResult result = NativeObfuscationHelper.obfuscateJar(
-            NativeObfuscationHelper.jarsDir().resolve(inputJarName),
+            NativeObfuscationHelper.inputJarFor(fixture),
             NativeObfuscationHelper.nativeWorkDir().resolve(outputJarName),
             NativeObfuscationHelper.configsDir().resolve(configName),
             Duration.ofMinutes(3)

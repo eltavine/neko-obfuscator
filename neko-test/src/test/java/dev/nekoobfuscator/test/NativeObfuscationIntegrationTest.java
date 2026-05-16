@@ -362,7 +362,7 @@ class NativeObfuscationIntegrationTest {
         Path firstOutput = workDir.resolve("TEST-idempotent-1.jar");
         Path secondOutput = workDir.resolve("TEST-idempotent-2.jar");
         Path config = NativeObfuscationHelper.configsDir().resolve("native-test.yml");
-        Path input = NativeObfuscationHelper.jarsDir().resolve("TEST.jar");
+        Path input = NativeObfuscationHelper.inputJarFor("TEST");
 
         NativeObfuscationHelper.obfuscateJar(input, firstOutput, config);
         NativeObfuscationHelper.obfuscateJar(input, secondOutput, config);
@@ -376,7 +376,7 @@ class NativeObfuscationIntegrationTest {
 
     @Test
     void nativeObfuscation_nativeMethodsHaveOriginalSignatures() throws Exception {
-        byte[] originalCalc = NativeObfuscationHelper.extractEntry(NativeObfuscationHelper.jarsDir().resolve("TEST.jar"), "pack/tests/bench/Calc.class");
+        byte[] originalCalc = NativeObfuscationHelper.extractEntry(NativeObfuscationHelper.inputJarFor("TEST"), "pack/tests/bench/Calc.class");
         byte[] nativeCalc = NativeObfuscationHelper.extractEntry(NativeObfuscationHelper.artifact("TEST").outputJar(), "pack/tests/bench/Calc.class");
 
         Map<String, Integer> originalMethods = methodAccessBySignature(originalCalc, List.of(

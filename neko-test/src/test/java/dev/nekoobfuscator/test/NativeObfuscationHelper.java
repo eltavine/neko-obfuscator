@@ -29,6 +29,12 @@ final class NativeObfuscationHelper {
     private static final Pattern CALC_MS_PATTERN = Pattern.compile("Calc:\\s+(\\d+)ms");
     private static final Map<String, NativeArtifact> ARTIFACTS = new LinkedHashMap<>();
     private static final Map<String, JarRunResult> CACHED_RUNS = new LinkedHashMap<>();
+    private static final Map<String, String> FIXTURE_INPUT_JARS = Map.of(
+        "TEST", "test.jar",
+        "SnakeGame", "snake.jar",
+        "obfusjack", "test21.jar"
+    );
+
 
     private NativeObfuscationHelper() {}
 
@@ -38,9 +44,9 @@ final class NativeObfuscationHelper {
         if (rebuild) {
             ARTIFACTS.clear();
             CACHED_RUNS.clear();
-            ARTIFACTS.put("TEST", obfuscateFixture("TEST", "TEST.jar", "TEST-native.jar", "native-test.yml"));
-            ARTIFACTS.put("SnakeGame", obfuscateFixture("SnakeGame", "SnakeGame.jar", "SnakeGame-native.jar", "native-snake.yml"));
-            ARTIFACTS.put("obfusjack", obfuscateFixture("obfusjack", "obfusjack-test21.jar", "obfusjack-native.jar", "native-obfusjack.yml"));
+            ARTIFACTS.put("TEST", obfuscateFixture("TEST", "TEST-native.jar", "native-test.yml"));
+            ARTIFACTS.put("SnakeGame", obfuscateFixture("SnakeGame", "SnakeGame-native.jar", "native-snake.yml"));
+            ARTIFACTS.put("obfusjack", obfuscateFixture("obfusjack", "obfusjack-native.jar", "native-obfusjack.yml"));
         }
         return Map.copyOf(ARTIFACTS);
     }
@@ -58,12 +64,7 @@ final class NativeObfuscationHelper {
             return existing;
         }
 
-        Path jar = switch (fixture) {
-            case "TEST" -> jarsDir().resolve("TEST.jar");
-            case "SnakeGame" -> jarsDir().resolve("SnakeGame.jar");
-            case "obfusjack" -> jarsDir().resolve("obfusjack-test21.jar");
-            default -> throw new IllegalArgumentException("Unknown fixture: " + fixture);
-        };
+        Path jar = inputJarFor(fixture);
         Path stdout = nativeWorkDir().resolve(key.replace(':', '_') + ".stdout.log");
         Path stderr = nativeWorkDir().resolve(key.replace(':', '_') + ".stderr.log");
         JarRunResult result = runJar(jar, jvmArgs, appArgs, stdout, stderr, timeout);
@@ -315,8 +316,16 @@ final class NativeObfuscationHelper {
         return path;
     }
 
-    private static NativeArtifact obfuscateFixture(String fixtureName, String inputJarName, String outputJarName, String configName) throws Exception {
-        Path input = jarsDir().resolve(inputJarName);
+    static Path inputJarFor(String fixtureName) {
+        String inputJarName = FIXTURE_INPUT_JARS.get(fixtureName);
+        if (inputJarName == null) {
+            throw new IllegalArgumentException("Unknown fixture: " + fixtureName);
+        }
+        return jarsDir().resolve(inputJarName);
+    }
+
+    private static NativeArtifact obfuscateFixture(String fixtureName, String outputJarName, String configName) throws Exception {
+        Path input = inputJarFor(fixtureName);
         Path output = nativeWorkDir().resolve(outputJarName);
         Path config = configsDir().resolve(configName);
         ObfuscationRunResult result = obfuscateJar(input, output, config);

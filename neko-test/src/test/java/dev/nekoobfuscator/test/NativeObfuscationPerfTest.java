@@ -35,7 +35,7 @@ class NativeObfuscationPerfTest {
     @Timeout(value = 2, unit = TimeUnit.MINUTES)
     void nativeObfuscation_TEST_obfuscationSpeedUnder60s() throws Exception {
         NativeObfuscationHelper.ObfuscationRunResult result = NativeObfuscationHelper.obfuscateJar(
-            NativeObfuscationHelper.jarsDir().resolve("TEST.jar"),
+            NativeObfuscationHelper.inputJarFor("TEST"),
             NativeObfuscationHelper.nativeWorkDir().resolve("perf-TEST-native.jar"),
             NativeObfuscationHelper.configsDir().resolve("native-test.yml"),
             Duration.ofMinutes(2)
@@ -48,7 +48,7 @@ class NativeObfuscationPerfTest {
     @Timeout(value = 3, unit = TimeUnit.MINUTES)
     void nativeObfuscation_obfusjack_obfuscationSpeedUnder120s() throws Exception {
         NativeObfuscationHelper.ObfuscationRunResult result = NativeObfuscationHelper.obfuscateJar(
-            NativeObfuscationHelper.jarsDir().resolve("obfusjack-test21.jar"),
+            NativeObfuscationHelper.inputJarFor("obfusjack"),
             NativeObfuscationHelper.nativeWorkDir().resolve("perf-obfusjack-native.jar"),
             NativeObfuscationHelper.configsDir().resolve("native-obfusjack.yml"),
             Duration.ofMinutes(3)
@@ -61,7 +61,7 @@ class NativeObfuscationPerfTest {
     @Timeout(value = 2, unit = TimeUnit.MINUTES)
     void nativeObfuscation_SnakeGame_obfuscationSpeedUnder30s() throws Exception {
         NativeObfuscationHelper.ObfuscationRunResult result = NativeObfuscationHelper.obfuscateJar(
-            NativeObfuscationHelper.jarsDir().resolve("SnakeGame.jar"),
+            NativeObfuscationHelper.inputJarFor("SnakeGame"),
             NativeObfuscationHelper.nativeWorkDir().resolve("perf-SnakeGame-native.jar"),
             NativeObfuscationHelper.configsDir().resolve("native-snake.yml"),
             Duration.ofMinutes(2)
