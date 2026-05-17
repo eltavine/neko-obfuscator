@@ -24,7 +24,7 @@ obfuscated output behavior.
 
 ## Runtime Target Rows
 
-### [ ] P1: Split generated source model
+### [x] P1: Split generated source model
 
 - Scope: introduce a generated-source artifact model that can represent one
   shared support translation unit plus method implementation translation units.
@@ -34,8 +34,12 @@ obfuscated output behavior.
   `NativeTranslator.translate(...)` and `CCodeGenerator` source generation.
 - Completion criteria: unit tests can still inspect generated source content,
   and no source consumer assumes a single generated C file.
+- Fresh validation: `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest` passed after introducing
+  `GeneratedSourceSet`; legacy `TranslationResult.source()` still returns the
+  monolithic source for existing source-inspection tests.
 
-### [ ] P2: Parallel native compilation and link
+### [x] P2: Parallel native compilation and link
 
 - Scope: change `NativeBuildEngine` to write all generated source files, compile
   each `.c` file to an object file, and link objects into the target library.
@@ -45,8 +49,13 @@ obfuscated output behavior.
   wrapper, with generated manifest inspection.
 - Completion criteria: native build produces a library from multiple object
   files and preserves hard failure on compile/link errors.
+- Fresh validation: `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest` passed. The fresh
+  TEST fixture manifest recorded 4 generated C files; the obfusjack manifest
+  recorded 5 generated C files. Both builds linked object files into
+  `libneko_linux_x64.so` without fallback.
 
-### [ ] P3: Generated-C audit compatibility
+### [x] P3: Generated-C audit compatibility
 
 - Scope: update generated-C audit and performance capture tests to consume all
   generated C paths rather than a single `generated.c.path`.
@@ -56,6 +65,10 @@ obfuscated output behavior.
 - Completion criteria: audit still finds translated `neko_native_impl_*`
   regions and reports forbidden JNI/fallback markers across all generated
   source files.
+- Fresh validation: `NativeGeneratedCHotPathAuditTest` parsed
+  `generated.c.count` / `generated.c.N.path`, concatenated every generated C
+  file for each artifact, found translated `neko_native_impl_*` regions, and
+  completed successfully.
 
 ### [ ] P4: Runtime equivalence for four jars
 

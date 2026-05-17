@@ -7,6 +7,7 @@ import dev.nekoobfuscator.core.ir.l3.CStatement;
 import dev.nekoobfuscator.core.ir.l3.CType;
 import dev.nekoobfuscator.core.ir.l3.CVariable;
 import dev.nekoobfuscator.native_.codegen.CCodeGenerator;
+import dev.nekoobfuscator.native_.codegen.CCodeGenerator.GeneratedSourceSet;
 import dev.nekoobfuscator.native_.codegen.CStringLiteral;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -115,9 +116,10 @@ public final class NativeTranslator {
 
         codeGenerator.configureStringCacheCount(opcodeTranslator.stringCacheCount());
 
-        String source = codeGenerator.generateSource(functions, finalBindings);
+        GeneratedSourceSet sourceSet = codeGenerator.generateSourceSet(functions, finalBindings);
+        String source = sourceSet.monolithicSource();
         String header = codeGenerator.generateHeader(finalBindings);
-        return new TranslationResult(source, header, finalBindings.size(), finalBindings);
+        return new TranslationResult(source, header, finalBindings.size(), finalBindings, sourceSet);
     }
 
     private CFunction translateMethod(MethodSelection selection, NativeMethodBinding binding, OpcodeTranslator opcodes) {
@@ -977,8 +979,18 @@ public final class NativeTranslator {
         String source,
         String header,
         int methodCount,
-        List<NativeMethodBinding> bindings
-    ) {}
+        List<NativeMethodBinding> bindings,
+        GeneratedSourceSet sourceSet
+    ) {
+        public TranslationResult(
+            String source,
+            String header,
+            int methodCount,
+            List<NativeMethodBinding> bindings
+        ) {
+            this(source, header, methodCount, bindings, null);
+        }
+    }
 
     public record NativeMethodBinding(
         String ownerInternalName,

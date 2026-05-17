@@ -60,11 +60,15 @@ class NativeGeneratedCHotPathAuditTest {
 
         List<ArtifactAudit> audits = new ArrayList<>();
         for (GeneratedArtifact artifact : artifacts) {
-            String source = Files.readString(artifact.generatedCPath());
-            ArtifactAudit audit = auditArtifact(artifact, source);
-            assertTrue(!audit.regionAudits().isEmpty(), () -> "Missing function/region audit for " + artifact.generatedCPath());
+            StringBuilder source = new StringBuilder();
+            for (Path generatedCPath : artifact.generatedCPaths()) {
+                source.append("\n/* file: ").append(generatedCPath).append(" */\n");
+                source.append(Files.readString(generatedCPath));
+            }
+            ArtifactAudit audit = auditArtifact(artifact, source.toString());
+            assertTrue(!audit.regionAudits().isEmpty(), () -> "Missing function/region audit for " + artifact.generatedCPaths());
             assertTrue(audit.regionAudits().stream().anyMatch(region -> region.name().startsWith("neko_native_impl_")),
-                () -> "Generated C function parser did not find translated impl regions in " + artifact.generatedCPath());
+                () -> "Generated C function parser did not find translated impl regions in " + artifact.generatedCPaths());
             assertRegionTotalsMatchArtifactTotals(audit);
             audits.add(audit);
         }
@@ -91,6 +95,7 @@ class NativeGeneratedCHotPathAuditTest {
         List<GeneratedArtifact> artifacts = properties.stringPropertyNames().stream()
             .filter(name -> name.startsWith("target.") && name.endsWith(".command.line"))
             .map(name -> name.substring("target.".length(), name.length() - ".command.line".length()))
+            .filter(target -> !target.contains("."))
             .sorted()
             .map(target -> generatedArtifact(fixture, target, manifestPath, properties))
             .toList();
@@ -111,14 +116,29 @@ class NativeGeneratedCHotPathAuditTest {
 
     private static GeneratedArtifact generatedArtifact(String fixture, String target, Path manifestPath, Properties properties) {
         String prefix = "target." + target + '.';
-        Path generatedCPath = Path.of(requiredProperty(properties, "generated.c.path", manifestPath));
+        List<Path> generatedCPaths = generatedCPaths(properties, manifestPath);
         Path generatedHeaderPath = Path.of(requiredProperty(properties, "generated.header.path", manifestPath));
         Path generatedLibraryPath = Path.of(requiredProperty(properties, prefix + "library.path", manifestPath));
         long generatedLibrarySize = Long.parseLong(requiredProperty(properties, prefix + "library.size.bytes", manifestPath));
         String compilerCommandLine = requiredProperty(properties, prefix + "command.line", manifestPath);
-        assertTrue(Files.exists(generatedCPath), () -> "Missing generated C: " + generatedCPath);
+        for (Path generatedCPath : generatedCPaths) {
+            assertTrue(Files.exists(generatedCPath), () -> "Missing generated C: " + generatedCPath);
+        }
         assertTrue(generatedLibrarySize > 0, () -> "Missing generated library size in " + manifestPath);
-        return new GeneratedArtifact(fixture, target, manifestPath, generatedCPath, generatedHeaderPath, generatedLibraryPath, generatedLibrarySize, compilerCommandLine);
+        return new GeneratedArtifact(fixture, target, manifestPath, generatedCPaths, generatedHeaderPath, generatedLibraryPath, generatedLibrarySize, compilerCommandLine);
+    }
+
+    private static List<Path> generatedCPaths(Properties properties, Path manifestPath) {
+        String countValue = properties.getProperty("generated.c.count");
+        if (countValue == null || countValue.isBlank()) {
+            return List.of(Path.of(requiredProperty(properties, "generated.c.path", manifestPath)));
+        }
+        int count = Integer.parseInt(countValue);
+        List<Path> paths = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            paths.add(Path.of(requiredProperty(properties, "generated.c." + i + ".path", manifestPath)));
+        }
+        return paths;
     }
 
     private static String requiredProperty(Properties properties, String key, Path manifestPath) {
@@ -279,7 +299,7 @@ class NativeGeneratedCHotPathAuditTest {
                 .mapToLong(region -> region.counts().get(pattern.name()))
                 .sum();
             assertEquals(audit.totals().get(pattern.name()), regionalTotal,
-                () -> "Region counts do not add up for `" + pattern.name() + "` in " + audit.artifact().generatedCPath());
+                () -> "Region counts do not add up for `" + pattern.name() + "` in " + audit.artifact().generatedCPaths());
         }
     }
 
@@ -378,7 +398,9 @@ class NativeGeneratedCHotPathAuditTest {
         sb.append(indent).append("  \"fixture\": ").append(json(artifact.fixture())).append(",\n");
         sb.append(indent).append("  \"target\": ").append(json(artifact.target())).append(",\n");
         sb.append(indent).append("  \"manifestPath\": ").append(json(artifact.manifestPath().toString())).append(",\n");
-        sb.append(indent).append("  \"generatedCPath\": ").append(json(artifact.generatedCPath().toString())).append(",\n");
+        sb.append(indent).append("  \"generatedCPaths\": ");
+        appendStringArray(sb, artifact.generatedCPaths().stream().map(Path::toString).toList(), indent + "  ");
+        sb.append(",\n");
         sb.append(indent).append("  \"generatedHeaderPath\": ").append(json(artifact.generatedHeaderPath().toString())).append(",\n");
         sb.append(indent).append("  \"generatedLibraryPath\": ").append(json(artifact.generatedLibraryPath().toString())).append(",\n");
         sb.append(indent).append("  \"generatedLibrarySizeBytes\": ").append(artifact.generatedLibrarySizeBytes()).append(",\n");
@@ -465,7 +487,7 @@ class NativeGeneratedCHotPathAuditTest {
         String fixture,
         String target,
         Path manifestPath,
-        Path generatedCPath,
+        List<Path> generatedCPaths,
         Path generatedHeaderPath,
         Path generatedLibraryPath,
         long generatedLibrarySizeBytes,

@@ -171,15 +171,18 @@ class NativeObfuscationPerfTest {
             properties.load(input);
         }
 
-        String cPath = requiredProperty(properties, "generated.c.path", buildManifestPath);
+        List<String> cPaths = generatedCPaths(properties, buildManifestPath);
         String headerPath = requiredProperty(properties, "generated.header.path", buildManifestPath);
-        assertTrue(Files.exists(Path.of(cPath)), () -> "Generated C path recorded but missing: " + cPath);
+        for (String cPath : cPaths) {
+            assertTrue(Files.exists(Path.of(cPath)), () -> "Generated C path recorded but missing: " + cPath);
+        }
 
         List<NativeBuildTargetCapture> targets = properties.stringPropertyNames().stream()
             .filter(name -> name.startsWith("target.") && name.endsWith(".command.line"))
             .map(name -> name.substring("target.".length(), name.length() - ".command.line".length()))
+            .filter(target -> !target.contains("."))
             .sorted()
-            .map(target -> captureTarget(properties, buildManifestPath, target, cPath, headerPath))
+            .map(target -> captureTarget(properties, buildManifestPath, target, cPaths, headerPath))
             .toList();
         assertTrue(!targets.isEmpty(), () -> "No native build targets recorded in " + buildManifestPath);
 
@@ -193,7 +196,7 @@ class NativeObfuscationPerfTest {
         Properties properties,
         Path manifestPath,
         String target,
-        String cPath,
+        List<String> cPaths,
         String headerPath
     ) {
         String prefix = "target." + target + '.';
@@ -203,7 +206,20 @@ class NativeObfuscationPerfTest {
         int exitCode = Integer.parseInt(requiredProperty(properties, prefix + "exit.code", manifestPath));
         assertEquals(0, exitCode, () -> "Native compiler failed for " + target + " in " + manifestPath);
         assertTrue(librarySize > 0, () -> "Native library size was not recorded for " + target + " in " + manifestPath);
-        return new NativeBuildTargetCapture(target, cPath, headerPath, libraryPath, commandLine, librarySize, exitCode);
+        return new NativeBuildTargetCapture(target, cPaths, headerPath, libraryPath, commandLine, librarySize, exitCode);
+    }
+
+    private static List<String> generatedCPaths(Properties properties, Path manifestPath) {
+        String countValue = properties.getProperty("generated.c.count");
+        if (countValue == null || countValue.isBlank()) {
+            return List.of(requiredProperty(properties, "generated.c.path", manifestPath));
+        }
+        int count = Integer.parseInt(countValue);
+        List<String> paths = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            paths.add(requiredProperty(properties, "generated.c." + i + ".path", manifestPath));
+        }
+        return paths;
     }
 
     private static String requiredProperty(Properties properties, String key, Path manifestPath) {
@@ -279,7 +295,9 @@ class NativeObfuscationPerfTest {
             NativeBuildTargetCapture target = build.targets().get(i);
             sb.append(indent).append("    {\n");
             sb.append(indent).append("      \"target\": ").append(json(target.target())).append(",\n");
-            sb.append(indent).append("      \"generatedCPath\": ").append(json(target.generatedCPath())).append(",\n");
+            sb.append(indent).append("      \"generatedCPaths\": ");
+            appendStringArray(sb, target.generatedCPaths());
+            sb.append(",\n");
             sb.append(indent).append("      \"generatedHeaderPath\": ").append(json(target.generatedHeaderPath())).append(",\n");
             sb.append(indent).append("      \"generatedLibraryPath\": ").append(json(target.generatedLibraryPath())).append(",\n");
             sb.append(indent).append("      \"generatedLibrarySizeBytes\": ").append(target.generatedLibrarySizeBytes()).append(",\n");
@@ -371,7 +389,7 @@ class NativeObfuscationPerfTest {
 
     private record NativeBuildTargetCapture(
         String target,
-        String generatedCPath,
+        List<String> generatedCPaths,
         String generatedHeaderPath,
         String generatedLibraryPath,
         String nativeCompilerCommandLine,

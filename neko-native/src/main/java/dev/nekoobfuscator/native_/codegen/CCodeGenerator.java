@@ -15,12 +15,17 @@ import dev.nekoobfuscator.native_.translator.NativeTranslator.NativeMethodBindin
 import org.objectweb.asm.Type;
 
 import java.util.LinkedHashSet;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 public final class CCodeGenerator {
+    private static final String IMPL_BEGIN_MARKER = "/* NEKO_TRANSLATED_IMPLS_BEGIN */";
+    private static final String IMPL_END_MARKER = "/* NEKO_TRANSLATED_IMPLS_END */";
+    private static final int FUNCTIONS_PER_IMPL_SOURCE = 24;
+
     @SuppressWarnings("unused")
     private final SymbolTableGenerator symbols;
     private final ManifestEmitter manifestEmitter = new ManifestEmitter();
@@ -454,13 +459,168 @@ public final class CCodeGenerator {
         sb.append(renderBindOwnerFunctions());
         sb.append(renderIcacheDirectStubs());
         sb.append(renderIcacheMetas());
+        sb.append(IMPL_BEGIN_MARKER).append('\n');
         sb.append(body);
+        sb.append(IMPL_END_MARKER).append('\n');
         sb.append(manifestEmitter.renderTables(bindings, signaturePlan));
         sb.append(signatureDispatcherEmitter.render(signaturePlan));
         sb.append(trampolineEmitter.render(signaturePlan));
         sb.append(manifestEmitter.renderDiscoveryDriver(bindings, ownerBindIndex));
         sb.append(jniOnLoadEmitter.renderJniOnLoadAndBootstrap());
         return sb.toString();
+    }
+
+    public GeneratedSourceSet generateSourceSet(List<CFunction> functions, List<NativeMethodBinding> bindings) {
+        String monolithic = generateSource(functions, bindings);
+        int begin = monolithic.indexOf(IMPL_BEGIN_MARKER);
+        int end = monolithic.indexOf(IMPL_END_MARKER);
+        if (begin < 0 || end < begin) {
+            throw new IllegalStateException("Generated source is missing translated implementation markers");
+        }
+
+        String prefix = monolithic.substring(0, begin + IMPL_BEGIN_MARKER.length() + 1);
+        String suffix = monolithic.substring(end);
+        String supportSource = exportGlobalDefinitions(externalizeRawFunctionPrototypes(prefix)) + suffix;
+        String implPrelude = internalizeHelperFunctions(externalizeGlobalDefinitions(externalizeRawFunctionPrototypes(prefix)));
+
+        List<GeneratedSourceFile> implementationSources = new ArrayList<>();
+        int chunkIndex = 0;
+        for (int start = 0; start < functions.size(); start += FUNCTIONS_PER_IMPL_SOURCE) {
+            int finish = Math.min(start + FUNCTIONS_PER_IMPL_SOURCE, functions.size());
+            StringBuilder impl = new StringBuilder(implPrelude);
+            impl.append("/* NEKO_IMPL_CHUNK ").append(chunkIndex).append(" methods ")
+                .append(start).append("..").append(finish - 1).append(" */\n");
+            for (int i = start; i < finish; i++) {
+                impl.append(externalizeRawFunctionDefinition(renderRawFunction(functions.get(i)))).append('\n');
+            }
+            impl.append(IMPL_END_MARKER).append('\n');
+            implementationSources.add(new GeneratedSourceFile("neko_native_impl_" + chunkIndex + ".c", impl.toString()));
+            chunkIndex++;
+        }
+
+        return new GeneratedSourceSet(
+            new GeneratedSourceFile("neko_native_support.c", supportSource),
+            implementationSources,
+            monolithic
+        );
+    }
+
+    private String externalizeRawFunctionPrototypes(String source) {
+        return source.replaceAll("(?m)^static (\\S+\\s+neko_native_impl_\\d+\\([^;]+;)$", "extern $1");
+    }
+
+    private String externalizeRawFunctionDefinition(String source) {
+        return source.replaceFirst("NEKO_FLATTEN NEKO_HOT static ", "NEKO_FLATTEN NEKO_HOT ");
+    }
+
+    private String externalizeGlobalDefinitions(String source) {
+        StringBuilder out = new StringBuilder(source.length());
+        List<String> lines = source.lines().toList();
+        boolean skippingInitializer = false;
+        for (String line : lines) {
+            if (skippingInitializer) {
+                if (line.startsWith("};")) {
+                    skippingInitializer = false;
+                }
+                continue;
+            }
+            String declaration = externGlobalDeclaration(line);
+            if (declaration != null) {
+                out.append(declaration).append('\n');
+                if (!line.contains(";")) {
+                    skippingInitializer = true;
+                }
+                continue;
+            }
+            out.append(line).append('\n');
+        }
+        return out.toString();
+    }
+
+    private String exportGlobalDefinitions(String source) {
+        StringBuilder out = new StringBuilder(source.length());
+        for (String line : source.lines().toList()) {
+            String declaration = exportedGlobalDefinition(line);
+            out.append(declaration != null ? declaration : line).append('\n');
+        }
+        return out.toString();
+    }
+
+    private String internalizeHelperFunctions(String source) {
+        StringBuilder out = new StringBuilder(source.length());
+        for (String line : source.lines().toList()) {
+            if (line.contains("__attribute__((alias(")) {
+                out.append(line.replaceAll("\\s+__attribute__\\(\\(alias\\(\"[^\"]+\"\\)\\)\\)", "")).append('\n');
+            } else if (line.startsWith("__attribute__((visibility(\"hidden\"))) ")
+                && !line.startsWith("__attribute__((visibility(\"hidden\"))) extern ")
+                && line.substring("__attribute__((visibility(\"hidden\"))) ".length()).contains("(")) {
+                out.append("static ").append(line.substring("__attribute__((visibility(\"hidden\"))) ".length())).append('\n');
+            } else {
+                out.append(line).append('\n');
+            }
+        }
+        return out.toString();
+    }
+
+    private String externGlobalDeclaration(String line) {
+        if (line.startsWith(" ") || line.startsWith("\t") || !line.contains("g_")) {
+            return null;
+        }
+        String trimmed = line.trim();
+        if (trimmed.startsWith("static inline ")) {
+            return null;
+        }
+        int equals = line.indexOf('=');
+        int end = equals >= 0 ? equals : line.indexOf(';');
+        if (end < 0) {
+            return null;
+        }
+        String left = line.substring(0, end).trim();
+        if (declarationHead(left).contains("(")) {
+            return null;
+        }
+        left = left.replaceFirst("^__attribute__\\(\\(aligned\\(64\\)\\)\\)\\s+static\\s+", "extern ");
+        left = left.replaceFirst("^static\\s+", "extern ");
+        left = left.replaceFirst("^__attribute__\\(\\(visibility\\(\"hidden\"\\)\\)\\)\\s+", "__attribute__((visibility(\"hidden\"))) extern ");
+        if (!left.startsWith("extern ") && !left.startsWith("__attribute__((visibility(\"hidden\"))) extern ")) {
+            return null;
+        }
+        return left + ";";
+    }
+
+    private String exportedGlobalDefinition(String line) {
+        if (line.startsWith(" ") || line.startsWith("\t") || !line.contains("g_")) {
+            return null;
+        }
+        String trimmed = line.trim();
+        if (trimmed.startsWith("static inline ")) {
+            return null;
+        }
+        int equals = line.indexOf('=');
+        int end = equals >= 0 ? equals : line.indexOf(';');
+        if (end < 0) {
+            return null;
+        }
+        String left = line.substring(0, end).trim();
+        if (declarationHead(left).contains("(")) {
+            return null;
+        }
+        left = left.replaceFirst("^__attribute__\\(\\(aligned\\(64\\)\\)\\)\\s+static\\s+",
+            "__attribute__((visibility(\"hidden\"))) __attribute__((aligned(64))) ");
+        left = left.replaceFirst("^static\\s+", "__attribute__((visibility(\"hidden\"))) ");
+        left = left.replaceFirst("^__attribute__\\(\\(visibility\\(\"hidden\"\\)\\)\\)\\s+",
+            "__attribute__((visibility(\"hidden\"))) ");
+        if (!left.startsWith("__attribute__((visibility(\"hidden\"))) ")) {
+            return null;
+        }
+        return equals >= 0 ? left + line.substring(equals) : left + ";";
+    }
+
+    private String declarationHead(String left) {
+        String head = left;
+        head = head.replaceFirst("^__attribute__\\(\\(visibility\\(\"hidden\"\\)\\)\\)\\s+", "");
+        head = head.replaceFirst("^__attribute__\\(\\(aligned\\(64\\)\\)\\)\\s+", "");
+        return head;
     }
 
 
@@ -860,6 +1020,21 @@ public final class CCodeGenerator {
         }
         return variable.declaration();
     }
+
+    public record GeneratedSourceSet(
+        GeneratedSourceFile supportSource,
+        List<GeneratedSourceFile> implementationSources,
+        String monolithicSource
+    ) {
+        public List<GeneratedSourceFile> allSources() {
+            List<GeneratedSourceFile> sources = new ArrayList<>(1 + implementationSources.size());
+            sources.add(supportSource);
+            sources.addAll(implementationSources);
+            return List.copyOf(sources);
+        }
+    }
+
+    public record GeneratedSourceFile(String fileName, String source) {}
 
     private record MethodRef(String owner, String name, String desc, boolean isStatic) {}
 

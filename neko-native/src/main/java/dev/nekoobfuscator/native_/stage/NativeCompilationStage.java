@@ -150,7 +150,7 @@ public final class NativeCompilationStage {
         Map<String, byte[]> builtLibraries;
         try {
             builtLibraries = new NativeBuildEngine(cfg.zigPath()).build(
-                translationResult.source(),
+                translationResult.sourceSet(),
                 translationResult.header(),
                 cfg.targets()
             );
