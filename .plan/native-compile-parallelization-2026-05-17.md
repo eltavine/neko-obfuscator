@@ -640,6 +640,62 @@ obfuscated output behavior.
   JNI function-table use, JVMTI use, helper class, skip-on-error path, or
   original-bytecode fallback was introduced.
 
+### [x] P21: Split support global definitions into a data shard
+
+- Scope: change only generated native source packaging for top-level hidden
+  support global definitions whose symbols are already referenced through
+  generated declarations. Keep every initializer value, symbol name, method
+  selection, native coverage, Zig flags, hot inline helper body, no-JNI/
+  no-JVMTI policy, and runtime behavior unchanged. The split boundary is the
+  generic global-definition form emitted by codegen, not any jar, class,
+  method, benchmark, or known test artifact.
+- Required evidence: fresh P20 build manifests show `neko_native_support.c`
+  remains the fixed compile long tail across all four native-only artifacts:
+  evaluator `2327ms`, test21 `2178ms`, TEST `1912ms`, and SnakeGame
+  `2298ms`. Fresh support C inspection shows the first large support body
+  after `// === Global resolution caches ===` contains repeated hidden global
+  slot definitions such as `g_cls_*`, `g_obj_array_klass_*`,
+  `g_cls_initialized_*`, `g_mid_*`, `g_mptr_*`, and related cache globals.
+  These definitions are data storage, while other translation units and support
+  functions already consume equivalent `extern` declarations through the
+  generated support contract.
+- Validation command or runtime target: run focused generator/unit validation
+  with repository `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`; regenerate the
+  native-only four jar set once after implementation, run TEST/test21/
+  evaluator/SnakeGame behavior targets with repository-local `java.io.tmpdir`,
+  inspect fresh manifests for `neko_native_globals.c`, and inspect generated
+  impl sources for forbidden JNI/JVMTI/fallback markers.
+- Completion criteria: fresh generated source sets contain a
+  `neko_native_globals.c` support shard when top-level hidden support globals
+  are present; `neko_native_support.c` keeps extern declarations for those
+  globals and no duplicate definitions; runtime jars still execute with the
+  accepted behavior; `translated` remains nonzero with `rejected=0`; and static
+  inspection still finds no forbidden JNI function-table usage in generated
+  impl sources.
+- Fresh validation: focused repository Gradle validation passed with
+  `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`. Fresh native-only
+  generation emitted `neko_native_globals.c` and linked it for all four
+  artifacts: evaluator `run-17869695517907` with 133 C sources and
+  `translated=122 rejected=0`; test21 `run-17860661488192` with 103 C sources
+  and `translated=93 rejected=0`; SnakeGame `run-17863062732487` with 25 C
+  sources and `translated=18 rejected=0`; TEST `run-17863274671999` with 57 C
+  sources and `translated=49 rejected=0`. Runtime validation preserved the
+  accepted behavior: TEST exited 0 through `-------------Tests r
+  Finished-------------` with `Calc: 44ms`; test21 exited 0 through
+  `=== All tests completed ===` with Platform `44ms`, Virtual `48ms`, Seq
+  `29ms`, Parallel `2ms`, and VThreads `2ms`; evaluator exited 0 through the
+  final decrypt success markers; SnakeGame preserved the accepted headless
+  `java.awt.HeadlessException` exit. Static inspection over the fresh
+  `neko_native_impl_*.c` files found no forbidden JNI function-table usage.
+  Manifest evidence shows the data shard compiles separately as
+  `neko_native_globals.c` in `111ms` to `173ms`, while `neko_native_support.c`
+  remains the next fixed long tail at `1897ms` to `2104ms`; the next compile
+  optimization must therefore target another generic support-code structure.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,

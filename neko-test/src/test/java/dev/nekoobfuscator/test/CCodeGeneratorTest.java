@@ -480,6 +480,11 @@ class CCodeGeneratorTest {
         CCodeGenerator.GeneratedSourceSet sourceSet = generator.generateSourceSet(List.of(function), List.of(binding));
         String header = sourceSet.implementationHeader().source();
         String support = sourceSet.supportSource().source();
+        String globalSupport = sourceSet.supportSources().stream()
+            .filter(source -> source.fileName().equals("neko_native_globals.c"))
+            .findFirst()
+            .orElseThrow()
+            .source();
         String ownerBindings = sourceSet.supportSources().stream()
             .filter(source -> source.fileName().equals("neko_native_owner_bindings.c"))
             .findFirst()
@@ -520,6 +525,12 @@ class CCodeGeneratorTest {
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_njx_dispatch_generic(\n"), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) neko_icache_site neko_icache_sites["), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jobject neko_concat_append(\n"), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jclass g_cls_"), support);
+        assertFalse(support.contains("__attribute__((visibility(\"hidden\"))) jclass g_cls_"), support);
+        assertTrue(globalSupport.contains("#include \"neko_native_impl_prelude.h\""), globalSupport);
+        assertTrue(globalSupport.contains("__attribute__((visibility(\"hidden\"))) jclass g_cls_"), globalSupport);
+        assertTrue(globalSupport.contains("__attribute__((visibility(\"hidden\"))) uintptr_t g_obj_array_klass_"), globalSupport);
+        assertFalse(globalSupport.contains("__attribute__((visibility(\"hidden\"))) extern jclass g_cls_"), globalSupport);
         assertFalse(support.contains("// === Bind-time owner resolution ==="), support);
         assertFalse(support.contains("// === Inline-cache metadata ==="), support);
         assertTrue(ownerBindings.contains("#include \"neko_native_impl_prelude.h\""), ownerBindings);

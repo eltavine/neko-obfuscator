@@ -551,12 +551,29 @@ public final class CCodeGenerator {
         int ownerStart = source.indexOf(ownerMarker);
         int icacheStart = minPresent(source.indexOf(directIcacheMarker), source.indexOf(metaIcacheMarker));
         int firstShardStart = minPresent(ownerStart, icacheStart);
+        GlobalSupportSplit globalSplit = splitSupportGlobalDefinitions(
+            source,
+            firstShardStart >= 0 ? firstShardStart : source.length()
+        );
+        source = globalSplit.mainSource();
+        ownerStart = source.indexOf(ownerMarker);
+        icacheStart = minPresent(source.indexOf(directIcacheMarker), source.indexOf(metaIcacheMarker));
+        firstShardStart = minPresent(ownerStart, icacheStart);
         if (firstShardStart < 0) {
-            return List.of(new GeneratedSourceFile("neko_native_support.c", source));
+            if (globalSplit.globalSource().isEmpty()) {
+                return List.of(new GeneratedSourceFile("neko_native_support.c", source));
+            }
+            return List.of(
+                new GeneratedSourceFile("neko_native_support.c", source),
+                new GeneratedSourceFile("neko_native_globals.c", supportShardSource(globalSplit.globalSource()))
+            );
         }
 
         List<GeneratedSourceFile> sources = new ArrayList<>();
         sources.add(new GeneratedSourceFile("neko_native_support.c", source.substring(0, firstShardStart)));
+        if (!globalSplit.globalSource().isEmpty()) {
+            sources.add(new GeneratedSourceFile("neko_native_globals.c", supportShardSource(globalSplit.globalSource())));
+        }
         if (ownerStart >= 0 && (icacheStart < 0 || ownerStart < icacheStart)) {
             int ownerEnd = icacheStart >= 0 ? icacheStart : source.length();
             String ownerShard = source.substring(ownerStart, ownerEnd);
@@ -571,6 +588,42 @@ public final class CCodeGenerator {
             }
         }
         return List.copyOf(sources);
+    }
+
+    private GlobalSupportSplit splitSupportGlobalDefinitions(String source, int scanEnd) {
+        StringBuilder main = new StringBuilder(source.length());
+        StringBuilder globals = new StringBuilder(source.length() / 4);
+        int index = 0;
+        while (index < source.length()) {
+            int lineEnd = source.indexOf('\n', index);
+            if (lineEnd < 0) {
+                lineEnd = source.length();
+            }
+            String line = source.substring(index, lineEnd);
+            String extern = index < scanEnd ? movableSupportGlobalDeclaration(line) : null;
+            if (extern != null) {
+                main.append(extern).append('\n');
+                globals.append(line).append('\n');
+            } else {
+                main.append(line);
+                if (lineEnd < source.length()) {
+                    main.append('\n');
+                }
+            }
+            index = lineEnd + 1;
+        }
+        return new GlobalSupportSplit(main.toString(), globals.toString());
+    }
+
+    private String movableSupportGlobalDeclaration(String line) {
+        if (!line.startsWith("__attribute__((visibility(\"hidden\"))) ") || !line.contains(" g_")
+            || !line.contains("=") || !line.contains(";")) {
+            return null;
+        }
+        if (line.contains("{") || line.contains("}") || declarationHead(line).contains("(")) {
+            return null;
+        }
+        return externGlobalDeclaration(line);
     }
 
     private int minPresent(int... values) {
@@ -1526,6 +1579,8 @@ static void neko_raise_cached_fast_array_reason(void *thread, JNIEnv *env, int r
     }
 
     public record GeneratedSourceFile(String fileName, String source) {}
+
+    private record GlobalSupportSplit(String mainSource, String globalSource) {}
 
     private record MethodRef(String owner, String name, String desc, boolean isStatic) {}
 
