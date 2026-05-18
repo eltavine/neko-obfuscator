@@ -1327,6 +1327,13 @@ NEKO_HOT_INLINE jboolean neko_checked_aastore(void *thread, JNIEnv *env, jobject
         appendCheckedPrimArrayLoad(sb, "l", "jlong",  "NEKO_PRIM_J", "jlongArray");
         appendCheckedPrimArrayLoad(sb, "f", "jfloat", "NEKO_PRIM_F", "jfloatArray");
         appendCheckedPrimArrayLoad(sb, "d", "jdouble","NEKO_PRIM_D", "jdoubleArray");
+        appendCheckedPrimArrayStore(sb, "b", "jbyte",  "NEKO_PRIM_B", "jbyteArray");
+        appendCheckedPrimArrayStore(sb, "c", "jchar",  "NEKO_PRIM_C", "jcharArray");
+        appendCheckedPrimArrayStore(sb, "s", "jshort", "NEKO_PRIM_S", "jshortArray");
+        appendCheckedPrimArrayStore(sb, "i", "jint",   "NEKO_PRIM_I", "jintArray");
+        appendCheckedPrimArrayStore(sb, "l", "jlong",  "NEKO_PRIM_J", "jlongArray");
+        appendCheckedPrimArrayStore(sb, "f", "jfloat", "NEKO_PRIM_F", "jfloatArray");
+        appendCheckedPrimArrayStore(sb, "d", "jdouble","NEKO_PRIM_D", "jdoubleArray");
         appendFusedAALoadPrim(sb, "b", "jbyte",  "NEKO_PRIM_B", "byte",   "jbyteArray");
         appendFusedAALoadPrim(sb, "c", "jchar",  "NEKO_PRIM_C", "char",   "jcharArray");
         appendFusedAALoadPrim(sb, "s", "jshort", "NEKO_PRIM_S", "short",  "jshortArray");
@@ -1407,6 +1414,31 @@ static void neko_raise_fast_array_reason(void *thread, JNIEnv *env, int reason,
             .append("    if (NEKO_UNLIKELY(idx < 0 || idx >= len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return JNI_FALSE; }\n")
             .append("    char *addr = oop + neko_const_prim_array_base(").append(elemKind).append(") + ((jlong)idx * neko_const_prim_array_scale(").append(elemKind).append("));\n")
             .append("    *out = *(").append(cType).append("*)addr;\n")
+            .append("    return JNI_TRUE;\n")
+            .append("}\n\n");
+    }
+
+    private static void appendCheckedPrimArrayStore(StringBuilder sb, String prefix, String cType, String elemKind, String jArrayType) {
+        sb.append("NEKO_HOT_INLINE jboolean neko_checked_").append(prefix)
+            .append("astore(void *thread, JNIEnv *env, ").append(jArrayType).append(" arr, jint idx, ")
+            .append(cType).append(" value, int *reason) {\n")
+            .append("    (void)thread;\n")
+            .append("    (void)env;\n")
+            .append("    if (reason != NULL) *reason = NEKO_FAST_ARRAY_OK;\n")
+            .append("    if (arr == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return JNI_FALSE; }\n")
+            .append("    if (NEKO_UNLIKELY(!neko_const_initialized()\n")
+            .append("        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())\n")
+            .append("        || neko_const_array_length_offset() < 0\n")
+            .append("        || neko_const_prim_array_base(").append(elemKind).append(") < 0\n")
+            .append("        || neko_const_prim_array_scale(").append(elemKind).append(") <= 0)) {\n")
+            .append("        fprintf(stderr, \"[neko-direct] checked ").append(prefix).append("ASTORE layout unavailable arr=%p idx=%d\\n\", (void*)arr, (int)idx); abort();\n")
+            .append("    }\n")
+            .append("    char *oop = (char*)neko_handle_oop((jobject)arr);\n")
+            .append("    if (NEKO_UNLIKELY(oop == NULL)) { fprintf(stderr, \"[neko-direct] checked ").append(prefix).append("ASTORE handle unresolved arr=%p idx=%d\\n\", (void*)arr, (int)idx); abort(); }\n")
+            .append("    jint len = *(jint*)(oop + neko_const_array_length_offset());\n")
+            .append("    if (NEKO_UNLIKELY(idx < 0 || idx >= len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return JNI_FALSE; }\n")
+            .append("    char *addr = oop + neko_const_prim_array_base(").append(elemKind).append(") + ((jlong)idx * neko_const_prim_array_scale(").append(elemKind).append("));\n")
+            .append("    *(").append(cType).append("*)addr = value;\n")
             .append("    return JNI_TRUE;\n")
             .append("}\n\n");
     }

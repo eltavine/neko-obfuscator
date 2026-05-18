@@ -160,18 +160,17 @@ public final class OpcodeTranslator {
             + arrayAccessBody("__a", "__i", success) + " }";
     }
 
-    private String primitiveArrayStore(String valueType, String pop, String arrayType, String success) {
-        return "{ " + valueType + " __v = (" + valueType + ")" + pop + "; " + arrayStoreBody(arrayType, success) + " }";
+    private String primitiveArrayStore(String valueType, String pop, String arrayType, String helper) {
+        return "{ " + valueType + " __v = (" + valueType + ")" + pop + "; "
+            + "jint __i = POP_I(); " + arrayType + " __a = (" + arrayType + ")POP_O(); "
+            + "int __reason = NEKO_FAST_ARRAY_OK; "
+            + "if (!" + helper + "(thread, env, __a, __i, __v, &__reason)) { "
+            + raiseFastArrayReason("__reason") + "; } }";
     }
 
-    private String wideArrayStore(String valueType, String arrayType, String success) {
+    private String wideArrayStore(String valueType, String arrayType, String helper) {
         String pop = "jlong".equals(valueType) ? "POP_L()" : "POP_D()";
-        return "{ " + valueType + " __v = " + pop + "; " + arrayStoreBody(arrayType, success) + " }";
-    }
-
-    private String arrayStoreBody(String arrayType, String success) {
-        return "jint __i = POP_I(); " + arrayType + " __a = (" + arrayType + ")POP_O(); "
-            + arrayAccessBody("__a", "__i", success);
+        return primitiveArrayStore(valueType, pop, arrayType, helper);
     }
 
     private String arrayAccessBody(String arrayExpr, String indexExpr, String success) {
@@ -255,14 +254,14 @@ public final class OpcodeTranslator {
             case Opcodes.CALOAD -> stmts.add(raw(primitiveArrayLoad("jcharArray", "jchar", "neko_checked_caload", "PUSH_I((jint)__value);")));
             case Opcodes.SALOAD -> stmts.add(raw(primitiveArrayLoad("jshortArray", "jshort", "neko_checked_saload", "PUSH_I((jint)__value);")));
 
-            case Opcodes.IASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jintArray", "neko_fast_iastore(__a, __i, __v);")));
-            case Opcodes.LASTORE -> stmts.add(raw(wideArrayStore("jlong", "jlongArray", "neko_fast_lastore(__a, __i, __v);")));
-            case Opcodes.FASTORE -> stmts.add(raw(primitiveArrayStore("jfloat", "POP_F()", "jfloatArray", "neko_fast_fastore(__a, __i, __v);")));
-            case Opcodes.DASTORE -> stmts.add(raw(wideArrayStore("jdouble", "jdoubleArray", "neko_fast_dastore(__a, __i, __v);")));
+            case Opcodes.IASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jintArray", "neko_checked_iastore")));
+            case Opcodes.LASTORE -> stmts.add(raw(wideArrayStore("jlong", "jlongArray", "neko_checked_lastore")));
+            case Opcodes.FASTORE -> stmts.add(raw(primitiveArrayStore("jfloat", "POP_F()", "jfloatArray", "neko_checked_fastore")));
+            case Opcodes.DASTORE -> stmts.add(raw(wideArrayStore("jdouble", "jdoubleArray", "neko_checked_dastore")));
             case Opcodes.AASTORE -> stmts.add(raw(objectArrayStore()));
-            case Opcodes.BASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jbyteArray", "neko_fast_bastore(__a, __i, (jbyte)__v);")));
-            case Opcodes.CASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jcharArray", "neko_fast_castore(__a, __i, (jchar)__v);")));
-            case Opcodes.SASTORE -> stmts.add(raw(primitiveArrayStore("jint", "POP_I()", "jshortArray", "neko_fast_sastore(__a, __i, (jshort)__v);")));
+            case Opcodes.BASTORE -> stmts.add(raw(primitiveArrayStore("jbyte", "POP_I()", "jbyteArray", "neko_checked_bastore")));
+            case Opcodes.CASTORE -> stmts.add(raw(primitiveArrayStore("jchar", "POP_I()", "jcharArray", "neko_checked_castore")));
+            case Opcodes.SASTORE -> stmts.add(raw(primitiveArrayStore("jshort", "POP_I()", "jshortArray", "neko_checked_sastore")));
 
             case Opcodes.IADD -> stmts.add(raw("{ jint b = POP_I(); jint a = POP_I(); PUSH_I(a + b); }"));
             case Opcodes.ISUB -> stmts.add(raw("{ jint b = POP_I(); jint a = POP_I(); PUSH_I(a - b); }"));

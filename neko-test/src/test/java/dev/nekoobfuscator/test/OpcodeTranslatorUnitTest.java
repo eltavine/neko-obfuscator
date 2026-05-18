@@ -271,7 +271,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(code,
             "neko_checked_iaload(thread, env,",
-            "neko_fast_iastore(",
+            "neko_checked_iastore(thread, env,",
             "neko_raise_fast_array_reason(thread, env,",
             "java/lang/NullPointerException",
             "java/lang/ArrayIndexOutOfBoundsException",
@@ -343,8 +343,8 @@ class OpcodeTranslatorUnitTest {
             assertFalse(loadBody.contains(testCase.jniGetHelper() + "(env,"), loadBody);
 
             String storeBody = translatedBodySection(translateSingleMethod(primitiveArrayStoreOwner(testCase)));
-            assertTrue(storeBody.contains("neko_fast_" + testCase.helperPrefix() + "astore("), storeBody);
-            assertFalse(storeBody.contains("neko_fast_" + testCase.helperPrefix() + "astore(env,"), storeBody);
+            assertTrue(storeBody.contains("neko_checked_" + testCase.helperPrefix() + "astore(thread, env,"), storeBody);
+            assertFalse(storeBody.contains("neko_checked_" + testCase.helperPrefix() + "astore(env,"), storeBody);
             assertFalse(storeBody.contains(testCase.jniSetHelper() + "(env,"), storeBody);
         }
     }

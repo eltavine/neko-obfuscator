@@ -369,6 +369,51 @@ obfuscated output behavior.
   `snake.jar` 1806 ms (`translated=18 rejected=0`, 22 C sources), and
   `test.jar` 2429 ms (`translated=49 rejected=0`, 53 C sources).
 
+### [x] P15: Compress primitive array-store generated C without de-inlining
+
+- Scope: keep Zig `-O3`, existing target optimization flags, `NEKO_HOT`,
+  `NEKO_HOT_INLINE`, one-method implementation splitting, no-JNI/no-JVMTI
+  semantics, and translated runtime behavior unchanged, but replace repeated
+  primitive `xASTORE` null/bounds/exception generated bodies with generic
+  checked inline helpers.
+- Required evidence: P14 fresh manifests show the remaining evaluator long-tail
+  implementation `neko_native_impl_103.c=4065 ms`; inspecting that generated C
+  shows 50 repeated primitive stores, 50 repeated `neko_fast_array_length`
+  checks, 115 repeated `neko_raise_implicit_exception` expressions, and 130
+  repeated `neko_bound_method_i_entry` expressions. `xALOAD` and object
+  `AASTORE` already use checked helpers, but primitive `xASTORE` still expands
+  the full check body at every opcode site.
+- Validation command or runtime target: focused generator/unit tests, native C
+  hot-path audit, one fresh four-jar native generation timing pass after the
+  code-shape optimization, and static generated-C inspection for short
+  `neko_checked_*astore` call sites plus no forbidden JNI/JVMTI/fallback calls.
+- Completion criteria: generated primitive array stores call
+  `NEKO_HOT_INLINE` checked-store helpers instead of expanding the full
+  null/bounds/exception body at every opcode; all four native generation rows
+  remain under 5s with `translated>0 rejected=0`; compiler flags and hot helper
+  inlining are unchanged; no JNI/JVMTI/original-bytecode fallback is introduced.
+- Checkpoint evidence: focused generator/unit validation passed with
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest
+  --tests dev.nekoobfuscator.test.OpcodeTranslatorUnitTest`; generated-C
+  hot-path validation passed with
+  `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`. A fresh
+  native-only four-jar timing pass with `.plan/native-only-full.yml`
+  (`skipOnError: false`) completed under the 5s gate:
+  `evaluator.jar` 3211 ms (`translated=122 rejected=0`, 126 C sources),
+  `test21.jar` 3215 ms (`translated=93 rejected=0`, 97 C sources),
+  `snake.jar` 1929 ms (`translated=18 rejected=0`, 22 C sources), and
+  `test.jar` 2716 ms (`translated=49 rejected=0`, 53 C sources). Fresh
+  generated artifacts under `build/neko-native-work/run-15008940410461`,
+  `run-15025150148753`, `run-15036312096800`, and `run-15049998311927`
+  contain `NEKO_HOT_INLINE jboolean neko_checked_{b,c,s,i,l,f,d}astore`
+  definitions plus short `neko_checked_*astore(thread, env, ...)` call sites.
+  Static inspection of fresh `neko_native_impl_*.c` found no expanded
+  `neko_fast_*astore(__a...)` primitive store bodies and no
+  `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` JNI function-table use in impl
+  sources. Fresh build manifests still use Zig `-O3`, `-march=x86_64_v3`,
+  and `-funroll-loops`.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,
