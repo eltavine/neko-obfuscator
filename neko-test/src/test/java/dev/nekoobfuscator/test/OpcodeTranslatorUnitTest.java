@@ -452,8 +452,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(methodBody,
             "jthrowable __exc = neko_take_pending_exception(thread);",
-            "java/lang/NullPointerException",
-            "neko_exception_handler_matches(env, __exc,",
+            "neko_exception_handler_matches_ref(env, __exc, &g_class_ref_",
             "neko_set_pending_exception(thread, __exc);"
         );
         assertFalse(methodBody.contains("neko_exception_occurred(env)"), methodBody);
@@ -637,7 +636,7 @@ class OpcodeTranslatorUnitTest {
         assertContains(body,
             "__neko_primitive_array_literal_",
             "neko_take_pending_exception(thread)",
-            "java/lang/Throwable",
+            "neko_exception_handler_matches_ref(env, __exc, &g_class_ref_",
             "PUSH_O(__exc); goto");
     }
 

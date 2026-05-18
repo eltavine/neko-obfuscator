@@ -978,9 +978,9 @@ public final class NativeTranslator {
                 catchAllEmitted = true;
                 break;
             } else {
-                sb.append("if (neko_exception_handler_matches(env, __exc, ")
-                    .append(cachedHandlerClassExpression(bindingOwner, handler.exceptionType))
-                    .append(")) { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } ");
+                sb.append("if (")
+                    .append(cachedHandlerMatchExpression(bindingOwner, handler.exceptionType))
+                    .append(") { sp = 0; PUSH_O(__exc); goto ").append(handler.handlerLabel).append("; } ");
             }
         }
         if (!catchAllEmitted) {
@@ -990,9 +990,9 @@ public final class NativeTranslator {
         return sb.toString();
     }
 
-    private String cachedHandlerClassExpression(String bindingOwner, String exceptionType) {
-        codeGenerator.registerOwnerClassReference(bindingOwner, exceptionType);
-        return "neko_bound_class(env, " + codeGenerator.classSlotName(exceptionType) + ", \"" + CStringLiteral.escape(exceptionType) + "\")";
+    private String cachedHandlerMatchExpression(String bindingOwner, String exceptionType) {
+        String ref = codeGenerator.classDescriptorRefName(bindingOwner, exceptionType);
+        return "neko_exception_handler_matches_ref(env, __exc, &" + ref + ")";
     }
 
     private boolean isPotentiallyExcepting(AbstractInsnNode insn) {

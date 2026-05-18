@@ -790,6 +790,14 @@ __attribute__((visibility("hidden"))) jboolean neko_exception_handler_matches(JN
     return neko_fast_is_instance_of(env, exc, cls);
 }
 
+__attribute__((visibility("hidden"))) jboolean neko_exception_handler_matches_ref(JNIEnv *env, jthrowable exc, const neko_class_ref *ref) {
+    if (ref == NULL || ref->class_slot == NULL) {
+        fprintf(stderr, "[neko-direct] exception handler ref metadata unavailable ref=%p\\n", (void*)ref);
+        abort();
+    }
+    return neko_exception_handler_matches(env, exc, neko_bound_class(env, *(ref->class_slot), ref->owner));
+}
+
 NEKO_FAST_INLINE jclass neko_fast_get_object_class(void *thread, jobject obj) {
     void *value_oop;
     void *value_klass;

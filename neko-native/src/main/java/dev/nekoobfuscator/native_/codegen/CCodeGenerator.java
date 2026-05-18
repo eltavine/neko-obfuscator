@@ -50,6 +50,7 @@ public final class CCodeGenerator {
     private final LinkedHashMap<String, IcacheMetaRef> icacheMetas = new LinkedHashMap<>();
     private final LinkedHashMap<String, StaticFieldDescriptorRef> staticFieldDescriptorRefs = new LinkedHashMap<>();
     private final LinkedHashMap<String, ImplicitExceptionRef> implicitExceptionRefs = new LinkedHashMap<>();
+    private final LinkedHashMap<String, ClassDescriptorRef> classDescriptorRefs = new LinkedHashMap<>();
     private int stringCacheCount;
     private boolean cachedFastArrayRaiseHelperRequired;
     private String cachedFastArrayRaiseDispatcherSymbol;
@@ -155,6 +156,16 @@ public final class CCodeGenerator {
             methodPtrSlotName(owner, "<init>", ctorDesc, false),
             methodIEntrySlotName(owner, "<init>", ctorDesc, false),
             dispatcher
+        ));
+        return ref.symbol();
+    }
+
+    public String classDescriptorRefName(String bindingOwner, String classOwner) {
+        registerOwnerClassReference(bindingOwner, classOwner);
+        ClassDescriptorRef ref = classDescriptorRefs.computeIfAbsent(classOwner, ignored -> new ClassDescriptorRef(
+            classDescriptorRefs.size(),
+            classOwner,
+            classSlotName(classOwner)
         ));
         return ref.symbol();
     }
@@ -1404,6 +1415,23 @@ public final class CCodeGenerator {
             sb.append("static jlong g_static_off_").append(entry.getValue()).append(" = -1;\n");
             sb.append("static jobject g_static_base_").append(entry.getValue()).append(" = NULL;\n");
         }
+        sb.append("typedef struct neko_class_ref {\n");
+        sb.append("    jclass *class_slot;\n");
+        sb.append("    const char *owner;\n");
+        sb.append("} neko_class_ref;\n");
+        if (!classDescriptorRefs.isEmpty()) {
+            sb.append("static const neko_class_ref g_class_refs[").append(classDescriptorRefs.size()).append("] = {\n");
+            for (ClassDescriptorRef ref : classDescriptorRefs.values()) {
+                sb.append("    {&").append(ref.classSlot()).append(", \"")
+                    .append(CStringLiteral.escape(ref.owner())).append("\"},   // ").append(ref.symbol()).append('\n');
+            }
+            sb.append("};\n");
+            int classRefIndex = 0;
+            for (ClassDescriptorRef ref : classDescriptorRefs.values()) {
+                sb.append("#define ").append(ref.symbol()).append(" (g_class_refs[")
+                    .append(classRefIndex++).append("])\n");
+            }
+        }
         sb.append("typedef struct neko_static_field_ref {\n");
         sb.append("    jclass *class_slot;\n");
         sb.append("    volatile jboolean *class_init_slot;\n");
@@ -1499,6 +1527,7 @@ public final class CCodeGenerator {
             }
         }
         sb.append("__attribute__((visibility(\"hidden\"))) extern void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const neko_implicit_exception_ref *ref);\n");
+        sb.append("__attribute__((visibility(\"hidden\"))) extern jboolean neko_exception_handler_matches_ref(JNIEnv *env, jthrowable exc, const neko_class_ref *ref);\n");
         return sb.toString();
     }
 
@@ -1777,6 +1806,13 @@ static void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const n
         sb.append("}\n\n");
         return sb.toString();
     }
+
+    private record ClassDescriptorRef(int index, String owner, String classSlot) {
+        String symbol() {
+            return "g_class_ref_" + index;
+        }
+    }
+
 
     private boolean isPrimitiveFieldDescriptor(String desc) {
         return desc != null && desc.length() == 1 && "ZBCSIJFD".indexOf(desc.charAt(0)) >= 0;
