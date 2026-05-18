@@ -496,7 +496,11 @@ public final class CCodeGenerator {
             + "#define NEKO_NATIVE_IMPL_PRELUDE_LOADED 1\n"
             + implPrelude
             + "\n#endif\n";
+        List<GeneratedSourceFile> baseSupportSources = splitBaseSupportSources(baseSupportSource);
         List<GeneratedSourceFile> lateSupportSources = splitLateSupportSources(suffix);
+        List<GeneratedSourceFile> supportSources = new ArrayList<>();
+        supportSources.addAll(baseSupportSources.subList(1, baseSupportSources.size()));
+        supportSources.addAll(lateSupportSources);
 
         List<GeneratedSourceFile> implementationSources = new ArrayList<>();
         int chunkIndex = 0;
@@ -519,12 +523,51 @@ public final class CCodeGenerator {
         }
 
         return new GeneratedSourceSet(
-            new GeneratedSourceFile("neko_native_support.c", baseSupportSource),
-            lateSupportSources,
+            baseSupportSources.get(0),
+            supportSources,
             new GeneratedSourceFile("neko_native_impl_prelude.h", implHeaderSource),
             implementationSources,
             monolithic
         );
+    }
+
+    private List<GeneratedSourceFile> splitBaseSupportSources(String source) {
+        String ownerMarker = "// === Bind-time owner resolution ===";
+        String directIcacheMarker = "// === Inline-cache direct-call stubs ===";
+        String metaIcacheMarker = "// === Inline-cache metadata ===";
+        int ownerStart = source.indexOf(ownerMarker);
+        int icacheStart = minPresent(source.indexOf(directIcacheMarker), source.indexOf(metaIcacheMarker));
+        int firstShardStart = minPresent(ownerStart, icacheStart);
+        if (firstShardStart < 0) {
+            return List.of(new GeneratedSourceFile("neko_native_support.c", source));
+        }
+
+        List<GeneratedSourceFile> sources = new ArrayList<>();
+        sources.add(new GeneratedSourceFile("neko_native_support.c", source.substring(0, firstShardStart)));
+        if (ownerStart >= 0 && (icacheStart < 0 || ownerStart < icacheStart)) {
+            int ownerEnd = icacheStart >= 0 ? icacheStart : source.length();
+            String ownerShard = source.substring(ownerStart, ownerEnd);
+            if (!ownerShard.isBlank()) {
+                sources.add(new GeneratedSourceFile("neko_native_owner_bindings.c", supportShardSource(ownerShard)));
+            }
+        }
+        if (icacheStart >= 0) {
+            String icacheShard = source.substring(icacheStart);
+            if (!icacheShard.isBlank()) {
+                sources.add(new GeneratedSourceFile("neko_native_icache_support.c", supportShardSource(icacheShard)));
+            }
+        }
+        return List.copyOf(sources);
+    }
+
+    private int minPresent(int... values) {
+        int min = -1;
+        for (int value : values) {
+            if (value >= 0 && (min < 0 || value < min)) {
+                min = value;
+            }
+        }
+        return min;
     }
 
     private List<GeneratedSourceFile> splitLateSupportSources(String suffix) {
@@ -555,6 +598,10 @@ public final class CCodeGenerator {
             + "#error \"neko_native_impl_prelude.h must be included before generated late support\"\n"
             + "#endif\n"
             + body;
+    }
+
+    private String supportShardSource(String body) {
+        return lateSupportSource(body);
     }
 
     private String externalizeRawFunctionPrototypes(String source) {

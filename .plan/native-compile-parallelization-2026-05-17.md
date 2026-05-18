@@ -414,6 +414,58 @@ obfuscated output behavior.
   sources. Fresh build manifests still use Zig `-O3`, `-march=x86_64_v3`,
   and `-funroll-loops`.
 
+### [x] P16: Split generated support owner-binding and inline-cache shards
+
+- Scope: keep Zig `-O3`, target optimization flags, `NEKO_HOT`,
+  `NEKO_HOT_INLINE`, one-method implementation splitting, no-JNI/no-JVMTI
+  semantics, and translated runtime behavior unchanged, but split the already
+  marker-delimited `neko_native_support.c` owner-binding and inline-cache
+  support regions into separate generated C translation units that include the
+  existing implementation prelude.
+- Required evidence: P15 fresh evaluator manifest
+  `build/neko-native-work/run-15008940410461/neko_native_build_manifest.properties`
+  shows `neko_native_support.c` still takes 2555 ms, tied with
+  `neko_native_impl_103.c` at 2551 ms. The same fresh support source is
+  884283 bytes and contains explicit generic boundaries:
+  `// === Bind-time owner resolution ===`,
+  `// === Inline-cache direct-call stubs ===`, and
+  `// === Inline-cache metadata ===`. These regions are generated
+  architecture-wide from owner/callsite metadata and are referenced through
+  declarations already present in `neko_native_impl_prelude.h`.
+- Validation command or runtime target: focused `CCodeGeneratorTest`,
+  generated-C hot-path audit, one fresh four-jar native-only timing pass with
+  `.plan/native-only-full.yml`, and static generated-source inspection proving
+  the new support shards compile with the same Zig flags and without forbidden
+  JNI/JVMTI/fallback calls.
+- Completion criteria: fresh generated source sets contain
+  `neko_native_owner_bindings.c` and `neko_native_icache_support.c` when their
+  corresponding regions exist; `neko_native_support.c` no longer carries those
+  marker-delimited bodies; all four native generation rows stay under 5s with
+  `translated>0 rejected=0`; compiler flags and translated hot-path inlining
+  are unchanged; no JNI/JVMTI/original-bytecode fallback is introduced.
+- Checkpoint evidence: focused source-set validation passed with
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest`,
+  and generated-C hot-path validation passed with
+  `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`. Fresh generated
+  evaluator artifacts under `build/neko-native-work/run-15384558175071`
+  contain `generated.c.count=128`, including
+  `neko_native_owner_bindings.c` and `neko_native_icache_support.c`. The
+  owner/icache shards include `neko_native_impl_prelude.h`; the remaining
+  `neko_native_support.c` no longer contains the owner-binding or
+  inline-cache metadata markers. The same evaluator manifest shows
+  `neko_native_support.c` reduced from the P15 884283-byte/2555 ms source to
+  715353 bytes/2120 ms, while the current dominant long tail remains
+  `neko_native_impl_103.c` at 2575 ms. A fresh native-only four-jar timing
+  pass with `.plan/native-only-full.yml` (`skipOnError: false`) stayed under
+  the 5s gate: `evaluator.jar` 3247 ms (`translated=122 rejected=0`, 128 C
+  sources), `test21.jar` 3272 ms (`translated=93 rejected=0`, 99 C sources),
+  `snake.jar` 1881 ms (`translated=18 rejected=0`, 24 C sources), and
+  `test.jar` 2476 ms (`translated=49 rejected=0`, 55 C sources). Static
+  inspection of fresh impl sources found no `NEKO_JNI_FN_PTR`, `(*env)->`, or
+  `env->` JNI function-table use. Fresh build manifests still use Zig `-O3`,
+  `-march=x86_64_v3`, and `-funroll-loops`.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,

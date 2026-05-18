@@ -479,6 +479,16 @@ class CCodeGeneratorTest {
         CCodeGenerator.GeneratedSourceSet sourceSet = generator.generateSourceSet(List.of(function), List.of(binding));
         String header = sourceSet.implementationHeader().source();
         String support = sourceSet.supportSource().source();
+        String ownerBindings = sourceSet.supportSources().stream()
+            .filter(source -> source.fileName().equals("neko_native_owner_bindings.c"))
+            .findFirst()
+            .orElseThrow()
+            .source();
+        String icacheSupport = sourceSet.supportSources().stream()
+            .filter(source -> source.fileName().equals("neko_native_icache_support.c"))
+            .findFirst()
+            .orElseThrow()
+            .source();
 
         assertFalse(header.contains("static jvalue neko_icache_dispatch("), header);
         assertFalse(header.contains("static void neko_raise_fast_array_reason("), header);
@@ -505,8 +515,14 @@ class CCodeGeneratorTest {
         assertTrue(support.contains("NEKO_HOT_INLINE jboolean neko_checked_iastore(void *thread, JNIEnv *env, jintArray arr"), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jvalue neko_njx_dispatch_generic(\n"), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) neko_icache_site neko_icache_sites["), support);
-        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) const neko_icache_meta neko_icache_metas["), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) jobject neko_concat_append(\n"), support);
+        assertFalse(support.contains("// === Bind-time owner resolution ==="), support);
+        assertFalse(support.contains("// === Inline-cache metadata ==="), support);
+        assertTrue(ownerBindings.contains("#include \"neko_native_impl_prelude.h\""), ownerBindings);
+        assertTrue(ownerBindings.contains("__attribute__((visibility(\"hidden\"))) void neko_bind_owner_"), ownerBindings);
+        assertTrue(icacheSupport.contains("#include \"neko_native_impl_prelude.h\""), icacheSupport);
+        assertTrue(icacheSupport.contains("// === Inline-cache metadata ==="), icacheSupport);
+        assertTrue(icacheSupport.contains("__attribute__((visibility(\"hidden\"))) const neko_icache_meta neko_icache_metas["), icacheSupport);
     }
 
     @Test
