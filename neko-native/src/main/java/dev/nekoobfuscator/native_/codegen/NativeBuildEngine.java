@@ -200,10 +200,14 @@ public final class NativeBuildEngine {
 
     private List<CommandResult> runCompileJobs(List<CompileJob> jobs) throws IOException {
         int workers = Math.max(1, Math.min(jobs.size(), Runtime.getRuntime().availableProcessors()));
+        List<CompileJob> submissionOrder = new ArrayList<>(jobs);
+        submissionOrder.sort(Comparator
+            .comparingLong((CompileJob job) -> sourceSize(job.sourceFile())).reversed()
+            .thenComparingInt(CompileJob::index));
         ExecutorService executor = Executors.newFixedThreadPool(workers);
         try {
             CompletionService<CommandResult> completion = new ExecutorCompletionService<>(executor);
-            for (CompileJob job : jobs) {
+            for (CompileJob job : submissionOrder) {
                 completion.submit(() -> runCommand(job.index(), job.command()));
             }
             List<CommandResult> results = new ArrayList<>(jobs.size());
@@ -221,6 +225,14 @@ public final class NativeBuildEngine {
             return results;
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    private long sourceSize(Path sourceFile) {
+        try {
+            return Files.size(sourceFile);
+        } catch (IOException ignored) {
+            return 0L;
         }
     }
 

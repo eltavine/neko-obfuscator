@@ -334,7 +334,7 @@ obfuscated output behavior.
   compile-time checkpoint; the broader baseline-vs-native runtime-output
   acceptance gate remains separate.
 
-### [ ] P14: Reduce fixed support compile floor without de-inlining hot paths
+### [x] P14: Reduce fixed support compile floor without de-inlining hot paths
 
 - Scope: keep Zig `-O3`, `NEKO_HOT`, `NEKO_HOT_INLINE`, no-JNI/no-JVMTI
   semantics, and translated runtime behavior unchanged while reducing the
@@ -351,6 +351,23 @@ obfuscated output behavior.
   while all four generation rows stay under 5s, no hot-path helper loses
   `NEKO_HOT_INLINE` where the current generated path depends on inlining, and
   native coverage remains `translated>0 rejected=0` for all four fixtures.
+- Checkpoint evidence: implementation changed only compile-job submission order
+  in `NativeBuildEngine`; generated C, Zig optimization flags, link order,
+  `NEKO_HOT`, and `NEKO_HOT_INLINE` annotations are unchanged. Jobs are now
+  submitted largest source first so long impl/support tasks start immediately
+  instead of after many small sources, while manifest/result records remain
+  sorted by original source index. Focused tests passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest
+  --tests dev.nekoobfuscator.test.OpcodeTranslatorUnitTest`. Native C hot-path
+  audit passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`.
+  One fresh evaluator run completed in 4213 ms (`translated=122 rejected=0`,
+  126 C sources, same 14893368-byte library as P13). A full fresh four-jar
+  generation pass stayed under 5s for every fixture and reported no fallback
+  markers: `evaluator.jar` 4741 ms (`translated=122 rejected=0`, 126 C
+  sources), `test21.jar` 3071 ms (`translated=93 rejected=0`, 97 C sources),
+  `snake.jar` 1806 ms (`translated=18 rejected=0`, 22 C sources), and
+  `test.jar` 2429 ms (`translated=49 rejected=0`, 53 C sources).
 
 ## Notes
 
