@@ -327,18 +327,20 @@ typedef struct {
     const char *owner;
     const char *method;
     const char *file;
+} neko_shadow_frame_desc;
+
+typedef struct {
+    const neko_shadow_frame_desc *desc;
 } neko_shadow_frame;
 
 #define NEKO_SHADOW_STACK_MAX 256
 static __thread neko_shadow_frame g_neko_shadow_stack[NEKO_SHADOW_STACK_MAX];
 static __thread uint32_t g_neko_shadow_depth = 0u;
 
-static void neko_shadow_push(const char *owner, const char *method, const char *file) {
-    if (owner == NULL || method == NULL || file == NULL) return;
+static void neko_shadow_push(const neko_shadow_frame_desc *desc) {
+    if (desc == NULL || desc->owner == NULL || desc->method == NULL || desc->file == NULL) return;
     if (g_neko_shadow_depth < NEKO_SHADOW_STACK_MAX) {
-        g_neko_shadow_stack[g_neko_shadow_depth].owner = owner;
-        g_neko_shadow_stack[g_neko_shadow_depth].method = method;
-        g_neko_shadow_stack[g_neko_shadow_depth].file = file;
+        g_neko_shadow_stack[g_neko_shadow_depth].desc = desc;
         g_neko_shadow_depth++;
     }
 }
@@ -378,11 +380,13 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
     if (trace == NULL || neko_exception_check(env)) return trace;
     for (i = 0u; i < count; i++) {
         neko_shadow_frame *frame = &g_neko_shadow_stack[depth - 1u - i];
+        const neko_shadow_frame_desc *desc = frame->desc;
         jvalue args[4];
         jobject element;
-        args[0].l = neko_shadow_dotted_string(env, frame->owner);
-        args[1].l = g_neko_jni_new_string_utf_fn(env, frame->method);
-        args[2].l = g_neko_jni_new_string_utf_fn(env, frame->file);
+        if (desc == NULL) continue;
+        args[0].l = neko_shadow_dotted_string(env, desc->owner);
+        args[1].l = g_neko_jni_new_string_utf_fn(env, desc->method);
+        args[2].l = g_neko_jni_new_string_utf_fn(env, desc->file);
         args[3].i = -1;
         if (neko_exception_check(env)) return trace;
         element = g_neko_jni_new_object_a_fn(env, ste_cls, ste_ctor, args);

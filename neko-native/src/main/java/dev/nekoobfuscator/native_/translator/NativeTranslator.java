@@ -166,8 +166,11 @@ public final class NativeTranslator {
             fn.addStatement(new CStatement.RawC(codeGenerator.ownerStringBindCall(selection.owner().name())));
         }
         fn.addStatement(new CStatement.RawC(
-            "neko_shadow_push(\"" + CStringLiteral.escape(selection.owner().name()) + "\", \"" + CStringLiteral.escape(selection.method().name()) + "\", \""
-                + CStringLiteral.escape(OpcodeTranslator.simpleSourceFileName(selection.owner().name())) + "\");"
+            "static const neko_shadow_frame_desc __neko_shadow_desc = { \""
+                + CStringLiteral.escape(selection.owner().name()) + "\", \""
+                + CStringLiteral.escape(selection.method().name()) + "\", \""
+                + CStringLiteral.escape(OpcodeTranslator.simpleSourceFileName(selection.owner().name()))
+                + "\" }; neko_shadow_push(&__neko_shadow_desc);"
         ));
         /* Tail-call landing pad: tryTailRecursion rewrites self-recursion
          * into `goto __neko_tco_entry`. Emitted unconditionally so unrelated
