@@ -49,6 +49,7 @@ public final class CCodeGenerator {
     private final LinkedHashMap<String, IcacheDirectStubRef> icacheDirectStubs = new LinkedHashMap<>();
     private final LinkedHashMap<String, IcacheMetaRef> icacheMetas = new LinkedHashMap<>();
     private final LinkedHashMap<String, StaticFieldDescriptorRef> staticFieldDescriptorRefs = new LinkedHashMap<>();
+    private final LinkedHashMap<String, ImplicitExceptionRef> implicitExceptionRefs = new LinkedHashMap<>();
     private int stringCacheCount;
     private boolean cachedFastArrayRaiseHelperRequired;
     private String cachedFastArrayRaiseDispatcherSymbol;
@@ -138,6 +139,22 @@ public final class CCodeGenerator {
             fieldSlotName(owner, name, desc, true),
             staticFieldBaseSlotName(owner, name, desc, true),
             staticFieldOffsetSlotName(owner, name, desc, true)
+        ));
+        return ref.symbol();
+    }
+
+    public String implicitExceptionRefName(String bindingOwner, String owner) {
+        String ctorDesc = "(Ljava/lang/String;)V";
+        registerOwnerMethodReference(bindingOwner, owner, "<init>", ctorDesc, false);
+        String dispatcher = registerInvokeShape(false, 'V', new char[] { 'L' });
+        ImplicitExceptionRef ref = implicitExceptionRefs.computeIfAbsent(owner, ignored -> new ImplicitExceptionRef(
+            implicitExceptionRefs.size(),
+            owner,
+            ctorDesc,
+            classSlotName(owner),
+            methodPtrSlotName(owner, "<init>", ctorDesc, false),
+            methodIEntrySlotName(owner, "<init>", ctorDesc, false),
+            dispatcher
         ));
         return ref.symbol();
     }
@@ -454,6 +471,7 @@ public final class CCodeGenerator {
         sb.append(renderResolutionCaches());
         sb.append(renderRawFunctionPrototypes(bindings));
         sb.append(nativeToJavaInvokeEmitter.renderPrelude());
+        sb.append(renderImplicitExceptionRefs());
         sb.append(NativeRuntimeSupportEmitter.renderRuntimeSupport());
         sb.append(NativeRuntimeSupportEmitter.renderHotSpotSupport());
         sb.append(NativeHotSpotFastAccessEmitter.renderHotSpotFastAccessHelpers());
@@ -471,6 +489,7 @@ public final class CCodeGenerator {
         sb.append(nativeToJavaInvokeEmitter.renderInitFunction());
         sb.append(NativeBindSupportEmitter.renderBindSupport());
         sb.append(renderCachedFastArrayRaiseHelper());
+        sb.append(renderImplicitExceptionRefHelper());
         sb.append(NativeStringSupportEmitter.renderStringTableInternSupport());
         /* T4.2a — emit the tolerant class-mirror resolver right after
          * renderBindSupport so it can reuse the resolver typedefs and
@@ -1412,6 +1431,15 @@ public final class CCodeGenerator {
                     .append(staticFieldRefIndex++).append("])\n");
             }
         }
+        sb.append("typedef struct neko_implicit_exception_ref {\n");
+        sb.append("    jclass *class_slot;\n");
+        sb.append("    void **method_slot;\n");
+        sb.append("    void **ientry_slot;\n");
+        sb.append("    jvalue (*dispatcher)(void*, JNIEnv*, void*, void*, jobject, const jvalue*);\n");
+        sb.append("    const char *owner;\n");
+        sb.append("    const char *name;\n");
+        sb.append("    const char *desc;\n");
+        sb.append("} neko_implicit_exception_ref;\n");
         for (int i = 0; i < stringCacheCount; i++) {
             sb.append("static jstring g_str_").append(i).append(" = NULL;\n");
         }
@@ -1450,6 +1478,27 @@ public final class CCodeGenerator {
         sb.append("#define NEKO_ENSURE_STATIC_METHOD_ID(slot, env, cls, name, desc) neko_ensure_method_id_slot(&(slot), (env), (cls), (name), (desc), JNI_TRUE)\n");
         sb.append("#define NEKO_ENSURE_FIELD_ID(slot, env, cls, name, desc) neko_ensure_field_id_slot(&(slot), (env), (cls), (name), (desc), JNI_FALSE)\n");
         sb.append("#define NEKO_ENSURE_STATIC_FIELD_ID(slot, env, cls, name, desc) neko_ensure_field_id_slot(&(slot), (env), (cls), (name), (desc), JNI_TRUE)\n\n");
+        return sb.toString();
+    }
+
+    private String renderImplicitExceptionRefs() {
+        StringBuilder sb = new StringBuilder();
+        if (!implicitExceptionRefs.isEmpty()) {
+            sb.append("static const neko_implicit_exception_ref g_implicit_exception_refs[").append(implicitExceptionRefs.size()).append("] = {\n");
+            for (ImplicitExceptionRef ref : implicitExceptionRefs.values()) {
+                sb.append("    {&").append(ref.classSlot()).append(", &").append(ref.methodPtrSlot())
+                    .append(", &").append(ref.methodIEntrySlot()).append(", ").append(ref.dispatcher())
+                    .append(", \"").append(CStringLiteral.escape(ref.owner())).append("\", \"<init>\", \"")
+                    .append(CStringLiteral.escape(ref.ctorDesc())).append("\"},   // ").append(ref.symbol()).append('\n');
+            }
+            sb.append("};\n");
+            int index = 0;
+            for (ImplicitExceptionRef ref : implicitExceptionRefs.values()) {
+                sb.append("#define ").append(ref.symbol()).append(" (g_implicit_exception_refs[")
+                    .append(index++).append("])\n");
+            }
+        }
+        sb.append("__attribute__((visibility(\"hidden\"))) extern void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const neko_implicit_exception_ref *ref);\n");
         return sb.toString();
     }
 
@@ -1503,6 +1552,26 @@ static void neko_raise_cached_fast_array_reason(void *thread, JNIEnv *env, int r
             CStringLiteral.escape(ctorDesc),
             dispatcher
         );
+    }
+
+    private String renderImplicitExceptionRefHelper() {
+        return """
+__attribute__((cold, noinline))
+static void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const neko_implicit_exception_ref *ref) {
+    jclass cls;
+    void *ctor_method;
+    void *ctor_entry;
+    if (ref == NULL || ref->class_slot == NULL || ref->method_slot == NULL || ref->ientry_slot == NULL || ref->dispatcher == NULL) {
+        fprintf(stderr, "[neko-direct] implicit exception ref metadata unavailable ref=%p\\n", (void*)ref);
+        abort();
+    }
+    cls = neko_bound_class(env, *(ref->class_slot), ref->owner);
+    ctor_method = *(ref->method_slot);
+    ctor_entry = neko_bound_method_i_entry(ctor_method, ref->ientry_slot, ref->owner, ref->name, ref->desc);
+    neko_raise_implicit_exception(thread, env, cls, ctor_method, ctor_entry, ref->dispatcher, ref->owner);
+}
+
+""";
     }
 
     private String renderBindOwnerFunctions() {
@@ -1775,6 +1844,21 @@ static void neko_raise_cached_fast_array_reason(void *thread, JNIEnv *env, int r
             return List.copyOf(sources);
         }
     }
+
+    private record ImplicitExceptionRef(
+        int index,
+        String owner,
+        String ctorDesc,
+        String classSlot,
+        String methodPtrSlot,
+        String methodIEntrySlot,
+        String dispatcher
+    ) {
+        String symbol() {
+            return "g_implicit_exception_ref_" + index;
+        }
+    }
+
 
     public record GeneratedSourceFile(String fileName, String source) {}
 

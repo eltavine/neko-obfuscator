@@ -1485,13 +1485,8 @@ public final class OpcodeTranslator {
     }
 
     private String raiseImplicitException(String owner) {
-        String ctorDesc = "(Ljava/lang/String;)V";
-        String dispatcher = codeGenerator.registerInvokeShape(false, 'V', new char[] { 'L' });
-        return "neko_raise_implicit_exception(thread, env, "
-            + cachedClassExpression(owner) + ", "
-            + cachedMethodPtrExpression(owner, "<init>", ctorDesc, false) + ", "
-            + cachedMethodIEntryExpression(owner, "<init>", ctorDesc, false) + ", "
-            + dispatcher + ", \"" + CStringLiteral.escape(owner) + "\")";
+        String ref = codeGenerator.implicitExceptionRefName(currentOwnerInternalName, owner);
+        return "neko_raise_implicit_exception_ref(thread, env, &" + ref + ")";
     }
 
     private String fieldCacheVar(String owner, String name, String desc, boolean isStatic) {

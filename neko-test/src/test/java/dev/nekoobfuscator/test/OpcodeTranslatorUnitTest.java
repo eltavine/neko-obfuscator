@@ -99,8 +99,7 @@ class OpcodeTranslatorUnitTest {
             "jint b = POP_I(); jint a = POP_I(); PUSH_I(a + b);",
             "jint b = POP_I(); jint a = POP_I(); PUSH_I(a * b);",
             "jint b = POP_I(); jint a = POP_I(); if (b == 0) {",
-            "java/lang/ArithmeticException",
-            "neko_raise_implicit_exception(thread, env,",
+            "neko_raise_implicit_exception_ref(thread, env, &g_implicit_exception_ref_",
             "PUSH_I(a / b);",
             "PUSH_I(a % b);",
             "PUSH_I(-POP_I());");
@@ -273,7 +272,7 @@ class OpcodeTranslatorUnitTest {
             "neko_checked_iaload(thread, env,",
             "neko_checked_iastore(thread, env,",
             "neko_raise_cached_fast_array_reason(thread, env,",
-            "java/lang/NullPointerException",
+            "neko_raise_implicit_exception_ref(thread, env, &g_implicit_exception_ref_",
             "neko_fast_array_length(arr)",
             "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
             "PUSH_O(neko_fast_new_object_array(thread, env, len,",
@@ -395,8 +394,7 @@ class OpcodeTranslatorUnitTest {
             "neko_fast_alloc_object(thread, env, cls)",
             "neko_fast_is_instance_of(env, obj, cls)",
             "neko_fast_get_object_class(thread, obj)",
-            "ClassCastException",
-            "neko_raise_implicit_exception(thread, env,",
+            "neko_raise_implicit_exception_ref(thread, env, &g_implicit_exception_ref_",
             "goto __neko_exception_exit;"
         );
         assertFalse(code.contains("neko_alloc_object(env,"), code);
@@ -412,8 +410,7 @@ class OpcodeTranslatorUnitTest {
 
         assertContains(code,
             "jthrowable __athrow = (jthrowable)POP_O();",
-            "java/lang/NullPointerException",
-            "neko_raise_implicit_exception(thread, env,",
+            "neko_raise_implicit_exception_ref(thread, env, &g_implicit_exception_ref_",
             "neko_set_pending_exception(thread, __athrow);"
         );
         assertFalse(code.contains("neko_throw(env"), code);
