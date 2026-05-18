@@ -46,6 +46,7 @@ public final class NativeTranslator {
 
     private final CCodeGenerator codeGenerator;
     private int concatLiteralIndex = 0;
+    private int primitiveArrayLiteralIndex = 0;
 
     public NativeTranslator(String outputPrefix, boolean obfuscateJniSlotDispatch, boolean cacheJniIds, long masterSeed) {
         this.codeGenerator = new CCodeGenerator(masterSeed);
@@ -210,8 +211,9 @@ public final class NativeTranslator {
                 pendingHandlers = null;
             }
             StringConcatPattern concatPattern = renderedStringConcatPattern(insn, selection.owner().name());
-            OpcodeTranslator.FusedTranslation fused = (concatPattern == null) ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap) : null;
-            TailCallRewrite tail = (concatPattern == null && fused == null)
+            PrimitiveArrayLiteralPattern arrayLiteral = concatPattern == null ? renderedPrimitiveArrayLiteralPattern(insn) : null;
+            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null) ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap) : null;
+            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && fused == null)
                 ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
@@ -223,6 +225,11 @@ public final class NativeTranslator {
             } else if (concatPattern != null) {
                 fn.addStatement(new CStatement.RawC(concatPattern.code));
                 insn = concatPattern.lastInsn;
+            } else if (arrayLiteral != null) {
+                fn.addStatement(new CStatement.RawC(arrayLiteral.code));
+                pendingHandlers = activeHandlers.getOrDefault(pcMap.get(arrayLiteral.newArrayInsn), List.of());
+                insn = arrayLiteral.lastInsn;
+                continue;
             } else if (fused != null) {
                 fn.addStatement(new CStatement.RawC(fused.code()));
                 insn = fused.lastInsn();
@@ -795,6 +802,146 @@ public final class NativeTranslator {
         String prefix = "static jstring " + literalVar + " = NULL; "
             + "neko_bind_string_slot(thread, env, &" + literalVar + ", \"" + CStringLiteral.escape(value) + "\"); ";
         return new StringProducer(prefix, literalVar);
+    }
+
+    private PrimitiveArrayLiteralPattern renderedPrimitiveArrayLiteralPattern(AbstractInsnNode firstInsn) {
+        Integer len = intLiteral(firstInsn);
+        if (len == null || len < 4) {
+            return null;
+        }
+        AbstractInsnNode newArrayInsn = nextLiteralPatternInsn(firstInsn);
+        if (!(newArrayInsn instanceof IntInsnNode newArray) || newArray.getOpcode() != Opcodes.NEWARRAY) {
+            return null;
+        }
+        PrimitiveArrayLiteralKind kind = PrimitiveArrayLiteralKind.forNewArrayOperand(newArray.operand);
+        if (kind == null) {
+            return null;
+        }
+        List<String> values = new ArrayList<>(len);
+        AbstractInsnNode cur = nextLiteralPatternInsn(newArrayInsn);
+        AbstractInsnNode lastStore = null;
+        for (int expectedIndex = 0; expectedIndex < len; expectedIndex++) {
+            if (cur == null || cur.getOpcode() != Opcodes.DUP) {
+                return null;
+            }
+            AbstractInsnNode indexInsn = nextLiteralPatternInsn(cur);
+            Integer index = intLiteral(indexInsn);
+            if (index == null || index != expectedIndex) {
+                return null;
+            }
+            AbstractInsnNode valueInsn = nextLiteralPatternInsn(indexInsn);
+            String value = kind.literalValue(valueInsn);
+            if (value == null) {
+                return null;
+            }
+            AbstractInsnNode storeInsn = nextLiteralPatternInsn(valueInsn);
+            if (storeInsn == null || storeInsn.getOpcode() != kind.storeOpcode) {
+                return null;
+            }
+            values.add(value);
+            lastStore = storeInsn;
+            cur = nextLiteralPatternInsn(storeInsn);
+        }
+        if (lastStore == null) {
+            return null;
+        }
+        String literalName = "__neko_primitive_array_literal_" + primitiveArrayLiteralIndex++;
+        StringBuilder code = new StringBuilder();
+        code.append("{ static const ").append(kind.cLiteralType).append(' ').append(literalName).append("[] = { ");
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) {
+                code.append(", ");
+            }
+            code.append(values.get(i));
+        }
+        code.append(" }; ")
+            .append(kind.cArrayType).append(" __a = (").append(kind.cArrayType).append(")neko_fast_new_primitive_array(thread, env, ")
+            .append(len).append(", ").append(kind.kindConstant).append("); ")
+            .append("char *__oop = (char*)neko_handle_oop((jobject)__a); ")
+            .append("if (__oop == NULL || neko_const_prim_array_scale(").append(kind.kindConstant).append(") != (jint)sizeof(").append(kind.cElementType).append(") ")
+            .append("|| *(jint*)(__oop + neko_const_array_length_offset()) != ").append(len).append(") { ")
+            .append("fprintf(stderr, \"[neko-direct] primitive array literal init unavailable kind=%d len=%d arr=%p\\n\", ")
+            .append(kind.kindConstant).append(", ").append(len).append(", (void*)__a); abort(); } ")
+            .append("memcpy(__oop + neko_const_prim_array_base(").append(kind.kindConstant).append("), ").append(literalName).append(", sizeof(").append(literalName).append(")); ")
+            .append("PUSH_O(__a); }");
+        return new PrimitiveArrayLiteralPattern(code.toString(), newArrayInsn, lastStore);
+    }
+
+    private AbstractInsnNode nextLiteralPatternInsn(AbstractInsnNode insn) {
+        AbstractInsnNode cur = insn == null ? null : insn.getNext();
+        while (cur instanceof LineNumberNode || cur instanceof FrameNode) {
+            cur = cur.getNext();
+        }
+        return cur;
+    }
+
+    private static Integer intLiteral(AbstractInsnNode insn) {
+        if (insn == null) {
+            return null;
+        }
+        int opcode = insn.getOpcode();
+        if (opcode == Opcodes.ICONST_M1) return -1;
+        if (opcode >= Opcodes.ICONST_0 && opcode <= Opcodes.ICONST_5) return opcode - Opcodes.ICONST_0;
+        if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) return ((IntInsnNode) insn).operand;
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer value) return value;
+        return null;
+    }
+
+    private static String doubleLiteral(AbstractInsnNode insn) {
+        Double value = null;
+        if (insn != null && insn.getOpcode() == Opcodes.DCONST_0) value = 0.0d;
+        if (insn != null && insn.getOpcode() == Opcodes.DCONST_1) value = 1.0d;
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Double ldcValue) value = ldcValue;
+        if (value == null) {
+            return null;
+        }
+        String hex = Long.toHexString(Double.doubleToRawLongBits(value));
+        return "0x" + "0".repeat(16 - hex.length()) + hex + "ULL";
+    }
+
+    private record PrimitiveArrayLiteralPattern(String code, AbstractInsnNode newArrayInsn, AbstractInsnNode lastInsn) {}
+
+    private enum PrimitiveArrayLiteralKind {
+        INT(Opcodes.T_INT, Opcodes.IASTORE, "jint", "jint", "jintArray", "NEKO_PRIM_I") {
+            @Override
+            String literalValue(AbstractInsnNode insn) {
+                Integer value = NativeTranslator.intLiteral(insn);
+                return value == null ? null : value.toString();
+            }
+        },
+        DOUBLE(Opcodes.T_DOUBLE, Opcodes.DASTORE, "uint64_t", "jdouble", "jdoubleArray", "NEKO_PRIM_D") {
+            @Override
+            String literalValue(AbstractInsnNode insn) {
+                return NativeTranslator.doubleLiteral(insn);
+            }
+        };
+
+        final int newArrayOperand;
+        final int storeOpcode;
+        final String cLiteralType;
+        final String cElementType;
+        final String cArrayType;
+        final String kindConstant;
+
+        PrimitiveArrayLiteralKind(int newArrayOperand, int storeOpcode, String cLiteralType, String cElementType, String cArrayType, String kindConstant) {
+            this.newArrayOperand = newArrayOperand;
+            this.storeOpcode = storeOpcode;
+            this.cLiteralType = cLiteralType;
+            this.cElementType = cElementType;
+            this.cArrayType = cArrayType;
+            this.kindConstant = kindConstant;
+        }
+
+        abstract String literalValue(AbstractInsnNode insn);
+
+        static PrimitiveArrayLiteralKind forNewArrayOperand(int operand) {
+            for (PrimitiveArrayLiteralKind kind : values()) {
+                if (kind.newArrayOperand == operand) {
+                    return kind;
+                }
+            }
+            return null;
+        }
     }
 
     private String renderTableSwitch(TableSwitchInsnNode insn, Map<LabelNode, String> labelMap) {

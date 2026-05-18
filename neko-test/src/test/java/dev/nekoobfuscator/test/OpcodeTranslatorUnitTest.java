@@ -587,6 +587,66 @@ class OpcodeTranslatorUnitTest {
         assertFalse(body.contains("neko_icache_"), body);
     }
 
+    @Test
+    void nativeTranslatorCompactsSequentialIntArrayLiteralInitialization() {
+        String source = translateSingleMethod(primitiveArrayLiteralOwner("pkg/IntLiteralArray", "()[I", Opcodes.T_INT, Opcodes.IASTORE));
+        String body = translatedBodySection(source);
+
+        assertContains(body,
+            "static const jint __neko_primitive_array_literal_",
+            "neko_fast_new_primitive_array(thread, env, 4, NEKO_PRIM_I)",
+            "memcpy(__oop + neko_const_prim_array_base(NEKO_PRIM_I)",
+            "PUSH_O(__a);");
+        assertFalse(body.contains("neko_checked_iastore"), body);
+    }
+
+    @Test
+    void nativeTranslatorCompactsSequentialDoubleArrayLiteralInitialization() {
+        String source = translateSingleMethod(primitiveArrayLiteralOwner("pkg/DoubleLiteralArray", "()[D", Opcodes.T_DOUBLE, Opcodes.DASTORE));
+        String body = translatedBodySection(source);
+
+        assertContains(body,
+            "static const uint64_t __neko_primitive_array_literal_",
+            "neko_fast_new_primitive_array(thread, env, 4, NEKO_PRIM_D)",
+            "memcpy(__oop + neko_const_prim_array_base(NEKO_PRIM_D)",
+            "PUSH_O(__a);");
+        assertFalse(body.contains("neko_checked_dastore"), body);
+    }
+
+    @Test
+    void nativeTranslatorDoesNotCompactArrayLiteralAcrossLabelBoundary() {
+        String source = translateSingleMethod(primitiveArrayLiteralOwner(
+            "pkg/LabeledLiteralArray", "()[I", Opcodes.T_INT, Opcodes.IASTORE, true, false));
+        String body = translatedBodySection(source);
+
+        assertFalse(body.contains("__neko_primitive_array_literal_"), body);
+        assertContains(body, "neko_checked_iastore");
+    }
+
+    @Test
+    void nativeTranslatorDoesNotCompactNonSequentialArrayStores() {
+        String source = translateSingleMethod(primitiveArrayLiteralOwner(
+            "pkg/NonSequentialLiteralArray", "()[I", Opcodes.T_INT, Opcodes.IASTORE, false, true));
+        String body = translatedBodySection(source);
+
+        assertFalse(body.contains("__neko_primitive_array_literal_"), body);
+        assertContains(body, "neko_checked_iastore");
+    }
+
+    @Test
+    void nativeTranslatorKeepsTryDispatchForCompactedArrayLiteral() {
+        String source = translateSingleMethod(primitiveArrayLiteralTryOwner());
+        String body = translatedBodySection(source);
+
+        assertContains(body,
+            "__neko_primitive_array_literal_",
+            "neko_take_pending_exception(thread)",
+            "java/lang/Throwable",
+            "PUSH_O(__exc); goto");
+    }
+
+
+
     private static OpcodeTranslator translator() {
         return new OpcodeTranslator(new CCodeGenerator(12345L), Map.of());
     }
@@ -656,6 +716,87 @@ class OpcodeTranslatorUnitTest {
         }
         return translator.translate(selections).source();
     }
+
+    private static ClassNode primitiveArrayLiteralTryOwner() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/TryLiteralArray";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        LabelNode start = new LabelNode();
+        LabelNode end = new LabelNode();
+        LabelNode handler = new LabelNode();
+        MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "run", "()[I", null, null);
+        method.instructions.add(start);
+        appendPrimitiveArrayLiteral(method, Opcodes.T_INT, Opcodes.IASTORE, false);
+        method.instructions.add(new InsnNode(Opcodes.ARETURN));
+        method.instructions.add(end);
+        method.instructions.add(handler);
+        method.instructions.add(new InsnNode(Opcodes.POP));
+        method.instructions.add(new InsnNode(Opcodes.ACONST_NULL));
+        method.instructions.add(new InsnNode(Opcodes.ARETURN));
+        method.tryCatchBlocks.add(new TryCatchBlockNode(start, end, handler, "java/lang/Throwable"));
+        method.maxStack = 5;
+        method.maxLocals = 0;
+        classNode.methods.add(method);
+        return classNode;
+    }
+
+    private static ClassNode primitiveArrayLiteralOwner(String owner, String descriptor, int newArrayType, int storeOpcode) {
+        return primitiveArrayLiteralOwner(owner, descriptor, newArrayType, storeOpcode, false, false);
+    }
+
+    private static ClassNode primitiveArrayLiteralOwner(
+        String owner,
+        String descriptor,
+        int newArrayType,
+        int storeOpcode,
+        boolean labelAfterNewArray,
+        boolean nonSequentialIndex
+    ) {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = owner;
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "run", descriptor, null, null);
+        method.instructions.add(new InsnNode(Opcodes.ICONST_4));
+        method.instructions.add(new IntInsnNode(Opcodes.NEWARRAY, newArrayType));
+        if (labelAfterNewArray) {
+            method.instructions.add(new LabelNode());
+        }
+        appendPrimitiveArrayLiteralStores(method, storeOpcode, nonSequentialIndex);
+        method.instructions.add(new InsnNode(Opcodes.ARETURN));
+        method.maxStack = 5;
+        method.maxLocals = 0;
+        classNode.methods.add(method);
+        return classNode;
+    }
+
+    private static void appendPrimitiveArrayLiteral(MethodNode method, int newArrayType, int storeOpcode, boolean nonSequentialIndex) {
+        method.instructions.add(new InsnNode(Opcodes.ICONST_4));
+        method.instructions.add(new IntInsnNode(Opcodes.NEWARRAY, newArrayType));
+        appendPrimitiveArrayLiteralStores(method, storeOpcode, nonSequentialIndex);
+    }
+
+    private static void appendPrimitiveArrayLiteralStores(MethodNode method, int storeOpcode, boolean nonSequentialIndex) {
+        for (int i = 0; i < 4; i++) {
+            method.instructions.add(new InsnNode(Opcodes.DUP));
+            int index = nonSequentialIndex && i == 0 ? 1 : i;
+            method.instructions.add(new InsnNode(Opcodes.ICONST_0 + index));
+            if (storeOpcode == Opcodes.DASTORE) {
+                method.instructions.add(new LdcInsnNode(10.25d + i));
+            } else {
+                method.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 10 + i));
+            }
+            method.instructions.add(new InsnNode(storeOpcode));
+        }
+    }
+
 
     private static ClassNode stringBuilderConcatOwner() {
         ClassNode classNode = new ClassNode();
