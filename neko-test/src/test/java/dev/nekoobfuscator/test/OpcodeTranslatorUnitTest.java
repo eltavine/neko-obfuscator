@@ -293,6 +293,7 @@ class OpcodeTranslatorUnitTest {
             "neko_fast_get_static_object_field_ref(thread, env, &g_static_field_ref_",
             "PUSH_O(",
             "jobject obj = POP_O();",
+            "jfieldID fid = neko_bound_field_ref(env, &g_field_ref_",
             "neko_fast_set_object_field(thread, env, obj, fid,"
         );
         assertFalse(code.contains("neko_set_object_field("), code);
@@ -314,6 +315,8 @@ class OpcodeTranslatorUnitTest {
             ));
             assertTrue(instancePutBody.contains("neko_fast_set_" + primitive + "_field("), instancePutBody);
             assertFalse(instancePutBody.contains(jniFieldSetterName(primitive) + "(env,"), instancePutBody);
+            assertTrue(instanceGetBody.contains("jfieldID fid = neko_bound_field_ref(env, &g_field_ref_"), instanceGetBody);
+            assertTrue(instancePutBody.contains("jfieldID fid = neko_bound_field_ref(env, &g_field_ref_"), instancePutBody);
 
             String staticGetBody = translatedBodySection(translateSingleMethod(
                 primitiveFieldOwner("FieldGetStatic" + primitive, "value", desc, 0, primitiveReturnInsn(primitive), true)
@@ -328,6 +331,7 @@ class OpcodeTranslatorUnitTest {
             assertTrue(staticPutBody.contains("neko_ensure_class_initialized_once(env, cls,"), staticPutBody);
             assertTrue(staticPutBody.contains("neko_fast_set_static_" + primitive + "_field("), staticPutBody);
             assertFalse(staticPutBody.contains(jniStaticFieldSetterName(primitive) + "(env,"), staticPutBody);
+            assertTrue(staticPutBody.contains("jfieldID fid = neko_bound_field_ref(env, &g_field_ref_"), staticPutBody);
         }
     }
 

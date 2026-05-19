@@ -482,6 +482,7 @@ class CCodeGeneratorTest {
         generator.classDescriptorRefName(owner.name(), "java/lang/Throwable");
         generator.methodEntryDescriptorRefName(owner.name(), "java/lang/String", "valueOf", "(I)Ljava/lang/String;", true);
         generator.methodIdDescriptorRefName(owner.name(), "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
+        generator.fieldDescriptorRefName(owner.name(), "java/lang/String", "value", "[B", false);
         CCodeGenerator.GeneratedSourceSet sourceSet = generator.generateSourceSet(List.of(function), List.of(binding));
         String header = sourceSet.implementationHeader().source();
         String support = sourceSet.supportSource().source();
@@ -532,6 +533,8 @@ class CCodeGeneratorTest {
         assertTrue(header.contains("#define neko_bound_method_i_entry_ref(ref)"), header);
         assertTrue(header.contains("extern const neko_method_id_ref g_method_id_refs["), header);
         assertTrue(header.contains("#define neko_bound_method_ref(env, ref)"), header);
+        assertTrue(header.contains("extern const neko_field_ref g_field_refs["), header);
+        assertTrue(header.contains("#define neko_bound_field_ref(env, ref)"), header);
         assertFalse(supportHelpers.isEmpty(), sourceSet.supportSources().toString());
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern jvalue neko_icache_dispatch(\n"), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) extern void neko_raise_fast_array_reason("), support);
@@ -553,6 +556,7 @@ class CCodeGeneratorTest {
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) const neko_class_ref g_class_refs["), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) const neko_method_entry_ref g_method_entry_refs["), support);
         assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) const neko_method_id_ref g_method_id_refs["), support);
+        assertTrue(support.contains("__attribute__((visibility(\"hidden\"))) const neko_field_ref g_field_refs["), support);
         assertFalse(support.contains("// === Bind-time owner resolution ==="), support);
         assertFalse(support.contains("// === Inline-cache metadata ==="), support);
         assertTrue(ownerBindings.contains("#include \"neko_native_impl_prelude.h\""), ownerBindings);

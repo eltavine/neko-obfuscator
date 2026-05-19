@@ -49,6 +49,7 @@ public final class CCodeGenerator {
     private final LinkedHashMap<String, IcacheDirectStubRef> icacheDirectStubs = new LinkedHashMap<>();
     private final LinkedHashMap<String, IcacheMetaRef> icacheMetas = new LinkedHashMap<>();
     private final LinkedHashMap<String, StaticFieldDescriptorRef> staticFieldDescriptorRefs = new LinkedHashMap<>();
+    private final LinkedHashMap<String, FieldDescriptorRef> fieldDescriptorRefs = new LinkedHashMap<>();
     private final LinkedHashMap<String, ImplicitExceptionRef> implicitExceptionRefs = new LinkedHashMap<>();
     private final LinkedHashMap<String, ClassDescriptorRef> classDescriptorRefs = new LinkedHashMap<>();
     private final LinkedHashMap<String, MethodEntryDescriptorRef> methodEntryDescriptorRefs = new LinkedHashMap<>();
@@ -142,6 +143,20 @@ public final class CCodeGenerator {
             fieldSlotName(owner, name, desc, true),
             staticFieldBaseSlotName(owner, name, desc, true),
             staticFieldOffsetSlotName(owner, name, desc, true)
+        ));
+        return ref.symbol();
+    }
+
+    public String fieldDescriptorRefName(String bindingOwner, String owner, String name, String desc, boolean isStatic) {
+        registerOwnerFieldReference(bindingOwner, owner, name, desc, isStatic);
+        String key = owner + "." + name + desc + "/" + (isStatic ? "S" : "I");
+        FieldDescriptorRef ref = fieldDescriptorRefs.computeIfAbsent(key, ignored -> new FieldDescriptorRef(
+            fieldDescriptorRefs.size(),
+            owner,
+            name,
+            desc,
+            isStatic,
+            fieldSlotName(owner, name, desc, isStatic)
         ));
         return ref.symbol();
     }
@@ -1489,6 +1504,30 @@ public final class CCodeGenerator {
                     .append(staticFieldRefIndex++).append("])\n");
             }
         }
+        sb.append("typedef struct neko_field_ref {\n");
+        sb.append("    jfieldID *field_slot;\n");
+        sb.append("    const char *owner;\n");
+        sb.append("    const char *name;\n");
+        sb.append("    const char *desc;\n");
+        sb.append("    jboolean is_static;\n");
+        sb.append("} neko_field_ref;\n");
+        if (!fieldDescriptorRefs.isEmpty()) {
+            sb.append("static const neko_field_ref g_field_refs[").append(fieldDescriptorRefs.size()).append("] = {\n");
+            for (FieldDescriptorRef ref : fieldDescriptorRefs.values()) {
+                sb.append("    {&").append(ref.fieldSlot()).append(", \"")
+                    .append(CStringLiteral.escape(ref.owner())).append("\", \"")
+                    .append(CStringLiteral.escape(ref.name())).append("\", \"")
+                    .append(CStringLiteral.escape(ref.desc())).append("\", ")
+                    .append(ref.isStatic() ? "JNI_TRUE" : "JNI_FALSE").append("},   // ").append(ref.symbol()).append('\n');
+            }
+            sb.append("};\n");
+            int fieldRefIndex = 0;
+            for (FieldDescriptorRef ref : fieldDescriptorRefs.values()) {
+                sb.append("#define ").append(ref.symbol()).append(" (g_field_refs[")
+                    .append(fieldRefIndex++).append("])\n");
+            }
+        }
+        sb.append("#define neko_bound_field_ref(env, ref) neko_bound_field((env), *((ref)->field_slot), (ref)->owner, (ref)->name, (ref)->desc, (ref)->is_static)\n");
         sb.append("typedef struct neko_implicit_exception_ref {\n");
         sb.append("    jclass *class_slot;\n");
         sb.append("    void **method_slot;\n");
@@ -1882,6 +1921,19 @@ static void neko_raise_implicit_exception_ref(void *thread, JNIEnv *env, const n
         sb.append("    return result;\n");
         sb.append("}\n\n");
         return sb.toString();
+    }
+
+    private record FieldDescriptorRef(
+        int index,
+        String owner,
+        String name,
+        String desc,
+        boolean isStatic,
+        String fieldSlot
+    ) {
+        String symbol() {
+            return "g_field_ref_" + index;
+        }
     }
 
     private record ClassDescriptorRef(int index, String owner, String classSlot) {
