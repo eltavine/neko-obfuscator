@@ -70,7 +70,7 @@ obfuscated output behavior.
   file for each artifact, found translated `neko_native_impl_*` regions, and
   completed successfully.
 
-### [ ] P4: Runtime equivalence for four jars
+### [x] P4: Runtime equivalence for four jars
 
 - Scope: freshly regenerate native-obfuscated artifacts for
   `evaluator.jar`, `test21.jar`, `snake.jar`, and `test.jar`, then compare
@@ -83,11 +83,25 @@ obfuscated output behavior.
 - Completion criteria: all four native outputs match the accepted baseline
   output contract, no fatal JVM error occurs, no `translated=0`, no
   `Native compilation produced no libraries`, and no fallback marker appears.
-- Current checkpoint evidence: after commit `b8fc403`, fresh native-only
-  generation produced split C source counts `test=8`, `test21=13`, `snake=4`,
-  and `evaluator=17`; `test` and `snake` runtime runs matched their accepted
-  exit contracts, while `test21-native` crashed with SIGSEGV and
-  `evaluator-native` exited 1. This row remains open.
+- Completion evidence: after P9 commit `2a5c47d`, fresh native-only generation
+  in `build/p9-native-validation` produced TEST/test21/SnakeGame/evaluator
+  artifacts with `translated/rejected` rows `49/0`, `93/0`, `18/0`, and
+  `122/0`; no generation log contained `translated=0`, `rejected>0`, or
+  `Native compilation produced no libraries`. Baseline-vs-native runtime
+  evidence in `build/p4-runtime-equivalence` used the original `test-jars/*.jar`
+  and the fresh `.plan/native-full-validation/*-native-full.jar` outputs. TEST
+  baseline/native both exited `0` and retained accepted markers including
+  `Test 1.1: Inheritance PASS`, `Test 2.6: ReTrace PASS`, `Test 2.8: Sec
+  ERROR`, and `-------------Tests r Finished-------------`; test21 baseline/native
+  both exited `0` and retained `sumPoint=10`, `clone equal? true hash1=3820
+  hash2=3820`, and `=== All tests completed ===`; evaluator baseline/native
+  both exited `0` and retained `Testing annotations`, `Descrypted Text:Hello
+  World`, `Successfully compared strings`, and `Successfully decrypted hello
+  world 123 1605479835458`; SnakeGame baseline/native both matched the accepted
+  timeout-smoke contract with status `124` and no stderr. The runtime audit
+  found no fatal marker (`SIGSEGV`, `SIGABRT`, verifier/linkage error), no
+  fallback marker, no native compilation fallback marker, and no fresh `hs_err`
+  file.
 
 ### [ ] P5: Remove duplicated impl prelude compilation
 
