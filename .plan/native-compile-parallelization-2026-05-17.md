@@ -103,7 +103,7 @@ obfuscated output behavior.
   fallback marker, no native compilation fallback marker, and no fresh `hs_err`
   file.
 
-### [ ] P5: Remove duplicated impl prelude compilation
+### [-] P5: Remove duplicated impl prelude compilation
 
 - Scope: keep the same Zig compiler and optimization flags, but move the common
   translated-implementation prelude out of each `neko_native_impl_*.c` body into
@@ -119,13 +119,15 @@ obfuscated output behavior.
   the precompiled impl prelude, no compile/link fallback occurs, generated C
   audit still covers every impl file, and the measured build path moves toward
   the requested 5s target without reducing compile optimization.
-- Current evidence: rejected. Fresh four-jar generation showed the PCH step was
-  a serial bottleneck, not a parallelization improvement: `test.jar` and
+- Rejection evidence: fresh four-jar generation showed the PCH step was a
+  serial bottleneck, not a parallelization improvement: `test.jar` and
   `evaluator.jar` spent about 21.8s in the precompiled header step, and
-  `test21.jar` spent about 61.8s before any impl compile could run. This row
-  remains open and is not the current implementation path.
+  `test21.jar` spent about 61.8s before any impl compile could run. The active
+  accepted path is P8's externalized implementation prelude header without a
+  PCH command; fresh P9 manifests retain that shape, compile each generated C
+  file directly with `zig cc -c -O3 ... -w`, and do not emit a PCH step.
 
-### [ ] P6: Remove generated-C warning-output overhead
+### [x] P6: Remove generated-C warning-output overhead
 
 - Scope: keep the same Zig compiler and optimization flags while suppressing
   warnings for machine-generated C units so native builds do not spend time
@@ -138,13 +140,18 @@ obfuscated output behavior.
 - Completion criteria: generated libraries still build, source audit remains
   green, and measured build time improves without changing transform coverage,
   CFF granularity, Zig, or compiler optimization level.
-- Current evidence: warning output suppression is retained in the active build
-  path as `-w` while keeping `zig cc`, `-O3`, `-march=x86_64_v3`,
+- Completion evidence: warning output suppression is retained in the active
+  build path as `-w` while keeping `zig cc`, `-O3`, `-march=x86_64_v3`,
   `-fno-plt`, `-fno-semantic-interposition`, `-fmerge-all-constants`, and
-  `-funroll-loops`. `NativeGeneratedCHotPathAuditTest` passed with this command
-  shape.
+  `-funroll-loops`. Focused native generated-C audit validation passed during
+  P9 with `NativeGeneratedCHotPathAuditTest`, and fresh P9 four-jar manifests
+  compiled every source with command lines containing `zig cc -c -O3 -std=c11
+  -w -fvisibility=hidden -target x86_64-linux-gnu ... -march=x86_64_v3` plus
+  the existing optimization flags. P9/P4 runtime validation proved the fresh
+  artifacts still execute accepted behavior with `translated>0 rejected=0`, no
+  native compilation fallback, and no fresh `hs_err`.
 
-### [ ] P7: Remove forced recursive flattening from translated C entry bodies
+### [-] P7: Remove forced recursive flattening from translated C entry bodies
 
 - Scope: keep `zig cc`, `-O3`, `-march=x86_64_v3`, and all existing compiler
   optimization flags, but stop marking every translated method entry with the
@@ -158,11 +165,12 @@ obfuscated output behavior.
 - Completion criteria: native generation reaches the requested speed target for
   representative jars or records the remaining long-tail evidence, and runtime
   behavior remains equivalent under the accepted output contracts.
-- Current evidence: rejected for now. Removing `NEKO_FLATTEN` produced much
-  faster C compiles, but fresh runtime comparison then regressed:
-  `test-native` reported `Test 2.5: Loader FAIL` and `evaluator-native` threw
-  `java.lang.LinkageError` in `TestManager$NekoLambda$5.accept`. The active
-  code keeps `NEKO_FLATTEN`.
+- Rejection evidence: removing `NEKO_FLATTEN` produced much faster C compiles,
+  but fresh runtime comparison then regressed: `test-native` reported `Test 2.5:
+  Loader FAIL` and `evaluator-native` threw `java.lang.LinkageError` in
+  `TestManager$NekoLambda$5.accept`. The active accepted code keeps
+  `NEKO_FLATTEN`; fresh P9/P4 validation proves accepted runtime behavior with
+  the current `NEKO_FLATTEN NEKO_HOT` entry-body shape.
 
 ### [x] P8: Externalize impl prelude and split impl chunks to one method
 
@@ -699,7 +707,7 @@ obfuscated output behavior.
   remains the next fixed long tail at `1897ms` to `2104ms`; the next compile
   optimization must therefore target another generic support-code structure.
 
-### [ ] P22: Remove unused moved-global externs from the support main unit
+### [-] P22: Remove unused moved-global externs from the support main unit
 
 - Scope: change only generated native source packaging after P21 by omitting
   moved global-slot `extern` declarations from `neko_native_support.c` when the
@@ -736,15 +744,17 @@ obfuscated output behavior.
   behavior; `translated` remains nonzero with `rejected=0`; and static
   inspection still finds no forbidden JNI function-table usage in generated
   impl sources.
-- Current evidence: rejected for the active implementation path. The experiment
-  passed focused generator/native audit tests and the four fresh native jars
-  preserved accepted behavior with `translated>0 rejected=0` and no forbidden
-  JNI markers in generated impl sources. It reduced hidden `extern g_*`
-  declarations in fresh support main files to about 127-133, but the fresh
-  manifests did not prove a compile-speed improvement: `neko_native_support.c`
-  still dominated at TEST `2137ms`, test21 `3374ms`, evaluator `3086ms`, and
-  SnakeGame `2954ms`. No code from this experiment is retained for the next
-  implementation path.
+- Rejection evidence: the experiment passed focused generator/native audit
+  tests and the four fresh native jars preserved accepted behavior with
+  `translated>0 rejected=0` and no forbidden JNI markers in generated impl
+  sources. It reduced hidden `extern g_*` declarations in fresh support main
+  files to about 127-133, but the fresh manifests did not prove a compile-speed
+  improvement: `neko_native_support.c` still dominated at TEST `2137ms`,
+  test21 `3374ms`, evaluator `3086ms`, and SnakeGame `2954ms`. No code from
+  this experiment is retained for the active implementation path; fresh P9
+  manifests show the accepted support-main shape compiles quickly enough not to
+  be the current top bottleneck (for example test21 `neko_native_support.c` was
+  `189ms`).
 
 ### [x] P23: Split support helper definitions by whole function groups
 
