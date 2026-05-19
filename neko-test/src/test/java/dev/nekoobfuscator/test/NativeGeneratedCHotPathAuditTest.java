@@ -70,6 +70,8 @@ class NativeGeneratedCHotPathAuditTest {
             assertTrue(audit.regionAudits().stream().anyMatch(region -> region.name().startsWith("neko_native_impl_")),
                 () -> "Generated C function parser did not find translated impl regions in " + artifact.generatedCPaths());
             assertRegionTotalsMatchArtifactTotals(audit);
+            assertTrue((" " + artifact.nativeCompilerCommandLine() + " ").contains(" -s "),
+                () -> "Release native link command must strip debug/symtab data: " + artifact.nativeCompilerCommandLine());
             audits.add(audit);
         }
 

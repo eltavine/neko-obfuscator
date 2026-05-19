@@ -150,6 +150,9 @@ public final class NativeBuildEngine {
                     "-target", zigTarget,
                     "-o", outputLib.toString()
                 ));
+                if (!debugBuild) {
+                    linkCmd.add("-s");
+                }
                 for (CompileJob job : jobs) {
                     linkCmd.add(job.objectFile().toString());
                 }
