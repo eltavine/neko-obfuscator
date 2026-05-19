@@ -1529,6 +1529,15 @@ public final class CCodeGenerator {
             }
         }
         sb.append("#define neko_bound_field_ref(env, ref) neko_bound_field((env), *((ref)->field_slot), (ref)->owner, (ref)->name, (ref)->desc, (ref)->is_static)\n");
+        if (fieldSlotIndex.containsKey("java/lang/String.value[B/I")
+            && fieldSlotIndex.containsKey("java/lang/String.coderB/I")) {
+            sb.append("#define neko_concat_accumulate_string(thread, env, acc, rhs) ")
+                .append("neko_concat_accumulate((thread), (env), (acc), (rhs), ")
+                .append(fieldOffsetSlotName("java/lang/String", "value", "[B", false))
+                .append(", ")
+                .append(fieldOffsetSlotName("java/lang/String", "coder", "B", false))
+                .append(")\n");
+        }
         sb.append("typedef struct neko_implicit_exception_ref {\n");
         sb.append("    jclass *class_slot;\n");
         sb.append("    void **method_slot;\n");

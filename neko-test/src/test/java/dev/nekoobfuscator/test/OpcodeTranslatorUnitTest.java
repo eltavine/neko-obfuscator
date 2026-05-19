@@ -486,13 +486,30 @@ class OpcodeTranslatorUnitTest {
             "area=\u0001 count=\u0001"
         )));
 
-        assertContains(code, "neko_bound_method_i_entry_ref(&g_method_entry_ref_", "neko_concat_accumulate");
+        assertContains(code, "neko_bound_method_i_entry_ref(&g_method_entry_ref_", "neko_concat_accumulate_string");
+        assertFalse(code.contains("neko_concat_accumulate(thread, env, __acc"), code);
         assertFalse(code.contains("java/lang/StringBuilder"), code);
         assertFalse(code.contains("java/lang/StringConcatHelper"), code);
         assertFalse(code.contains("simpleConcat"), code);
         assertFalse(code.contains("java/lang/String\", \"concat\""), code);
         assertFalse(code.contains("neko_box_"), code);
         assertFalse(code.contains("neko_new_object_a(env"), code);
+    }
+
+    @Test
+    void stringConcatFullSourceDeclaresMacroAndStringOffsets() {
+        String source = translateSingleMethod(stringConcatInvokeDynamicOwner());
+        String body = translatedBodySection(source);
+
+        assertContains(source,
+            "#define neko_concat_accumulate_string(thread, env, acc, rhs)",
+            "g_off_"
+        );
+        assertContains(body, "neko_concat_accumulate_string(thread, env, __acc");
+        assertFalse(body.contains("neko_concat_accumulate(thread, env, __acc"), body);
+        assertFalse(source.contains("NEKO_JNI_FN_PTR"), source);
+        assertFalse(source.contains("(*env)->"), source);
+        assertFalse(source.contains("env->"), source);
     }
 
     @Test
@@ -800,6 +817,43 @@ class OpcodeTranslatorUnitTest {
         }
     }
 
+
+    private static ClassNode stringConcatInvokeDynamicOwner() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/IndyConcat";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode method = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "run",
+            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+            null,
+            null
+        );
+        Handle bootstrap = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            "java/lang/invoke/StringConcatFactory",
+            "makeConcatWithConstants",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+            false
+        );
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        method.instructions.add(new InvokeDynamicInsnNode(
+            "makeConcatWithConstants",
+            "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+            bootstrap,
+            "\u0001:\u0001"
+        ));
+        method.instructions.add(new InsnNode(Opcodes.ARETURN));
+        method.maxStack = 2;
+        method.maxLocals = 2;
+        classNode.methods.add(method);
+        return classNode;
+    }
 
     private static ClassNode stringBuilderConcatOwner() {
         ClassNode classNode = new ClassNode();

@@ -1255,9 +1255,9 @@ public final class OpcodeTranslator {
     }
 
     private void appendDirectStringConcat(StringBuilder sb, String rhsExpr) {
-        sb.append("__acc = neko_concat_accumulate(thread, env, __acc, (jstring)(").append(rhsExpr).append("), ")
-            .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false)).append(", ")
-            .append(codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false)).append("); ");
+        codeGenerator.fieldOffsetSlotName("java/lang/String", "value", "[B", false);
+        codeGenerator.fieldOffsetSlotName("java/lang/String", "coder", "B", false);
+        sb.append("__acc = neko_concat_accumulate_string(thread, env, __acc, (jstring)(").append(rhsExpr).append(")); ");
     }
 
     private Object[] adaptBootstrapArgs(Object[] originalArgs, Type[] bootstrapArgTypes) {

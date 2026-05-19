@@ -483,6 +483,8 @@ class CCodeGeneratorTest {
         generator.methodEntryDescriptorRefName(owner.name(), "java/lang/String", "valueOf", "(I)Ljava/lang/String;", true);
         generator.methodIdDescriptorRefName(owner.name(), "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false);
         generator.fieldDescriptorRefName(owner.name(), "java/lang/String", "value", "[B", false);
+        generator.fieldOffsetSlotName("java/lang/String", "value", "[B", false);
+        generator.fieldOffsetSlotName("java/lang/String", "coder", "B", false);
         CCodeGenerator.GeneratedSourceSet sourceSet = generator.generateSourceSet(List.of(function), List.of(binding));
         String header = sourceSet.implementationHeader().source();
         String support = sourceSet.supportSource().source();
@@ -526,6 +528,7 @@ class CCodeGeneratorTest {
         assertTrue(header.contains("#define neko_icache_meta_"), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jobject neko_concat_append(\n"), header);
         assertTrue(header.contains("NEKO_FAST_INLINE jstring neko_concat_accumulate(\n"), header);
+        assertTrue(header.contains("#define neko_concat_accumulate_string(thread, env, acc, rhs)"), header);
 
         assertTrue(header.contains("extern const neko_class_ref g_class_refs["), header);
         assertTrue(header.contains("__attribute__((visibility(\"hidden\"))) extern jboolean neko_exception_handler_matches_ref("), header);
