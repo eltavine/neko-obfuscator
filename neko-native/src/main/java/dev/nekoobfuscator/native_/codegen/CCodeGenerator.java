@@ -1477,6 +1477,7 @@ public final class CCodeGenerator {
                     .append(classRefIndex++).append("])\n");
             }
         }
+        sb.append("#define neko_bound_class_ref(env, ref) neko_bound_class((env), *((ref)->class_slot), (ref)->owner)\n");
         sb.append("typedef struct neko_static_field_ref {\n");
         sb.append("    jclass *class_slot;\n");
         sb.append("    volatile jboolean *class_init_slot;\n");

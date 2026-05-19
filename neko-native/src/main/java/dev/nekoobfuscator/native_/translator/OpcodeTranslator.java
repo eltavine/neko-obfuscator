@@ -1437,8 +1437,8 @@ public final class OpcodeTranslator {
     }
 
     private String cachedClassExpression(String owner) {
-        codeGenerator.registerOwnerClassReference(currentOwnerInternalName, owner);
-        return "neko_bound_class(env, " + classCacheVar(owner) + ", \"" + CStringLiteral.escape(owner) + "\")";
+        String ref = codeGenerator.classDescriptorRefName(currentOwnerInternalName, owner);
+        return "neko_bound_class_ref(env, &" + ref + ")";
     }
 
     private String cachedMethodExpression(String owner, String name, String desc, boolean isStatic) {

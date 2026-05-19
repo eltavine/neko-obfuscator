@@ -276,9 +276,11 @@ class OpcodeTranslatorUnitTest {
             "neko_fast_array_length(arr)",
             "PUSH_O(neko_fast_new_primitive_array(thread, env, len, NEKO_PRIM_I));",
             "PUSH_O(neko_fast_new_object_array(thread, env, len,",
-            "PUSH_O(neko_multi_new_array(thread, env, 2, __dims, \"[[I\","
+            "PUSH_O(neko_multi_new_array(thread, env, 2, __dims, \"[[I\",",
+            "neko_bound_class_ref(env, &g_class_ref_"
         );
         assertFalse(code.contains("neko_new_object_array(env,"), code);
+        assertFalse(code.contains("neko_bound_class(env, g_cls_"), code);
     }
 
     @Test
