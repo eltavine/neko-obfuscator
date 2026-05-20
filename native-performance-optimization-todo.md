@@ -381,6 +381,20 @@ Performance and GC gates:
     parity in `build/native-run-tmp/parity-p10o/` regressed: TEST native Calc
     median `138 ms` vs NPT-3h `134 ms`, and obfusjack native timed out once at
     180s after four completed repeated runs.
+  - Implementation row recorded 2026-05-20: NPT-3p will remove only the
+    unreachable generated `neko_njx_dispatch_generic` body and its generic
+    return-BasicType helper after source search proves all emitted callsites use
+    shape-specialized dispatchers. This is dead-code removal and must not
+    change any reachable JVM target call path.
+  - Completion evidence 2026-05-20 for NPT-3p: removed unreachable generated
+    `neko_njx_dispatch_generic` and `neko_njx_result_basic_type`; source search
+    showed all emitted NJX callsites use shape-specialized dispatchers.
+    Focused generator/audit tests passed (`artifact://280`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://282`). Generated C
+    under `build/neko-native-work/run-12646002423282/` contains no generic NJX
+    dispatcher symbol and preserves shape-specialized call_stub Method*/entry
+    dispatch with no named JVM/JDK native method-body replacement. P10 remains
+    `[-]` because original JVM parity is still not achieved.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 

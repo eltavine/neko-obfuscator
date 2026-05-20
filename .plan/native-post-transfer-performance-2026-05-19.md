@@ -630,6 +630,34 @@ the source plan that owns the changed path before it can be considered complete.
   once at 180s after four completed runs. The local debug-gate source change
   was reverted before any implementation checkpoint.
 
+### [x] NPT-3p: Runtime P10 remove unused generic NJX dispatcher body
+
+- Scope: delete only the generated static generic NJX dispatcher and its
+  generic return-BasicType helper after source search proves registered call
+  sites emit shape-specialized dispatchers. This removes dead generated C and
+  must not change any Method*/entry target, call_stub bridge, argument packing,
+  handle scope, exception behavior, or debug behavior on reachable paths.
+- Required evidence: source search showing `neko_njx_dispatch_generic` is not
+  referenced by any emitted callsite; generated C still contains the
+  shape-specialized `neko_njx_*` dispatchers and no generic dispatcher body.
+- Validation command or runtime target: focused generator/audit tests and
+  `NativeObfuscationIntegrationTest`. Direct parity is recorded if runtime
+  paths change; this row is intended to remove unreachable code only.
+- Completion criteria: fresh integration passes, generated C has no
+  `neko_njx_dispatch_generic`, no forbidden JNI/JVMTI/fallback or named
+  method-body substitution appears, and worktree is checkpointed.
+- Completion evidence 2026-05-20: source search found no emitter callsite for
+  `neko_njx_dispatch_generic`; all reachable callsites use shape-specialized
+  dispatchers registered through `renderShapeCallStub`. Removed the unused
+  generated generic dispatcher body and its private `neko_njx_result_basic_type`
+  helper. Focused generator/audit tests passed (`artifact://280`) and fresh
+  `NativeObfuscationIntegrationTest` passed (`artifact://282`). Generated C in
+  `build/neko-native-work/run-12646002423282/` contains shape-specialized
+  `neko_njx_*` dispatchers and no `neko_njx_dispatch_generic` or
+  `neko_njx_result_basic_type` symbols; target Method*/entry call paths remain
+  shape-specialized call_stub dispatches with no named JVM/JDK native method
+  replacement.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
