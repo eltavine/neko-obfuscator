@@ -487,6 +487,30 @@ the source plan that owns the changed path before it can be considered complete.
   single-slot result-buffer source change was reverted before any
   implementation checkpoint because the runtime stability gate failed.
 
+### [rejected] NPT-3j: Runtime P10 constant-index NJX call parameter packing
+
+- Scope: optimize only shape-specialized NJX call parameter packing by emitting
+  constant `call_params` slot indexes for each known ABI shape instead of the
+  mutable `__njx_pos` cursor. The exact slot layout, two-slot long/double
+  padding word, object handle unwrapping, Method*, entry pointer, and call_stub
+  behavior must remain unchanged.
+- Required evidence: source/generated-C proof that generated shapes use fixed
+  slot indexes and still preserve the existing zero-padding semantics for
+  one-slot primitives and two-slot long/double arguments.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://227`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://229`), but direct parity in
+  `build/native-run-tmp/parity-p10j/` did not meet the no-regression gate.
+  TEST native Calc values were `140/140/133/136/134 ms` (median `136 ms`,
+  worse than NPT-3h `134 ms`), and the obfusjack native repeated run timed out
+  once at 180s after three completed runs. The constant-index packing source
+  change was reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
