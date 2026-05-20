@@ -558,6 +558,29 @@ the source plan that owns the changed path before it can be considered complete.
   `hot` attribute source change was reverted before any implementation
   checkpoint.
 
+### [rejected] NPT-3m: Runtime P6 primitive-array cold failure outlining
+
+- Scope: outline only the primitive array helper failure `fprintf`/`abort`
+  blocks into cold noinline helpers. Fast-path null/bounds/metadata checks,
+  array load/store semantics, exception/fail-closed behavior, and generated
+  target method selection must remain unchanged.
+- Required evidence: generated-C proof that `neko_fast_*aload` and
+  `neko_fast_*astore` hot bodies call cold failure helpers instead of carrying
+  inline `fprintf` blocks.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://250`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://252`), but direct parity in
+  `build/native-run-tmp/parity-p10m/` did not meet the no-regression gate.
+  TEST native Calc values were `136/141/135/143/139 ms` (median `139 ms`,
+  worse than NPT-3h `134 ms`), and the obfusjack native repeated run timed out
+  once at 180s after two completed runs. The primitive-array cold failure
+  helper source change was reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
