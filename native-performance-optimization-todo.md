@@ -327,6 +327,17 @@ Performance and GC gates:
     `build/native-run-tmp/parity-p10j/` regressed: TEST native Calc median
     `136 ms` vs NPT-3h `134 ms`, and obfusjack native timed out once at 180s
     after three completed repeated runs.
+  - Implementation row recorded 2026-05-20: NPT-3k will make shape-specialized
+    NJX result locals and debug result logging return-kind-specific, avoiding
+    unused `out_rax` or `out_xmm0` locals after NPT-3h. The call_stub buffer,
+    BasicType, Method*, entry pointer, arguments, handles, and exception
+    behavior must remain unchanged.
+  - Rejected row update 2026-05-20: NPT-3k return-kind-specific result locals
+    were reverted. Focused generator/audit tests passed (`artifact://235`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://237`), but direct
+    parity in `build/native-run-tmp/parity-p10k/` regressed: TEST native Calc
+    median `138 ms` vs NPT-3h `134 ms`, and obfusjack native timed out once at
+    180s after two completed repeated runs.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 

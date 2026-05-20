@@ -511,6 +511,30 @@ the source plan that owns the changed path before it can be considered complete.
   once at 180s after three completed runs. The constant-index packing source
   change was reverted before any implementation checkpoint.
 
+### [rejected] NPT-3k: Runtime P10 return-kind-specific NJX result locals
+
+- Scope: continue NPT-3h by emitting only the result local variables and debug
+  log arguments required by each shape return kind. Integer/object shapes need
+  only `out_rax`, FP shapes need only `out_xmm0`, and void shapes need neither.
+  The call_stub result buffer, BasicType, Method*, entry pointer, arguments,
+  handle scope, and exception behavior must remain unchanged.
+- Required evidence: generated-C proof that result locals/logging are
+  return-kind-specific and no target method body or control-flow replacement is
+  introduced.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://235`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://237`), but direct parity in
+  `build/native-run-tmp/parity-p10k/` did not meet the no-regression gate.
+  TEST native Calc values were `138/146/139/133/138 ms` (median `138 ms`,
+  worse than NPT-3h `134 ms`), and the obfusjack native repeated run timed out
+  once at 180s after two completed runs. The return-kind-local source change
+  was reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
