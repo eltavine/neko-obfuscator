@@ -658,6 +658,32 @@ the source plan that owns the changed path before it can be considered complete.
   shape-specialized call_stub dispatches with no named JVM/JDK native method
   replacement.
 
+### [x] NPT-3q: Runtime P10 remove obsolete compiled-entry trampoline generator
+
+- Scope: delete the unused Java emitter code and generated declarations for the
+  rejected compiled-entry NJX trampoline path. The retained generated runtime
+  must continue to use HotSpot call_stub shape dispatchers for original JVM
+  Method*/entry targets; no call target, argument packing, handle scope,
+  exception behavior, or thread-state transition may change.
+- Required evidence: source search proves `renderBodies()` emits
+  `renderShapeCallStub` and no code references the compiled-entry generator,
+  wrapper globals, or trampoline begin/end symbols after cleanup.
+- Validation command or runtime target: focused generator/audit tests and
+  `NativeObfuscationIntegrationTest`.
+- Completion criteria: fresh integration passes, generated C has no unused
+  `g_njx_wrapper_*` or `neko_njx_tramp_*` declarations, and shape-specialized
+  call_stub dispatchers remain present.
+- Completion evidence 2026-05-20: removed the unused compiled-entry trampoline
+  emitter, per-shape `neko_njx_tramp_*` declarations, `g_njx_wrapper_*`
+  globals, and unused runtime/frame-layout helper code from
+  `NativeToJavaInvokeEmitter`. Focused generator/audit tests passed
+  (`artifact://287`) and fresh `NativeObfuscationIntegrationTest` passed
+  (`artifact://289`). Generated C under
+  `build/neko-native-work/run-12921477179290/` contains no
+  `g_njx_wrapper*`, `neko_njx_tramp_*`, or `neko_njx_runtime_t` symbols while
+  retaining shape-specialized `neko_njx_*` call_stub dispatchers for the same
+  Method*/entry targets.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 

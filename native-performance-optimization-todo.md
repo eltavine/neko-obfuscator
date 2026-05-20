@@ -395,6 +395,21 @@ Performance and GC gates:
     dispatcher symbol and preserves shape-specialized call_stub Method*/entry
     dispatch with no named JVM/JDK native method-body replacement. P10 remains
     `[-]` because original JVM parity is still not achieved.
+  - Implementation row recorded 2026-05-20: NPT-3q will remove only the
+    obsolete compiled-entry trampoline emitter/declarations left after rejected
+    NPT-3b. The generated runtime must continue using shape-specialized
+    HotSpot call_stub dispatchers for the same original JVM Method*/entry
+    targets.
+  - Completion evidence 2026-05-20 for NPT-3q: removed the obsolete
+    compiled-entry trampoline emitter, `neko_njx_tramp_*` declarations,
+    `g_njx_wrapper_*` globals, and unused runtime/frame-layout helper code
+    after NPT-3b had been rejected. Focused generator/audit tests passed
+    (`artifact://287`) and `NativeObfuscationIntegrationTest` passed
+    (`artifact://289`). Generated C under
+    `build/neko-native-work/run-12921477179290/` contains no compiled-entry
+    trampoline symbols and still emits shape-specialized call_stub dispatchers
+    for the same Method*/entry targets. P10 remains `[-]` because original JVM
+    parity is still not achieved.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
