@@ -736,6 +736,32 @@ the source plan that owns the changed path before it can be considered complete.
   (median `53 ms`, worse than `50 ms`). The cold-miss outline source change
   was reverted before any implementation checkpoint.
 
+### [rejected] NPT-3t: Runtime P11 direct-oop handle fast-slot prediction
+
+- Scope: add generic branch prediction only to the `neko_direct_oop_to_handle`
+  active JNIHandleBlock slot availability check. The helper must still push
+  the same raw oop into the same active JNIHandleBlock slot, update `_top` and
+  `_last` exactly as before, allocate an overflow block only on the same
+  overflow condition, and hard-abort on the same unavailable paths.
+- Required evidence: source/generated-C proof that only the generic
+  `top < g_neko_jnih_block_capacity` predicate is marked as the expected fast
+  path and no owner/name/descriptor-specific method replacement or handle
+  semantics change is introduced.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://315`) and fresh `NativeObfuscationIntegrationTest` passed
+  (`artifact://317`), but direct parity in
+  `build/native-run-tmp/parity-p10t/` did not complete: the fifth obfusjack
+  native run timed out after 180s. Completed runs did not justify retaining
+  the change: TEST native Calc median was `134 ms`, but obfusjack native Seq
+  completed values were `17/18/18/17 ms` and the run timed out before the
+  required five-run median. The branch-prediction source change was reverted
+  before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
