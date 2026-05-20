@@ -424,6 +424,20 @@ Performance and GC gates:
     the platform-thread section. Virtual/interface dispatch must keep the
     declared method binding until a generic proof shows it can be removed
     without stability or performance regression.
+  - Implementation row recorded 2026-05-20: NPT-3s will outline only the
+    virtual/interface `neko_icache_dispatch` cold miss resolver into a
+    `cold,noinline` helper. The hot path must still compute the receiver
+    `Klass*` key, probe the PIC, and dispatch direct-C/direct-NJX hits to the
+    same Method*/entry/call_stub targets; the miss helper must preserve exact
+    receiver resolution, fail-closed aborts, and exception behavior. No
+    owner/name/descriptor-specific native replacement is allowed.
+  - Rejected row update 2026-05-20: NPT-3s cold icache miss outlining was
+    reverted. Focused generator/audit tests passed (`artifact://307`) and
+    `NativeObfuscationIntegrationTest` passed (`artifact://309`), but direct
+    parity in `build/native-run-tmp/parity-p10s/` regressed: TEST native Calc
+    median `137 ms` vs NPT-3h `134 ms`, obfusjack native Seq median `18 ms`
+    vs `17 ms`, and Platform median `53 ms` vs `50 ms`. Virtual improved to
+    `43 ms` vs `44 ms`, but the row fails the required no-regression gate.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 

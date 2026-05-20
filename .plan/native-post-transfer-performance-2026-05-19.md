@@ -709,6 +709,33 @@ the source plan that owns the changed path before it can be considered complete.
   the declared-`jmethodID` removal was reverted before any implementation
   checkpoint.
 
+### [rejected] NPT-3s: Runtime P12 outline virtual icache miss resolver
+
+- Scope: split only the cold virtual/interface `neko_icache_dispatch` miss
+  resolution block into a `cold,noinline` helper. The hot dispatch function
+  must keep receiver null/meta checks, receiver `Klass*` key computation, PIC
+  lookup, direct-C hits, direct-NJX hits, and the same Method*/entry/call_stub
+  target path. No owner/name/descriptor-specific native implementation may be
+  introduced.
+- Required evidence: generated-C proof that `neko_icache_dispatch` contains
+  the PIC hit path and calls `neko_icache_dispatch_miss` only after a miss,
+  while the miss helper still performs the existing exact receiver method
+  resolution and call_stub dispatch.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://307`) and fresh `NativeObfuscationIntegrationTest` passed
+  (`artifact://309`), but direct parity in
+  `build/native-run-tmp/parity-p10s/` failed the no-regression gate. TEST
+  native Calc was `137/134/138/136/139 ms` (median `137 ms`, worse than
+  NPT-3h `134 ms`), and obfusjack native was Seq `18/18/19/18/18 ms`
+  (median `18 ms`, worse than `17 ms`) and Platform `53/55/55/42/52 ms`
+  (median `53 ms`, worse than `50 ms`). The cold-miss outline source change
+  was reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
