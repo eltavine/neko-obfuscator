@@ -581,6 +581,30 @@ the source plan that owns the changed path before it can be considered complete.
   once at 180s after two completed runs. The primitive-array cold failure
   helper source change was reverted before any implementation checkpoint.
 
+### [rejected] NPT-3n: Runtime P10 remove hot NJX dispatch stats counter
+
+- Scope: remove only the per-NJX-call diagnostic dispatch counter from the hot
+  shape-specialized call_stub path. Direct invocation remains mandatory, debug
+  logging still works through `NEKO_DIRECT_LOG`, resolve-failure counting
+  remains available, and target Method*/entry selection is unchanged.
+- Required evidence: source/generated-C proof that shape dispatchers no longer
+  call `neko_njx_note_dispatch()` while call_stub, Method*, entry pointer,
+  parameter stack, result unpacking, exception checks, and handle scopes remain
+  unchanged.
+- Validation command or runtime target: focused generator/audit tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: no runtime/fatal/forbidden-marker regressions and
+  same-run timings improve or do not regress relative to NPT-3h.
+- Rejection evidence 2026-05-20: focused generator/audit tests passed
+  (`artifact://260`) and `NativeObfuscationIntegrationTest` passed
+  (`artifact://262`), but direct parity in
+  `build/native-run-tmp/parity-p10n/` did not meet the no-regression gate.
+  TEST native Calc values were `142/139/141/141/135 ms` (median `141 ms`,
+  worse than NPT-3h `134 ms`), and the obfusjack native repeated run timed out
+  once at 180s after one completed run. The dispatch-stats source change was
+  reverted before any implementation checkpoint.
+
 
 ### [ ] NPT-4: Compile-time post-P41 bottleneck selection
 
