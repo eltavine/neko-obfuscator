@@ -1806,3 +1806,32 @@ the source plan that owns the changed path before it can be considered complete.
   versus NPT-3ap `89,85,92,88,86 ms` (median `88ms`). The source change was
   reverted before commit. Do not retry this tag-parameterized fused primitive
   diagnostic outlining without new branch-layout or compiler-output evidence.
+
+### [x] NPT-3ar: Close descriptor shadow-frame and primitive-volatility rows
+
+- Scope: close stale performance todo rows whose generic implementation is
+  already present in the current source and validated by fresh generated
+  artifacts. This is an evidence-only audit update; it must not change
+  executable code.
+- Required evidence: P3 requires one shadow-stack push/pop per translated
+  method while replacing three per-slot strings with one descriptor pointer.
+  P5 requires primitive field access to branch on resolved Java `ACC_VOLATILE`
+  metadata so non-volatile fields use ordinary C loads/stores.
+- Validation command or runtime target: source inspection plus generated-C
+  inspection from the fresh NPT-3ap TEST artifact, with the same focused tests,
+  generation, and smoke evidence already recorded for NPT-3ap/NPT-3am.
+- Completion criteria: P3 and P5 todo rows are marked complete only if current
+  generated C proves descriptor-pointer shadow frames and access-flag-driven
+  primitive field volatility, with no executable diff in this row.
+- Completion evidence 2026-05-21: source emits
+  `static const neko_shadow_frame_desc __neko_shadow_desc` and
+  `neko_shadow_push(&__neko_shadow_desc)` at translated method entry, and
+  runtime support stores only `const neko_shadow_frame_desc *desc` per shadow
+  frame before expanding owner/method/file in `neko_shadow_stack_trace`.
+  Generated C from `build/neko-native-work/run-14840042038598` shows per-method
+  descriptor pushes in `neko_native_impl_*.c`, `neko_shadow_frame` containing
+  only `desc`, and trace expansion through `desc->owner`, `desc->method`, and
+  `desc->file`. The same generated artifact proves primitive field helpers
+  accept `uint32_t access_flags`, branch on `0x0040u`, use `volatile` only for
+  volatile paths, and use ordinary pointer loads/stores otherwise. No
+  executable source changed in this row.
