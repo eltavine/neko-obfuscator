@@ -1249,3 +1249,33 @@ Performance and GC gates:
     library grew from `1034808` to `1038488` bytes. Source edits were reverted.
     Do not retry this broad predicate replacement without new code-size or
     branch-layout evidence.
+
+- [x] P24 Fuse primitive int arithmetic returns. The translator should fuse
+  only adjacent same-basic-block `ICONST_*`/`BIPUSH`/`SIPUSH`/`ILOAD`, second
+  matching int producer, `IADD` or `IMUL`, and `IRETURN` into a direct primitive
+  return expression. The fused C must still execute the normal shadow pop before
+  returning and must flush any pending exception dispatch before the return.
+  This must not cross labels, try-handler boundary flushes, object/ref
+  operations, fields, arrays, invokes, monitors, division/remainder,
+  subtraction with operand-order risk, long/float/double arithmetic, or helper
+  calls. Source evidence: fresh NPT-3ba generated TEST C shows generic leaf
+  methods such as `Abst1.mul(II)I`, `Top.add(II)I`, and `flo.solve(II)I` load
+  two int locals, emit `IADD`/`IMUL`, then immediately pop and return the
+  result.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show leaf arithmetic returns
+  use direct primitive return expressions with shadow pop retained.
+  - Implementation row recorded 2026-05-22: NPT-3bc will implement this as a
+    primitive-only `NativeTranslator` peephole and will reject any non-add/mul,
+    non-int, non-immediate-return, or label-crossing sequence.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-20027566395481` built
+    `libneko_linux_x64.so` (`1034808` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed `Abst1.mul`, `Top.add`, and `flo.solve` use
+    direct primitive int return expressions with `neko_shadow_pop()` retained
+    and no stack round trip. Static grep found no `NEKO_JNI_FN_PTR`, `(*env)->`,
+    or `env->` markers in the generated work directory. Same-session
+    alternating TEST smoke passed with empty stderr: NPT-3ba
+    `87,87,84,85,93,98,92 ms` (median `87ms`) versus NPT-3bc
+    `88,85,86,86,84,99,94 ms` (median `86ms`). Focused native integration
+    tests for TEST Calc and obfusjack completion also passed.

@@ -213,16 +213,19 @@ public final class NativeTranslator {
             }
             StringConcatPattern concatPattern = renderedStringConcatPattern(insn, selection.owner().name());
             PrimitiveArrayLiteralPattern arrayLiteral = concatPattern == null ? renderedPrimitiveArrayLiteralPattern(insn) : null;
-            StaticIntAddUpdateFusion staticIntAddUpdate = (concatPattern == null && arrayLiteral == null)
+            PrimitiveIntReturnFusion primitiveIntReturn = (concatPattern == null && arrayLiteral == null)
+                ? tryPrimitiveIntReturnFusion(opcodes, insn)
+                : null;
+            StaticIntAddUpdateFusion staticIntAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntReturn == null)
                 ? tryStaticIntAddUpdateFusion(opcodes, insn)
                 : null;
-            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && staticIntAddUpdate == null)
+            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntReturn == null && staticIntAddUpdate == null)
                 ? tryPrimitiveBranchFusion(opcodes, insn, labelMap)
                 : null;
-            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && staticIntAddUpdate == null && primitiveBranch == null)
+            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveBranch == null)
                 ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap)
                 : null;
-            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && staticIntAddUpdate == null && primitiveBranch == null && fused == null)
+            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveBranch == null && fused == null)
                 ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
@@ -239,6 +242,13 @@ public final class NativeTranslator {
                 pendingHandlers = activeHandlers.getOrDefault(pcMap.get(arrayLiteral.newArrayInsn), List.of());
                 insn = arrayLiteral.lastInsn;
                 continue;
+            } else if (primitiveIntReturn != null) {
+                if (pendingHandlers != null) {
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
+                    pendingHandlers = null;
+                }
+                fn.addStatement(new CStatement.RawC(primitiveIntReturn.code));
+                insn = primitiveIntReturn.lastInsn;
             } else if (staticIntAddUpdate != null) {
                 fn.addStatement(new CStatement.RawC(staticIntAddUpdate.code));
                 insn = staticIntAddUpdate.lastInsn;
@@ -317,6 +327,30 @@ public final class NativeTranslator {
             return raw.code().contains(label);
         }
         return false;
+    }
+
+    private record PrimitiveIntReturnFusion(String code, AbstractInsnNode lastInsn) {}
+
+    private PrimitiveIntReturnFusion tryPrimitiveIntReturnFusion(OpcodeTranslator opcodes, AbstractInsnNode insn) {
+        String left = opcodes.intPushExpression(insn);
+        if (left == null) return null;
+        AbstractInsnNode rhsInsn = nextNonMetaSameBlock(insn);
+        String right = opcodes.intPushExpression(rhsInsn);
+        if (right == null) return null;
+        AbstractInsnNode arithmeticInsn = nextNonMetaSameBlock(rhsInsn);
+        if (!(arithmeticInsn instanceof InsnNode)) return null;
+        String operator = switch (arithmeticInsn.getOpcode()) {
+            case Opcodes.IADD -> "+";
+            case Opcodes.IMUL -> "*";
+            default -> null;
+        };
+        if (operator == null) return null;
+        AbstractInsnNode returnInsn = nextNonMetaSameBlock(arithmeticInsn);
+        if (!(returnInsn instanceof InsnNode) || returnInsn.getOpcode() != Opcodes.IRETURN) return null;
+        return new PrimitiveIntReturnFusion(
+            "{ jint __ret = (jint)((" + left + ") " + operator + " (" + right + ")); neko_shadow_pop(); return __ret; }",
+            returnInsn
+        );
     }
 
     private record StaticIntAddUpdateFusion(String code, AbstractInsnNode lastInsn) {}

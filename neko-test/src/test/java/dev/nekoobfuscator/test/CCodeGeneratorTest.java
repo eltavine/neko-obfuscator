@@ -336,6 +336,65 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void primitiveIntAddMulImmediateReturnsFuseWithoutCrossingLabels() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/IntReturnOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode add = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "add", "(II)I", null, null);
+        add.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        add.instructions.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        add.instructions.add(new InsnNode(Opcodes.IADD));
+        add.instructions.add(new InsnNode(Opcodes.IRETURN));
+        add.maxStack = 2;
+        add.maxLocals = 2;
+        classNode.methods.add(add);
+
+        MethodNode mul = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "mul", "(II)I", null, null);
+        mul.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        mul.instructions.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        mul.instructions.add(new InsnNode(Opcodes.IMUL));
+        mul.instructions.add(new InsnNode(Opcodes.IRETURN));
+        mul.maxStack = 2;
+        mul.maxLocals = 2;
+        classNode.methods.add(mul);
+
+        LabelNode boundary = new LabelNode();
+        MethodNode blocked = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "blocked", "(II)I", null, null);
+        blocked.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        blocked.instructions.add(boundary);
+        blocked.instructions.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        blocked.instructions.add(new InsnNode(Opcodes.IADD));
+        blocked.instructions.add(new InsnNode(Opcodes.IRETURN));
+        blocked.maxStack = 2;
+        blocked.maxLocals = 2;
+        classNode.methods.add(blocked);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("primitive-int-return-fusion", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("add", "(II)I")),
+            new MethodSelection(owner, owner.findMethod("mul", "(II)I")),
+            new MethodSelection(owner, owner.findMethod("blocked", "(II)I"))
+        )).source();
+
+        String addBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        assertTrue(addBody.contains("{ jint __ret = (jint)((locals[0].i) + (locals[1].i)); neko_shadow_pop(); return __ret; }"), () -> addBody);
+        assertFalse(addBody.contains("PUSH_I(a + b);"), () -> addBody);
+
+        String mulBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(mulBody.contains("{ jint __ret = (jint)((locals[0].i) * (locals[1].i)); neko_shadow_pop(); return __ret; }"), () -> mulBody);
+        assertFalse(mulBody.contains("PUSH_I(a * b);"), () -> mulBody);
+
+        String blockedBody = lastFunctionSection(source, "neko_native_impl_2_body");
+        assertTrue(blockedBody.contains("PUSH_I(locals[0].i);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("PUSH_I(a + b);"), () -> blockedBody);
+    }
+
+    @Test
     void hotspotProbeEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;
