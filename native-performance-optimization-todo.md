@@ -396,6 +396,28 @@ Performance and GC gates:
     completed with `Calc: 87ms`.
 
 - [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
+  - Implementation row recorded 2026-05-21: NPT-3am will expose resolved Java
+    field `access_flags` through generated native field-slot metadata and use it
+    so primitive field helpers emit volatile C accesses only for `ACC_VOLATILE`
+    fields. Non-volatile Java fields should use ordinary C loads/stores.
+    Unknown or unresolved metadata must remain fail-closed or conservatively
+    volatile. This row must not change object reference barrier semantics, field
+    resolution ownership, JNI fallback, exception behavior, or unrelated helper
+    ABI.
+  - Completion evidence 2026-05-21 for NPT-3am: fresh source/diff review showed
+    this target is already implemented in the current code before any NPT-3am
+    executable edit. Generated field refs carry `access_flags_slot`; owner
+    binding calls pass `g_access_*` slots to `neko_bind_instance_field_offset`
+    and `neko_bind_static_field_metadata`; those bind helpers write
+    `native_field.access_flags` into the slot. Fresh generated C from
+    `build/neko-native-work/run-13753557747563` proves primitive helpers take
+    `uint32_t access_flags` and branch on `0x0040u`: volatile fields use
+    `volatile` pointer access and non-volatile fields use ordinary pointer
+    access for all primitive get/set and static get/set helpers. Primitive field
+    callsites pass the resolved `g_access_*` slots. Focused generator/audit
+    tests passed during NPT-3al, fresh TEST native generation produced
+    `translated=49 rejected=0`, and default collector TEST completed with
+    `Calc: 87ms`. No executable change was needed for this row.
 
 - [ ] P6 Outline hot-helper diagnostic failure blocks. Move inline `fprintf` / `abort` diagnostic construction out of hot helpers into shared `cold, noinline` functions. Keep the hot body as a small predicted branch to the cold function. Source evidence: inline diagnostics exist in `neko_fast_aaload` at `CCodeGenerator.java:5455-5465`, object field helpers at `CCodeGenerator.java:5647-5733`, fused helpers at `CCodeGenerator.java:5847-5854`, and primitive array helpers at `CCodeGenerator.java:5907-5925`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate; generated C audit must show hot helper bodies no longer contain large `fprintf` blocks.
   - Rejected row update 2026-05-21: NPT-3z primitive-array cold diagnostic

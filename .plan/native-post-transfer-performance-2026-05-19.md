@@ -1624,3 +1624,40 @@ the source plan that owns the changed path before it can be considered complete.
   to missing `z_store`. Default strict ZGC kept field/array slots null and
   failed closed with `z_lrb=(nil)`, `z_array=(nil)`, `z_store=(nil)`.
   Default collector TEST completed with `Calc: 87ms`.
+
+### [x] NPT-3am: Split primitive field volatile access
+
+- Scope: expose resolved Java field `access_flags` through generated native
+  field-slot metadata and use it so primitive field helpers emit volatile C
+  accesses only for fields with `ACC_VOLATILE`. Non-volatile Java fields should
+  use ordinary C loads/stores. Unknown or unresolved metadata must remain
+  fail-closed or conservatively volatile; this row must not change object
+  reference barrier semantics, field resolution ownership, JNI fallback,
+  exception behavior, or ABI layout for unrelated helpers.
+- Required evidence: the performance todo identifies current primitive field
+  helpers as using volatile pointer dereferences for every primitive load/store,
+  while field resolution already records HotSpot field access flags. This row
+  must confirm the exact generated slot layout and access sites before editing.
+- Validation command or runtime target: focused generator/unit tests with
+  repository `./gradlew`, generated-C inspection proving volatile appears only
+  on volatile primitive field paths or conservative unknown paths, fresh TEST
+  native generation, default collector TEST smoke, and performance samples for
+  TEST Calc/Platform if the row passes functional validation.
+- Completion criteria: generated metadata carries field volatility generically,
+  primitive field helpers preserve volatile semantics for volatile fields,
+  normal fields no longer force volatile C memory access, unknown metadata stays
+  conservative, and runtime validation shows no regression or fallback.
+- Completion evidence 2026-05-21: fresh source/diff review showed this target
+  is already implemented in the current code before any NPT-3am executable
+  edit: generated static and instance field refs carry `access_flags_slot`,
+  owner binding calls pass `g_access_*` slots to
+  `neko_bind_instance_field_offset` and `neko_bind_static_field_metadata`, and
+  those bind helpers write `native_field.access_flags` into the slot. Fresh
+  generated C from `build/neko-native-work/run-13753557747563` proves primitive
+  helpers take `uint32_t access_flags` and branch on `0x0040u`: volatile fields
+  use `volatile` pointer access and non-volatile fields use ordinary pointer
+  access for all primitive get/set and static get/set helpers. Primitive field
+  callsites pass the resolved `g_access_*` slots. Focused generator/audit tests
+  passed during NPT-3al, fresh TEST native generation produced `translated=49
+  rejected=0`, and default collector TEST completed with `Calc: 87ms`. No
+  executable change was needed for this row.
