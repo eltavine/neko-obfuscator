@@ -270,6 +270,32 @@ Performance and GC gates:
     collector TEST still completes with `Calc: 94ms`. This closes the
     JVMCI-table walker/audit substep only; ZGC strict remains blocked because
     this runtime does not expose the JVMCI table through `dlsym`.
+  - Audit row recorded 2026-05-21: NPT-3ah will determine whether the active
+    stripped Arch OpenJDK `libjvm.so` contains a generically recoverable JVMCI
+    VMStructEntry table even though `jvmciHotSpotVM*` symbols are absent from
+    `dlsym`, `nm`, and `readelf -Ws`. Evidence to start from: `strings` still
+    contains `thread_address_bad_mask_offset` and
+    `ZBarrierSetRuntime_load_barrier_on_oop_*`, while local OpenJDK source
+    defines the shared VMStructEntry layout and JVMCI table fields. This row is
+    read-only/prototype-only: no arbitrary memory scanner, runtime barrier
+    selection, fallback, or executable behavior change may be added until a
+    bounded section-scoped recovery invariant is proven.
+  - Completion evidence 2026-05-21 for NPT-3ah: read-only ELF/source
+    inspection found a bounded recovery invariant. The active Arch OpenJDK
+    `libjvm.so` has no `.symtab` and no `jvmciHotSpotVM*` entries in
+    `readelf -Ws`, but `.rodata` contains `CompilerToVM::Data` at
+    file/VMA `0xf4c22a`, `thread_address_bad_mask_offset` at `0xfb1eb8`,
+    `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded` at `0xfb1ed8`,
+    and `ZBarrierSetRuntime_load_barrier_on_oop_array` at `0xfb2060`.
+    A read-only pointer-addend prototype found VMStructEntry-shaped records in
+    the data image at `0x12f0930`, `0x12f0960`, and `0x12f0a80` with
+    `typeName=CompilerToVM::Data`, the expected field names, `isStatic=1`,
+    and static-address addends `0x1314db0`, `0x1314da8`, and `0x1314d78`.
+    Local OpenJDK source confirms VMStructEntry is six fields / 48 bytes and
+    the JVMCI arrays are sentinel-terminated. The next implementation may scan
+    only the mapped libjvm data/RELRO ranges for this VMStructEntry invariant;
+    it must not scan arbitrary memory, bind the mismatched array ABI, select
+    ZGC readiness, or add fallback behavior.
 
 - [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
 

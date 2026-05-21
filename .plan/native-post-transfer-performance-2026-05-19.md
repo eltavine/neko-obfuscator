@@ -1404,3 +1404,51 @@ the source plan that owns the changed path before it can be considered complete.
   default collector with `Calc: 94ms`. The row is accepted as a generic
   dlsym-reachable JVMCI-table audit/binder; this runtime does not expose the
   table, so ZGC strict remains fail-closed.
+
+### [x] NPT-3ah: Runtime stripped JVMCI serviceability-table recovery audit
+
+- Scope: determine whether the active product `libjvm.so` contains a
+  recoverable JVMCI VMStructEntry table despite stripping the exported
+  `jvmciHotSpotVM*` symbols. This is a read-only audit/prototype row only:
+  inspect ELF sections, local OpenJDK layout, and runtime logs; do not add a
+  runtime scanner, do not scan arbitrary heap/code memory, do not select a ZGC
+  barrier path, and do not change executable behavior until a complete generic
+  invariant is recorded.
+- Required evidence: NPT-3ag shows `dlsym` cannot resolve
+  `jvmciHotSpotVMStructs`, `jvmciHotSpotVMIntConstants`, or
+  `jvmciHotSpotVMLongConstants` even with `-XX:+EnableJVMCI`; `nm` and
+  `readelf -Ws` show no matching symbols in the active Arch OpenJDK
+  `libjvm.so`; `strings` still contains
+  `thread_address_bad_mask_offset` and `ZBarrierSetRuntime_load_barrier_on_oop_*`;
+  local OpenJDK source defines VMStructEntry layout and the JVMCI table fields.
+- Validation command or runtime target: read-only local source and ELF
+  inspection, plus optional repository-local prototype output under `build/`
+  if needed. No Gradle or runtime artifact is required unless the audit
+  becomes an implementation row.
+- Completion criteria: either identify a generic, bounded, section-scoped way
+  to recover JVMCI VMStructEntry records from the mapped `libjvm.so` image with
+  enough evidence for a later implementation row, or record that the product
+  JDK does not expose a safe recoverable JVMCI table path and choose the next
+  non-ZGC performance/GC blocker.
+- Completion evidence 2026-05-21: read-only ELF/source inspection identified a
+  bounded recovery path. `readelf -S` shows the active
+  `/usr/lib/jvm/java-21-openjdk/lib/server/libjvm.so` contains `.rodata`,
+  `.data.rel.ro`, and `.data` sections; `.symtab` is absent and `readelf -Ws`
+  shows no `jvmciHotSpotVM*` symbols. `grep -aob` found
+  `CompilerToVM::Data` at file/VMA `0xf4c22a`,
+  `thread_address_bad_mask_offset` at `0xfb1eb8`,
+  `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded` at `0xfb1ed8`,
+  and `ZBarrierSetRuntime_load_barrier_on_oop_array` at `0xfb2060`. A
+  read-only prototype search for little-endian pointer addends found
+  VMStructEntry-shaped records in the data image: entry `0x12f0930` points to
+  `CompilerToVM::Data`, `thread_address_bad_mask_offset`, type string `int`,
+  `isStatic=1`, and static-address addend `0x1314db0`; entry `0x12f0960`
+  points to `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded`, type
+  string `address`, and static-address addend `0x1314da8`; entry `0x12f0a80`
+  points to `ZBarrierSetRuntime_load_barrier_on_oop_array`, type string
+  `address`, and static-address addend `0x1314d78`. Local OpenJDK source
+  confirms the VMStructEntry layout is six fields / 48 bytes and the JVMCI
+  table emits sentinel-terminated arrays. The next implementation row may add
+  a generic libjvm image-section scanner limited to the mapped libjvm
+  data/RELRO ranges and these VMStructEntry invariants; it must still keep the
+  array barrier unbound until its ABI is corrected.
