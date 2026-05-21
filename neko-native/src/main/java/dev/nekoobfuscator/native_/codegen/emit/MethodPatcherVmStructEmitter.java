@@ -797,6 +797,25 @@ static void neko_scan_stripped_jvmci_vmstructs(void) {
 }
 #endif
 
+enum {
+    NEKO_JDK21_BARRIERSET_SHENANDOAH_FALLBACK = 4,
+    NEKO_JDK21_BARRIERSET_Z_FALLBACK = 5
+};
+
+static jboolean neko_barrierset_tag_is_shenandoah(int32_t tag) {
+    if (tag == g_neko_method_layout.vmconst_barrierset_shenandoah) return JNI_TRUE;
+    return (g_neko_method_layout.vmconst_barrierset_shenandoah < 0
+            && tag == NEKO_JDK21_BARRIERSET_SHENANDOAH_FALLBACK)
+        ? JNI_TRUE : JNI_FALSE;
+}
+
+static jboolean neko_barrierset_tag_is_zgc(int32_t tag) {
+    if (tag == g_neko_method_layout.vmconst_barrierset_z) return JNI_TRUE;
+    return (g_neko_method_layout.vmconst_barrierset_z < 0
+            && tag == NEKO_JDK21_BARRIERSET_Z_FALLBACK)
+        ? JNI_TRUE : JNI_FALSE;
+}
+
 static void neko_detect_current_gc_barrier(void) {
     void *bs;
     int32_t tag = -1;
@@ -825,30 +844,19 @@ static void neko_detect_current_gc_barrier(void) {
         (int)g_hotspot.use_shenandoah_gc,
         g_neko_method_layout.addr_zglobals_instance_p,
         g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong);
-    if (tag == g_neko_method_layout.vmconst_barrierset_g1) {
+    if (neko_barrierset_tag_is_shenandoah(tag) || g_hotspot.use_shenandoah_gc) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_SHENANDOAH;
+        g_hotspot.use_shenandoah_gc = JNI_TRUE;
+    } else if (neko_barrierset_tag_is_zgc(tag) || g_hotspot.use_zgc) {
+        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_Z;
+        /* The BarrierSet tag tells us this is ZGC even when the early
+         * ZGlobals value probe sees zeros. Readiness below still requires
+         * either callable runtime barriers or complete live mask values. */
+        g_hotspot.use_zgc = JNI_TRUE;
+    } else if (tag == g_neko_method_layout.vmconst_barrierset_g1) {
         g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_G1;
     } else if (tag == g_neko_method_layout.vmconst_barrierset_cardtable) {
         g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_CARDTABLE;
-    } else if (tag == g_neko_method_layout.vmconst_barrierset_z
-               || g_hotspot.use_zgc
-               /* JDK 21 VMIntConstants doesn't expose BarrierSet::ZBarrierSet,
-                * but ZGC always publishes ZGlobalsForVMStructs::_instance_p as
-                * a static address. Use that as a structural fingerprint. */
-               || g_neko_method_layout.addr_zglobals_instance_p != NULL) {
-        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_Z;
-        /* Even when the early mask probe didn't see non-zero values
-         * (modern generational ZGC publishes masks dynamically per GC
-         * cycle and they may be zero at OnLoad), the BarrierSet tag /
-         * structural fingerprint tells us this IS ZGC. Promote use_zgc
-         * so the rest of the pipeline routes through the ZGC barrier path. */
-        g_hotspot.use_zgc = JNI_TRUE;
-    } else if (tag == g_neko_method_layout.vmconst_barrierset_shenandoah
-               || g_hotspot.use_shenandoah_gc
-               /* Shenandoah's structural fingerprint: the LRB strong runtime
-                * function is exported by libjvm under -XX:+UseShenandoahGC. */
-               || g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong != NULL) {
-        g_neko_method_layout.current_barrier_kind = NEKO_GC_BARRIER_SHENANDOAH;
-        g_hotspot.use_shenandoah_gc = JNI_TRUE;
     }
     if (g_neko_method_layout.off_cardtablebarrierset_card_table >= 0) {
         void *ct = *(void**)((char*)bs + g_neko_method_layout.off_cardtablebarrierset_card_table);
@@ -865,14 +873,6 @@ static jboolean neko_gc_barrier_layout_ready(void) {
         (g_neko_method_layout.card_table_byte_map_base != NULL
          && g_neko_method_layout.vmconst_cardtable_dirty_card >= 0)
         ? JNI_TRUE : JNI_FALSE;
-    /* For ZGC: readiness is a capability check. Metadata presence alone is
-     * not enough; translated oop paths need either callable runtime barriers
-     * or nonzero live masks for the inline path. */
-    jboolean z_dlsym_ready =
-        (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded != NULL
-         && g_neko_method_layout.sym_z_load_barrier_on_oop_array != NULL
-         && g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing != NULL)
-        ? JNI_TRUE : JNI_FALSE;
     uintptr_t z_addr_mask = 0;
     uintptr_t z_load_good = 0;
     uintptr_t z_load_bad = 0;
@@ -888,11 +888,26 @@ static jboolean neko_gc_barrier_layout_ready(void) {
     if (z_store_good == 0) z_store_good = g_hotspot.z_pointer_store_good_mask;
     if (g_hotspot.z_zglobals_store_bad_mask_p != NULL) z_store_bad = *(uintptr_t*)g_hotspot.z_zglobals_store_bad_mask_p;
     if (z_store_bad == 0) z_store_bad = g_hotspot.z_pointer_store_bad_mask;
+    /* For ZGC: readiness is a capability check. Metadata presence alone is
+     * not enough; translated oop paths need either callable runtime barriers
+     * or complete nonzero live masks for the inline path. */
+    jboolean z_symbol_ready =
+        (g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded != NULL
+         && g_neko_method_layout.sym_z_load_barrier_on_oop_array != NULL
+         && g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing != NULL)
+        ? JNI_TRUE : JNI_FALSE;
     jboolean z_instance_ready =
         (g_neko_method_layout.addr_zglobals_instance_p != NULL
          && g_neko_method_layout.off_zglobals_address_offset_mask >= 0
          && g_neko_method_layout.off_zglobals_pointer_load_good_mask >= 0
          && g_neko_method_layout.off_zglobals_pointer_load_bad_mask >= 0
+         && g_neko_method_layout.off_zglobals_pointer_store_good_mask >= 0
+         && g_neko_method_layout.off_zglobals_pointer_store_bad_mask >= 0
+         && g_hotspot.z_zglobals_addr_mask_p != NULL
+         && g_hotspot.z_zglobals_load_good_mask_p != NULL
+         && g_hotspot.z_zglobals_load_bad_mask_p != NULL
+         && g_hotspot.z_zglobals_store_good_mask_p != NULL
+         && g_hotspot.z_zglobals_store_bad_mask_p != NULL
          && z_addr_mask != 0
          && z_load_good != 0
          && z_load_bad != 0
@@ -905,12 +920,28 @@ static jboolean neko_gc_barrier_layout_ready(void) {
         case NEKO_GC_BARRIER_CARDTABLE:
             return card_table_ready ? JNI_TRUE : JNI_FALSE;
         case NEKO_GC_BARRIER_Z:
-            return (z_dlsym_ready || z_instance_ready) ? JNI_TRUE : JNI_FALSE;
+            if (z_symbol_ready || z_instance_ready) return JNI_TRUE;
+            NEKO_PATCH_LOG("ZGC barrier capability missing: symbols field=%p array=%p store=%p masks addr=0x%llx load_good=0x%llx load_bad=0x%llx store_good=0x%llx store_bad=0x%llx",
+                g_neko_method_layout.sym_z_load_barrier_on_oop_field_preloaded,
+                g_neko_method_layout.sym_z_load_barrier_on_oop_array,
+                g_neko_method_layout.sym_z_store_barrier_on_oop_field_with_healing,
+                (unsigned long long)z_addr_mask,
+                (unsigned long long)z_load_good,
+                (unsigned long long)z_load_bad,
+                (unsigned long long)z_store_good,
+                (unsigned long long)z_store_bad);
+            return JNI_FALSE;
         case NEKO_GC_BARRIER_SHENANDOAH:
-            return (g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong != NULL
-                    && g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry != NULL
-                    && g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry != NULL)
-                ? JNI_TRUE : JNI_FALSE;
+            if (g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong != NULL
+                && g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry != NULL
+                && g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry != NULL) {
+                return JNI_TRUE;
+            }
+            NEKO_PATCH_LOG("Shenandoah barrier capability missing: lrb=%p pre=%p array=%p",
+                g_neko_method_layout.sym_shenandoah_load_reference_barrier_strong,
+                g_neko_method_layout.sym_shenandoah_write_ref_field_pre_entry,
+                g_neko_method_layout.sym_shenandoah_arraycopy_barrier_oop_entry);
+            return JNI_FALSE;
         default:
             return JNI_FALSE;
     }

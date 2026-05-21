@@ -1101,6 +1101,47 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void strictGcBarrierDetectionUsesTagFallbacksBeforeCardTableFamilies() {
+        CFunction function = new CFunction(
+            "neko_native_entry_probe",
+            CType.VOID,
+            List.of(
+                new CVariable("thread", CType.JOBJECT, 0),
+                new CVariable("env", CType.JOBJECT, 1),
+                new CVariable("self", CType.JOBJECT, 2)
+            )
+        );
+        function.addStatement(new CStatement.ReturnVoid());
+
+        NativeMethodBinding binding = new NativeMethodBinding(
+            "pkg/GcProbe",
+            "demo",
+            "()V",
+            "neko_native_entry_probe",
+            function.name(),
+            "neko_binding_gc_probe",
+            "()V",
+            false,
+            false,
+            false
+        );
+
+        String source = new CCodeGenerator(12345L).generateSource(List.of(function), List.of(binding));
+        String detector = functionSection(source, "neko_detect_current_gc_barrier");
+        String readiness = functionSection(source, "neko_gc_barrier_layout_ready");
+
+        assertTrue(source.contains("NEKO_JDK21_BARRIERSET_SHENANDOAH_FALLBACK = 4"), () -> source);
+        assertTrue(source.contains("NEKO_JDK21_BARRIERSET_Z_FALLBACK = 5"), () -> source);
+        assertTrue(detector.indexOf("neko_barrierset_tag_is_shenandoah(tag)") < detector.indexOf("tag == g_neko_method_layout.vmconst_barrierset_g1"), () -> detector);
+        assertTrue(detector.indexOf("neko_barrierset_tag_is_zgc(tag)") < detector.indexOf("tag == g_neko_method_layout.vmconst_barrierset_g1"), () -> detector);
+        assertFalse(detector.contains("addr_zglobals_instance_p != NULL"), () -> detector);
+        assertTrue(readiness.contains("g_hotspot.z_zglobals_addr_mask_p != NULL"), () -> readiness);
+        assertTrue(readiness.contains("z_addr_mask != 0"), () -> readiness);
+        assertTrue(readiness.contains("ZGC barrier capability missing"), () -> readiness);
+        assertTrue(readiness.contains("Shenandoah barrier capability missing"), () -> readiness);
+    }
+
+    @Test
     void icacheScaffoldEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;

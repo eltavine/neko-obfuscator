@@ -3038,7 +3038,7 @@ the source plan that owns the changed path before it can be considered complete.
   source/test implementation was reverted. Do not resume this row until the
   strict-GC barrier mapping/capability prerequisite is fixed and validated.
 
-### [ ] NPT-3bu: Fix strict-GC barrier tag and capability detection for ZGC/Shenandoah bootstrap
+### [x] NPT-3bu: Fix strict-GC barrier tag and capability detection for ZGC/Shenandoah bootstrap
 
 - Scope: limit the implementation to generic HotSpot GC barrier identification
   and readiness detection during native layout/bootstrap. It must map or
@@ -3066,3 +3066,25 @@ the source plan that owns the changed path before it can be considered complete.
   required supported collectors or fails closed with exact capability
   diagnostics for genuinely missing required VM support; no forbidden fallback
   markers appear.
+- Completion evidence 2026-05-22: implemented generic JDK 21 BarrierSet tag
+  fallbacks for Shenandoah `tag=4` and ZGC `tag=5`, ordered strict-GC
+  detection before CardTable/G1 families, removed the unsafe
+  `ZGlobalsForVMStructs::_instance_p` ZGC structural fingerprint that
+  misclassified Shenandoah, and made ZGC readiness require either callable
+  runtime barrier symbols or complete nonzero live ZGlobals masks. Focused
+  generator/audit tests passed. Fresh TEST native generation produced
+  `build/npt-3bu/TEST-native.jar` from
+  `build/neko-native-work/run-28846828379689` with `translated=49`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1038104` bytes. Strict
+  forbidden JNI/fallback grep over that run returned no matches. Default,
+  G1, Serial, and Parallel TEST native runs passed with Calc `89ms`, `76ms`,
+  `73ms`, and `76ms`. ZGC with `ZVerifyViews` now reports
+  `barrier-tag detected: tag=5 ... z=-1 shen=-1`, then fails closed during
+  layout with `ZGC barrier capability missing: symbols field=(nil) array=(nil)
+  store=(nil) masks addr=0x0 load_good=0x0 load_bad=0x0 store_good=0x0
+  store_bad=0x0` and `[neko-bootstrap] native layout initialization failed`.
+  Shenandoah with verification now reports `barrier-tag detected: tag=4 ...
+  z=-1 shen=-1`, then fails closed during layout with `Shenandoah barrier
+  capability missing: lrb=(nil) pre=(nil) array=(nil)` and
+  `[neko-bootstrap] native layout initialization failed`. No JNI, JVMTI,
+  original-bytecode, skip, or collector-disabling fallback was introduced.
