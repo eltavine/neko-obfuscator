@@ -324,6 +324,33 @@ Performance and GC gates:
     emitted in `neko_native_support.c` and the bootstrap call is emitted in
     `neko_native_support_helpers_3.c`. Default collector TEST completed with
     `Calc: 91ms`.
+  - Audit row recorded 2026-05-21: NPT-3aj will determine why the recovered
+    stripped JVMCI
+    `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded` static slot is
+    null during strict ZGC native layout initialization even though the
+    `CompilerToVM::Data` VMStructEntry and slot address are recoverable. This
+    row is read-only: inspect OpenJDK source, local `libjvm.so`
+    symbols/strings, generated native logs, and generated C only. Do not call
+    JVMCI initialization paths, bind raw CodeBlob stubs, mark ZGC ready, change
+    store/no-store semantics, or add fallback behavior.
+  - Completion evidence 2026-05-21 for NPT-3aj: OpenJDK source shows
+    `CompilerToVM::Data::initialize(JVMCI_TRAPS)` publishes the ZGC slots from
+    `XBarrierSetRuntime::*_addr()` under `UseZGC`; the initializer is invoked
+    from `readConfiguration0`, reached through JVMCI Java/native configuration
+    paths, not from the VMStruct table walk. `JVM_GetJVMCIRuntime` requires
+    `EnableJVMCI` and initializes the Java `HotSpotJVMCIRuntime`, so it is not
+    a valid native-bootstrap trigger under the no-JNI/no-new-helper constraints.
+    Runtime evidence confirms timing: default strict ZGC keeps the recovered
+    field-load and array slots null, while strict ZGC with
+    `-XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI -XX:+EagerJVMCI` fills
+    `thread_address_bad_mask_offset=40`,
+    `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded=0x7f398144ace0`,
+    and `ZBarrierSetRuntime_load_barrier_on_oop_array=0x7f398144ab70`.
+    Readiness still fails closed because the current native surface does not
+    bind the mismatched array ABI and has no resolved store barrier. Next row:
+    correct and bind the ZGC array ABI from the recovered JVMCI slot, then
+    reassess ZGC readiness around actually available callable barriers and the
+    inline fail-closed store path.
 
 - [ ] P5 Split primitive field access into volatile and non-volatile paths. Current generated primitive field helpers use C `volatile` for every primitive load/store, which blocks useful compiler optimization for normal fields. Bind-time field metadata already carries `access_flags`; extend field binding so generated field slots expose Java `ACC_VOLATILE`, then emit volatile C access only for volatile Java fields and normal loads/stores for ordinary fields. Source evidence: all primitive field helpers emit volatile pointer dereferences in `CCodeGenerator.java:5866-5904`; field resolution records access flags in `CCodeGenerator.java:931-939` and sets them in resolution paths. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; add unit coverage for volatile and non-volatile primitive fields.
 

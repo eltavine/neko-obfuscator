@@ -1501,3 +1501,46 @@ the source plan that owns the changed path before it can be considered complete.
   emitted in `neko_native_support.c` and the bootstrap call is emitted in
   `neko_native_support_helpers_3.c`. Default collector TEST completed with
   `Calc: 91ms`.
+
+### [x] NPT-3aj: JVMCI ZGC barrier slot initialization audit
+
+- Scope: determine why the recovered stripped JVMCI
+  `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded` static slot is null
+  during strict ZGC native layout initialization even though the
+  `CompilerToVM::Data` VMStructEntry record and slot address are recoverable.
+  This is a read-only evidence row. It may inspect OpenJDK source, local
+  `libjvm.so` symbols/strings, generated native logs, and existing generated C,
+  but must not call JVMCI initialization paths, bind raw CodeBlob stubs, mark
+  ZGC ready, change store/no-store semantics, or add fallback behavior.
+- Required evidence: NPT-3ai proves the VMStructEntry scanner recovers the
+  bad-mask static slot and the field-load barrier static slot, but fresh strict
+  ZGC logs show the field-load barrier slot value is null while the GC barrier
+  path remains fail-closed.
+- Validation command or runtime target: source/symbol/log audit only; if a
+  candidate runtime path is found, record a later implementation row with its
+  exact invariant and runtime validation target before editing executable code.
+- Completion criteria: identify the exact initializer or runtime publication
+  path responsible for filling the JVMCI ZGC barrier slots, prove whether it is
+  callable or observable from the current native bootstrap surface without JNI
+  fallback/JVMTI/new helper layers, and record the next generic implementation
+  or rejection decision.
+- Completion evidence 2026-05-21: OpenJDK source shows
+  `CompilerToVM::Data::initialize(JVMCI_TRAPS)` publishes the ZGC slots from
+  `XBarrierSetRuntime::*_addr()` under `UseZGC`; the initializer is invoked
+  from `readConfiguration0`, which is reached through JVMCI Java/native
+  configuration paths, not from the VMStruct table walk itself. The native
+  JVMCI runtime entry `JVM_GetJVMCIRuntime` rejects calls unless `EnableJVMCI`
+  is set and initializes the Java `HotSpotJVMCIRuntime`; this path requires the
+  JVMCI/JNI Java runtime surface and is not a valid native-bootstrap trigger
+  under the no-JNI/no-new-helper constraints. Runtime evidence confirms the
+  timing: default strict ZGC keeps the recovered field-load and array slots
+  null, while strict ZGC with
+  `-XX:+UnlockExperimentalVMOptions -XX:+EnableJVMCI -XX:+EagerJVMCI` fills
+  `thread_address_bad_mask_offset=40`,
+  `ZBarrierSetRuntime_load_barrier_on_oop_field_preloaded=0x7f398144ace0`,
+  and `ZBarrierSetRuntime_load_barrier_on_oop_array=0x7f398144ab70`.
+  Readiness still fails closed because the current native surface intentionally
+  does not bind the mismatched array ABI and has no resolved store barrier.
+  Next implementation must be a separate row: correct and bind the ZGC array
+  ABI from the recovered JVMCI slot, then reassess ZGC readiness around the
+  actually available callable barriers and inline fail-closed store path.
