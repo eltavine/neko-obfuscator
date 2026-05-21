@@ -47,6 +47,8 @@ public final class NativeTranslator {
     private final CCodeGenerator codeGenerator;
     private int concatLiteralIndex = 0;
     private int primitiveArrayLiteralIndex = 0;
+    private int stringRecurrenceIndex = 0;
+    private int doubleMacLoopIndex = 0;
 
     public NativeTranslator(String outputPrefix, boolean obfuscateJniSlotDispatch, boolean cacheJniIds, long masterSeed) {
         this.codeGenerator = new CCodeGenerator(masterSeed);
@@ -151,6 +153,7 @@ public final class NativeTranslator {
         fn.setUsesMonitors(bytecodeUsesMonitors(node));
 
         Map<LabelNode, String> labelMap = buildLabelMap(node);
+        Map<LabelNode, Integer> jumpTargetCounts = buildJumpTargetCounts(node);
         Map<AbstractInsnNode, Integer> pcMap = buildPcMap(node);
         Map<Integer, List<TryHandler>> activeHandlers = buildActiveHandlers(method, labelMap, pcMap);
 
@@ -211,36 +214,40 @@ public final class NativeTranslator {
                 fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
                 pendingHandlers = null;
             }
-            StringConcatPattern concatPattern = renderedStringConcatPattern(insn, selection.owner().name());
-            PrimitiveArrayLiteralPattern arrayLiteral = concatPattern == null ? renderedPrimitiveArrayLiteralPattern(insn) : null;
-            PrimitiveIntTailCallFusion primitiveIntTailCall = (concatPattern == null && arrayLiteral == null)
+            StringConcatRecurrenceFusion stringRecurrence = tryStringConcatRecurrenceFusion(insn, labelMap, jumpTargetCounts, activeHandlers, pcMap);
+            StringConcatPattern concatPattern = stringRecurrence == null ? renderedStringConcatPattern(insn, selection.owner().name()) : null;
+            PrimitiveArrayLiteralPattern arrayLiteral = (stringRecurrence == null && concatPattern == null) ? renderedPrimitiveArrayLiteralPattern(insn) : null;
+            PrimitiveIntTailCallFusion primitiveIntTailCall = (stringRecurrence == null && concatPattern == null && arrayLiteral == null)
                 ? tryPrimitiveIntTailCallFusion(opcodes, insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
-            PrimitiveIntReturnFusion primitiveIntReturn = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null)
+            PrimitiveIntReturnFusion primitiveIntReturn = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null)
                 ? tryPrimitiveIntReturnFusion(opcodes, insn)
                 : null;
-            StaticIntAddUpdateFusion staticIntAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null)
+            StaticIntAddUpdateFusion staticIntAddUpdate = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null)
                 ? tryStaticIntAddUpdateFusion(opcodes, insn)
                 : null;
-            StaticDirectSingleIntInvokeFusion staticDirectSingleIntInvoke = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
+            StaticDirectSingleIntInvokeFusion staticDirectSingleIntInvoke = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
                 ? tryStaticDirectSingleIntInvokeFusion(opcodes, insn)
                 : null;
-            PrimitiveConstantLocalStoreFusion primitiveConstantLocalStore = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null)
+            PrimitiveConstantLocalStoreFusion primitiveConstantLocalStore = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null)
                 ? tryPrimitiveConstantLocalStoreFusion(opcodes, insn)
                 : null;
-            PrimitiveFloatDoubleLocalAddUpdateFusion primitiveFloatDoubleLocalAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null)
+            PrimitiveFloatDoubleLocalAddUpdateFusion primitiveFloatDoubleLocalAddUpdate = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null)
                 ? tryPrimitiveFloatDoubleLocalAddUpdateFusion(opcodes, insn)
                 : null;
-            PrimitiveCompareBranchFusion primitiveCompareBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null)
+            CountedDoubleArrayMacLoopFusion countedDoubleArrayMacLoop = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null)
+                ? tryCountedDoubleArrayMacLoopFusion(opcodes, insn, labelMap, jumpTargetCounts, activeHandlers, pcMap)
+                : null;
+            PrimitiveCompareBranchFusion primitiveCompareBranch = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && countedDoubleArrayMacLoop == null)
                 ? tryPrimitiveCompareBranchFusion(opcodes, insn, labelMap)
                 : null;
-            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null)
+            PrimitiveBranchFusion primitiveBranch = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && countedDoubleArrayMacLoop == null && primitiveCompareBranch == null)
                 ? tryPrimitiveBranchFusion(opcodes, insn, labelMap)
                 : null;
-            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null)
+            OpcodeTranslator.FusedTranslation fused = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && countedDoubleArrayMacLoop == null && primitiveCompareBranch == null && primitiveBranch == null)
                 ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap)
                 : null;
-            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null && fused == null)
+            TailCallRewrite tail = (stringRecurrence == null && concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && countedDoubleArrayMacLoop == null && primitiveCompareBranch == null && primitiveBranch == null && fused == null)
                 ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
@@ -249,6 +256,14 @@ public final class NativeTranslator {
                 fn.addStatement(new CStatement.RawC(renderTableSwitch(tableSwitchInsn, labelMap)));
             } else if (insn instanceof LookupSwitchInsnNode lookupSwitchInsn) {
                 fn.addStatement(new CStatement.RawC(renderLookupSwitch(lookupSwitchInsn, labelMap)));
+            } else if (stringRecurrence != null) {
+                if (pendingHandlers != null) {
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
+                    pendingHandlers = null;
+                }
+                fn.addStatement(new CStatement.RawC(stringRecurrence.code));
+                insn = stringRecurrence.lastInsn;
+                continue;
             } else if (concatPattern != null) {
                 fn.addStatement(new CStatement.RawC(concatPattern.code));
                 insn = concatPattern.lastInsn;
@@ -284,6 +299,13 @@ public final class NativeTranslator {
             } else if (primitiveFloatDoubleLocalAddUpdate != null) {
                 fn.addStatement(new CStatement.RawC(primitiveFloatDoubleLocalAddUpdate.code));
                 insn = primitiveFloatDoubleLocalAddUpdate.lastInsn;
+            } else if (countedDoubleArrayMacLoop != null) {
+                if (pendingHandlers != null) {
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
+                    pendingHandlers = null;
+                }
+                fn.addStatement(new CStatement.RawC(countedDoubleArrayMacLoop.code));
+                insn = countedDoubleArrayMacLoop.lastInsn;
             } else if (primitiveCompareBranch != null) {
                 if (pendingHandlers != null) {
                     fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
@@ -583,6 +605,153 @@ public final class NativeTranslator {
         return null;
     }
 
+    private record CountedDoubleArrayMacLoopFusion(String code, AbstractInsnNode lastInsn) {}
+
+    private record LoopDoubleArrayLoadExpr(String expr, AbstractInsnNode lastInsn) {}
+
+    private CountedDoubleArrayMacLoopFusion tryCountedDoubleArrayMacLoopFusion(
+        OpcodeTranslator opcodes,
+        AbstractInsnNode start,
+        Map<LabelNode, String> labelMap,
+        Map<LabelNode, Integer> jumpTargetCounts,
+        Map<Integer, List<TryHandler>> activeHandlers,
+        Map<AbstractInsnNode, Integer> pcMap
+    ) {
+        if (!(start instanceof VarInsnNode indexLoad) || indexLoad.getOpcode() != Opcodes.ILOAD) {
+            return null;
+        }
+        int indexLocal = indexLoad.var;
+        LabelNode loopHeader = previousLabelBefore(start);
+        if (loopHeader == null) {
+            return null;
+        }
+        AbstractInsnNode boundInsn = nextNonMetaSameBlock(indexLoad);
+        if (intPushUsesLocal(boundInsn, indexLocal)) {
+            return null;
+        }
+        String boundExpr = opcodes.intPushExpression(boundInsn);
+        if (boundExpr == null) {
+            return null;
+        }
+        AbstractInsnNode branchInsn = nextNonMetaSameBlock(boundInsn);
+        if (!(branchInsn instanceof JumpInsnNode exitBranch) || exitBranch.getOpcode() != Opcodes.IF_ICMPGE) {
+            return null;
+        }
+        String exitLabel = labelMap.get(exitBranch.label);
+        if (exitLabel == null) {
+            return null;
+        }
+        AbstractInsnNode accLoadInsn = nextNonMetaSameBlock(branchInsn);
+        if (!(accLoadInsn instanceof VarInsnNode accLoad) || accLoad.getOpcode() != Opcodes.DLOAD) {
+            return null;
+        }
+        int accLocal = accLoad.var;
+        String indexExpr = "__neko_mac_i_" + doubleMacLoopIndex;
+        LoopDoubleArrayLoadExpr left = loopDoubleArrayLoadExpr(opcodes, nextNonMetaSameBlock(accLoadInsn), indexLocal, indexExpr);
+        if (left == null) {
+            return null;
+        }
+        LoopDoubleArrayLoadExpr right = loopDoubleArrayLoadExpr(opcodes, nextNonMetaSameBlock(left.lastInsn), indexLocal, indexExpr);
+        if (right == null) {
+            return null;
+        }
+        AbstractInsnNode multiply = nextNonMetaSameBlock(right.lastInsn);
+        if (!(multiply instanceof InsnNode) || multiply.getOpcode() != Opcodes.DMUL) {
+            return null;
+        }
+        AbstractInsnNode add = nextNonMetaSameBlock(multiply);
+        if (!(add instanceof InsnNode) || add.getOpcode() != Opcodes.DADD) {
+            return null;
+        }
+        AbstractInsnNode storeInsn = nextNonMetaSameBlock(add);
+        if (!(storeInsn instanceof VarInsnNode accStore)
+            || accStore.getOpcode() != Opcodes.DSTORE
+            || accStore.var != accLocal) {
+            return null;
+        }
+        AbstractInsnNode incrementInsn = nextNonMetaSameBlock(storeInsn);
+        if (!(incrementInsn instanceof IincInsnNode increment)
+            || increment.var != indexLocal
+            || increment.incr != 1) {
+            return null;
+        }
+        AbstractInsnNode backedgeInsn = nextNonMetaSameBlock(incrementInsn);
+        if (!(backedgeInsn instanceof JumpInsnNode backedge)
+            || backedge.getOpcode() != Opcodes.GOTO
+            || backedge.label != loopHeader) {
+            return null;
+        }
+        if (coveredRegionHasActiveHandlers(start, backedgeInsn, activeHandlers, pcMap)
+            || coveredRegionHasBranchTarget(start, backedgeInsn, jumpTargetCounts)) {
+            return null;
+        }
+
+        int loopId = doubleMacLoopIndex++;
+        String iVar = "__neko_mac_i_" + loopId;
+        String limitVar = "__neko_mac_limit_" + loopId;
+        String leftVar = "__neko_mac_l_" + loopId;
+        String rightVar = "__neko_mac_r_" + loopId;
+        String reasonVar = "__neko_mac_reason_" + loopId;
+        String code = "{ /* scalarized counted double[][] multiply-accumulate loop */ "
+            + "jint " + iVar + " = locals[" + indexLocal + "].i; "
+            + "jint " + limitVar + " = (jint)(" + boundExpr + "); "
+            + "for (; " + iVar + " < " + limitVar + "; " + iVar + " = (jint)(" + iVar + " + 1)) { "
+            + "int " + reasonVar + " = 0; "
+            + "jdouble " + leftVar + " = " + left.expr + "; "
+            + "if (" + reasonVar + " != NEKO_FAST_ARRAY_OK) { locals[" + indexLocal + "].i = " + iVar + "; "
+            + "neko_raise_cached_fast_array_reason(thread, env, " + reasonVar + "); goto __neko_exception_exit; } "
+            + reasonVar + " = 0; "
+            + "jdouble " + rightVar + " = " + right.expr + "; "
+            + "if (" + reasonVar + " != NEKO_FAST_ARRAY_OK) { locals[" + indexLocal + "].i = " + iVar + "; "
+            + "neko_raise_cached_fast_array_reason(thread, env, " + reasonVar + "); goto __neko_exception_exit; } "
+            + "locals[" + accLocal + "].d = locals[" + accLocal + "].d + (" + leftVar + " * " + rightVar + "); } "
+            + "locals[" + indexLocal + "].i = " + iVar + "; goto " + exitLabel + "; }";
+        return new CountedDoubleArrayMacLoopFusion(code, backedgeInsn);
+    }
+
+    private LoopDoubleArrayLoadExpr loopDoubleArrayLoadExpr(
+        OpcodeTranslator opcodes,
+        AbstractInsnNode start,
+        int indexLocal,
+        String indexExpr
+    ) {
+        if (!(start instanceof VarInsnNode outerVar) || outerVar.getOpcode() != Opcodes.ALOAD) {
+            return null;
+        }
+        AbstractInsnNode idx1 = nextNonMetaSameBlock(start);
+        String idx1Expr = loopIntPushExpression(opcodes, idx1, indexLocal, indexExpr);
+        if (idx1Expr == null) {
+            return null;
+        }
+        AbstractInsnNode aaload = nextNonMetaSameBlock(idx1);
+        if (!(aaload instanceof InsnNode) || aaload.getOpcode() != Opcodes.AALOAD) {
+            return null;
+        }
+        AbstractInsnNode idx2 = nextNonMetaSameBlock(aaload);
+        String idx2Expr = loopIntPushExpression(opcodes, idx2, indexLocal, indexExpr);
+        if (idx2Expr == null) {
+            return null;
+        }
+        AbstractInsnNode daload = nextNonMetaSameBlock(idx2);
+        if (!(daload instanceof InsnNode) || daload.getOpcode() != Opcodes.DALOAD) {
+            return null;
+        }
+        String expr = "neko_fast_raw_aaload_daload((void*)(locals[" + outerVar.var + "].o), "
+            + idx1Expr + ", " + idx2Expr + ", &__neko_mac_reason_" + doubleMacLoopIndex + ")";
+        return new LoopDoubleArrayLoadExpr(expr, daload);
+    }
+
+    private String loopIntPushExpression(OpcodeTranslator opcodes, AbstractInsnNode insn, int indexLocal, String indexExpr) {
+        if (insn instanceof VarInsnNode varInsn && varInsn.getOpcode() == Opcodes.ILOAD && varInsn.var == indexLocal) {
+            return indexExpr;
+        }
+        return opcodes.intPushExpression(insn);
+    }
+
+    private boolean intPushUsesLocal(AbstractInsnNode insn, int local) {
+        return insn instanceof VarInsnNode varInsn && varInsn.getOpcode() == Opcodes.ILOAD && varInsn.var == local;
+    }
+
     private record PrimitiveCompareBranchFusion(String code, AbstractInsnNode lastInsn) {}
 
     private PrimitiveCompareBranchFusion tryPrimitiveCompareBranchFusion(
@@ -710,6 +879,33 @@ public final class NativeTranslator {
             }
         }
         return labels;
+    }
+
+    private Map<LabelNode, Integer> buildJumpTargetCounts(MethodNode node) {
+        Map<LabelNode, Integer> targets = new IdentityHashMap<>();
+        for (AbstractInsnNode insn = node.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof JumpInsnNode jumpInsn) {
+                incrementLabelCount(targets, jumpInsn.label);
+            } else if (insn instanceof TableSwitchInsnNode tableSwitch) {
+                incrementLabelCount(targets, tableSwitch.dflt);
+                for (LabelNode label : tableSwitch.labels) {
+                    incrementLabelCount(targets, label);
+                }
+            } else if (insn instanceof LookupSwitchInsnNode lookupSwitch) {
+                incrementLabelCount(targets, lookupSwitch.dflt);
+                for (LabelNode label : lookupSwitch.labels) {
+                    incrementLabelCount(targets, label);
+                }
+            }
+        }
+        for (TryCatchBlockNode tcb : node.tryCatchBlocks) {
+            incrementLabelCount(targets, tcb.handler);
+        }
+        return targets;
+    }
+
+    private void incrementLabelCount(Map<LabelNode, Integer> counts, LabelNode label) {
+        counts.merge(label, 1, Integer::sum);
     }
 
     private Map<AbstractInsnNode, Integer> buildPcMap(MethodNode node) {
@@ -1158,6 +1354,207 @@ public final class NativeTranslator {
         List<TryHandler> lastHandlers = activeHandlers.getOrDefault(lastPc, List.of());
         if (!aaloadHandlers.equals(lastHandlers)) return null;
         return candidate;
+    }
+
+    private record StringConcatRecurrenceFusion(String code, AbstractInsnNode lastInsn) {}
+
+    private StringConcatRecurrenceFusion tryStringConcatRecurrenceFusion(
+        AbstractInsnNode start,
+        Map<LabelNode, String> labelMap,
+        Map<LabelNode, Integer> jumpTargetCounts,
+        Map<Integer, List<TryHandler>> activeHandlers,
+        Map<AbstractInsnNode, Integer> pcMap
+    ) {
+        if (!(start instanceof VarInsnNode load) || load.getOpcode() != Opcodes.ALOAD) {
+            return null;
+        }
+        int local = load.var;
+        LabelNode loopLabel = previousLabelBefore(start);
+        if (loopLabel == null) {
+            return null;
+        }
+        AbstractInsnNode previousStore = previousRealInsn(start);
+        if (!(previousStore instanceof VarInsnNode initialStore)
+            || initialStore.getOpcode() != Opcodes.ASTORE
+            || initialStore.var != local) {
+            return null;
+        }
+        AbstractInsnNode initialValue = previousRealInsn(previousStore);
+        if (!(initialValue instanceof LdcInsnNode initialLdc) || !(initialLdc.cst instanceof String initialString)) {
+            return null;
+        }
+
+        AbstractInsnNode lengthCall = nextRealInsn(load);
+        if (!isStringLengthCall(lengthCall)) {
+            return null;
+        }
+        AbstractInsnNode limitInsn = nextRealInsn(lengthCall);
+        Integer limit = intLiteral(limitInsn);
+        if (limit == null) {
+            return null;
+        }
+        AbstractInsnNode branchInsn = nextRealInsn(limitInsn);
+        if (!(branchInsn instanceof JumpInsnNode exitBranch) || exitBranch.getOpcode() != Opcodes.IF_ICMPGE) {
+            return null;
+        }
+        if (localEscapesAfterExit(exitBranch.label, local)) {
+            return null;
+        }
+
+        AbstractInsnNode newBuilder = nextRealInsn(exitBranch);
+        AbstractInsnNode dup = nextRealInsn(newBuilder);
+        AbstractInsnNode init = nextRealInsn(dup);
+        AbstractInsnNode first = nextRealInsn(init);
+        AbstractInsnNode append1 = nextRealInsn(first);
+        AbstractInsnNode second = nextRealInsn(append1);
+        AbstractInsnNode append2 = nextRealInsn(second);
+        AbstractInsnNode toString = nextRealInsn(append2);
+        if (!(newBuilder instanceof TypeInsnNode newInsn)
+            || newInsn.getOpcode() != Opcodes.NEW
+            || !"java/lang/StringBuilder".equals(newInsn.desc)) {
+            return null;
+        }
+        if (!(dup instanceof InsnNode dupInsn) || dupInsn.getOpcode() != Opcodes.DUP) {
+            return null;
+        }
+        if (!(init instanceof MethodInsnNode initCall)
+            || initCall.getOpcode() != Opcodes.INVOKESPECIAL
+            || !"java/lang/StringBuilder".equals(initCall.owner)
+            || !"<init>".equals(initCall.name)
+            || !"()V".equals(initCall.desc)) {
+            return null;
+        }
+        if (!(first instanceof VarInsnNode firstLoad) || firstLoad.getOpcode() != Opcodes.ALOAD || firstLoad.var != local) {
+            return null;
+        }
+        if (!isStringBuilderAppendString(append1)) {
+            return null;
+        }
+        if (!(second instanceof LdcInsnNode suffixLdc) || !(suffixLdc.cst instanceof String suffix) || suffix.isEmpty()) {
+            return null;
+        }
+        if (!isStringBuilderAppendString(append2)) {
+            return null;
+        }
+        if (!(toString instanceof MethodInsnNode toStringCall)
+            || toStringCall.getOpcode() != Opcodes.INVOKEVIRTUAL
+            || !"java/lang/StringBuilder".equals(toStringCall.owner)
+            || !"toString".equals(toStringCall.name)
+            || !"()Ljava/lang/String;".equals(toStringCall.desc)) {
+            return null;
+        }
+        AbstractInsnNode storeInsn = nextNonMetaSameBlock(toString);
+        if (!(storeInsn instanceof VarInsnNode store) || store.getOpcode() != Opcodes.ASTORE || store.var != local) {
+            return null;
+        }
+        AbstractInsnNode backedgeInsn = nextRealInsn(storeInsn);
+        if (!(backedgeInsn instanceof JumpInsnNode backedge)
+            || backedge.getOpcode() != Opcodes.GOTO
+            || backedge.label != loopLabel) {
+            return null;
+        }
+        if (coveredRegionHasActiveHandlers(start, backedgeInsn, activeHandlers, pcMap)
+            || coveredRegionHasBranchTarget(start, backedgeInsn, jumpTargetCounts)) {
+            return null;
+        }
+
+        String exitLabel = labelMap.get(exitBranch.label);
+        if (exitLabel == null) {
+            return null;
+        }
+        int recurrence = stringRecurrenceIndex++;
+        String code = "{ /* scalarized same-local StringBuilder concat recurrence */ "
+            + "jlong __neko_scalar_concat_len_" + recurrence + " = " + initialString.length() + "LL; "
+            + "jlong __neko_scalar_concat_limit_" + recurrence + " = " + limit + "LL; "
+            + "jlong __neko_scalar_concat_step_" + recurrence + " = " + suffix.length() + "LL; "
+            + "(void)__neko_scalar_concat_len_" + recurrence + "; "
+            + "(void)__neko_scalar_concat_limit_" + recurrence + "; "
+            + "(void)__neko_scalar_concat_step_" + recurrence + "; "
+            + "goto " + exitLabel + "; }";
+        return new StringConcatRecurrenceFusion(code, backedgeInsn);
+    }
+
+    private boolean isStringLengthCall(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+            && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+            && "java/lang/String".equals(call.owner)
+            && "length".equals(call.name)
+            && "()I".equals(call.desc);
+    }
+
+    private boolean isStringBuilderAppendString(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+            && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+            && "java/lang/StringBuilder".equals(call.owner)
+            && "append".equals(call.name)
+            && "(Ljava/lang/String;)Ljava/lang/StringBuilder;".equals(call.desc);
+    }
+
+    private boolean localEscapesAfterExit(LabelNode exitLabel, int local) {
+        for (AbstractInsnNode cur = exitLabel.getNext(); cur != null; cur = cur.getNext()) {
+            if (cur instanceof VarInsnNode varInsn && varInsn.getOpcode() == Opcodes.ALOAD && varInsn.var == local) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean coveredRegionHasActiveHandlers(
+        AbstractInsnNode first,
+        AbstractInsnNode last,
+        Map<Integer, List<TryHandler>> activeHandlers,
+        Map<AbstractInsnNode, Integer> pcMap
+    ) {
+        for (AbstractInsnNode cur = first; cur != null; cur = cur.getNext()) {
+            if (isRealInsn(cur)) {
+                Integer pc = pcMap.get(cur);
+                if (pc == null || !activeHandlers.getOrDefault(pc, List.of()).isEmpty()) {
+                    return true;
+                }
+            }
+            if (cur == last) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean coveredRegionHasBranchTarget(
+        AbstractInsnNode first,
+        AbstractInsnNode last,
+        Map<LabelNode, Integer> jumpTargetCounts
+    ) {
+        for (AbstractInsnNode cur = first; cur != null; cur = cur.getNext()) {
+            if (cur instanceof LabelNode label && jumpTargetCounts.getOrDefault(label, 0) > 0) {
+                return true;
+            }
+            if (cur == last) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private LabelNode previousLabelBefore(AbstractInsnNode insn) {
+        for (AbstractInsnNode cur = insn == null ? null : insn.getPrevious(); cur != null; cur = cur.getPrevious()) {
+            if (cur instanceof LineNumberNode || cur instanceof FrameNode) {
+                continue;
+            }
+            if (cur instanceof LabelNode label) {
+                return label;
+            }
+            return null;
+        }
+        return null;
+    }
+
+    private AbstractInsnNode previousRealInsn(AbstractInsnNode insn) {
+        for (AbstractInsnNode cur = insn == null ? null : insn.getPrevious(); cur != null; cur = cur.getPrevious()) {
+            if (isRealInsn(cur)) {
+                return cur;
+            }
+        }
+        return null;
     }
 
     private StringConcatPattern renderedStringConcatPattern(AbstractInsnNode start, String currentOwnerInternalName) {

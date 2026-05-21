@@ -2683,7 +2683,7 @@ Performance and GC gates:
   still open because default TEST remains above target and raw graph still
   requires opt-in.
 
-- [ ] P49 Scalarize proven same-local StringBuilder concat recurrence.
+- [x] P49 Scalarize proven same-local StringBuilder concat recurrence.
   Add a generic bytecode proof and native emission path for a non-escaping
   same-local recurrence of the form `s = new StringBuilder().append(s).append(x).toString()`
   where the updated local is used only for scalar observations proven
@@ -2733,6 +2733,19 @@ Performance and GC gates:
   `[neko-direct] primitive array allocation direct path unavailable len=192
   kind=7 ... raw=1 zgc=0 coh=0 tlab=1`. P50/NPT-3cl is the required allocator
   prerequisite before P49 can be checkpointed.
+  Completion evidence 2026-05-22: after P50 removed the primitive-array
+  allocation abort, the recurrence scalarizer remains validated in the focused
+  Gradle slice and fresh generated TEST C still removes the per-iteration
+  StringBuilder concat path. Fresh TEST x5 after the current translator changes
+  reported Calc `3/3/2/3/3 ms` with Pool PASS, preserving the default
+  `<=20ms` target without `NEKO_RAW_STRING_GRAPH_PREREQ`. Fresh obfusjack x5
+  completed without aborts and reported Platform `49/43/49/49/46 ms`, Virtual
+  `39/47/36/40/41 ms`, Seq `13/11/11/11/11 ms`, Parallel `1 ms`, and VThreads
+  `1 ms`; the remaining Platform/Virtual misses are tracked by the next
+  thread-work hot-path row, while the string recurrence path did not regress
+  obfusjack correctness. Strict grep over fresh `run-413*` generated C/headers
+  found no forbidden JNI wrapper markers. G1/Serial/Parallel TEST smokes
+  reported Pool PASS and Calc `3/3/3 ms`.
 
 - [x] P50 Use JVM_NewArray slow primitive-array allocation when TLAB refill cannot satisfy direct allocation.
   Extend the existing non-JNI JVM symbol slow allocation surface used by
@@ -2782,3 +2795,60 @@ Performance and GC gates:
   `2/3/3 ms`. Obfusjack x5 completed without the primitive-array allocation
   abort; timings were Platform `50/46/48/41/50 ms`, Virtual `40/40/42/45/43 ms`,
   Seq `18/17/17/17/17 ms`, Parallel `1 ms`, VThreads `1 ms`.
+
+- [x] P52 Scalarize counted double[][] multiply-accumulate inner loops.
+  Add a generic translator loop fusion for a counted `int` loop whose body
+  updates one `double` accumulator local with the product of two `double[][]`
+  element reads and then increments the counted local by one. The proof must
+  require a single backedge to the loop header, no active try handler over the
+  covered range, no branch target inside the covered range other than the
+  header/exit labels, an `IF_ICMPGE`/`IF_ICMPGT` style exit guard that dominates
+  the body, a same-local induction increment, and no writes to the array
+  reference, bound, index, or accumulator locals except the proven update. The
+  emitted C may replace the bytecode body with one native `for` loop that uses
+  the existing raw fused `AALOAD+DALOAD` helper, preserves the helper failure
+  reason dispatch, and jumps to the original exit label. It must not hoist
+  nullable array dereferences before the original loop guard, must not change
+  exception order on the first failing access, and must not specialize owner,
+  method, class, descriptor, source line, or benchmark artifact names.
+  Source evidence: after P51, fresh generated obfusjack C in
+  `build/neko-native-work/run-40744661698418/neko_native_impl_52.c` proves the
+  `mmulSeq` inner loop is now reduced to a scalar multiply-add statement but
+  still executes the translated label loop, loop-local stores, increment,
+  pending-exception check, and backedge every iteration. Fresh obfusjack x5
+  after P51 still misses the gate with Seq `17/20/17/17/17 ms`, while TEST Calc
+  remains under target at `4/3/2/3/3 ms`. The exact failing invariant is
+  loop-dispatch overhead remaining after the straight-line multiply-add fusion;
+  the changed path is the generic counted-loop translator path for the same
+  bytecode shape.
+  Validation: focused translator tests for positive counted-loop fusion and
+  rejection when a protected range, interior branch target, non-unit induction
+  update, mismatched accumulator store, or escaping write breaks the proof;
+  fresh artifact regeneration; generated-C inspection proving the inner loop
+  emits one scalar native `for` and no per-iteration `PUSH_D`/`POP_D`
+  multiply-add sequence or translated backedge in the covered range; TEST x5
+  preserving Calc; obfusjack x5 measuring Seq/Platform/Virtual/Parallel/
+  VThreads; strict forbidden JNI/fallback grep; G1/Serial/Parallel TEST smokes.
+  Completion criteria: the optimization is enabled only by the generic
+  bytecode/control-flow proof, rejection tests keep the existing translation,
+  generated C preserves fast-array failure dispatch and first failing access
+  semantics, obfusjack Seq reaches or materially moves toward the `<=14ms`
+  target without runtime aborts, and TEST does not regress.
+  Completion evidence 2026-05-22: implemented the generic counted-loop
+  scalarizer in `NativeTranslator` with proof checks for the loop header, single
+  `IF_ICMPGE` exit, unit `IINC` induction update, matching accumulator store,
+  no protected range, and no interior branch target. Focused Gradle validation
+  passed for `OpcodeTranslatorUnitTest`, `CCodeGeneratorTest`,
+  `NativeGeneratedCHotPathAuditTest`, and
+  `NativeObfuscationIntegrationTest.nativeObfuscation_rawStringGraphOptInRunsConcatShapes`.
+  Fresh generated obfusjack C in
+  `build/neko-native-work/run-41392045707312/neko_native_impl_52.c` emits
+  `scalarized counted double[][] multiply-accumulate loop` as one native `for`
+  using `neko_fast_raw_aaload_daload`, preserves fast-array reason dispatch, and
+  removes the translated inner-loop `locals[9].i += 1` backedge from the covered
+  range. Strict grep over fresh `run-413*` generated C/headers found no
+  forbidden JNI wrapper markers. Fresh TEST x5 reported Calc `3/3/2/3/3 ms`
+  with Pool PASS. Fresh obfusjack x5 reported Platform `49/43/49/49/46 ms`,
+  Virtual `39/47/36/40/41 ms`, Seq `13/11/11/11/11 ms`, Parallel `1 ms`, and
+  VThreads `1 ms`, so the Seq median is `11 ms` and meets the `<=14ms` gate.
+  G1/Serial/Parallel TEST smokes reported Pool PASS and Calc `3/3/3 ms`.

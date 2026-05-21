@@ -540,6 +540,26 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
+    void stringBuilderConcatLengthRecurrenceScalarizesWhenLocalDiesAtReturn() {
+        String source = translateSingleMethod(stringBuilderConcatLengthRecurrenceOwner(false));
+        String body = translatedBodySection(source);
+
+        assertContains(body, "scalarized same-local StringBuilder concat recurrence", "__neko_scalar_concat_len_");
+        assertContains(body, "neko_fast_set_static_I_field");
+        assertFalse(body.contains("neko_concat_append_inline_store_local"), body);
+        assertFalse(body.contains("neko_build_raw_string_graph_store_local"), body);
+    }
+
+    @Test
+    void stringBuilderConcatLengthRecurrenceKeepsConcatWhenLocalEscapesAfterExit() {
+        String source = translateSingleMethod(stringBuilderConcatLengthRecurrenceOwner(true));
+        String body = translatedBodySection(source);
+
+        assertFalse(body.contains("scalarized same-local StringBuilder concat recurrence"), body);
+        assertContains(body, "neko_concat_append_inline_store_local(thread, env, &__neko_local_roots[0]");
+    }
+
+    @Test
     void methodHandleExactBridgeNoArrayAlloc() {
         for (boolean invokeExact : List.of(false, true)) {
             TranslationArtifact artifact = translateSingleMethodArtifact(methodHandleBridgeOwner(invokeExact));
@@ -683,6 +703,32 @@ class OpcodeTranslatorUnitTest {
     }
 
     @Test
+    void nativeTranslatorScalarizesCountedDoubleArrayMultiplyAccumulateLoop() {
+        String source = translateSingleMethod(countedDoubleArrayMultiplyAccumulateLoopOwner(1));
+        String body = translatedBodySection(source);
+
+        assertContains(body,
+            "scalarized counted double[][] multiply-accumulate loop",
+            "for (; __neko_mac_i_",
+            "jdouble __neko_mac_l_",
+            "jdouble __neko_mac_r_",
+            "goto __neko_exception_exit",
+            "locals[6].d = locals[6].d + (__neko_mac_l_");
+        assertFalse(body.contains("jdouble b = POP_D(); jdouble a = POP_D(); PUSH_D(a * b);"), body);
+        assertFalse(body.contains("jdouble b = POP_D(); jdouble a = POP_D(); PUSH_D(a + b);"), body);
+        assertFalse(body.contains("locals[9].i += 1;"), body);
+    }
+
+    @Test
+    void nativeTranslatorDoesNotScalarizeCountedDoubleArrayLoopWhenInductionStepDiffers() {
+        String source = translateSingleMethod(countedDoubleArrayMultiplyAccumulateLoopOwner(2));
+        String body = translatedBodySection(source);
+
+        assertFalse(body.contains("scalarized counted double[][] multiply-accumulate loop"), body);
+        assertContains(body, "locals[9].i += 2;");
+    }
+
+    @Test
     void nativeTranslatorKeepsTryDispatchForCompactedArrayLiteral() {
         String source = translateSingleMethod(primitiveArrayLiteralTryOwner());
         String body = translatedBodySection(source);
@@ -789,6 +835,50 @@ class OpcodeTranslatorUnitTest {
         method.tryCatchBlocks.add(new TryCatchBlockNode(start, end, handler, "java/lang/Throwable"));
         method.maxStack = 5;
         method.maxLocals = 0;
+        classNode.methods.add(method);
+        return classNode;
+    }
+
+    private static ClassNode countedDoubleArrayMultiplyAccumulateLoopOwner(int inductionStep) {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/CountedDoubleArrayMultiplyAccumulate" + inductionStep;
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        LabelNode loop = new LabelNode();
+        LabelNode exit = new LabelNode();
+        MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "run", "([[D[[DII)D", null, null);
+        method.instructions.add(new InsnNode(Opcodes.DCONST_0));
+        method.instructions.add(new VarInsnNode(Opcodes.DSTORE, 6));
+        method.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        method.instructions.add(new VarInsnNode(Opcodes.ISTORE, 9));
+        method.instructions.add(loop);
+        method.instructions.add(new VarInsnNode(Opcodes.ILOAD, 9));
+        method.instructions.add(new VarInsnNode(Opcodes.ILOAD, 2));
+        method.instructions.add(new JumpInsnNode(Opcodes.IF_ICMPGE, exit));
+        method.instructions.add(new VarInsnNode(Opcodes.DLOAD, 6));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        method.instructions.add(new VarInsnNode(Opcodes.ILOAD, 3));
+        method.instructions.add(new InsnNode(Opcodes.AALOAD));
+        method.instructions.add(new VarInsnNode(Opcodes.ILOAD, 9));
+        method.instructions.add(new InsnNode(Opcodes.DALOAD));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 1));
+        method.instructions.add(new VarInsnNode(Opcodes.ILOAD, 9));
+        method.instructions.add(new InsnNode(Opcodes.AALOAD));
+        method.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        method.instructions.add(new InsnNode(Opcodes.DALOAD));
+        method.instructions.add(new InsnNode(Opcodes.DMUL));
+        method.instructions.add(new InsnNode(Opcodes.DADD));
+        method.instructions.add(new VarInsnNode(Opcodes.DSTORE, 6));
+        method.instructions.add(new IincInsnNode(9, inductionStep));
+        method.instructions.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        method.instructions.add(exit);
+        method.instructions.add(new VarInsnNode(Opcodes.DLOAD, 6));
+        method.instructions.add(new InsnNode(Opcodes.DRETURN));
+        method.maxStack = 6;
+        method.maxLocals = 10;
         classNode.methods.add(method);
         return classNode;
     }
@@ -940,6 +1030,70 @@ class OpcodeTranslatorUnitTest {
         method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 1));
         method.instructions.add(new InsnNode(Opcodes.ARETURN));
         method.maxLocals = 2;
+        return classNode;
+    }
+
+    private static ClassNode stringBuilderConcatLengthRecurrenceOwner(boolean escapeAfterExit) {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V17;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/StringBuilderConcatLengthRecurrence" + (escapeAfterExit ? "Escape" : "Dead");
+        classNode.superName = "java/lang/Object";
+        classNode.fields = new ArrayList<>();
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC, "count", "I", null, null));
+        classNode.methods = new ArrayList<>();
+
+        LabelNode loop = new LabelNode();
+        LabelNode exit = new LabelNode();
+        MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "run", "()V", null, null);
+        method.instructions.add(new LdcInsnNode(""));
+        method.instructions.add(new VarInsnNode(Opcodes.ASTORE, 0));
+        method.instructions.add(loop);
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false));
+        method.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 101));
+        method.instructions.add(new JumpInsnNode(Opcodes.IF_ICMPGE, exit));
+        method.instructions.add(new TypeInsnNode(Opcodes.NEW, "java/lang/StringBuilder"));
+        method.instructions.add(new InsnNode(Opcodes.DUP));
+        method.instructions.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false));
+        method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            false
+        ));
+        method.instructions.add(new LdcInsnNode("ab"));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "append",
+            "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+            false
+        ));
+        method.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/StringBuilder",
+            "toString",
+            "()Ljava/lang/String;",
+            false
+        ));
+        method.instructions.add(new VarInsnNode(Opcodes.ASTORE, 0));
+        method.instructions.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        method.instructions.add(exit);
+        if (escapeAfterExit) {
+            method.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+            method.instructions.add(new InsnNode(Opcodes.POP));
+        }
+        method.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, classNode.name, "count", "I"));
+        method.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        method.instructions.add(new InsnNode(Opcodes.IADD));
+        method.instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, classNode.name, "count", "I"));
+        method.instructions.add(new InsnNode(Opcodes.RETURN));
+        method.maxStack = 3;
+        method.maxLocals = 1;
+        classNode.methods.add(method);
         return classNode;
     }
 
