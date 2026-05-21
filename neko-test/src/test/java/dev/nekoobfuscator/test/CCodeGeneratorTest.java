@@ -847,6 +847,12 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("static inline void *neko_pending_exception_oop(void *thread)"), source);
         assertTrue(source.contains("static inline void neko_clear_pending_exception(void *thread)"), source);
         assertTrue(source.contains("static inline jthrowable neko_take_pending_exception(void *thread)"), source);
+        assertTrue(source.contains("#define NEKO_ENV_OFFSET_CACHE_NAME \"NEKO_NATIVE_JNI_ENV_OFFSET\""), source);
+        assertTrue(source.contains("static jboolean neko_exception_check_validate_env_offset(JNIEnv *env, ptrdiff_t off"), source);
+        assertTrue(source.contains("static jboolean neko_exception_check_load_process_env_offset(JNIEnv *env)"), source);
+        assertTrue(source.contains("static jboolean neko_exception_check_publish_process_env_offset(ptrdiff_t off)"), source);
+        assertTrue(source.contains("g_neko_env_offset_publication_kind = 2;"), source);
+        assertTrue(source.contains("eager env-offset publication via process cache"), source);
         assertTrue(source.contains("static void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry"));
         assertFalse(source.contains("static inline jint neko_throw("), source);
         assertFalse(source.contains("static inline jint neko_throw_new("), source);

@@ -126,7 +126,7 @@ the source plan that owns the changed path before it can be considered complete.
   JNI call wrappers, array JNI wrappers, or JVMTI markers. Compile totals/top
   rows are recorded in the same summary JSON.
 
-### [ ] NPT-2: Stage 4 T4.0 eager exception-check env-offset publication
+### [x] NPT-2: Stage 4 T4.0 eager exception-check env-offset publication
 
 - Scope: implement the Stage 4.A structural performance prerequisite from
   `native-gentle-flamingo-todo.md` T4.0: ensure
@@ -146,6 +146,64 @@ the source plan that owns the changed path before it can be considered complete.
   no new JNI function-table use or fallback path.
 - Dependency: NPT-1, unless a plan-level update records why a narrower fresh
   baseline is sufficient.
+- Reopened evidence 2026-05-22: fresh TEST artifact
+  `build/npt-3bw/TEST-native.jar` and obfusjack artifact
+  `build/npt-3bw/obfusjack-native.jar` have the collapsed hot
+  `neko_exception_check` body in generated C and no forbidden JNI grep matches,
+  but an obfusjack `NEKO_PATCH_DEBUG=1` runtime printed repeated
+  `eager env-offset publication via memory walk: off=960` lines in one JVM
+  process. The exact failing invariant is process-wide publication: every
+  generated shared library owns a private
+  `g_neko_off_thread_jni_environment_for_check`, so each library repeats the
+  cold memory walk even though the hot path remains resolver-free. The next
+  implementation substep is a generic generated-native bootstrap cache: publish
+  the validated JNIEnv-to-JavaThread offset into a process-wide cache after the
+  first successful cold derivation, have later libraries validate that cached
+  offset against the current `JNIEnv`, JNI functions table, pending-exception
+  slot, vtable window, and thread-state invariant before accepting it, and keep
+  the hot `neko_exception_check` path as a plain global load plus pointer
+  arithmetic plus `_pending_exception` read. Validation remains the row's
+  existing fresh `R-build`, repeated TEST/obfusjack runtime, `R-inspect`, and
+  negative/fail-closed evidence.
+- Completion evidence 2026-05-22: implemented a generic generated-native
+  process cache for `JNIEnv* -> JavaThread*` distance publication. The first
+  generated library validates and publishes `NEKO_NATIVE_JNI_ENV_OFFSET` after
+  the cold memory walk; later generated libraries parse and revalidate that
+  cache against the current `JNIEnv`, JNI functions table, vtable window,
+  pending-exception slot, and thread-state invariant before accepting it.
+  Invalid cache values are ignored after diagnostic proof and do not corrupt
+  the hot path. The cache helpers are emitted as cold/noinline bootstrap-only
+  code, and `neko_exception_check` remains a plain load of
+  `g_neko_off_thread_jni_environment_for_check`, pointer arithmetic, and direct
+  `_pending_exception` read with no resolver call. Focused `R-build` passed:
+  `./gradlew --no-daemon :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest
+  -Djava.io.tmpdir=build/native-run-tmp`. Fresh artifacts:
+  `build/npt-2-cache/TEST-native.jar` from
+  `build/neko-native-work/run-31103118865777` (`translated=49 rejected=0`,
+  lib `1043048` bytes) and `build/npt-2-cache/obfusjack-native.jar` from
+  `build/neko-native-work/run-31110445445738`
+  (`translated=93 rejected=0`, lib `1811816` bytes). `R-inspect` over those
+  run dirs found `0` `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` generated-C
+  matches and showed the cache helpers plus cold/noinline declarations.
+  `NEKO_PATCH_DEBUG=1` obfusjack showed exactly one
+  `derived JNIEnv->JavaThread distance via memory walk` and one
+  `eager env-offset publication via memory walk`, followed by repeated
+  `eager env-offset publication via process cache` lines; no later library
+  repeated the memory walk. Invalid-cache negative runtime with
+  `NEKO_NATIVE_JNI_ENV_OFFSET=8 NEKO_PATCH_DEBUG=1` exited cleanly, logged
+  `ignored invalid process JNIEnv->JavaThread offset cache`, then performed one
+  validated memory walk and completed obfusjack. Runtime gates on the final
+  artifacts passed: TEST x5 retained `Tests r Finished` and Calc
+  `71/70/71/68/69` ms (median `70`); original obfusjack x5 completed with
+  Seq `2/2/2/3/2` ms; native obfusjack x10 completed with Platform
+  `44/44/46/48/47/46/43/43/43/45` ms, Virtual
+  `37/40/39/43/36/37/39/36/38/37` ms, Seq
+  `17/17/17/20/17/17/17/17/17/17` ms, and Parallel/VThreads `1` ms. Same-
+  session old-artifact comparison was similarly noisy and did not show a
+  distinct regression: prior obfusjack samples included Platform
+  `47/46/48/46`, Virtual `40/37/42/36`, and Seq `23/18/17/17` ms.
 
 ### [-] NPT-3: Runtime P4 const fast-state accessor layer
 

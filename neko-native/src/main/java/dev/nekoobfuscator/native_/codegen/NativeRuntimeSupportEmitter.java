@@ -115,6 +115,7 @@ extern ptrdiff_t g_neko_off_thread_pending_exception;
 __attribute__((visibility("hidden"))) extern ptrdiff_t g_neko_off_thread_jni_environment_for_check;
 __attribute__((visibility("hidden"))) extern void *g_neko_jni_onload_thread_reg;
 __attribute__((visibility("hidden"))) extern void *g_neko_jni_functions_table;
+__attribute__((visibility("hidden"))) extern int32_t g_neko_env_offset_publication_kind;
 __attribute__((visibility("hidden"))) extern ptrdiff_t g_neko_off_thread_state;
 __attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_java;
 __attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_native;
@@ -124,9 +125,12 @@ __attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_nati
  * previous (T3.20) version was reached lazily from the hot-path
  * neko_exception_check; that defeated CSE of the offset across multiple
  * inlined exception checks in the same impl_fn. T4.0 moves the call site
- * to neko_method_layout_init (end of JNI_OnLoad) so the resolver runs at
- * most once per process; the hot path no longer references the resolver
- * or the atomic acquire-load. We mark the function `cold` + `noinline` so
+ * to neko_method_layout_init (end of JNI_OnLoad). The first generated library
+ * that must memory-walk publishes a validated process-wide cache; later
+ * generated libraries validate and reuse that cache before scanning, so the
+ * resolver performs at most one memory walk per JVM process. The hot path no
+ * longer references the resolver or the atomic acquire-load. We mark the
+ * function `cold` + `noinline` so
  * GCC keeps it in a separate text segment partition and never speculates
  * a cross-function inline that would force a register-allocation barrier
  * around the hot path. The body itself is unchanged: env is the address
@@ -139,11 +143,151 @@ __attribute__((visibility("hidden"))) extern int32_t g_neko_thread_state_in_nati
  * required to look like NULL or a non-low aligned pointer so a coincidental
  * vtable hit cannot wedge in a wrong offset. No JNI calls are made; an
  * unvalidated candidate is hard-rejected. */
+extern int setenv(const char *name, const char *value, int overwrite);
+#define NEKO_ENV_OFFSET_CACHE_NAME "NEKO_NATIVE_JNI_ENV_OFFSET"
+
 __attribute__((cold)) __attribute__((noinline))
-static jboolean neko_exception_check_resolve_env_offset(JNIEnv *env) {
+static jboolean neko_exception_check_validate_env_offset(JNIEnv *env, ptrdiff_t off, void **thread_out, void **vtbl_out) {
     uintptr_t env_bits;
     uintptr_t fn_table_bits;
     intptr_t libjvm_window;
+    uintptr_t candidate_bits;
+    void *thread_candidate;
+    void *vtbl;
+    intptr_t diff;
+    void *pending;
+    int32_t state;
+    if (env == NULL || g_neko_jni_functions_table == NULL
+        || g_neko_off_thread_pending_exception <= 0
+        || off < (ptrdiff_t)0x100 || off >= (ptrdiff_t)0x4000
+        || (off % (ptrdiff_t)sizeof(void*)) != 0) {
+        return JNI_FALSE;
+    }
+    env_bits = (uintptr_t)env;
+    candidate_bits = env_bits - (uintptr_t)off;
+    if (candidate_bits < (uintptr_t)0x100000ULL) {
+        return JNI_FALSE;
+    }
+    if ((candidate_bits & (uintptr_t)0xfULL) != 0u) {
+        /* JavaThread is allocated with C++ new which guarantees at
+         * least 16-byte alignment on 64-bit Linux. */
+        return JNI_FALSE;
+    }
+    thread_candidate = (void*)candidate_bits;
+    if (*(void**)((char*)thread_candidate + off) != g_neko_jni_functions_table) {
+        return JNI_FALSE;
+    }
+    vtbl = *(void**)thread_candidate;
+    if (vtbl == NULL) {
+        return JNI_FALSE;
+    }
+    if (((uintptr_t)vtbl & (uintptr_t)0x7ULL) != 0u) {
+        return JNI_FALSE;
+    }
+    fn_table_bits = (uintptr_t)g_neko_jni_functions_table;
+    /* libjvm's text and data sections sit on different mmap'd regions,
+     * sometimes hundreds of megabytes apart. Use a 1 GB window from the
+     * published function-table pointer; this is wide enough to cover both
+     * libjvm pages while still rejecting random non-libjvm vtables. */
+    libjvm_window = (intptr_t)0x40000000;  /* 1 GB on each side */
+    diff = (intptr_t)vtbl - (intptr_t)fn_table_bits;
+    if (diff < -libjvm_window || diff > libjvm_window) {
+        return JNI_FALSE;
+    }
+    pending = *(void**)((char*)thread_candidate + g_neko_off_thread_pending_exception);
+    if (pending != NULL
+        && ((uintptr_t)pending < (uintptr_t)0x100000ULL
+            || ((uintptr_t)pending & (uintptr_t)0x7ULL) != 0u)) {
+        return JNI_FALSE;
+    }
+    if (g_neko_off_thread_state > 0) {
+        state = *(int32_t*)((char*)thread_candidate + g_neko_off_thread_state);
+        /* Thread state is a small enum (HotSpot uses 0..9). A real JavaThread
+         * is in `_thread_in_native` while we run inside JNI_OnLoad / bind
+         * helpers, but accept any of the states the patcher already published
+         * to keep this generic. */
+        if (state != g_neko_thread_state_in_java
+            && state != g_neko_thread_state_in_native
+            && state != g_neko_thread_state_in_native_trans) {
+            return JNI_FALSE;
+        }
+    }
+    if (thread_out != NULL) {
+        *thread_out = thread_candidate;
+    }
+    if (vtbl_out != NULL) {
+        *vtbl_out = vtbl;
+    }
+    return JNI_TRUE;
+}
+
+__attribute__((cold)) __attribute__((noinline))
+static jboolean neko_exception_check_load_process_env_offset(JNIEnv *env) {
+    const char *cached = getenv(NEKO_ENV_OFFSET_CACHE_NAME);
+    unsigned long value = 0;
+    const unsigned char *p;
+    ptrdiff_t off;
+    void *thread_candidate = NULL;
+    void *vtbl = NULL;
+    if (cached == NULL || cached[0] == '\\0') {
+        return JNI_FALSE;
+    }
+    p = (const unsigned char*)cached;
+    while (*p >= (unsigned char)'0' && *p <= (unsigned char)'9') {
+        value = (value * 10UL) + (unsigned long)(*p - (unsigned char)'0');
+        if (value >= 0x4000UL) {
+            return JNI_FALSE;
+        }
+        p++;
+    }
+    if (*p != (unsigned char)'\\0') {
+        return JNI_FALSE;
+    }
+    off = (ptrdiff_t)value;
+    if (!neko_exception_check_validate_env_offset(env, off, &thread_candidate, &vtbl)) {
+        if (getenv("NEKO_PATCH_DEBUG") != NULL) {
+            fprintf(stderr,
+                "[neko-direct] ignored invalid process JNIEnv->JavaThread offset cache: value=%s env=%p fn_table=%p\\n",
+                cached, (void*)env, g_neko_jni_functions_table);
+        }
+        return JNI_FALSE;
+    }
+    __atomic_store_n(&g_neko_off_thread_jni_environment_for_check, off, __ATOMIC_RELEASE);
+    g_neko_env_offset_publication_kind = 2;
+    if (getenv("NEKO_PATCH_DEBUG") != NULL) {
+        fprintf(stderr,
+            "[neko-direct] reused process JNIEnv->JavaThread offset cache:"
+            " off=%td env=%p thread=%p vtbl=%p\\n",
+            off, (void*)env, thread_candidate, vtbl);
+    }
+    return JNI_TRUE;
+}
+
+__attribute__((cold)) __attribute__((noinline))
+static jboolean neko_exception_check_publish_process_env_offset(ptrdiff_t off) {
+    char encoded[32];
+    int n;
+    if (off <= 0) {
+        return JNI_FALSE;
+    }
+    n = snprintf(encoded, sizeof(encoded), "%td", off);
+    if (n <= 0 || (size_t)n >= sizeof(encoded)) {
+        return JNI_FALSE;
+    }
+    if (setenv(NEKO_ENV_OFFSET_CACHE_NAME, encoded, 1) != 0) {
+        if (getenv("NEKO_PATCH_DEBUG") != NULL) {
+            fprintf(stderr,
+                "[neko-direct] failed to publish process JNIEnv->JavaThread offset cache:"
+                " off=%td\\n",
+                off);
+        }
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+__attribute__((cold)) __attribute__((noinline))
+static jboolean neko_exception_check_resolve_env_offset(JNIEnv *env) {
     ptrdiff_t off;
     /* `g_neko_off_thread_jni_environment_for_check` is updated once and never
      * reset. The eager publication wrapper in neko_method_layout_init
@@ -161,13 +305,9 @@ static jboolean neko_exception_check_resolve_env_offset(JNIEnv *env) {
         || g_neko_off_thread_pending_exception <= 0) {
         return JNI_FALSE;
     }
-    env_bits = (uintptr_t)env;
-    fn_table_bits = (uintptr_t)g_neko_jni_functions_table;
-    /* libjvm's text and data sections sit on different mmap'd regions,
-     * sometimes hundreds of megabytes apart. Use a 1 GB window from the
-     * published function-table pointer; this is wide enough to cover both
-     * libjvm pages while still rejecting random non-libjvm vtables. */
-    libjvm_window = (intptr_t)0x40000000;  /* 1 GB on each side */
+    if (neko_exception_check_load_process_env_offset(env)) {
+        return JNI_TRUE;
+    }
     /* `_jni_environment` is the embedded JNIEnv member of JavaThread. In
      * HotSpot 21 it sits hundreds of bytes into the struct (after the
      * Thread base, OSThread*, _stack_base, the JavaFrameAnchor, etc.), so
@@ -177,54 +317,16 @@ static jboolean neko_exception_check_resolve_env_offset(JNIEnv *env) {
      * preamble (vtable, mutex pointers) where `*(thread + off)` would
      * trivially match by aliasing. */
     for (off = 0x100; off < 0x4000; off += (ptrdiff_t)sizeof(void*)) {
-        uintptr_t candidate_bits = env_bits - (uintptr_t)off;
-        void *thread_candidate;
-        void *vtbl;
-        intptr_t diff;
-        void *pending;
-        int32_t state;
-        if (candidate_bits < (uintptr_t)0x100000ULL) {
-            return JNI_FALSE;
-        }
-        if ((candidate_bits & (uintptr_t)0xfULL) != 0u) {
-            /* JavaThread is allocated with C++ new which guarantees at
-             * least 16-byte alignment on 64-bit Linux. */
+        void *thread_candidate = NULL;
+        void *vtbl = NULL;
+        if (!neko_exception_check_validate_env_offset(env, off, &thread_candidate, &vtbl)) {
             continue;
-        }
-        thread_candidate = (void*)candidate_bits;
-        if (*(void**)((char*)thread_candidate + off) != g_neko_jni_functions_table) {
-            continue;
-        }
-        vtbl = *(void**)thread_candidate;
-        if (vtbl == NULL) {
-            continue;
-        }
-        if (((uintptr_t)vtbl & (uintptr_t)0x7ULL) != 0u) {
-            continue;
-        }
-        diff = (intptr_t)vtbl - (intptr_t)fn_table_bits;
-        if (diff < -libjvm_window || diff > libjvm_window) {
-            continue;
-        }
-        pending = *(void**)((char*)thread_candidate + g_neko_off_thread_pending_exception);
-        if (pending != NULL
-            && ((uintptr_t)pending < (uintptr_t)0x100000ULL
-                || ((uintptr_t)pending & (uintptr_t)0x7ULL) != 0u)) {
-            continue;
-        }
-        if (g_neko_off_thread_state > 0) {
-            state = *(int32_t*)((char*)thread_candidate + g_neko_off_thread_state);
-            /* Thread state is a small enum (HotSpot uses 0..9). A real
-             * JavaThread is in `_thread_in_native` while we run inside
-             * JNI_OnLoad / bind helpers, but accept any of the states the
-             * patcher already published to keep this generic. */
-            if (state != g_neko_thread_state_in_java
-                && state != g_neko_thread_state_in_native
-                && state != g_neko_thread_state_in_native_trans) {
-                continue;
-            }
         }
         __atomic_store_n(&g_neko_off_thread_jni_environment_for_check, off, __ATOMIC_RELEASE);
+        if (!neko_exception_check_publish_process_env_offset(off)) {
+            return JNI_FALSE;
+        }
+        g_neko_env_offset_publication_kind = 3;
         if (getenv("NEKO_PATCH_DEBUG") != NULL) {
             fprintf(stderr,
                 "[neko-direct] derived JNIEnv->JavaThread distance via memory walk:"

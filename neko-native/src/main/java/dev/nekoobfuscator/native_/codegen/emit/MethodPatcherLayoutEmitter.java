@@ -294,6 +294,8 @@ __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_pending_except
  * top-of-file region, before g_neko_method_layout exists) can subtract it
  * from JNIEnv* to derive the JavaThread*. Set once during layout init. */
 __attribute__((visibility("hidden"))) ptrdiff_t g_neko_off_thread_jni_environment_for_check = 0;
+/* 0 unset, 1 VMStructs, 2 validated process cache, 3 cold memory walk. */
+__attribute__((visibility("hidden"))) int32_t g_neko_env_offset_publication_kind = 0;
 /* === Native→Java direct invoke globals ===
  * Exported so the per-shape direct dispatchers can issue a call into HotSpot's
  * shared call_stub without going through any JNI function pointer. The signed

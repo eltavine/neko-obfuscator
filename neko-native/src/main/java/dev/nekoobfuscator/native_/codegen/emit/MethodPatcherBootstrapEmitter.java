@@ -348,6 +348,7 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
     if (g_neko_method_layout.off_thread_jni_environment > 0) {
         g_neko_off_thread_jni_environment_for_check =
             g_neko_method_layout.off_thread_jni_environment;
+        g_neko_env_offset_publication_kind = 1;
     }
     if (g_neko_off_thread_jni_environment_for_check <= 0) {
         if (env == NULL) {
@@ -380,8 +381,13 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
             g_neko_method_layout.off_thread_jni_environment =
                 g_neko_off_thread_jni_environment_for_check;
         }
-        NEKO_PATCH_LOG("eager env-offset publication via memory walk: off=%td (VMStructs did not expose JavaThread::_jni_environment)",
-            g_neko_off_thread_jni_environment_for_check);
+        if (g_neko_env_offset_publication_kind == 2) {
+            NEKO_PATCH_LOG("eager env-offset publication via process cache: off=%td",
+                g_neko_off_thread_jni_environment_for_check);
+        } else {
+            NEKO_PATCH_LOG("eager env-offset publication via memory walk: off=%td (VMStructs did not expose JavaThread::_jni_environment)",
+                g_neko_off_thread_jni_environment_for_check);
+        }
     } else {
         NEKO_PATCH_LOG("eager env-offset publication via VMStructs: off=%td",
             g_neko_off_thread_jni_environment_for_check);
