@@ -2028,6 +2028,43 @@ the source plan that owns the changed path before it can be considered complete.
   NPT-3aw `84,84,84,87,86 ms` (median `84ms`). Focused native integration tests
   for TEST Calc and obfusjack completion also passed.
 
+### [x] NPT-3bg: Fuse primitive constant local stores
+
+- Scope: fuse only adjacent same-basic-block primitive constant producers
+  (`ICONST_*`, `BIPUSH`, `SIPUSH`, `LCONST_*`, `FCONST_*`, `DCONST_*`, and
+  numeric `LDC`) followed immediately by a matching primitive local store
+  (`ISTORE`, `LSTORE`, `FSTORE`, or `DSTORE`). The fused C must assign the same
+  literal expression directly to the target local slot. It must not cross
+  labels, fold object/reference stores, fold non-constant producers, change
+  local indexes, or alter exception dispatch boundaries.
+- Required evidence: fresh NPT-3bf generated TEST C at
+  `build/neko-native-work/run-21337326266905/neko_native_impl_1.c`,
+  `neko_native_impl_19.c`, and `neko_native_impl_21.c` shows hot methods still
+  initialize primitive locals through constant `PUSH_*` followed immediately by
+  `locals[n].* = POP_*()`. These are primitive non-throwing stack round trips.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving primitive
+  constant local stores use direct assignments with no constant push/pop round
+  trip, default TEST smoke/timing comparison, and focused native integration
+  tests for TEST Calc and obfusjack completion.
+- Completion criteria: only primitive constant local stores fuse; label-blocked,
+  type-mismatched, and non-constant cases retain stack traffic; no
+  JNI/JVMTI/fallback markers are introduced; timing does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-21666360179964` built `libneko_linux_x64.so` at
+  `1034760` bytes with `translated=49 rejected=0`. Generated C inspection
+  showed hot primitive initializers in `Digi.run`, `Calc.runAll`, and
+  `Calc.runAdd` use direct local assignments such as `locals[1].d = 0.0`,
+  `locals[3].i = 0`, and `locals[4].f = 1.1f`. Static grep found no
+  `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` markers in the generated work
+  directory. Same-session alternating TEST smoke comparison passed with empty
+  stderr: NPT-3bf `90,88,86,93,87,88,94 ms` (median `88ms`) versus NPT-3bg
+  `91,84,91,88,89,88,87 ms` (median `88ms`), with library size reduced from
+  `1034808` to `1034760` bytes. Focused native integration tests for TEST Calc
+  and obfusjack completion also passed.
+
 ### [x] NPT-3bf: Fuse primitive float/double same-local add updates
 
 - Scope: fuse only adjacent same-basic-block `FLOAD` or `DLOAD` of a local,

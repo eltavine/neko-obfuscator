@@ -627,6 +627,74 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void primitiveConstantLocalStoresFuseWithoutCrossingLabels() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/ConstantStoreOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode constants = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "constants", "()V", null, null);
+        constants.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 7));
+        constants.instructions.add(new VarInsnNode(Opcodes.ISTORE, 0));
+        constants.instructions.add(new LdcInsnNode(9L));
+        constants.instructions.add(new VarInsnNode(Opcodes.LSTORE, 1));
+        constants.instructions.add(new LdcInsnNode(1.5f));
+        constants.instructions.add(new VarInsnNode(Opcodes.FSTORE, 3));
+        constants.instructions.add(new LdcInsnNode(2.5d));
+        constants.instructions.add(new VarInsnNode(Opcodes.DSTORE, 4));
+        constants.instructions.add(new InsnNode(Opcodes.RETURN));
+        constants.maxStack = 2;
+        constants.maxLocals = 6;
+        classNode.methods.add(constants);
+
+        LabelNode boundary = new LabelNode();
+        MethodNode blocked = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "blocked", "()V", null, null);
+        blocked.instructions.add(new InsnNode(Opcodes.DCONST_0));
+        blocked.instructions.add(boundary);
+        blocked.instructions.add(new VarInsnNode(Opcodes.DSTORE, 0));
+        blocked.instructions.add(new InsnNode(Opcodes.RETURN));
+        blocked.maxStack = 2;
+        blocked.maxLocals = 2;
+        classNode.methods.add(blocked);
+
+        MethodNode nonConstant = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "nonConstant", "(I)V", null, null);
+        nonConstant.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        nonConstant.instructions.add(new VarInsnNode(Opcodes.ISTORE, 1));
+        nonConstant.instructions.add(new InsnNode(Opcodes.RETURN));
+        nonConstant.maxStack = 1;
+        nonConstant.maxLocals = 2;
+        classNode.methods.add(nonConstant);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("constant-local-store-fusion", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("constants", "()V")),
+            new MethodSelection(owner, owner.findMethod("blocked", "()V")),
+            new MethodSelection(owner, owner.findMethod("nonConstant", "(I)V"))
+        )).source();
+
+        String constantsBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        assertTrue(constantsBody.contains("{ locals[0].i = 7; }"), () -> constantsBody);
+        assertTrue(constantsBody.contains("{ locals[1].j = 9LL; }"), () -> constantsBody);
+        assertTrue(constantsBody.contains("{ locals[3].f = 1.5f; }"), () -> constantsBody);
+        assertTrue(constantsBody.contains("{ locals[4].d = 2.5; }"), () -> constantsBody);
+        assertFalse(constantsBody.contains("POP_I()"), () -> constantsBody);
+        assertFalse(constantsBody.contains("POP_L()"), () -> constantsBody);
+        assertFalse(constantsBody.contains("POP_F()"), () -> constantsBody);
+        assertFalse(constantsBody.contains("POP_D()"), () -> constantsBody);
+
+        String blockedBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(blockedBody.contains("PUSH_D(0.0);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("locals[0].d = POP_D();"), () -> blockedBody);
+
+        String nonConstantBody = lastFunctionSection(source, "neko_native_impl_2_body");
+        assertTrue(nonConstantBody.contains("PUSH_I(locals[0].i);"), () -> nonConstantBody);
+        assertTrue(nonConstantBody.contains("locals[1].i = POP_I();"), () -> nonConstantBody);
+    }
+
+    @Test
     void hotspotProbeEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;

@@ -1387,3 +1387,34 @@ Performance and GC gates:
     NPT-3be `83,88,84,84,89,88,87 ms` (median `87ms`) versus NPT-3bf
     `93,85,92,86,85,87,85 ms` (median `86ms`). Focused native integration tests
     for TEST Calc and obfusjack completion also passed.
+
+- [x] P28 Fuse primitive constant local stores. The translator should fuse only
+  adjacent same-basic-block primitive constant producers (`ICONST_*`, `BIPUSH`,
+  `SIPUSH`, `LCONST_*`, `FCONST_*`, `DCONST_*`, and numeric `LDC`) followed
+  immediately by a matching primitive local store (`ISTORE`, `LSTORE`, `FSTORE`,
+  or `DSTORE`). The fused C must assign the same literal expression directly to
+  the target local slot. It must not cross labels, fold object/reference stores,
+  fold non-constant producers, change local indexes, or alter exception
+  dispatch boundaries. Source evidence: fresh NPT-3bf generated TEST C at
+  `build/neko-native-work/run-21337326266905/neko_native_impl_1.c`,
+  `neko_native_impl_19.c`, and `neko_native_impl_21.c` shows hot methods still
+  initialize primitive locals through constant `PUSH_*` followed immediately by
+  `locals[n].* = POP_*()`.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show primitive constant local
+  stores use direct assignments with no constant push/pop round trip.
+  - Implementation row recorded 2026-05-22: NPT-3bg will implement this as a
+    primitive-only constant local-store peephole and will reject label-crossing,
+    type-mismatched, object/reference, and non-constant producer sequences.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-21666360179964` built
+    `libneko_linux_x64.so` (`1034760` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed hot primitive initializers in `Digi.run`,
+    `Calc.runAll`, and `Calc.runAdd` use direct local assignments such as
+    `locals[1].d = 0.0`, `locals[3].i = 0`, and `locals[4].f = 1.1f`. Static
+    grep found no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` markers in the
+    generated work directory. Same-session alternating TEST smoke passed with
+    empty stderr: NPT-3bf `90,88,86,93,87,88,94 ms` (median `88ms`) versus
+    NPT-3bg `91,84,91,88,89,88,87 ms` (median `88ms`), with library size
+    reduced from `1034808` to `1034760` bytes. Focused native integration tests
+    for TEST Calc and obfusjack completion also passed.
