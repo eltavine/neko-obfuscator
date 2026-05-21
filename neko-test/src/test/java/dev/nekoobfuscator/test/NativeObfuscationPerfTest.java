@@ -12,7 +12,9 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -25,6 +27,20 @@ class NativeObfuscationPerfTest {
     private static final Pattern BUILD_MANIFEST_PATTERN = Pattern.compile("Native build manifest for ([^:]+): (\\S+)");
     private static final Pattern PERF_TOPIC_PATTERN = Pattern.compile("(?i)(matrix|seq|thread|virtual|parallel|vthreads)");
     private static final Pattern PERF_TIME_PATTERN = Pattern.compile("(?i)\\b\\d+(?:\\.\\d+)?\\s*(?:ns|us|micros?|ms|milliseconds?|s|seconds?)\\b");
+    private static final Pattern NAMED_MILLIS_TIMING_PATTERN = Pattern.compile(
+        "(?i)^\\s*(Platform threads|Virtual threads|Seq|Parallel|VThreads)\\s*:\\s*(\\d+(?:\\.\\d+)?)\\s*ms\\b"
+    );
+    private static final Map<String, Long> TIMING_SANITY_CEILINGS_MILLIS = Map.of(
+        "Calc", 150L,
+        "Platform", 150L,
+        "Virtual", 150L,
+        "Seq", 60L,
+        "Parallel", 30L,
+        "VThreads", 30L
+    );
+    private static final List<String> OBFUSJACK_REQUIRED_TIMINGS = List.of(
+        "Platform", "Virtual", "Seq", "Parallel", "VThreads"
+    );
 
     @BeforeAll
     static void prepareFixtures() throws Exception {
@@ -138,9 +154,15 @@ class NativeObfuscationPerfTest {
             assertEquals(0, run.exitCode(), () -> fixture + " baseline run " + runIndex + "\n" + combined);
             NativeObfuscationHelper.assertNoFatalNativeCrash(run);
             Long calcMillis = parseCalc ? NativeObfuscationHelper.parseCalcMillis(combined) : null;
+            Map<String, Long> timingMillis = parsePerformanceTimingMillis(combined);
+            if (calcMillis != null) {
+                timingMillis.put("Calc", calcMillis);
+            }
             if (!parseCalc) {
                 assertTrue(combined.contains("=== All tests completed ==="), () -> fixture + " baseline run did not complete\n" + combined);
+                assertObfusjackTimingRows(fixture, runIndex, timingMillis, combined);
             }
+            assertTimingSanity(fixture, runIndex, timingMillis, combined);
             runs.add(new BaselineRun(
                 fixture,
                 runIndex,
@@ -149,6 +171,7 @@ class NativeObfuscationPerfTest {
                 run.exitCode(),
                 run.duration().toMillis(),
                 calcMillis,
+                timingMillis,
                 extractPerformanceTimingLines(combined)
             ));
         }
@@ -235,6 +258,60 @@ class NativeObfuscationPerfTest {
             .toList();
     }
 
+    private static Map<String, Long> parsePerformanceTimingMillis(String output) {
+        Map<String, Long> timings = new LinkedHashMap<>();
+        output.lines().forEach(line -> {
+            Matcher matcher = NAMED_MILLIS_TIMING_PATTERN.matcher(line);
+            if (matcher.find()) {
+                timings.put(normalizeTimingName(matcher.group(1)), Math.round(Double.parseDouble(matcher.group(2))));
+            }
+        });
+        return timings;
+    }
+
+    private static String normalizeTimingName(String name) {
+        return switch (name.toLowerCase()) {
+            case "platform threads" -> "Platform";
+            case "virtual threads" -> "Virtual";
+            case "seq" -> "Seq";
+            case "parallel" -> "Parallel";
+            case "vthreads" -> "VThreads";
+            default -> throw new IllegalArgumentException("Unknown timing row: " + name);
+        };
+    }
+
+    private static void assertObfusjackTimingRows(
+        String fixture,
+        int runIndex,
+        Map<String, Long> timingMillis,
+        String combined
+    ) {
+        for (String required : OBFUSJACK_REQUIRED_TIMINGS) {
+            assertTrue(
+                timingMillis.containsKey(required),
+                () -> fixture + " baseline run " + runIndex + " missing timing row `" + required + "`\n" + combined
+            );
+        }
+    }
+
+    private static void assertTimingSanity(
+        String fixture,
+        int runIndex,
+        Map<String, Long> timingMillis,
+        String combined
+    ) {
+        timingMillis.forEach((name, millis) -> {
+            assertTrue(millis > 0, () -> fixture + " baseline run " + runIndex + " non-positive `" + name + "` timing: " + millis + "\n" + combined);
+            Long ceiling = TIMING_SANITY_CEILINGS_MILLIS.get(name);
+            if (ceiling != null) {
+                assertTrue(
+                    millis <= ceiling,
+                    () -> fixture + " baseline run " + runIndex + " `" + name + "` timing exceeded " + ceiling + "ms: " + millis + "ms\n" + combined
+                );
+            }
+        });
+    }
+
     private static List<Path> findHsErrFiles() throws Exception {
         List<Path> files = new ArrayList<>();
         try (var stream = Files.walk(NativeObfuscationHelper.projectRoot(), 4)) {
@@ -275,6 +352,13 @@ class NativeObfuscationPerfTest {
         sb.append(",\n");
         sb.append("    \"obfusjack\": ");
         appendRuns(sb, obfusjackRuns);
+        sb.append("\n  },\n");
+        sb.append("  \"mediansMillis\": {\n");
+        sb.append("    \"TEST\": ");
+        appendTimingMap(sb, medianTimings(testRuns));
+        sb.append(",\n");
+        sb.append("    \"obfusjack\": ");
+        appendTimingMap(sb, medianTimings(obfusjackRuns));
         sb.append("\n  },\n");
         sb.append("  \"hsErr\": {\n");
         sb.append("    \"found\": ").append(!hsErrFiles.isEmpty()).append(",\n");
@@ -325,6 +409,9 @@ class NativeObfuscationPerfTest {
             sb.append("        \"exitCode\": ").append(run.exitCode()).append(",\n");
             sb.append("        \"durationMillis\": ").append(run.durationMillis()).append(",\n");
             sb.append("        \"calcMillis\": ").append(run.calcMillis() == null ? "null" : run.calcMillis()).append(",\n");
+            sb.append("        \"timingsMillis\": ");
+            appendTimingMap(sb, run.timingsMillis());
+            sb.append(",\n");
             sb.append("        \"parsedMatrixThreadTimingLines\": ");
             appendStringArray(sb, run.parsedMatrixThreadTimingLines());
             sb.append("\n      }");
@@ -334,6 +421,35 @@ class NativeObfuscationPerfTest {
             sb.append('\n');
         }
         sb.append("    ]");
+    }
+
+    private static Map<String, Long> medianTimings(List<BaselineRun> runs) {
+        Map<String, List<Long>> valuesByName = new LinkedHashMap<>();
+        for (BaselineRun run : runs) {
+            run.timingsMillis().forEach((name, value) ->
+                valuesByName.computeIfAbsent(name, ignored -> new ArrayList<>()).add(value)
+            );
+        }
+
+        Map<String, Long> medians = new LinkedHashMap<>();
+        valuesByName.forEach((name, values) -> {
+            List<Long> sorted = new ArrayList<>(values);
+            Collections.sort(sorted);
+            medians.put(name, sorted.get(sorted.size() / 2));
+        });
+        return medians;
+    }
+
+    private static void appendTimingMap(StringBuilder sb, Map<String, Long> timings) {
+        sb.append('{');
+        int index = 0;
+        for (Map.Entry<String, Long> entry : timings.entrySet()) {
+            if (index++ > 0) {
+                sb.append(", ");
+            }
+            sb.append(json(entry.getKey())).append(": ").append(entry.getValue());
+        }
+        sb.append('}');
     }
 
     private static void appendPathArray(StringBuilder sb, List<Path> paths) {
@@ -405,6 +521,7 @@ class NativeObfuscationPerfTest {
         int exitCode,
         long durationMillis,
         Long calcMillis,
+        Map<String, Long> timingsMillis,
         List<String> parsedMatrixThreadTimingLines
     ) {}
 }

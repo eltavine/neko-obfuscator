@@ -3088,3 +3088,37 @@ the source plan that owns the changed path before it can be considered complete.
   capability missing: lrb=(nil) pre=(nil) array=(nil)` and
   `[neko-bootstrap] native layout initialization failed`. No JNI, JVMTI,
   original-bytecode, skip, or collector-disabling fallback was introduced.
+
+### [x] NPT-3bv: Tighten structured native performance median gates
+
+- Scope: limit the implementation to native performance test instrumentation
+  and assertions in `NativeObfuscationPerfTest`. Parse TEST Calc timing and
+  obfusjack Platform, Virtual, Seq, Parallel, and VThreads timing rows from the
+  repeated native-path runs already performed by the test. Record per-run
+  timing maps and medians in the baseline JSON report, and assert that current
+  fixture timing rows are parseable, complete when present, positive, and within
+  conservative current-source sanity ceilings. This must not change generated
+  runtime code, native code generation, JNI/JVMTI behavior, fallback behavior,
+  obfuscation coverage, or collector behavior.
+- Required evidence: current source records `calcMillis` for TEST and stores
+  raw obfusjack timing lines as strings, but it does not compute or assert
+  obfusjack matrix/thread medians. The observed current obfusjack output emits
+  `Platform threads`, `Virtual threads`, `Seq`, `Parallel`, and `VThreads`
+  rows, so the hot-path gate can become structured without runtime changes.
+- Validation command or runtime target: focused
+  `NativeObfuscationPerfTest` execution with `java.io.tmpdir` under
+  `build/native-run-tmp`, plus diff inspection proving only test/report
+  instrumentation changed.
+- Completion criteria: fresh focused perf test passes, baseline JSON contains
+  parsed per-run timing maps and median timing maps, and no runtime/codegen
+  source files are changed.
+- Completion evidence 2026-05-22: focused `NativeObfuscationPerfTest` passed
+  using repository `./gradlew` with `java.io.tmpdir` under
+  `build/native-run-tmp`. The generated
+  `neko-test/build/test-native/native-performance-baseline.json` includes
+  `timingsMillis` for every repeated TEST and obfusjack run plus
+  `mediansMillis`: TEST Calc `69 ms`; obfusjack Platform `45 ms`, Virtual
+  `36 ms`, Seq `17 ms`, Parallel `1 ms`, and VThreads `1 ms`. Diff inspection
+  shows this checkpoint changed only perf test/report instrumentation and the
+  matching todo/plan rows; no runtime/codegen source, JNI/JVMTI path, fallback
+  behavior, obfuscation coverage, generated C, or collector behavior changed.

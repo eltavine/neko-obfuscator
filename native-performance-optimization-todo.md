@@ -977,7 +977,28 @@ Performance and GC gates:
     JNI/JVMTI/fallback markers; remaining support-file JNI strings were
     comments or internal JVM symbol names.
 
-- [ ] P15 Tighten native performance tests after P0 baseline exists. Extend native performance tests to record and assert TEST Calc median plus obfusjack parsed matrix/thread medians when those output lines are present. Keep thresholds relative to the immediate baseline until stable absolute gates are justified by current-source measurements. Source evidence: current perf tests only parse TEST Calc at `NativeObfuscationPerfTest.java:71-91`; obfusjack integration currently checks completion, not performance, at `NativeObfuscationIntegrationTest.java:101-109`. Validation: `R-build`, `R-test` x5, `R-obfusjack` x5, `R-native-test`, `R-inspect`.
+- [x] P15 Tighten native performance tests after P0 baseline exists. Extend native performance tests to record and assert TEST Calc median plus obfusjack parsed matrix/thread medians when those output lines are present. Keep thresholds relative to the immediate baseline until stable absolute gates are justified by current-source measurements. Source evidence: current perf tests only parse TEST Calc at `NativeObfuscationPerfTest.java:71-91`; obfusjack integration currently checks completion, not performance, at `NativeObfuscationIntegrationTest.java:101-109`. Validation: `R-build`, `R-test` x5, `R-obfusjack` x5, `R-native-test`, `R-inspect`.
+  - Implementation row recorded 2026-05-22: NPT-3bv will make
+    `NativeObfuscationPerfTest` parse structured median values for TEST Calc
+    and obfusjack Platform, Virtual, Seq, Parallel, and VThreads rows from the
+    same repeated native-path runs it already performs. The test may assert
+    that emitted timing rows are parseable, complete for the current obfusjack
+    fixture output, positive, and within conservative current-source sanity
+    ceilings; it must not change runtime code, obfuscation coverage, JNI/JVMTI
+    behavior, generated C, or collector behavior. The baseline report must
+    include the parsed per-run timings and medians so future hot-path changes
+    can compare against fresh same-environment measurements instead of
+    unstructured logs.
+  - Completion evidence 2026-05-22 for NPT-3bv: focused
+    `NativeObfuscationPerfTest` passed with `java.io.tmpdir` under
+    `build/native-run-tmp`. The generated
+    `neko-test/build/test-native/native-performance-baseline.json` now records
+    per-run `timingsMillis` maps and `mediansMillis`: TEST Calc median `69 ms`;
+    obfusjack Platform `45 ms`, Virtual `36 ms`, Seq `17 ms`, Parallel `1 ms`,
+    and VThreads `1 ms`. Diff inspection showed only perf test/report
+    instrumentation and matching todo/plan updates; no runtime, codegen,
+    JNI/JVMTI, fallback, obfuscation coverage, generated-C, or collector
+    behavior changed.
 
 - [x] P16 Reduce translated-to-translated direct-call raw-entry overhead without
   changing Java-level method activation semantics. Internal direct calls between
