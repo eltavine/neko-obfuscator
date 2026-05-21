@@ -2028,6 +2028,43 @@ the source plan that owns the changed path before it can be considered complete.
   NPT-3aw `84,84,84,87,86 ms` (median `84ms`). Focused native integration tests
   for TEST Calc and obfusjack completion also passed.
 
+### [x] NPT-3bf: Fuse primitive float/double same-local add updates
+
+- Scope: fuse only adjacent same-basic-block `FLOAD` or `DLOAD` of a local,
+  followed by a matching pure float/double constant producer, `FADD` or `DADD`,
+  and `FSTORE` or `DSTORE` back to the same local. The fused C must assign the
+  same arithmetic expression directly to the local slot and must preserve the
+  existing fallback C arithmetic shape. It must not cross labels, fold
+  subtraction/multiplication/division/remainder, fold non-constant RHS values,
+  change local indexes, touch long/int/object/ref locals, or alter exception
+  dispatch boundaries.
+- Required evidence: fresh NPT-3be generated TEST C at
+  `build/neko-native-work/run-21034784798896/neko_native_impl_1.c` and
+  `neko_native_impl_21.c` shows hot loops increment float/double locals through
+  `PUSH_F`/`PUSH_D`, `FADD`/`DADD`, then immediate `FSTORE`/`DSTORE` to the
+  same local. These instructions are primitive, non-throwing stack round trips.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving same-local
+  float/double add updates use direct local assignments with no add-result
+  stack round trip, default TEST smoke/timing comparison, and focused native
+  integration tests for TEST Calc and obfusjack completion.
+- Completion criteria: only same-local float/double constant add updates fuse;
+  label-blocked and different-local cases retain stack traffic; no
+  JNI/JVMTI/fallback markers are introduced; timing does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-21337326266905` built `libneko_linux_x64.so` at
+  `1034808` bytes with `translated=49 rejected=0`. Generated C inspection
+  showed hot float/double loop increments in `Digi.run` and `Calc.runAdd` use
+  direct same-local assignments such as `locals[4].f = locals[4].f + 1.3f` and
+  `locals[0].d = locals[0].d + 0.99`. Static grep found no `NEKO_JNI_FN_PTR`,
+  `(*env)->`, or `env->` markers in the generated work directory. Same-session
+  alternating TEST smoke comparison passed with empty stderr: NPT-3be
+  `83,88,84,84,89,88,87 ms` (median `87ms`) versus NPT-3bf
+  `93,85,92,86,85,87,85 ms` (median `86ms`). Focused native integration tests
+  for TEST Calc and obfusjack completion also passed.
+
 ### [x] NPT-3ax: Elide unreferenced exception-exit blocks
 
 - Scope: omit the generated `__neko_exception_exit` label and default return

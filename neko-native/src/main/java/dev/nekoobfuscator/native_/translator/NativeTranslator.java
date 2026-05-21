@@ -222,16 +222,19 @@ public final class NativeTranslator {
             StaticIntAddUpdateFusion staticIntAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null)
                 ? tryStaticIntAddUpdateFusion(opcodes, insn)
                 : null;
-            PrimitiveCompareBranchFusion primitiveCompareBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
+            PrimitiveFloatDoubleLocalAddUpdateFusion primitiveFloatDoubleLocalAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
+                ? tryPrimitiveFloatDoubleLocalAddUpdateFusion(opcodes, insn)
+                : null;
+            PrimitiveCompareBranchFusion primitiveCompareBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveFloatDoubleLocalAddUpdate == null)
                 ? tryPrimitiveCompareBranchFusion(opcodes, insn, labelMap)
                 : null;
-            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveCompareBranch == null)
+            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null)
                 ? tryPrimitiveBranchFusion(opcodes, insn, labelMap)
                 : null;
-            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null)
+            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null)
                 ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap)
                 : null;
-            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null && fused == null)
+            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null && fused == null)
                 ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
@@ -266,6 +269,9 @@ public final class NativeTranslator {
             } else if (staticIntAddUpdate != null) {
                 fn.addStatement(new CStatement.RawC(staticIntAddUpdate.code));
                 insn = staticIntAddUpdate.lastInsn;
+            } else if (primitiveFloatDoubleLocalAddUpdate != null) {
+                fn.addStatement(new CStatement.RawC(primitiveFloatDoubleLocalAddUpdate.code));
+                insn = primitiveFloatDoubleLocalAddUpdate.lastInsn;
             } else if (primitiveCompareBranch != null) {
                 if (pendingHandlers != null) {
                     fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
@@ -435,6 +441,59 @@ public final class NativeTranslator {
         if (!(putInsn instanceof FieldInsnNode put) || put.getOpcode() != Opcodes.PUTSTATIC) return null;
         if (!get.owner.equals(put.owner) || !get.name.equals(put.name) || !get.desc.equals(put.desc)) return null;
         return new StaticIntAddUpdateFusion(opcodes.translateStaticIntAddUpdate(get, rhsExpr), put);
+    }
+
+    private record PrimitiveFloatDoubleLocalAddUpdateFusion(String code, AbstractInsnNode lastInsn) {}
+
+    private PrimitiveFloatDoubleLocalAddUpdateFusion tryPrimitiveFloatDoubleLocalAddUpdateFusion(
+        OpcodeTranslator opcodes,
+        AbstractInsnNode insn
+    ) {
+        if (!(insn instanceof VarInsnNode load)) return null;
+        int loadOpcode = load.getOpcode();
+        if (loadOpcode != Opcodes.FLOAD && loadOpcode != Opcodes.DLOAD) return null;
+        AbstractInsnNode rhsInsn = nextNonMetaSameBlock(load);
+        String rhsExpr = loadOpcode == Opcodes.FLOAD
+            ? floatConstantExpression(opcodes, rhsInsn)
+            : doubleConstantExpression(opcodes, rhsInsn);
+        if (rhsExpr == null) return null;
+        AbstractInsnNode addInsn = nextNonMetaSameBlock(rhsInsn);
+        int expectedAdd = loadOpcode == Opcodes.FLOAD ? Opcodes.FADD : Opcodes.DADD;
+        if (!(addInsn instanceof InsnNode) || addInsn.getOpcode() != expectedAdd) return null;
+        AbstractInsnNode storeInsn = nextNonMetaSameBlock(addInsn);
+        int expectedStore = loadOpcode == Opcodes.FLOAD ? Opcodes.FSTORE : Opcodes.DSTORE;
+        if (!(storeInsn instanceof VarInsnNode store) || store.getOpcode() != expectedStore || store.var != load.var) {
+            return null;
+        }
+        String slot = loadOpcode == Opcodes.FLOAD ? "f" : "d";
+        return new PrimitiveFloatDoubleLocalAddUpdateFusion(
+            "{ locals[" + load.var + "]." + slot + " = locals[" + load.var + "]." + slot + " + " + rhsExpr + "; }",
+            storeInsn
+        );
+    }
+
+    private String floatConstantExpression(OpcodeTranslator opcodes, AbstractInsnNode insn) {
+        if (insn == null) return null;
+        int op = insn.getOpcode();
+        if (op == Opcodes.FCONST_0 || op == Opcodes.FCONST_1 || op == Opcodes.FCONST_2) {
+            return opcodes.floatPushExpression(insn);
+        }
+        if (op == Opcodes.LDC && ((LdcInsnNode) insn).cst instanceof Float) {
+            return opcodes.floatPushExpression(insn);
+        }
+        return null;
+    }
+
+    private String doubleConstantExpression(OpcodeTranslator opcodes, AbstractInsnNode insn) {
+        if (insn == null) return null;
+        int op = insn.getOpcode();
+        if (op == Opcodes.DCONST_0 || op == Opcodes.DCONST_1) {
+            return opcodes.doublePushExpression(insn);
+        }
+        if (op == Opcodes.LDC && ((LdcInsnNode) insn).cst instanceof Double) {
+            return opcodes.doublePushExpression(insn);
+        }
+        return null;
     }
 
     private String intConstantExpression(AbstractInsnNode insn) {

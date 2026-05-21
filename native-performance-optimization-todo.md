@@ -1355,3 +1355,35 @@ Performance and GC gates:
     with empty stderr: NPT-3bd `82,82,90,91,87,89,88 ms` (median `88ms`) versus
     NPT-3be `85,92,87,83,88,93,97 ms` (median `88ms`). Focused native
     integration tests for TEST Calc and obfusjack completion also passed.
+
+- [x] P27 Fuse primitive float/double same-local add updates. The translator
+  should fuse only adjacent same-basic-block `FLOAD` or `DLOAD` of a local,
+  followed by a matching pure float/double constant producer, `FADD` or `DADD`,
+  and `FSTORE` or `DSTORE` back to the same local. The fused C must assign the
+  same arithmetic expression directly to the local slot and must preserve the
+  existing fallback C arithmetic shape. It must not cross labels, fold
+  subtraction/multiplication/division/remainder, fold non-constant RHS values,
+  change local indexes, touch long/int/object/ref locals, or alter exception
+  dispatch boundaries. Source evidence: fresh NPT-3be generated TEST C at
+  `build/neko-native-work/run-21034784798896/neko_native_impl_1.c` and
+  `neko_native_impl_21.c` shows hot loops increment float/double locals through
+  `PUSH_F`/`PUSH_D`, `FADD`/`DADD`, then immediate `FSTORE`/`DSTORE` to the same
+  local.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show same-local float/double
+  add updates use direct local assignments with no add-result stack round trip.
+  - Implementation row recorded 2026-05-22: NPT-3bf will implement this as a
+    primitive-only same-local float/double constant add-update peephole and will
+    reject label-crossing, different-local, non-constant, and non-add sequences.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-21337326266905` built
+    `libneko_linux_x64.so` (`1034808` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed hot float/double loop increments in
+    `Digi.run` and `Calc.runAdd` use direct same-local assignments such as
+    `locals[4].f = locals[4].f + 1.3f` and
+    `locals[0].d = locals[0].d + 0.99`. Static grep found no
+    `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` markers in the generated work
+    directory. Same-session alternating TEST smoke passed with empty stderr:
+    NPT-3be `83,88,84,84,89,88,87 ms` (median `87ms`) versus NPT-3bf
+    `93,85,92,86,85,87,85 ms` (median `86ms`). Focused native integration tests
+    for TEST Calc and obfusjack completion also passed.

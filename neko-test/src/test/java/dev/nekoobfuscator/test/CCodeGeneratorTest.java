@@ -549,6 +549,84 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void primitiveFloatDoubleSameLocalAddUpdatesFuseWithoutCrossingLabels() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/FloatingAddUpdateOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode floatSame = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "floatSame", "(F)V", null, null);
+        floatSame.instructions.add(new VarInsnNode(Opcodes.FLOAD, 0));
+        floatSame.instructions.add(new LdcInsnNode(1.3f));
+        floatSame.instructions.add(new InsnNode(Opcodes.FADD));
+        floatSame.instructions.add(new VarInsnNode(Opcodes.FSTORE, 0));
+        floatSame.instructions.add(new InsnNode(Opcodes.RETURN));
+        floatSame.maxStack = 2;
+        floatSame.maxLocals = 1;
+        classNode.methods.add(floatSame);
+
+        MethodNode doubleSame = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "doubleSame", "(D)V", null, null);
+        doubleSame.instructions.add(new VarInsnNode(Opcodes.DLOAD, 0));
+        doubleSame.instructions.add(new LdcInsnNode(0.99d));
+        doubleSame.instructions.add(new InsnNode(Opcodes.DADD));
+        doubleSame.instructions.add(new VarInsnNode(Opcodes.DSTORE, 0));
+        doubleSame.instructions.add(new InsnNode(Opcodes.RETURN));
+        doubleSame.maxStack = 4;
+        doubleSame.maxLocals = 2;
+        classNode.methods.add(doubleSame);
+
+        MethodNode differentLocal = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "differentLocal", "(FF)V", null, null);
+        differentLocal.instructions.add(new VarInsnNode(Opcodes.FLOAD, 0));
+        differentLocal.instructions.add(new LdcInsnNode(1.3f));
+        differentLocal.instructions.add(new InsnNode(Opcodes.FADD));
+        differentLocal.instructions.add(new VarInsnNode(Opcodes.FSTORE, 1));
+        differentLocal.instructions.add(new InsnNode(Opcodes.RETURN));
+        differentLocal.maxStack = 2;
+        differentLocal.maxLocals = 2;
+        classNode.methods.add(differentLocal);
+
+        LabelNode boundary = new LabelNode();
+        MethodNode blocked = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "blocked", "(D)V", null, null);
+        blocked.instructions.add(new VarInsnNode(Opcodes.DLOAD, 0));
+        blocked.instructions.add(boundary);
+        blocked.instructions.add(new LdcInsnNode(0.99d));
+        blocked.instructions.add(new InsnNode(Opcodes.DADD));
+        blocked.instructions.add(new VarInsnNode(Opcodes.DSTORE, 0));
+        blocked.instructions.add(new InsnNode(Opcodes.RETURN));
+        blocked.maxStack = 4;
+        blocked.maxLocals = 2;
+        classNode.methods.add(blocked);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("floating-add-update-fusion", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("floatSame", "(F)V")),
+            new MethodSelection(owner, owner.findMethod("doubleSame", "(D)V")),
+            new MethodSelection(owner, owner.findMethod("differentLocal", "(FF)V")),
+            new MethodSelection(owner, owner.findMethod("blocked", "(D)V"))
+        )).source();
+
+        String floatBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        assertTrue(floatBody.contains("{ locals[0].f = locals[0].f + 1.3f; }"), () -> floatBody);
+        assertFalse(floatBody.contains("PUSH_F(a + b);"), () -> floatBody);
+
+        String doubleBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(doubleBody.contains("{ locals[0].d = locals[0].d + 0.99; }"), () -> doubleBody);
+        assertFalse(doubleBody.contains("PUSH_D(a + b);"), () -> doubleBody);
+
+        String differentBody = lastFunctionSection(source, "neko_native_impl_2_body");
+        assertTrue(differentBody.contains("PUSH_F(a + b);"), () -> differentBody);
+        assertTrue(differentBody.contains("locals[1].f = POP_F();"), () -> differentBody);
+
+        String blockedBody = lastFunctionSection(source, "neko_native_impl_3_body");
+        assertTrue(blockedBody.contains("PUSH_D(locals[0].d);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("PUSH_D(a + b);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("locals[0].d = POP_D();"), () -> blockedBody);
+    }
+
+    @Test
     void hotspotProbeEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;
