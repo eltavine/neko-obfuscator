@@ -272,6 +272,7 @@ NEKO_FAST_INLINE jstring neko_string_value_of_L(
 }
 
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) {
+    NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_total_count);
     if (raw_oop == NULL) return NULL;
     raw_oop = neko_zgc_good_oop(raw_oop);
     if (g_neko_handle_push_ready && thread != NULL) {
@@ -279,10 +280,14 @@ NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) 
         if (block != NULL) {
             int32_t *top_ptr = (int32_t*)((char*)block + g_neko_off_jnih_block_top);
             int32_t top = *top_ptr;
+            neko_handle_audit_max(&g_neko_handle_direct_max_top, top > 0 ? (uint64_t)top : 0u);
+            neko_handle_audit_max(&g_neko_handle_direct_max_capacity,
+                g_neko_jnih_block_capacity > 0 ? (uint64_t)g_neko_jnih_block_capacity : 0u);
             if (top < g_neko_jnih_block_capacity) {
                 void **handles = (void**)((char*)block + g_neko_off_jnih_block_handles);
                 handles[top] = raw_oop;
                 *top_ptr = top + 1;
+                NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_fast_slot_count);
                 if (g_neko_method_layout.off_jnih_block_next > 0) {
                     ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
                     *(void**)((char*)block + off_last) = block;
@@ -293,6 +298,7 @@ NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) 
                 void *new_block = calloc(1, g_neko_method_layout.sizeof_JNIHandleBlock);
                 if (new_block != NULL) {
                     void **new_handles = (void**)((char*)new_block + g_neko_off_jnih_block_handles);
+                    NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_overflow_alloc_count);
                     new_handles[0] = raw_oop;
                     *(int32_t*)((char*)new_block + g_neko_off_jnih_block_top) = 1;
                     *(void**)((char*)new_block + g_neko_method_layout.off_jnih_block_next) = block;
@@ -306,6 +312,7 @@ NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) 
             }
         }
     }
+    NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_unavailable_count);
     fprintf(stderr, "[neko-direct] JNIHandleBlock direct slot unavailable thread=%p raw=%p\\n", thread, raw_oop);
     abort();
 }

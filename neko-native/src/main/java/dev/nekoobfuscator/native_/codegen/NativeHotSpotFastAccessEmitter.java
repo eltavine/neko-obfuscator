@@ -959,6 +959,17 @@ static volatile uint64_t g_neko_icache_translated_store_count = 0;
 static volatile uint64_t g_neko_icache_direct_njx_store_count = 0;
 static volatile uint64_t g_neko_icache_unresolved_count = 0;
 #endif
+#ifndef NEKO_HANDLE_AUDIT
+#define NEKO_HANDLE_AUDIT 0
+#endif
+#if NEKO_HANDLE_AUDIT
+static volatile uint64_t g_neko_handle_direct_total_count = 0;
+static volatile uint64_t g_neko_handle_direct_fast_slot_count = 0;
+static volatile uint64_t g_neko_handle_direct_overflow_alloc_count = 0;
+static volatile uint64_t g_neko_handle_direct_unavailable_count = 0;
+static volatile uint64_t g_neko_handle_direct_max_top = 0;
+static volatile uint64_t g_neko_handle_direct_max_capacity = 0;
+#endif
 static volatile int g_neko_njx_stats_printed = 0;
 NEKO_FAST_INLINE int neko_njx_debug(void) { return g_neko_njx_debug_cached; }
 NEKO_FAST_INLINE int neko_njx_enabled(void) {
@@ -979,6 +990,26 @@ NEKO_FAST_INLINE int neko_njx_enabled(void) {
 } while (0)
 #else
 #define NEKO_ICACHE_AUDIT_HIT(counter) ((void)0)
+#endif
+
+#if NEKO_HANDLE_AUDIT
+#define NEKO_HANDLE_AUDIT_HIT(counter) do { \
+    if (__builtin_expect(neko_njx_debug(), 0)) { \
+        __atomic_fetch_add(&(counter), 1, __ATOMIC_RELAXED); \
+    } \
+} while (0)
+static inline void neko_handle_audit_max(volatile uint64_t *slot, uint64_t value) {
+    if (__builtin_expect(neko_njx_debug(), 0)) {
+        uint64_t current = __atomic_load_n(slot, __ATOMIC_RELAXED);
+        while (value > current
+            && !__sync_bool_compare_and_swap(slot, current, value)) {
+            current = __atomic_load_n(slot, __ATOMIC_RELAXED);
+        }
+    }
+}
+#else
+#define NEKO_HANDLE_AUDIT_HIT(counter) ((void)0)
+#define neko_handle_audit_max(slot, value) ((void)0)
 #endif
 
 NEKO_FAST_INLINE void neko_njx_note_dispatch(void) {
@@ -1153,9 +1184,25 @@ __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
     uint64_t ic_direct_njx_store;
     uint64_t ic_unresolved;
 #endif
+#if NEKO_HANDLE_AUDIT
+    uint64_t handle_total;
+    uint64_t handle_fast_slot;
+    uint64_t handle_overflow_alloc;
+    uint64_t handle_unavailable;
+    uint64_t handle_max_top;
+    uint64_t handle_max_capacity;
+#endif
     if (!neko_njx_debug()) return;
     hits = __atomic_load_n(&g_neko_njx_dispatch_count, __ATOMIC_RELAXED);
     fails = __atomic_load_n(&g_neko_njx_resolve_fail_count, __ATOMIC_RELAXED);
+#if NEKO_HANDLE_AUDIT
+    handle_total = __atomic_load_n(&g_neko_handle_direct_total_count, __ATOMIC_RELAXED);
+    handle_fast_slot = __atomic_load_n(&g_neko_handle_direct_fast_slot_count, __ATOMIC_RELAXED);
+    handle_overflow_alloc = __atomic_load_n(&g_neko_handle_direct_overflow_alloc_count, __ATOMIC_RELAXED);
+    handle_unavailable = __atomic_load_n(&g_neko_handle_direct_unavailable_count, __ATOMIC_RELAXED);
+    handle_max_top = __atomic_load_n(&g_neko_handle_direct_max_top, __ATOMIC_RELAXED);
+    handle_max_capacity = __atomic_load_n(&g_neko_handle_direct_max_capacity, __ATOMIC_RELAXED);
+#endif
 #if NEKO_ICACHE_AUDIT
     ic_direct_c = __atomic_load_n(&g_neko_icache_direct_c_hit_count, __ATOMIC_RELAXED);
     ic_direct_njx = __atomic_load_n(&g_neko_icache_direct_njx_hit_count, __ATOMIC_RELAXED);
@@ -1165,8 +1212,29 @@ __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
     ic_unresolved = __atomic_load_n(&g_neko_icache_unresolved_count, __ATOMIC_RELAXED);
     if (hits == 0 && fails == 0 && ic_direct_c == 0 && ic_direct_njx == 0
         && ic_miss == 0 && ic_translated_store == 0 && ic_direct_njx_store == 0
-        && ic_unresolved == 0) return;
+        && ic_unresolved == 0
+#if NEKO_HANDLE_AUDIT
+        && handle_total == 0 && handle_fast_slot == 0 && handle_overflow_alloc == 0
+        && handle_unavailable == 0
+#endif
+    ) return;
     if (!__sync_bool_compare_and_swap(&g_neko_njx_stats_printed, 0, 1)) return;
+#if NEKO_HANDLE_AUDIT
+    fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu icache_direct_c_hit=%llu icache_direct_njx_hit=%llu icache_miss=%llu icache_translated_store=%llu icache_direct_njx_store=%llu icache_unresolved=%llu handle_direct_total=%llu handle_direct_fast_slot=%llu handle_direct_overflow_alloc=%llu handle_direct_unavailable=%llu handle_direct_max_top=%llu handle_direct_max_capacity=%llu\\n",
+        (unsigned long long)hits, (unsigned long long)fails,
+        (unsigned long long)ic_direct_c,
+        (unsigned long long)ic_direct_njx,
+        (unsigned long long)ic_miss,
+        (unsigned long long)ic_translated_store,
+        (unsigned long long)ic_direct_njx_store,
+        (unsigned long long)ic_unresolved,
+        (unsigned long long)handle_total,
+        (unsigned long long)handle_fast_slot,
+        (unsigned long long)handle_overflow_alloc,
+        (unsigned long long)handle_unavailable,
+        (unsigned long long)handle_max_top,
+        (unsigned long long)handle_max_capacity);
+#else
     fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu icache_direct_c_hit=%llu icache_direct_njx_hit=%llu icache_miss=%llu icache_translated_store=%llu icache_direct_njx_store=%llu icache_unresolved=%llu\\n",
         (unsigned long long)hits, (unsigned long long)fails,
         (unsigned long long)ic_direct_c,
@@ -1175,11 +1243,29 @@ __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
         (unsigned long long)ic_translated_store,
         (unsigned long long)ic_direct_njx_store,
         (unsigned long long)ic_unresolved);
+#endif
 #else
-    if (hits == 0 && fails == 0) return;
+    if (hits == 0 && fails == 0
+#if NEKO_HANDLE_AUDIT
+        && handle_total == 0 && handle_fast_slot == 0 && handle_overflow_alloc == 0
+        && handle_unavailable == 0
+#endif
+    ) return;
     if (!__sync_bool_compare_and_swap(&g_neko_njx_stats_printed, 0, 1)) return;
+#if NEKO_HANDLE_AUDIT
+    fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu handle_direct_total=%llu handle_direct_fast_slot=%llu handle_direct_overflow_alloc=%llu handle_direct_unavailable=%llu handle_direct_max_top=%llu handle_direct_max_capacity=%llu\\n",
+        (unsigned long long)hits,
+        (unsigned long long)fails,
+        (unsigned long long)handle_total,
+        (unsigned long long)handle_fast_slot,
+        (unsigned long long)handle_overflow_alloc,
+        (unsigned long long)handle_unavailable,
+        (unsigned long long)handle_max_top,
+        (unsigned long long)handle_max_capacity);
+#else
     fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu\\n",
         (unsigned long long)hits, (unsigned long long)fails);
+#endif
 #endif
 }
 __attribute__((constructor)) static void neko_njx_register_atexit(void) {

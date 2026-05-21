@@ -77,6 +77,7 @@ public final class NativeBuildEngine {
             manifest.setProperty("generated.header.path", hdrFile.toString());
             manifest.setProperty("debug.build", Boolean.toString(System.getenv("NEKO_NATIVE_DEBUG") != null));
             manifest.setProperty("icache.audit.build", Boolean.toString(System.getenv("NEKO_NATIVE_ICACHE_AUDIT") != null));
+            manifest.setProperty("handle.audit.build", Boolean.toString(System.getenv("NEKO_NATIVE_HANDLE_AUDIT") != null));
             manifest.setProperty("opt.diagnostics.build", Boolean.toString(System.getenv("NEKO_NATIVE_OPT_DIAGNOSTICS") != null));
 
             // Find JNI headers
@@ -97,6 +98,7 @@ public final class NativeBuildEngine {
                  * Default off (size-optimized release build). */
                 boolean debugBuild = System.getenv("NEKO_NATIVE_DEBUG") != null;
                 boolean icacheAuditBuild = System.getenv("NEKO_NATIVE_ICACHE_AUDIT") != null;
+                boolean handleAuditBuild = System.getenv("NEKO_NATIVE_HANDLE_AUDIT") != null;
                 boolean optDiagnosticsBuild = System.getenv("NEKO_NATIVE_OPT_DIAGNOSTICS") != null;
                 List<String> commonCompileArgs = new ArrayList<>(List.of(
                     zigPath, "cc",
@@ -144,6 +146,9 @@ public final class NativeBuildEngine {
                 }
                 if (icacheAuditBuild) {
                     commonCompileArgs.add("-DNEKO_ICACHE_AUDIT=1");
+                }
+                if (handleAuditBuild) {
+                    commonCompileArgs.add("-DNEKO_HANDLE_AUDIT=1");
                 }
                 if (jniPlatformInclude != null) {
                     commonCompileArgs.addAll(List.of("-I", jniPlatformInclude.toString()));

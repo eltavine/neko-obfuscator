@@ -867,6 +867,31 @@ Performance and GC gates:
     is still not achieved.
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
+  - Implementation row recorded 2026-05-22: NPT-3bx will add only default-off
+    handle-overflow audit counters around `neko_direct_oop_to_handle`, not a
+    reusable-block implementation. The audit must count total
+    `neko_direct_oop_to_handle` calls, active-block fast-slot hits, overflow
+    `calloc` allocations, unavailable direct-slot exits, and max observed
+    active-block top/capacity. Counters
+    must be compiled only for opt-in audit builds and printed through the
+    existing `NEKO_DIRECT_DEBUG=1` stats path. If the final TEST/obfusjack audit
+    reports zero or negligible overflow allocation, do not implement the
+    reusable-block strategy without new evidence.
+  - Completion evidence 2026-05-22 for NPT-3bx: focused generator/audit tests
+    passed; fresh opt-in TEST and obfusjack artifacts were generated with
+    `NEKO_NATIVE_HANDLE_AUDIT=1`, `translated=49/0` and `93/0`, and manifest
+    `handle.audit.build=true`. Strict generated-C forbidden-JNI grep was empty.
+    `NEKO_DIRECT_DEBUG=1` audit runtime showed the overflow allocation path is
+    real and non-negligible: TEST dominant stats row
+    `handle_direct_total=510054`, `handle_direct_fast_slot=491718`,
+    `handle_direct_overflow_alloc=18336`, `handle_direct_unavailable=0`,
+    `handle_direct_max_top=32`, `handle_direct_max_capacity=32`; obfusjack
+    stats row `handle_direct_total=854741`, `handle_direct_fast_slot=846154`,
+    `handle_direct_overflow_alloc=8587`, `handle_direct_unavailable=0`,
+    `handle_direct_max_top=32`, `handle_direct_max_capacity=32`. Fresh default
+    non-audit TEST reported `handle.audit.build=false`, completed with
+    `Calc: 73ms`, and emitted no stats line. This justifies a generic P11
+    reusable-block/window implementation as the next P11 substep.
   - Implementation row recorded 2026-05-21: NPT-3at will reduce translated
     local-root handle reservation only for methods whose ABI and bytecode prove
     they do not store references in locals. Source evidence: `NativeTranslator`

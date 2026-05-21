@@ -1966,6 +1966,65 @@ the source plan that owns the changed path before it can be considered complete.
   `88,85,83,101,94 ms` (median `88ms`). Focused native integration tests for
   TEST Calc and obfusjack completion also passed.
 
+### [x] NPT-3bx: P11 default-off direct-oop handle overflow audit
+
+- Scope: add measurement only for `native-performance-optimization-todo.md`
+  P11 before changing local-handle overflow allocation. The audit must instrument
+  the generic `neko_direct_oop_to_handle` path, not a benchmark-specific caller,
+  and must not alter default runtime behavior or handle ownership.
+- Required evidence: current source shows overflow `calloc` in
+  `neko_direct_oop_to_handle`; generated C/source inspection identifies all
+  counters as opt-in only; opt-in TEST and obfusjack runtimes report total
+  direct-oop handle calls, active-block fast-slot hits, overflow block
+  allocations, unavailable direct-slot exits, and max observed active-block
+  top/capacity. The evidence must decide whether a reusable-block/window
+  implementation is justified; zero or negligible overflow means P11 should
+  remain an audit finding rather than an allocation rewrite.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`, fresh opt-in TEST/obfusjack generation
+  using repository-local build/temp/cache directories, `NEKO_DIRECT_DEBUG=1`
+  runtime for both artifacts, default non-audit smoke for at least TEST, and
+  generated-C inspection showing audit counters are absent or inert in default
+  builds and no forbidden JNI/JVMTI/fallback markers are introduced.
+- Completion criteria: opt-in stats print useful nonzero total-call data;
+  default builds retain the existing stats surface and hot path; runtime
+  artifacts report `translated>0 rejected=0`; TEST and obfusjack complete
+  without fatal/error output; the row records whether P11 implementation should
+  proceed or be deferred.
+- Completion evidence 2026-05-22: added default-off `NEKO_HANDLE_AUDIT`
+  counters to the generic `neko_direct_oop_to_handle` path and exposed the
+  build through `NEKO_NATIVE_HANDLE_AUDIT=1` / manifest
+  `handle.audit.build=true`. Default builds keep `NEKO_HANDLE_AUDIT=0` and do
+  not print the handle stats fields unless explicitly compiled with the audit
+  flag and run with `NEKO_DIRECT_DEBUG=1`. Focused validation passed:
+  `./gradlew --no-daemon :neko-test:test --tests
+  dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest
+  -Djava.io.tmpdir=build/native-run-tmp`. Fresh opt-in artifacts:
+  `build/npt-3bx/TEST-handle-audit.jar` from
+  `build/neko-native-work/run-31631741784087` (`translated=49 rejected=0`,
+  manifest `handle.audit.build=true`, lib `1059560` bytes) and
+  `build/npt-3bx/obfusjack-handle-audit.jar` from
+  `build/neko-native-work/run-31640797565320`
+  (`translated=93 rejected=0`, manifest `handle.audit.build=true`, lib
+  `1838584` bytes). Strict forbidden-JNI grep over those generated run dirs
+  found no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` matches. Opt-in TEST
+  runtime with `NEKO_DIRECT_DEBUG=1` completed with `Calc: 387ms` under audit
+  overhead and printed two stats rows; the dominant row showed
+  `handle_direct_total=510054`, `handle_direct_fast_slot=491718`,
+  `handle_direct_overflow_alloc=18336`, `handle_direct_unavailable=0`,
+  `handle_direct_max_top=32`, and `handle_direct_max_capacity=32`. Opt-in
+  obfusjack runtime completed and printed `handle_direct_total=854741`,
+  `handle_direct_fast_slot=846154`, `handle_direct_overflow_alloc=8587`,
+  `handle_direct_unavailable=0`, `handle_direct_max_top=32`, and
+  `handle_direct_max_capacity=32`. Fresh default non-audit TEST artifact
+  `build/npt-3bx/TEST-default.jar` from
+  `build/neko-native-work/run-31689142844822` reported
+  `handle.audit.build=false`, completed with `Calc: 73ms`, and emitted no
+  `[neko-direct] stats` line. Conclusion: P11 overflow allocation is hot enough
+  to justify a generic reusable-block/window implementation; do not defer P11
+  on zero-overflow grounds.
+
 ### [x] NPT-3au: Split translated direct-call body entry
 
 - Scope: reduce translated-to-translated direct-call raw-entry overhead by
