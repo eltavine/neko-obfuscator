@@ -904,6 +904,9 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * ref_size));"), source);
         assertTrue(source.contains("memset(array_oop + base, 0, ((size_t)len * scale));"), source);
         assertTrue(source.contains("neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);"), source);
+        assertTrue(source.contains("return neko_alloc_primitive_array_slow(env, len, kind);"), source);
+        assertTrue(source.contains("static jarray neko_alloc_primitive_array_slow(JNIEnv *env, jint len, int kind)"), source);
+        assertTrue(source.contains("JVM primitive array allocation symbols unavailable kind=%d"), source);
         assertTrue(source.contains("oop = (char*)neko_fast_tlab_alloc(thread, bytes);"), source);
         assertTrue(source.contains("if (oop == NULL && env != NULL) {"), source);
         assertTrue(source.contains("if (oop == NULL) {"), source);

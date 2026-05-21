@@ -808,6 +808,9 @@ NEKO_FAST_INLINE jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env,
         if (array_oop == NULL && env != NULL) {
             neko_refill_tlab_with_slow_byte_array(env, bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)bytes);
             array_oop = (char*)neko_fast_tlab_alloc(thread, bytes);
+            if (array_oop == NULL) {
+                return neko_alloc_primitive_array_slow(env, len, kind);
+            }
         }
         if (array_oop != NULL) {
             neko_init_oop_header(array_oop, g_hotspot.primitive_array_klass_bits[kind]);

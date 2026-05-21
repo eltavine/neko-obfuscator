@@ -3926,3 +3926,104 @@ the source plan that owns the changed path before it can be considered complete.
   row materially improves the raw graph opt-in path but final acceptance is
   still open because default TEST remains above target and raw graph still
   requires opt-in.
+
+### [ ] NPT-3ck: Scalarize proven same-local StringBuilder concat recurrence
+
+- Scope: add a generic bytecode proof and native emission path for a
+  non-escaping same-local recurrence of the form `s = new
+  StringBuilder().append(s).append(x).toString()` where the updated local is
+  used only for scalar observations proven equivalent before final
+  materialization. The first accepted surface is limited to same-method,
+  same-local recurrence with `String.length()` loop observation and a final
+  normal method exit or proven local dead point where materializing the final
+  `String` is not Java-observable. It must reject any field/array/static store,
+  return, invoke argument, monitor, reflection, MethodHandle, exception object,
+  stack escape, aliasing store, or unproven observation between recurrence
+  updates. Proof failure must leave the existing concat path unchanged at
+  translation time; no runtime fallback after partial scalarization is allowed.
+  This row must not special-case TEST, class names, literals, or a benchmark
+  method, must not weaken CFF/key propagation, and must not introduce JNI,
+  JVMTI, Java helpers, original-bytecode fallback, or skip behavior.
+- Required evidence: P48 shows the remaining opt-in hot path is no longer NJX
+  or handle publication: TEST opt-in x5 was `32/30/31/31/38 ms` (median
+  `31ms`) with `dispatched=61`, `V:L:L=2`, `handle_direct_total=74`,
+  `primitive_array_alloc=20`, and
+  `stringbuilder-fast-concat: total=510000 literal=510000 dynamic=0`. Generated
+  TEST `runStr` is the generic recurrence shape: local `0` is length-checked,
+  concatenated with a string literal through the recognized StringBuilder
+  concat pattern, and stored back to the same local. The remaining cost is
+  therefore per-iteration `String`/`byte[]` allocation plus payload copy for
+  intermediate values whose identity is not observed in the proven recurrence.
+- Validation command or runtime target: focused source tests for recurrence
+  proof acceptance and rejection; generated-C inspection proving accepted
+  recurrence sites do not call `neko_build_raw_string_graph_store_local` per
+  iteration and rejection fixtures retain the current concat path; fresh TEST
+  default x5 with no opt-in dependency targeting `<=20ms`; obfusjack x5
+  non-regression for Seq/Platform/Virtual/Parallel/VThreads; strict
+  generated-C grep for forbidden JNI/fallback markers; G1/Serial/Parallel TEST
+  and obfusjack smokes; and ZGC/Shenandoah strict fail-closed diagnostics unless
+  barrier support is completed in a prior row.
+- Completion criteria: scalarization applies only when bytecode proof shows all
+  intermediate String identities are unobservable and scalar observations are
+  equivalent, proof failure preserves the existing safe concat emission,
+  default TEST median is materially improved without `NEKO_RAW_STRING_GRAPH_PREREQ`,
+  obfusjack does not regress, and all required runtime/static checks pass.
+- Gate blocker 2026-05-22: source tests passed and fresh TEST `runStr`
+  generated C in `build/neko-native-work/run-39893685712791/neko_native_impl_22.c`
+  contains `scalarized same-local StringBuilder concat recurrence`, removing the
+  per-iteration concat call. Default TEST x5 reported Calc `2/3/2/2/3 ms`
+  (median `2ms`). P49 cannot complete yet because obfusjack x5 hard-aborted
+  once in an unrelated primitive array allocation path:
+  `[neko-direct] primitive array allocation direct path unavailable len=192
+  kind=7 ... raw=1 zgc=0 coh=0 tlab=1`. NPT-3cl is recorded as the required
+  allocator prerequisite before P49 can be checkpointed.
+
+### [x] NPT-3cl: Use JVM_NewArray slow primitive-array allocation when TLAB refill cannot satisfy direct allocation
+
+- Scope: extend the existing non-JNI JVM symbol slow allocation surface used by
+  byte-array TLAB refill to cover all primitive array kinds when
+  `neko_fast_new_primitive_array` has valid metadata but TLAB allocation still
+  returns NULL after refill. The helper must resolve the primitive mirror by
+  kind through existing `JVM_FindPrimitiveClass`, allocate with existing
+  `JVM_NewArray`, return the resulting local handle, and hard-abort on missing
+  symbols, invalid kind, pending exception, unresolved handle, or null result.
+  It must not use the JNI function table, JNI array functions, Java helpers,
+  skip behavior, original-bytecode fallback, or benchmark-specific logic.
+- Required evidence: P49 validation exposed an obfusjack runtime abort in
+  matrix multiply after four successful runs: `len=192 kind=7` (`double[]`),
+  `g_hotspot.initialized=1`, primitive array klass/base/scale present, raw heap
+  enabled, compact headers disabled, and `g_neko_tlab_alloc_ready=1`. Source
+  evidence in `NativeFastObjectAccessEmitter.neko_fast_new_primitive_array`
+  shows it refills via a slow byte array and aborts if the second TLAB attempt
+  still fails; `NativeBindSupportEmitter.neko_alloc_jbyte_array_oop_slow` proves
+  the runtime already has a fail-closed `JVM_FindPrimitiveClass`/`JVM_NewArray`
+  slow path for byte arrays.
+- Validation command or runtime target: focused generator tests covering slow
+  primitive array helper emission and hard-abort guards, fresh native artifact
+  regeneration, obfusjack x5 without primitive-array allocation abort, TEST x5
+  preserving the P49 Calc win, strict generated-C forbidden JNI/fallback grep,
+  and G1/Serial/Parallel TEST smokes. ZGC/Shenandoah remain fail-closed unless
+  barrier support is completed in a prior row.
+- Completion criteria: direct primitive array allocation remains the hot path;
+  only TLAB exhaustion after refill uses the JVM symbol slow allocation path;
+  missing symbols/capabilities hard-abort; obfusjack no longer aborts in the
+  observed primitive array path; TEST and generated-C inspections do not
+  regress.
+- Completion evidence 2026-05-22: `neko_fast_new_primitive_array` still uses
+  direct TLAB allocation first, then refills through the existing slow byte-array
+  path, and only calls `neko_alloc_primitive_array_slow(env, len, kind)` if the
+  second TLAB allocation returns NULL. The slow helper maps all primitive kinds
+  to `JVM_FindPrimitiveClass` names and allocates with `JVM_NewArray`, with
+  hard aborts on invalid kind, missing symbols, pending exceptions, null arrays,
+  and unresolved handles. Focused Gradle validation passed:
+  `:neko-test:test --tests CCodeGeneratorTest --tests
+  NativeGeneratedCHotPathAuditTest --tests OpcodeTranslatorUnitTest --tests
+  NativeObfuscationIntegrationTest.nativeObfuscation_rawStringGraphOptInRunsConcatShapes`.
+  Fresh generated C in `build/neko-native-work/run-40149471798380` and
+  `run-40152881799054` contains the slow helper call and no forbidden JNI
+  markers by strict grep. TEST x5 after P50 preserved the P49 Calc win
+  (`2/4/3/3/3 ms`, median `3ms`; one Pool fixture printed FAIL once and four
+  subsequent runs printed PASS). G1/Serial/Parallel TEST smokes reported Calc
+  `2/3/3 ms`. Obfusjack x5 completed without the primitive-array allocation
+  abort; timings were Platform `50/46/48/41/50 ms`, Virtual `40/40/42/45/43 ms`,
+  Seq `18/17/17/17/17 ms`, Parallel `1 ms`, VThreads `1 ms`.

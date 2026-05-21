@@ -716,6 +716,53 @@ static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env, jint min_payload_
     (void)neko_alloc_jbyte_array_oop_slow(env, min_payload_len, &scratch);
     if (scratch != NULL) g_neko_jni_delete_local_ref_fn(env, scratch);
 }
+
+static const char *neko_primitive_name_for_kind(int kind) {
+    switch (kind) {
+        case NEKO_PRIM_Z: return "boolean";
+        case NEKO_PRIM_C: return "char";
+        case NEKO_PRIM_F: return "float";
+        case NEKO_PRIM_D: return "double";
+        case NEKO_PRIM_B: return "byte";
+        case NEKO_PRIM_S: return "short";
+        case NEKO_PRIM_I: return "int";
+        case NEKO_PRIM_J: return "long";
+        default: return NULL;
+    }
+}
+
+static jarray neko_alloc_primitive_array_slow(JNIEnv *env, jint len, int kind) {
+    const char *primitive_name = neko_primitive_name_for_kind(kind);
+    jclass primitive_class;
+    jarray array;
+    if (env == NULL || len < 0 || primitive_name == NULL) {
+        fprintf(stderr, "[neko-bind] invalid slow primitive array allocation request len=%d kind=%d\\n", (int)len, kind);
+        abort();
+    }
+    if (g_neko_method_layout.sym_jvm_find_primitive_class == NULL
+        || g_neko_method_layout.sym_jvm_new_array == NULL) {
+        fprintf(stderr, "[neko-bind] JVM primitive array allocation symbols unavailable kind=%d\\n", kind);
+        abort();
+    }
+    primitive_class = ((neko_jvm_find_primitive_class_t)g_neko_method_layout.sym_jvm_find_primitive_class)(env, primitive_name);
+    if (primitive_class == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] JVM_FindPrimitiveClass(%s) failed\\n", primitive_name);
+        abort();
+    }
+    array = ((neko_jvm_new_array_t)g_neko_method_layout.sym_jvm_new_array)(env, primitive_class, len);
+    g_neko_jni_delete_local_ref_fn(env, primitive_class);
+    if (array == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] JVM_NewArray(%s) failed len=%d\\n", primitive_name, (int)len);
+        abort();
+    }
+    if (neko_handle_oop((jobject)array) == NULL) {
+        fprintf(stderr, "[neko-bind] JVM_NewArray(%s) returned an unresolved handle len=%d\\n", primitive_name, (int)len);
+        abort();
+    }
+    return array;
+}
 """).append("""
 static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf, size_t len) {
     void *string_klass;

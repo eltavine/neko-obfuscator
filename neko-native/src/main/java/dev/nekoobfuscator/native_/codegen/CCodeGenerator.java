@@ -952,6 +952,9 @@ public final class CCodeGenerator {
             "static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env, jint min_payload_len);\n"
         );
         sb.append(
+            "static jarray neko_alloc_primitive_array_slow(JNIEnv *env, jint len, int kind);\n"
+        );
+        sb.append(
             "static char *neko_alloc_jbyte_array_oop_slow(JNIEnv *env, jint len, jarray *local_ref_out);\n\n"
         );
         sb.append(renderResolutionCaches());
