@@ -2652,3 +2652,50 @@ the source plan that owns the changed path before it can be considered complete.
   `17,17,17,17 ms` (median `17ms`). Source/test edits were reverted. Do not
   retry this exact `Math.min` intrinsic shape without new evidence explaining
   the crash and branch/code-layout regression.
+
+### [x] NPT-3bm: Reject owner-bound strings for StringBuilder concat literals
+
+- Scope: for the existing native StringBuilder concat pattern, replace
+  generated function-local static literal slots with the same owner-bound
+  string cache expression used by normal LDC and indy concat literals. The
+  change may only affect literal producers inside the already-recognized
+  StringBuilder concat pattern. It must not change string construction,
+  `neko_concat_append`, raw concat allocation, owner binding semantics,
+  non-literal producers, StringConcatFactory lowering, JNI usage, exception
+  behavior, or GC barriers.
+- Required evidence: fresh NPT-3bi TEST generated C shows `Calc.runStr` calls
+  `neko_bind_owner_strings_14(thread, env)` at method entry and uses
+  `neko_bound_string(thread, env, &g_str_37, "")` for the normal LDC empty
+  string, but the hot `"ax"` concat literal uses a separate
+  `static jstring __neko_concat_lit_0` plus `neko_bind_string_slot(...)` inside
+  the append loop. The owner bind function for `pack/tests/bench/Calc` does
+  not include `"ax"`, so the same literal is rebound through the helper on
+  every loop iteration. `OpcodeTranslator.cachedStringExpression` already
+  registers literals with `CCodeGenerator.registerOwnerStringReference`, and
+  `methodMayUseBoundStrings` already adds the owner-string bind call for
+  methods containing LDC strings.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving the hot
+  concat literal uses `neko_bound_string(thread, env, &g_str_N, "ax")`, the
+  owner bind function contains `"ax"`, and no `__neko_concat_lit_N` local
+  static remains for that pattern, strict forbidden JNI grep, default TEST
+  smoke/timing comparison, and focused native integration tests for TEST Calc
+  and obfusjack completion.
+- Completion criteria: only StringBuilder concat literal producers switch to
+  owner-bound string slots; first-use/global-ref binding stays centralized in
+  the existing owner-string binder; no new static local publication path is
+  introduced; generated C has no forbidden JNI/JVMTI/fallback markers; timing
+  does not regress.
+- Rejected 2026-05-22. Focused generator/audit tests passed. Fresh TEST
+  generation `build/neko-native-work/run-24803874241514` built
+  `libneko_linux_x64.so` at `1036728` bytes with `translated=49 rejected=0`.
+  Generated C inspection proved `Calc.runStr` moved the hot `"ax"` literal to
+  `neko_bound_string(thread, env, &g_str_38, "ax")`, `neko_bind_owner_strings_14`
+  binds `g_str_38` once at owner-string bind time, and no
+  `__neko_concat_lit_N` local static slot remained for the pattern. Strict grep
+  for `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` was clean. Runtime smoke
+  passed, but same-session alternating TEST timing rejected the slice:
+  NPT-3bi `76,76,74,73,79,72,75 ms` (median `75ms`) versus NPT-3bm
+  `72,71,83,70,87,80,76 ms` (median `76ms`). Source/test edits were reverted.
+  Do not retry this owner-bound concat literal shape without new code-layout or
+  inlining evidence.
