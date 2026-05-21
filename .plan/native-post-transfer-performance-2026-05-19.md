@@ -2508,3 +2508,49 @@ the source plan that owns the changed path before it can be considered complete.
   `73,69,68,70,85,84,71 ms` (median `71ms`). Focused native integration tests
   for TEST Calc, obfusjack completion, and implicit exception/String length
   runtime coverage passed.
+
+### [x] NPT-3bj: Reject intrinsic `String.length()` compare-branch fusion
+
+- Scope: fuse only adjacent same-basic-block `ALOAD` receiver, exact
+  `INVOKEVIRTUAL java/lang/String.length:()I`, pure int constant/local
+  producer, and `IF_ICMP*` branch. The fused C must preserve the exact
+  null-receiver implicit NPE path, check pending exception before evaluating
+  the branch, and compare the computed length directly against the second int
+  operand without materializing the result through the operand stack. The first
+  implementation is restricted to call sites with no active try handlers so a
+  null receiver can keep the existing `__neko_exception_exit` route; try/catch
+  covered sites must retain the unfused opcode sequence. It must not fuse other
+  methods, other owners, non-virtual calls, object/reference compares,
+  label-crossing patterns, concat paths, or any path where exception handler
+  routing is not proven identical.
+- Required evidence: fresh NPT-3bi generated TEST C at
+  `build/neko-native-work/run-22968063094268/neko_native_impl_22.c` shows
+  `Calc.runStr` now emits `neko_fast_string_length` for the hot
+  `String.length` call, but still pushes the result, pushes constant `101`,
+  checks pending exception, then pops both ints in `IF_ICMPGE`. This stack
+  round trip executes once per append-loop iteration after the accepted length
+  intrinsic.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving hot
+  `String.length` compare branches use a direct local length compare with
+  pending exception check retained, default TEST smoke/timing comparison, and
+  focused native integration tests for TEST Calc and obfusjack completion.
+- Completion criteria: only same-block no-active-handler exact `String.length`
+  int-compare branches fuse; null receiver behavior and pending-exception
+  ordering remain identical; try/catch-covered cases stay unfused; generated C
+  has no forbidden JNI wrappers or fallback markers; timing does not regress.
+- Rejected 2026-05-22. The implementation tested only the no-active-handler
+  same-block `String.length` plus `IF_ICMP*` branch shape. It preserved the
+  normal implicit NPE helper and emitted an explicit pending exception check
+  before the fused branch. Focused generator/audit tests passed, and fresh TEST
+  generation `build/neko-native-work/run-23558603672735` built
+  `libneko_linux_x64.so` at `1036744` bytes with `translated=49 rejected=0`.
+  Generated C inspection showed `Calc.runStr` used a direct `__len` local and
+  no longer emitted `PUSH_I(neko_fast_string_length(...))` or `PUSH_I(101)`;
+  strict forbidden JNI grep for `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` was
+  clean. Runtime stayed functional, but same-session alternating TEST timing
+  rejected the slice: NPT-3bi `69,72,77,71,74,72,77 ms` (median `72ms`) versus
+  NPT-3bj `73,72,77,87,74,72,75 ms` (median `74ms`), and the native library
+  grew from `1036696` to `1036744` bytes. Source/test edits were reverted. Do
+  not retry this branch-fusion shape without new code-size or branch-layout
+  evidence.
