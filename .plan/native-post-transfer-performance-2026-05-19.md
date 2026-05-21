@@ -2598,3 +2598,57 @@ the source plan that owns the changed path before it can be considered complete.
   hot code. Source/test edits were reverted. Do not retry local static concat
   literal slot guarding without atomic publication and losing-global-ref
   cleanup evidence.
+
+### [x] NPT-3bl: Reject exact integer `java/lang/Math.min` intrinsic
+
+- Scope: lower only exact `INVOKESTATIC java/lang/Math.min:(II)I` and
+  `INVOKESTATIC java/lang/Math.min:(JJ)J` bytecode sites to direct primitive C
+  comparisons after popping both operands in JVM argument order. The change must
+  not affect `Math.max`, float/double overloads, non-JDK owners, translated
+  application methods, method handles/reflection, class initialization,
+  exception paths, object/GC behavior, or NJX in general.
+- Required evidence: fresh generated obfusjack native C at
+  `build/neko-native-work/run-23052048100862/neko_native_impl_48.c:29` and
+  `neko_native_impl_65.c:26` shows exact `Math.min(II)I` sites still dispatch
+  through `neko_njx_S_I_II`; `neko_native_impl_55.c:55` shows exact
+  `Math.min(JJ)J` still dispatches through `neko_njx_S_J_JJ`. These wrappers
+  build argument arrays, install/restore Java handle blocks, check thread
+  state, call through the guarded call stub, and marshal results for a pure
+  integer operation. Java `Math.min` for `int` and `long` is exactly
+  `a <= b ? a : b`; restricting the slice to integer overloads avoids
+  floating-point NaN and signed-zero semantics.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh obfusjack native generation, generated-C inspection proving the
+  exact `Math.min(II)I` and `(JJ)J` sites emit direct `PUSH_I`/`PUSH_L`
+  compares and no `neko_njx_*` call for those sites, strict forbidden JNI grep,
+  obfusjack native runtime/timing comparison, and focused native integration
+  tests for TEST Calc and obfusjack completion.
+- Completion criteria: only exact integer `Math.min` overloads are lowered;
+  operand order and signed comparison semantics match Java; no pending
+  exception check is introduced for the pure operation; generated C has no
+  forbidden JNI/JVMTI/fallback markers; obfusjack timing does not regress.
+- Implementation note 2026-05-22: the first generated form kept a call to
+  `neko_ensure_class_initialized_once` at every lowered `Math.min` site.
+  Same-session obfusjack timing rejected that shape because the steady-state
+  helper call offset the NJX removal. The next implementation keeps the same
+  first-use class initialization, but emits the existing initialized-slot check
+  in generated code so the hot path enters the helper only while the
+  `java/lang/Math` slot is not initialized.
+- Rejected 2026-05-22. Focused generator/audit tests passed. Fresh obfusjack
+  generation `build/neko-native-work/run-24493430020950` built
+  `libneko_linux_x64.so` at `1804984` bytes with `translated=93 rejected=0`.
+  Generated C inspection proved the target sites emitted direct primitive
+  compares with a cold `g_cls_initialized_26` guard:
+  `neko_native_impl_48.c:29` and `neko_native_impl_65.c:26` for
+  `Math.min(II)I`, and `neko_native_impl_55.c:55` for `Math.min(JJ)J`. Strict
+  grep for `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` was clean. Runtime
+  rejected the slice: one NPT-3bl obfusjack run dumped core before completion,
+  and the completed same-session alternating runs regressed against the cached
+  pre-change obfusjack jar. Baseline Platform `44,45,46,46,45 ms` (median
+  `45ms`) versus NPT-3bl completed Platform `52,46,47,47 ms` (median
+  `47ms`); baseline Virtual `33,32,34,49,32 ms` (median `33ms`) versus NPT-3bl
+  completed Virtual `37,43,34,38 ms` (median `37.5ms`); baseline Seq
+  `16,16,16,18,18 ms` (median `16ms`) versus NPT-3bl completed Seq
+  `17,17,17,17 ms` (median `17ms`). Source/test edits were reverted. Do not
+  retry this exact `Math.min` intrinsic shape without new evidence explaining
+  the crash and branch/code-layout regression.
