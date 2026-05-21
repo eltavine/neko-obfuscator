@@ -1661,3 +1661,38 @@ the source plan that owns the changed path before it can be considered complete.
   passed during NPT-3al, fresh TEST native generation produced `translated=49
   rejected=0`, and default collector TEST completed with `Calc: 87ms`. No
   executable change was needed for this row.
+
+### [x] NPT-3an: Outline hot-helper diagnostics
+
+- Scope: move selected inline `fprintf`/`abort` diagnostic construction out of
+  hot native helper bodies into shared `cold`, `noinline` diagnostic functions.
+  The first implementation must be narrowly scoped to helpers where the cold
+  branch already terminates unconditionally and where argument values can be
+  passed without changing evaluation order. It must not change exception
+  behavior, pending-exception handling, GC barriers, array bounds/null ordering,
+  or field/array access semantics.
+- Required evidence: current generated helper source contains inline diagnostic
+  blocks in hot array and field helpers; NPT-3am/P5 did not require executable
+  edits, leaving P6 as the next performance row.
+- Validation command or runtime target: focused generator/audit tests, generated
+  C inspection proving hot helper bodies call cold diagnostics instead of
+  containing large inline diagnostic formatting, fresh TEST native generation,
+  and default collector TEST smoke. Broader performance gate remains a later
+  row unless this change produces a runtime regression.
+- Completion criteria: selected hot helper error paths are outlined to cold
+  noinline functions, normal fast-path branches and semantic checks are
+  unchanged, generated C compiles, and runtime smoke shows no new failure.
+- Completion evidence 2026-05-21: object-field GETFIELD/GETSTATIC/PUTFIELD/
+  PUTSTATIC diagnostic exits were outlined to `cold`, `noinline` hidden helper
+  functions. Focused generator/audit tests passed:
+  `env GRADLE_USER_HOME=build/gradle-home-native-coverage bash ./gradlew
+  :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`. Fresh TEST native
+  generation succeeded in `build/neko-native-work/run-14414463312953` with
+  `translated=49 rejected=0` and `libneko_linux_x64.so` size `1037656` bytes.
+  Generated C inspection showed hot helpers in `neko_native_support.c` call
+  `neko_abort_object_*_unavailable`, while
+  `neko_native_support_helpers_4.c` defines those functions as
+  `__attribute__((visibility("hidden"))) void __attribute__((cold, noinline))`.
+  Default collector TEST smoke on `build/npt-3an-r2/TEST-native.jar` completed
+  with no stderr and `Calc: 91ms`.

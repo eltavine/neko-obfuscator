@@ -420,6 +420,26 @@ Performance and GC gates:
     `Calc: 87ms`. No executable change was needed for this row.
 
 - [ ] P6 Outline hot-helper diagnostic failure blocks. Move inline `fprintf` / `abort` diagnostic construction out of hot helpers into shared `cold, noinline` functions. Keep the hot body as a small predicted branch to the cold function. Source evidence: inline diagnostics exist in `neko_fast_aaload` at `CCodeGenerator.java:5455-5465`, object field helpers at `CCodeGenerator.java:5647-5733`, fused helpers at `CCodeGenerator.java:5847-5854`, and primitive array helpers at `CCodeGenerator.java:5907-5925`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate; generated C audit must show hot helper bodies no longer contain large `fprintf` blocks.
+  - Implementation row recorded 2026-05-21: NPT-3an will move selected inline
+    `fprintf`/`abort` diagnostic construction out of hot native helper bodies
+    into shared `cold`, `noinline` diagnostic functions. The first scope must
+    be narrow: only helpers whose cold branch already terminates
+    unconditionally and whose argument values can be passed without changing
+    evaluation order. Do not change exception behavior, pending-exception
+    handling, GC barriers, array bounds/null ordering, or field/array access
+    semantics.
+  - Completion evidence 2026-05-21 for NPT-3an: object-field GETFIELD/
+    GETSTATIC/PUTFIELD/PUTSTATIC diagnostic exits were outlined to hidden
+    `cold`, `noinline` helper functions. Focused generator/audit tests passed,
+    fresh TEST native generation succeeded in
+    `build/neko-native-work/run-14414463312953` with `translated=49 rejected=0`
+    and `libneko_linux_x64.so` size `1037656` bytes, generated C inspection
+    showed hot helpers call `neko_abort_object_*_unavailable` while
+    `neko_native_support_helpers_4.c` defines those helpers with
+    `visibility("hidden")`, `cold`, and `noinline`, and default collector TEST
+    smoke on `build/npt-3an-r2/TEST-native.jar` completed with no stderr and
+    `Calc: 91ms`. P6 remains open for object-array/fused-array diagnostics and
+    broader performance-gate closure.
   - Rejected row update 2026-05-21: NPT-3z primitive-array cold diagnostic
     outlining was reverted. Focused generator/audit tests and
     `NativeObfuscationIntegrationTest` passed, but direct parity in

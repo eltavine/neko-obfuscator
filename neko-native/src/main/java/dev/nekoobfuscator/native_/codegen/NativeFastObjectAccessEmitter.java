@@ -937,6 +937,38 @@ NEKO_HOT_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray
      */
     private static void appendObjectFieldFastHelpers(StringBuilder sb) {
         sb.append("""
+static void __attribute__((cold, noinline)) neko_abort_object_getfield_unavailable(jobject obj, jlong offset, void *thread) {
+    fprintf(stderr, "[neko-direct] object GETFIELD direct path unavailable obj=%p offset=%lld thread=%p\\n",
+        (void*)obj, (long long)offset, thread);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_object_getstatic_unavailable(void *thread, jclass cls, jobject staticBase, jlong offset) {
+    void *dbg_block = thread != NULL ? *(void**)((char*)thread + g_neko_off_thread_active_handles) : NULL;
+    int32_t dbg_top = dbg_block != NULL ? *(int32_t*)((char*)dbg_block + g_neko_off_jnih_block_top) : -1;
+    char *dbg_cls_oop = (char*)neko_static_base_oop((jobject)cls);
+    char *dbg_base_oop = (char*)neko_static_base_oop(staticBase);
+    uint32_t dbg_narrow = dbg_cls_oop != NULL && offset > 0 ? *(uint32_t*)(dbg_cls_oop + offset) : 0;
+    void *dbg_wide = dbg_cls_oop != NULL && offset > 0 ? *(void**)(dbg_cls_oop + offset) : NULL;
+    fprintf(stderr, "[neko-direct] object GETSTATIC direct path unavailable cls=%p base=%p offset=%lld thread=%p init=%d push=%d block=%p top=%d cap=%d cls_oop=%p base_oop=%p narrow=0x%x wide=%p compressed=%d\\n",
+        (void*)cls, (void*)staticBase, (long long)offset, thread, (int)g_hotspot.initialized, (int)g_neko_handle_push_ready,
+        dbg_block, (int)dbg_top, (int)g_neko_jnih_block_capacity, (void*)dbg_cls_oop, (void*)dbg_base_oop,
+        (unsigned)dbg_narrow, dbg_wide, (int)g_hotspot.compressed_oops_enabled);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_object_putfield_unavailable(jobject obj, jlong offset, void *thread) {
+    fprintf(stderr, "[neko-direct] object PUTFIELD direct path unavailable obj=%p offset=%lld thread=%p\\n",
+        (void*)obj, (long long)offset, thread);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_object_putstatic_unavailable(jclass cls, jobject staticBase, jlong offset, void *thread) {
+    fprintf(stderr, "[neko-direct] object PUTSTATIC direct path unavailable cls=%p base=%p offset=%lld thread=%p\\n",
+        (void*)cls, (void*)staticBase, (long long)offset, thread);
+    abort();
+}
+
 NEKO_FAST_INLINE jobject neko_fast_get_object_field(void *thread, JNIEnv *env, jobject obj, jfieldID fid, jlong offset) {
     (void)env; (void)fid;
     if (g_hotspot.initialized
@@ -955,8 +987,7 @@ NEKO_FAST_INLINE jobject neko_fast_get_object_field(void *thread, JNIEnv *env, j
             return neko_direct_oop_to_handle(thread, element_oop);
         }
     }
-    fprintf(stderr, "[neko-direct] object GETFIELD direct path unavailable obj=%p offset=%lld thread=%p\\n", (void*)obj, (long long)offset, thread);
-    abort();
+    neko_abort_object_getfield_unavailable(obj, offset, thread);
 }
 
 NEKO_FAST_INLINE jobject neko_fast_get_static_object_field(void *thread, JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset) {
@@ -978,19 +1009,7 @@ NEKO_FAST_INLINE jobject neko_fast_get_static_object_field(void *thread, JNIEnv 
             return neko_direct_oop_to_handle(thread, element_oop);
         }
     }
-    {
-        void *dbg_block = thread != NULL ? *(void**)((char*)thread + g_neko_off_thread_active_handles) : NULL;
-        int32_t dbg_top = dbg_block != NULL ? *(int32_t*)((char*)dbg_block + g_neko_off_jnih_block_top) : -1;
-        char *dbg_cls_oop = (char*)neko_static_base_oop((jobject)cls);
-        char *dbg_base_oop = (char*)neko_static_base_oop(staticBase);
-        uint32_t dbg_narrow = dbg_cls_oop != NULL && offset > 0 ? *(uint32_t*)(dbg_cls_oop + offset) : 0;
-        void *dbg_wide = dbg_cls_oop != NULL && offset > 0 ? *(void**)(dbg_cls_oop + offset) : NULL;
-        fprintf(stderr, "[neko-direct] object GETSTATIC direct path unavailable cls=%p base=%p offset=%lld thread=%p init=%d push=%d block=%p top=%d cap=%d cls_oop=%p base_oop=%p narrow=0x%x wide=%p compressed=%d\\n",
-            (void*)cls, (void*)staticBase, (long long)offset, thread, (int)g_hotspot.initialized, (int)g_neko_handle_push_ready,
-            dbg_block, (int)dbg_top, (int)g_neko_jnih_block_capacity, (void*)dbg_cls_oop, (void*)dbg_base_oop,
-            (unsigned)dbg_narrow, dbg_wide, (int)g_hotspot.compressed_oops_enabled);
-    }
-    abort();
+    neko_abort_object_getstatic_unavailable(thread, cls, staticBase, offset);
 }
 
 NEKO_FAST_INLINE jobject neko_fast_get_static_object_field_ref(void *thread, JNIEnv *env, const neko_static_field_ref *ref) {
@@ -1020,8 +1039,7 @@ NEKO_FAST_INLINE void neko_fast_set_object_field(void *thread, JNIEnv *env, jobj
             return;
         }
     }
-    fprintf(stderr, "[neko-direct] object PUTFIELD direct path unavailable obj=%p offset=%lld thread=%p\\n", (void*)obj, (long long)offset, thread);
-    abort();
+    neko_abort_object_putfield_unavailable(obj, offset, thread);
 }
 
 NEKO_FAST_INLINE void neko_fast_set_static_object_field(void *thread, JNIEnv *env, jclass cls, jfieldID fid, jobject staticBase, jlong offset, jobject val) {
@@ -1046,8 +1064,7 @@ NEKO_FAST_INLINE void neko_fast_set_static_object_field(void *thread, JNIEnv *en
             return;
         }
     }
-    fprintf(stderr, "[neko-direct] object PUTSTATIC direct path unavailable cls=%p base=%p offset=%lld thread=%p\\n", (void*)cls, (void*)staticBase, (long long)offset, thread);
-    abort();
+    neko_abort_object_putstatic_unavailable(cls, staticBase, offset, thread);
 }
 
 
