@@ -76,6 +76,7 @@ public final class NativeBuildEngine {
             manifest.setProperty("generated.impl.sliced.header.count", Integer.toString(sourceSet.implementationHeaders().size()));
             manifest.setProperty("generated.header.path", hdrFile.toString());
             manifest.setProperty("debug.build", Boolean.toString(System.getenv("NEKO_NATIVE_DEBUG") != null));
+            manifest.setProperty("icache.audit.build", Boolean.toString(System.getenv("NEKO_NATIVE_ICACHE_AUDIT") != null));
 
             // Find JNI headers
             String javaHome = System.getProperty("java.home");
@@ -94,6 +95,7 @@ public final class NativeBuildEngine {
                  * trampoline / dispatcher / impl_fn frames after a crash.
                  * Default off (size-optimized release build). */
                 boolean debugBuild = System.getenv("NEKO_NATIVE_DEBUG") != null;
+                boolean icacheAuditBuild = System.getenv("NEKO_NATIVE_ICACHE_AUDIT") != null;
                 List<String> commonCompileArgs = new ArrayList<>(List.of(
                     zigPath, "cc",
                     "-c",
@@ -137,6 +139,9 @@ public final class NativeBuildEngine {
                 }
                 if (debugBuild) {
                     commonCompileArgs.addAll(List.of("-g", "-fno-omit-frame-pointer"));
+                }
+                if (icacheAuditBuild) {
+                    commonCompileArgs.add("-DNEKO_ICACHE_AUDIT=1");
                 }
                 if (jniPlatformInclude != null) {
                     commonCompileArgs.addAll(List.of("-I", jniPlatformInclude.toString()));

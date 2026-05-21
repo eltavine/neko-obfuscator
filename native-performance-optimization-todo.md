@@ -529,7 +529,27 @@ Performance and GC gates:
 
 - [ ] P11 Reduce local-handle overflow allocation in translated object-heavy paths. Replace `neko_direct_oop_to_handle` overflow `calloc` with a reusable block strategy or larger scoped translated-method handle window. This is separate from NJX because ordinary object array loads, object field loads, string concat, array allocation, and object allocation all route through `neko_direct_oop_to_handle`. Source evidence: overflow allocation is in `CCodeGenerator.java:4880-4917`, and callers include `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`, object field helpers at `CCodeGenerator.java:5629-5734`, and allocation helpers at `CCodeGenerator.java:4919-4988`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate.
 
-- [ ] P12 Add a generic virtual/interface PIC-hit fast stub audit before changing dispatch. The current `neko_icache_dispatch` already has direct-C and direct-NJX hit branches, so do not redesign it blindly. First measure generated hit/miss counts and emitted branch shape; then, only if hot misses or hit overhead are proven, split cold miss resolution into a noinline function and keep the hit path as receiver-key lookup plus direct target call. Source evidence: hit and miss paths are interleaved in `CCodeGenerator.java:4477-4567`; translator emits virtual dispatch sites at `OpcodeTranslator.java:466-510`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate.
+- [x] P12 Add a generic virtual/interface PIC-hit fast stub audit before changing dispatch. The current `neko_icache_dispatch` already has direct-C and direct-NJX hit branches, so do not redesign it blindly. First measure generated hit/miss counts and emitted branch shape; then, only if hot misses or hit overhead are proven, split cold miss resolution into a noinline function and keep the hit path as receiver-key lookup plus direct target call. Source evidence: hit and miss paths are interleaved in `CCodeGenerator.java:4477-4567`; translator emits virtual dispatch sites at `OpcodeTranslator.java:466-510`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate.
+  - Accepted implementation row recorded 2026-05-21: NPT-3ab added only default-off
+    virtual/interface PIC audit counters and extend the final
+    `NEKO_DIRECT_DEBUG=1` stats summary. This row counts direct-C hits,
+    direct-NJX hits, misses, translated-stub stores, direct-NJX stores, and
+    unresolved dispatch exits behind compile-time `NEKO_ICACHE_AUDIT=1`, enabled
+    only by `NEKO_NATIVE_ICACHE_AUDIT=1`; the default build keeps the original
+    two-field stats line and does not initialize direct-debug state from the
+    constructor. Validation: focused `CCodeGeneratorTest` and
+    `NativeGeneratedCHotPathAuditTest` passed; fresh
+    `NativeObfuscationIntegrationTest` passed; opt-in TEST audit artifact
+    `build/p12-icache-audit/TEST-native-audit.jar` generated with
+    `translated=49 rejected=0` and manifest `icache.audit.build=true`; opt-in
+    `NEKO_DIRECT_DEBUG=1` runtime completed and emitted useful counters:
+    `icache_direct_njx_hit=519999`, `icache_miss=43`,
+    `icache_direct_njx_store=44`, `resolve_failed=0`, `icache_unresolved=0`.
+    Generated-C inspection found no executable forbidden JNI/JVMTI markers in
+    the icache support path; support-file JNI strings were comments or internal
+    JVM symbol names. This evidence does not justify another P12 dispatch shape:
+    the current hot runtime mix is dominated by direct-NJX PIC hits, not cold
+    misses.
 
 - [ ] P13 Tune raw function flattening by generated body size. `NEKO_FLATTEN` is currently applied to every raw translated function. Add a generic heuristic that keeps flattening for small/hot straight-line bodies but avoids flattening very large functions where cold blocks and helper expansions inflate instruction-cache footprint. This must be driven by generated statement/body size, not owner/method names. Source evidence: unconditional `NEKO_FLATTEN NEKO_HOT` is emitted at `CCodeGenerator.java:459-467`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate; compare generated C size, native library size, and medians.
 

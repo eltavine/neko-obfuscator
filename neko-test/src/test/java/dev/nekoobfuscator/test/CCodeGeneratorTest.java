@@ -438,6 +438,13 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_receiver_key_supported("), source);
         assertTrue(source.contains("typedef jvalue (*neko_icache_direct_stub)") || source.contains("typedef jvalue(*neko_icache_direct_stub)"), source);
         assertTrue(source.contains("neko_icache_dispatch("), source);
+        assertTrue(source.contains("#define NEKO_ICACHE_AUDIT 0"), source);
+        assertTrue(source.contains("#if NEKO_ICACHE_AUDIT"), source);
+        assertTrue(source.contains("g_neko_icache_direct_c_hit_count"), source);
+        assertTrue(source.contains("g_neko_icache_direct_njx_hit_count"), source);
+        assertTrue(source.contains("g_neko_icache_miss_count"), source);
+        assertTrue(source.contains("NEKO_ICACHE_AUDIT_HIT(g_neko_icache_direct_c_hit_count);"), source);
+        assertTrue(source.contains("icache_direct_c_hit=%llu"), source);
     }
 
     @Test

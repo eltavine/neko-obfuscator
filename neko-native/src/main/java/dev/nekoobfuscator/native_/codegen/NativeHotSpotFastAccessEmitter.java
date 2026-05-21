@@ -918,6 +918,17 @@ static int g_neko_njx_enabled_initialized = 0;
 static int g_neko_njx_debug_cached = 0;
 static volatile uint64_t g_neko_njx_dispatch_count = 0;
 static volatile uint64_t g_neko_njx_resolve_fail_count = 0;
+#ifndef NEKO_ICACHE_AUDIT
+#define NEKO_ICACHE_AUDIT 0
+#endif
+#if NEKO_ICACHE_AUDIT
+static volatile uint64_t g_neko_icache_direct_c_hit_count = 0;
+static volatile uint64_t g_neko_icache_direct_njx_hit_count = 0;
+static volatile uint64_t g_neko_icache_miss_count = 0;
+static volatile uint64_t g_neko_icache_translated_store_count = 0;
+static volatile uint64_t g_neko_icache_direct_njx_store_count = 0;
+static volatile uint64_t g_neko_icache_unresolved_count = 0;
+#endif
 static volatile int g_neko_njx_stats_printed = 0;
 NEKO_FAST_INLINE int neko_njx_debug(void) { return g_neko_njx_debug_cached; }
 NEKO_FAST_INLINE int neko_njx_enabled(void) {
@@ -929,6 +940,16 @@ NEKO_FAST_INLINE int neko_njx_enabled(void) {
     }
     return g_neko_njx_enabled_cached;
 }
+
+#if NEKO_ICACHE_AUDIT
+#define NEKO_ICACHE_AUDIT_HIT(counter) do { \
+    if (__builtin_expect(g_neko_njx_debug_cached, 0)) { \
+        __atomic_fetch_add(&(counter), 1, __ATOMIC_RELAXED); \
+    } \
+} while (0)
+#else
+#define NEKO_ICACHE_AUDIT_HIT(counter) ((void)0)
+#endif
 
 NEKO_FAST_INLINE void neko_njx_note_dispatch(void) {
     if (__builtin_expect(neko_njx_debug(), 0)) {
@@ -975,6 +996,7 @@ NEKO_FAST_INLINE void neko_icache_store_direct_njx(JNIEnv *env, neko_icache_site
 NEKO_FAST_INLINE jboolean neko_icache_note_miss(JNIEnv *env, neko_icache_site *site) {
     if (site == NULL) return JNI_FALSE;
     if (site->miss_count < (uint16_t)0xFFFFu) site->miss_count++;
+    NEKO_ICACHE_AUDIT_HIT(g_neko_icache_miss_count);
     (void)env;
     return JNI_FALSE;
 }
@@ -1022,10 +1044,12 @@ static jvalue neko_icache_dispatch(
             cacheSlot = neko_icache_find_slot(site, receiverKey);
             if (cacheSlot >= 0) {
                 if (site->target_kind[cacheSlot] == NEKO_ICACHE_DIRECT_C && site->target[cacheSlot] != NULL) {
+                    NEKO_ICACHE_AUDIT_HIT(g_neko_icache_direct_c_hit_count);
                     return ((neko_icache_direct_stub)site->target[cacheSlot])(thread, env, receiver_jni, args);
                 }
                 if (site->target_kind[cacheSlot] == NEKO_ICACHE_DIRECT_NJX && site->target[cacheSlot] != NULL && site->target2[cacheSlot] != NULL
                     && neko_njx_enabled()) {
+                    NEKO_ICACHE_AUDIT_HIT(g_neko_icache_direct_njx_hit_count);
                     NEKO_DIRECT_LOG("icache hit direct-njx %s%s method=%p entry=%p receiver=%p",
                         meta->name, meta->desc, site->target[cacheSlot], site->target2[cacheSlot], receiver);
                     result = meta->direct_dispatcher(thread, env, site->target[cacheSlot], site->target2[cacheSlot], receiver, args);
@@ -1038,6 +1062,7 @@ static jvalue neko_icache_dispatch(
                     void *translatedKlass = neko_class_mirror_to_klass(translatedClass);
                     if (translatedKlass == receiverKlass) {
                         neko_icache_store_direct(env, site, receiverKey, NULL, (void*)meta->translated_stub);
+                        NEKO_ICACHE_AUDIT_HIT(g_neko_icache_translated_store_count);
                         return meta->translated_stub(thread, env, receiver_jni, args);
                     }
                 }
@@ -1065,6 +1090,7 @@ static jvalue neko_icache_dispatch(
                         NEKO_DIRECT_LOG("icache store direct-njx %s%s method=%p entry=%p receiver=%p",
                             meta->name, meta->desc, m_ptr, m_entry, receiver);
                         neko_icache_store_direct_njx(env, site, receiverKey, NULL, m_ptr, m_entry);
+                        NEKO_ICACHE_AUDIT_HIT(g_neko_icache_direct_njx_store_count);
                         result = meta->direct_dispatcher(thread, env, m_ptr, m_entry, receiver, args);
                         return result;
                     }
@@ -1079,6 +1105,7 @@ static jvalue neko_icache_dispatch(
         }
     }
     neko_njx_note_resolve_fail();
+    NEKO_ICACHE_AUDIT_HIT(g_neko_icache_unresolved_count);
     fprintf(stderr, "[neko-direct] unresolved virtual dispatch %s%s declared_mid=%p receiver=%p site=%p\\n",
         meta->name, meta->desc, declared_mid, receiver, (void*)site);
     abort();
@@ -1088,13 +1115,42 @@ static jvalue neko_icache_dispatch(
 __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
     uint64_t hits;
     uint64_t fails;
+#if NEKO_ICACHE_AUDIT
+    uint64_t ic_direct_c;
+    uint64_t ic_direct_njx;
+    uint64_t ic_miss;
+    uint64_t ic_translated_store;
+    uint64_t ic_direct_njx_store;
+    uint64_t ic_unresolved;
+#endif
     if (!neko_njx_debug()) return;
     hits = __atomic_load_n(&g_neko_njx_dispatch_count, __ATOMIC_RELAXED);
     fails = __atomic_load_n(&g_neko_njx_resolve_fail_count, __ATOMIC_RELAXED);
+#if NEKO_ICACHE_AUDIT
+    ic_direct_c = __atomic_load_n(&g_neko_icache_direct_c_hit_count, __ATOMIC_RELAXED);
+    ic_direct_njx = __atomic_load_n(&g_neko_icache_direct_njx_hit_count, __ATOMIC_RELAXED);
+    ic_miss = __atomic_load_n(&g_neko_icache_miss_count, __ATOMIC_RELAXED);
+    ic_translated_store = __atomic_load_n(&g_neko_icache_translated_store_count, __ATOMIC_RELAXED);
+    ic_direct_njx_store = __atomic_load_n(&g_neko_icache_direct_njx_store_count, __ATOMIC_RELAXED);
+    ic_unresolved = __atomic_load_n(&g_neko_icache_unresolved_count, __ATOMIC_RELAXED);
+    if (hits == 0 && fails == 0 && ic_direct_c == 0 && ic_direct_njx == 0
+        && ic_miss == 0 && ic_translated_store == 0 && ic_direct_njx_store == 0
+        && ic_unresolved == 0) return;
+    if (!__sync_bool_compare_and_swap(&g_neko_njx_stats_printed, 0, 1)) return;
+    fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu icache_direct_c_hit=%llu icache_direct_njx_hit=%llu icache_miss=%llu icache_translated_store=%llu icache_direct_njx_store=%llu icache_unresolved=%llu\\n",
+        (unsigned long long)hits, (unsigned long long)fails,
+        (unsigned long long)ic_direct_c,
+        (unsigned long long)ic_direct_njx,
+        (unsigned long long)ic_miss,
+        (unsigned long long)ic_translated_store,
+        (unsigned long long)ic_direct_njx_store,
+        (unsigned long long)ic_unresolved);
+#else
     if (hits == 0 && fails == 0) return;
     if (!__sync_bool_compare_and_swap(&g_neko_njx_stats_printed, 0, 1)) return;
     fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu\\n",
         (unsigned long long)hits, (unsigned long long)fails);
+#endif
 }
 __attribute__((constructor)) static void neko_njx_register_atexit(void) {
     atexit(neko_njx_dump_stats_at_exit);

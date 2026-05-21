@@ -1117,3 +1117,50 @@ the source plan that owns the changed path before it can be considered complete.
   row; this is an audit-sync row.
 - Completion criteria: no stale checkbox is marked complete; every updated
   checkbox has a matching fresh artifact and evidence path.
+
+### [x] NPT-3ab: Runtime P12 virtual/interface PIC-hit audit
+
+- Scope: add only default-off diagnostic counters for the existing
+  `neko_icache_dispatch` virtual/interface PIC path. The audit may count
+  direct-C hits, direct-NJX hits, misses, translated-stub stores, direct-NJX
+  stores, and unresolved exits in the existing `NEKO_DIRECT_DEBUG=1` stats
+  summary.
+- Required evidence: current source shows direct-C and direct-NJX hit branches,
+  interleaved miss resolution, and only a per-site `miss_count`; previous P12
+  declared-mid removal and cold-miss outlining were rejected. The new audit must
+  prove the current hit/miss/target-kind mix before any further dispatch shape
+  change.
+- Validation command or runtime target: focused generator/audit tests with
+  repository `./gradlew` after permission, fresh
+  `NativeObfuscationIntegrationTest`, default-off TEST/obfusjack parity runs,
+  one opt-in `NEKO_DIRECT_DEBUG=1` diagnostic runtime, and generated-C
+  inspection.
+- Completion criteria: generated C shows only audit counters/logging added
+  around existing branches; default-off parity has no accepted regression; the
+  opt-in diagnostic run emits useful PIC hit/miss/target-kind counts; no
+  receiver-key computation, PIC size, target selection, miss resolution,
+  direct-C dispatch, direct-NJX call-stub dispatch, handle scope, exception
+  behavior, JNI/JVMTI fallback, skip-on-error behavior, or original-bytecode
+  fallback changes.
+- Completion evidence: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed; fresh
+  `NativeObfuscationIntegrationTest` passed; opt-in TEST audit artifact
+  `build/p12-icache-audit/TEST-native-audit.jar` generated with
+  `translated=49 rejected=0` from
+  `build/neko-native-work/run-9527959662306`; its build manifest recorded
+  `icache.audit.build=true` and compile commands containing
+  `-DNEKO_ICACHE_AUDIT=1`. The opt-in `NEKO_DIRECT_DEBUG=1` runtime completed
+  and emitted counters including `icache_direct_njx_hit=519999`,
+  `icache_miss=43`, `icache_direct_njx_store=44`, `resolve_failed=0`, and
+  `icache_unresolved=0`; a second loaded native segment reported
+  `icache_direct_njx_hit=20`, `icache_miss=76`, `icache_direct_njx_store=77`,
+  `resolve_failed=0`, `icache_unresolved=0`. Generated-C inspection found no
+  executable forbidden JNI/JVMTI markers in the icache support path; remaining
+  support-file JNI strings were comments or internal JVM symbol names.
+- Outcome: the audit is accepted as measurement infrastructure. The recorded
+  runtime mix is dominated by direct-NJX PIC hits, so no further P12 cold-miss
+  outlining or dispatch-shape change is justified without new evidence.
+- Dependency update: P2/P4 GC strict acceptance remains blocked by the fresh
+  ZGC mask-publication abort (`ZGC oop load masks unavailable addr=0x0
+  good=0x0`). This P12 row is measurement-only runtime hot-path debugging to
+  guide the next performance change; it does not mark any GC blocker complete.
