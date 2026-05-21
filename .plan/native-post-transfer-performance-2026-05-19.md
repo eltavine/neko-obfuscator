@@ -2232,6 +2232,55 @@ the source plan that owns the changed path before it can be considered complete.
   come from the other generic concat fast path that immediately pushes the
   returned object.
 
+### [x] NPT-3cc: P10 default-off StringBuilder concat fast-path audit
+
+- Scope: add default-off audit counters for the recognized
+  `StringBuilder.append(String).append(String).toString` concat fast path emitted
+  by `NativeTranslator`. This is an evidence-only P10 substep to determine
+  whether the dominant TEST `V:L:L` NJX object returns come from the immediate
+  `neko_concat_append_inline(...)` plus `PUSH_O(__fastConcat)` path. It must not
+  construct strings natively, change the `String.concat` Method*/entry target,
+  change stack/local root semantics, change default runtime behavior, or
+  special-case a sample, class, method, or benchmark.
+- Required evidence: NPT-3cb proved the invokedynamic accumulator counters are
+  zero for TEST while source generation shows the other generic concat lowering
+  emits `neko_concat_append_inline(...)` followed by immediate `PUSH_O` in both
+  literal and non-literal second-argument branches.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`, fresh default TEST/obfusjack smoke proving
+  `handle.audit.build=false` artifacts emit no fast-path audit stats, fresh
+  opt-in TEST/obfusjack runtime with `NEKO_DIRECT_DEBUG=1` showing the
+  StringBuilder fast-path counters, generated-C/manifest inspection for
+  `NEKO_HANDLE_AUDIT` gating, and forbidden-JNI/JVMTI/fallback grep.
+- Completion criteria: opt-in counters reconcile with the NPT-3ca/NPT-3cb
+  `V:L:L` traffic enough to identify whether the immediate StringBuilder concat
+  fast path is the next generic optimization boundary; default artifacts have no
+  behavior change; TEST and obfusjack complete without fatal/error output; the
+  recorded evidence either justifies or rejects optimizing that boundary.
+- Completed 2026-05-22: added `NEKO_HANDLE_AUDIT`-gated StringBuilder
+  fast-concat counters in both recognized `NativeTranslator` branches. Focused
+  `CCodeGeneratorTest` and `NativeGeneratedCHotPathAuditTest` passed. Fresh
+  default artifacts: TEST `build/neko-native-work/run-34233855782829`
+  (`translated=49 rejected=0`, `handle.audit.build=false`, lib `1084344`) and
+  obfusjack `run-34238244839435` (`translated=93 rejected=0`,
+  `handle.audit.build=false`, lib `1876824`). Default five-run medians were TEST
+  Calc `73ms`, obfusjack Platform `47ms`, Virtual `41ms`, Seq `17ms`; default
+  benchmark stderr logs emitted no `[neko-direct]` audit rows, and strict
+  generated-C grep for `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` returned no
+  matches. Fresh opt-in artifacts: TEST `run-34356662706187`
+  (`handle.audit.build=true`, lib `1132648`) and obfusjack
+  `run-34361066685190` (`handle.audit.build=true`, lib `1958600`). Direct
+  opt-in TEST runtime completed with `V:L:L=510002`, `njx_return=510004`,
+  concat-continuation zero, and `stringbuilder-fast-concat: total=510000
+  literal=510000 dynamic=0`. Direct opt-in obfusjack runtime completed with
+  full program output, `njx_return=301141`, concat-continuation
+  `accumulate_total=137 accumulate_njx=89 final_push=48`, and
+  `stringbuilder-fast-concat: total=0 literal=0 dynamic=0`. Conclusion:
+  immediate StringBuilder fast concat accounts for all but two of TEST's
+  dominant `V:L:L` object returns and is the next justified generic optimization
+  boundary; obfusjack remains dominated by other object-return and direct-handle
+  origins.
+
 ### [x] NPT-3au: Split translated direct-call body entry
 
 - Scope: reduce translated-to-translated direct-call raw-entry overhead by

@@ -994,6 +994,9 @@ static volatile uint64_t g_neko_handle_origin_bound_string_count = 0;
 static volatile uint64_t g_neko_concat_accumulate_total_count = 0;
 static volatile uint64_t g_neko_concat_accumulate_njx_count = 0;
 static volatile uint64_t g_neko_concat_final_push_count = 0;
+static volatile uint64_t g_neko_stringbuilder_concat_fast_total_count = 0;
+static volatile uint64_t g_neko_stringbuilder_concat_fast_literal_count = 0;
+static volatile uint64_t g_neko_stringbuilder_concat_fast_dynamic_count = 0;
 #endif
 static volatile int g_neko_njx_stats_printed = 0;
 NEKO_FAST_INLINE int neko_njx_debug(void) { return g_neko_njx_debug_cached; }
@@ -1332,6 +1335,10 @@ __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
             (unsigned long long)concat_final,
             (unsigned long long)(concat_njx > concat_final ? concat_njx - concat_final : 0));
     }
+    fprintf(stderr, "[neko-direct] stringbuilder-fast-concat: total=%llu literal=%llu dynamic=%llu\\n",
+        (unsigned long long)__atomic_load_n(&g_neko_stringbuilder_concat_fast_total_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_stringbuilder_concat_fast_literal_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_stringbuilder_concat_fast_dynamic_count, __ATOMIC_RELAXED));
 #endif
 }
 __attribute__((constructor)) static void neko_njx_register_atexit(void) {

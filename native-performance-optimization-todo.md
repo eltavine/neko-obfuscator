@@ -632,6 +632,47 @@ Performance and GC gates:
     only `intermediate_candidate=41` against `njx_return=301141`. Conclusion:
     raw concat-continuation is rejected as the next route; TEST's dominant
     `V:L:L` returns are immediate final pushes from the generic concat fast path.
+  - Implementation row recorded 2026-05-22: NPT-3cc will add a default-off
+    audit for the recognized `StringBuilder.append(String).append(String).toString`
+    concat fast path emitted by `NativeTranslator`. Required evidence: NPT-3cb
+    proved the invokedynamic accumulator counters are zero for TEST while source
+    generation emits `neko_concat_append_inline(...)` followed by immediate
+    `PUSH_O(__fastConcat)` for the other generic concat lowering. The audit may
+    count only recognized fast-path emissions and runtime executions under
+    `NEKO_NATIVE_HANDLE_AUDIT=1`; it must not construct strings natively, change
+    the `String.concat` Method*/entry target, change stack/local root semantics,
+    alter default runtime behavior, or special-case any class, method, sample, or
+    benchmark. Validation: focused generator/audit tests, fresh default
+    TEST/obfusjack smoke proving `handle.audit.build=false` artifacts emit no
+    fast-path audit stats, fresh opt-in TEST/obfusjack runtime with
+    `NEKO_DIRECT_DEBUG=1` showing the fast-path counters, generated-C/manifest
+    inspection for `NEKO_HANDLE_AUDIT` gating, and forbidden-JNI/JVMTI/fallback
+    grep. Completion requires proving whether the immediate StringBuilder concat
+    fast path accounts for TEST's dominant `V:L:L` NJX return traffic enough to
+    justify or reject a later generic optimization at that boundary.
+  - Completed 2026-05-22: NPT-3cc added `NEKO_HANDLE_AUDIT`-gated StringBuilder
+    fast-concat counters in both recognized `NativeTranslator` branches and kept
+    default artifacts at `handle.audit.build=false`. Focused `CCodeGeneratorTest`
+    and `NativeGeneratedCHotPathAuditTest` passed. Fresh default TEST
+    `build/neko-native-work/run-34233855782829` translated `49 rejected=0`,
+    `handle.audit.build=false`, lib `1084344`; fresh default obfusjack
+    `run-34238244839435` translated `93 rejected=0`, `handle.audit.build=false`,
+    lib `1876824`. Default five-run medians were TEST Calc `73ms`, obfusjack
+    Platform `47ms`, Virtual `41ms`, Seq `17ms`; baseline stderr logs emitted no
+    `[neko-direct]` audit rows, and strict generated-C grep for
+    `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` returned no matches. Fresh opt-in
+    artifacts were TEST `run-34356662706187` (`handle.audit.build=true`, lib
+    `1132648`) and obfusjack `run-34361066685190` (`handle.audit.build=true`,
+    lib `1958600`). Direct opt-in TEST runtime completed with `V:L:L=510002`,
+    `njx_return=510004`, concat-continuation zero, and
+    `stringbuilder-fast-concat: total=510000 literal=510000 dynamic=0`. Direct
+    opt-in obfusjack runtime completed with full program output, `njx_return=301141`,
+    concat-continuation `accumulate_total=137 accumulate_njx=89 final_push=48`,
+    and `stringbuilder-fast-concat: total=0 literal=0 dynamic=0`. Conclusion:
+    immediate StringBuilder fast concat accounts for all but two of TEST's
+    dominant `V:L:L` object returns and is the next justified generic optimization
+    boundary; obfusjack remains dominated by other object-return and direct-handle
+    origins, so the follow-up must preserve non-StringBuilder paths.
   - Current implementation row recorded 2026-05-20: remove the per-call full `memset` of NJX `call_params` only. Every used slot must still be initialized exactly: one-slot primitive/object arguments write their own slot, float slots are zeroed before writing the 32-bit payload to preserve the previous high-word state, and two-slot long/double arguments zero the required leading padding slot before writing the payload slot. This is a generic call-stub stack-packing optimization for every NJX target, including original JVM/JDK functions; it must not replace any target method with native code or change which JVM function is called.
   - Validation update 2026-05-20: forbidden Math/libm and other named-JDK
     native substitutions were removed; generated run
