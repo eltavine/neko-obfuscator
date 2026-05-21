@@ -1732,3 +1732,42 @@ the source plan that owns the changed path before it can be considered complete.
   helpers with `visibility("hidden")`, `cold`, and `noinline`. Default
   collector TEST smoke on `build/npt-3ao/TEST-native.jar` completed with no
   stderr and `Calc: 89ms`.
+
+### [x] NPT-3ap: Outline object fused-array diagnostics
+
+- Scope: move object-array checked/fused diagnostic `fprintf`/`abort`
+  construction from `neko_checked_aaload`, `neko_checked_aastore`, and
+  `neko_fast_aaload_aaload` into hidden `cold`, `noinline` helper functions.
+  Keep returned reason codes, null and bounds ordering, handle resolution,
+  array-store checks, GC barriers, and raw oop loads/stores unchanged. Do not
+  touch generated primitive checked/fused helpers or the primitive direct array
+  diagnostic shape rejected by NPT-3z.
+- Required evidence: current source still emits unconditional diagnostic aborts
+  in object-array checked/fused failure paths after NPT-3ao. These paths are
+  separate from the rejected primitive-array direct diagnostic row and can be
+  moved without changing success-path semantics.
+- Validation command or runtime target: focused generator/audit tests, fresh
+  TEST native generation, generated-C inspection proving the selected
+  object-array checked/fused helpers call cold diagnostics instead of containing
+  inline formatting blocks, and default collector TEST smoke.
+- Completion criteria: selected object-array checked/fused diagnostic exits are
+  outlined to cold noinline helpers, all normal checks and reason-code returns
+  are unchanged, generated C compiles with `translated>0 rejected=0`, and
+  runtime smoke shows no new failure.
+- Completion evidence 2026-05-21: `neko_checked_aaload`,
+  `neko_checked_aastore`, and `neko_fast_aaload_aaload` now call hidden `cold`,
+  `noinline` diagnostic helpers for layout and unresolved-handle hard-abort
+  paths. Focused generator/audit tests passed:
+  `env GRADLE_USER_HOME=build/gradle-home-native-coverage bash ./gradlew
+  :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests
+  dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest`. Fresh TEST native
+  generation succeeded in `build/neko-native-work/run-14840042038598` with
+  `translated=49 rejected=0` and `libneko_linux_x64.so` size `1036952` bytes.
+  Generated C inspection showed selected checked/fused object-array helpers in
+  `neko_native_support.c` call `neko_abort_checked_*` and
+  `neko_abort_fused_aaload_aaload_*`, while `neko_native_support_helpers_4.c`
+  defines those helpers with `visibility("hidden")`, `cold`, and `noinline`.
+  Default collector TEST smoke on `build/npt-3ap/TEST-native.jar` completed
+  with no stderr and `Calc: 97ms`; repeated TEST samples showed NPT-3ao
+  `88,88,95,95,94 ms` (median `94ms`) versus NPT-3ap
+  `89,85,92,88,86 ms` (median `88ms`).

@@ -459,6 +459,29 @@ Performance and GC gates:
     collector TEST smoke on `build/npt-3ao/TEST-native.jar` completed with no
     stderr and `Calc: 89ms`. P6 remains open for fused-array diagnostics and
     broader performance-gate closure.
+  - Implementation row recorded 2026-05-21: NPT-3ap will move object-array
+    checked/fused diagnostic `fprintf`/`abort` construction from
+    `neko_checked_aaload`, `neko_checked_aastore`, and
+    `neko_fast_aaload_aaload` into hidden `cold`, `noinline` helper functions.
+    Keep returned reason codes, null and bounds ordering, handle resolution,
+    array-store checks, GC barriers, and raw oop loads/stores unchanged. Do not
+    touch generated primitive checked/fused helpers or the primitive direct
+    array diagnostic shape rejected by NPT-3z.
+  - Completion evidence 2026-05-21 for NPT-3ap: `neko_checked_aaload`,
+    `neko_checked_aastore`, and `neko_fast_aaload_aaload` now call hidden
+    `cold`, `noinline` diagnostic helpers for layout and unresolved-handle
+    hard-abort paths. Focused generator/audit tests passed, fresh TEST native
+    generation succeeded in `build/neko-native-work/run-14840042038598` with
+    `translated=49 rejected=0` and `libneko_linux_x64.so` size `1036952`
+    bytes, generated C inspection showed selected checked/fused object-array
+    helpers call `neko_abort_checked_*` and
+    `neko_abort_fused_aaload_aaload_*` while `neko_native_support_helpers_4.c`
+    defines those helpers with `visibility("hidden")`, `cold`, and `noinline`,
+    and default collector TEST smoke on `build/npt-3ap/TEST-native.jar`
+    completed with no stderr. Repeated TEST samples showed NPT-3ao
+    `88,88,95,95,94 ms` (median `94ms`) versus NPT-3ap
+    `89,85,92,88,86 ms` (median `88ms`). P6 remains open for generated fused
+    primitive AALOAD+xALOAD diagnostics and broader performance-gate closure.
   - Rejected row update 2026-05-21: NPT-3z primitive-array cold diagnostic
     outlining was reverted. Focused generator/audit tests and
     `NativeObfuscationIntegrationTest` passed, but direct parity in

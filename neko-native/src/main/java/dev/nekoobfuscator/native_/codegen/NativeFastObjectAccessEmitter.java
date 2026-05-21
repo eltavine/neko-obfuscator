@@ -1101,6 +1101,36 @@ NEKO_FAST_INLINE void neko_fast_set_static_object_field(void *thread, JNIEnv *en
 #define NEKO_FAST_ARRAY_INNER_NULL 3
 #define NEKO_FAST_ARRAY_INNER_BOUNDS 4
 
+static void __attribute__((cold, noinline)) neko_abort_checked_aaload_layout(jobjectArray arr, jint idx, void *thread) {
+    fprintf(stderr, "[neko-direct] checked AALOAD layout unavailable arr=%p idx=%d thread=%p\\n", (void*)arr, (int)idx, thread);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_checked_aaload_handle(jobjectArray arr, jint idx) {
+    fprintf(stderr, "[neko-direct] checked AALOAD handle unresolved arr=%p idx=%d\\n", (void*)arr, (int)idx);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_checked_aastore_layout(jobjectArray arr, jint idx, void *thread) {
+    fprintf(stderr, "[neko-direct] checked AASTORE layout unavailable arr=%p idx=%d thread=%p\\n", (void*)arr, (int)idx, thread);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_checked_aastore_handle(jobjectArray arr, jint idx) {
+    fprintf(stderr, "[neko-direct] checked AASTORE handle unresolved arr=%p idx=%d\\n", (void*)arr, (int)idx);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_fused_aaload_aaload_layout(jobjectArray outer, jint idx1, jint idx2, void *thread) {
+    fprintf(stderr, "[neko-direct] AALOAD+AALOAD layout unavailable outer=%p idx1=%d idx2=%d thread=%p\\n", (void*)outer, (int)idx1, (int)idx2, thread);
+    abort();
+}
+
+static void __attribute__((cold, noinline)) neko_abort_fused_aaload_aaload_outer_handle(jobjectArray outer) {
+    fprintf(stderr, "[neko-direct] AALOAD+AALOAD outer handle unresolved outer=%p\\n", (void*)outer);
+    abort();
+}
+
 NEKO_HOT_INLINE jboolean neko_checked_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject *out, int *reason) {
     (void)env;
     if (out != NULL) *out = NULL;
@@ -1109,13 +1139,11 @@ NEKO_HOT_INLINE jboolean neko_checked_aaload(void *thread, JNIEnv *env, jobjectA
         || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
         || neko_const_prim_array_base(NEKO_PRIM_I) < 0
         || thread == NULL)) {
-        fprintf(stderr, "[neko-direct] checked AALOAD layout unavailable arr=%p idx=%d thread=%p\\n", (void*)arr, (int)idx, thread);
-        abort();
+        neko_abort_checked_aaload_layout(arr, idx, thread);
     }
     char *oop = (char*)neko_handle_oop((jobject)arr);
     if (NEKO_UNLIKELY(oop == NULL)) {
-        fprintf(stderr, "[neko-direct] checked AALOAD handle unresolved arr=%p idx=%d\\n", (void*)arr, (int)idx);
-        abort();
+        neko_abort_checked_aaload_handle(arr, idx);
     }
     size_t base = (size_t)neko_const_prim_array_base(NEKO_PRIM_I);
     jint len = *(jint*)(oop + base - 4u);
@@ -1132,13 +1160,11 @@ NEKO_HOT_INLINE jboolean neko_checked_aastore(void *thread, JNIEnv *env, jobject
         || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
         || neko_const_prim_array_base(NEKO_PRIM_I) < 0
         || thread == NULL)) {
-        fprintf(stderr, "[neko-direct] checked AASTORE layout unavailable arr=%p idx=%d thread=%p\\n", (void*)arr, (int)idx, thread);
-        abort();
+        neko_abort_checked_aastore_layout(arr, idx, thread);
     }
     char *oop = (char*)neko_handle_oop((jobject)arr);
     if (NEKO_UNLIKELY(oop == NULL)) {
-        fprintf(stderr, "[neko-direct] checked AASTORE handle unresolved arr=%p idx=%d\\n", (void*)arr, (int)idx);
-        abort();
+        neko_abort_checked_aastore_handle(arr, idx);
     }
     size_t ref_size = neko_const_oop_ref_size();
     size_t base = (size_t)neko_const_prim_array_base(NEKO_PRIM_I);
@@ -1183,14 +1209,12 @@ NEKO_HOT_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobje
         || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
         || neko_const_prim_array_base(NEKO_PRIM_I) < 0
         || thread == NULL)) {
-        fprintf(stderr, "[neko-direct] AALOAD+AALOAD layout unavailable outer=%p idx1=%d idx2=%d thread=%p\\n", (void*)outer, (int)idx1, (int)idx2, thread);
-        abort();
+        neko_abort_fused_aaload_aaload_layout(outer, idx1, idx2, thread);
     }
     if (outer == NULL) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_NULL; return NULL; }
     char *outer_oop = (char*)neko_handle_oop((jobject)outer);
     if (NEKO_UNLIKELY(outer_oop == NULL)) {
-        fprintf(stderr, "[neko-direct] AALOAD+AALOAD outer handle unresolved outer=%p\\n", (void*)outer);
-        abort();
+        neko_abort_fused_aaload_aaload_outer_handle(outer);
     }
     jint outer_len = *(jint*)(outer_oop + neko_const_prim_array_base(NEKO_PRIM_I) - 4);
     if (NEKO_UNLIKELY(idx1 < 0 || idx1 >= outer_len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return NULL; }
