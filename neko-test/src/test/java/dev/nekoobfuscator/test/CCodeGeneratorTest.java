@@ -395,6 +395,70 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void primitiveIntArithmeticSelfTailCallsFuseWithoutCrossingLabels() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/IntTailOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode decrement = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "decrement", "(I)V", null, null);
+        decrement.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        decrement.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        decrement.instructions.add(new InsnNode(Opcodes.ISUB));
+        decrement.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, classNode.name, "decrement", "(I)V", false));
+        decrement.instructions.add(new LabelNode());
+        decrement.instructions.add(new InsnNode(Opcodes.RETURN));
+        decrement.maxStack = 2;
+        decrement.maxLocals = 1;
+        classNode.methods.add(decrement);
+
+        MethodNode scale = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "scale", "(I)I", null, null);
+        scale.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        scale.instructions.add(new InsnNode(Opcodes.ICONST_2));
+        scale.instructions.add(new InsnNode(Opcodes.IMUL));
+        scale.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, classNode.name, "scale", "(I)I", false));
+        scale.instructions.add(new InsnNode(Opcodes.IRETURN));
+        scale.maxStack = 2;
+        scale.maxLocals = 1;
+        classNode.methods.add(scale);
+
+        LabelNode boundary = new LabelNode();
+        MethodNode blocked = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "blocked", "(I)V", null, null);
+        blocked.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        blocked.instructions.add(boundary);
+        blocked.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        blocked.instructions.add(new InsnNode(Opcodes.ISUB));
+        blocked.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, classNode.name, "blocked", "(I)V", false));
+        blocked.instructions.add(new InsnNode(Opcodes.RETURN));
+        blocked.maxStack = 2;
+        blocked.maxLocals = 1;
+        classNode.methods.add(blocked);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("primitive-int-tail-fusion", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("decrement", "(I)V")),
+            new MethodSelection(owner, owner.findMethod("scale", "(I)I")),
+            new MethodSelection(owner, owner.findMethod("blocked", "(I)V"))
+        )).source();
+
+        String decrementBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        assertTrue(decrementBody.contains("{ /* tail-call int arithmetic \u2192 goto L0 */ locals[0].i = (jint)((locals[0].i) - (1)); sp = 0; goto __neko_tco_entry; }"), () -> decrementBody);
+        assertFalse(decrementBody.contains("PUSH_I(a - b);"), () -> decrementBody);
+
+        String scaleBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(scaleBody.contains("{ /* tail-call int arithmetic \u2192 goto L0 */ locals[0].i = (jint)((locals[0].i) * (2)); sp = 0; goto __neko_tco_entry; }"), () -> scaleBody);
+        assertFalse(scaleBody.contains("PUSH_I(a * b);"), () -> scaleBody);
+
+        String blockedBody = lastFunctionSection(source, "neko_native_impl_2_body");
+        assertTrue(blockedBody.contains("PUSH_I(locals[0].i);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("PUSH_I(a - b);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("{ /* tail-call \u2192 goto L0 */ jint __tco0 = POP_I(); locals[0].i = __tco0; sp = 0; goto __neko_tco_entry; }"), () -> blockedBody);
+    }
+
+    @Test
     void hotspotProbeEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;

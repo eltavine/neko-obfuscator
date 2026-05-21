@@ -2257,3 +2257,49 @@ the source plan that owns the changed path before it can be considered complete.
   with empty stderr: NPT-3ba `87,87,84,85,93,98,92 ms` (median `87ms`) versus
   NPT-3bc `88,85,86,86,84,99,94 ms` (median `86ms`). Focused native integration
   tests for TEST Calc and obfusjack completion also passed.
+
+### [x] NPT-3bd: Fuse primitive int arithmetic into single-arg self tail calls
+
+- Scope: fuse only adjacent same-basic-block `ICONST_*`/`BIPUSH`/`SIPUSH`/`ILOAD`,
+  second matching int producer, `IADD`, `ISUB`, or `IMUL`, then a static
+  self-recursive tail call for a method with exactly one `int` argument and a
+  matching return. The fused C must assign the computed expression directly to
+  the restarted local, clear the operand stack, and jump to the existing
+  tail-call landing pad. It must not cross labels between the primitive
+  producers and the self call. Like the existing tail-call rewrite, labels,
+  lines, and frames may appear between the call and the matching return only
+  when no intervening real instruction exists. It must not cross
+  try-handler-covered call sites, object/ref operations, fields, arrays, invokes
+  other than the proven self tail call, monitors, division/remainder,
+  long/float/double arithmetic, multi-argument calls, instance receiver calls,
+  or helper calls.
+- Required evidence: fresh NPT-3bc generated TEST C at
+  `build/neko-native-work/run-20027566395481/neko_native_impl_20.c` shows the
+  generic static self-recursive `int -> void` tail path evaluating
+  `locals[0].i - 1` through `PUSH_I(locals[0].i)`, `PUSH_I(1)`, `ISUB`, then
+  immediately popping that value into `locals[0].i` inside the existing
+  tail-call rewrite. This is stack-only primitive arithmetic immediately
+  consumed by the generic TCO path.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving the
+  single-arg arithmetic self tail call uses a direct local assignment with the
+  existing `sp = 0; goto __neko_tco_entry;`, default TEST smoke/timing
+  comparison, and focused native integration tests for TEST Calc and obfusjack
+  completion.
+- Completion criteria: only one-argument static `int` self tail calls with
+  same-block primitive int add/sub/mul argument arithmetic fuse; operand order
+  for subtraction matches JVM stack order; call-site active handlers remain
+  rejected; no JNI/JVMTI/fallback markers are introduced; timing does not
+  regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-20650186041509` built `libneko_linux_x64.so` at
+  `1034808` bytes with `translated=49 rejected=0`. Generated C inspection
+  showed `Calc.call(I)V` assigns `locals[0].i - 1` directly in the tail-call
+  restart path while preserving the normal `L3` return epilogue. Static grep
+  found no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` markers in the generated
+  work directory. Same-session alternating TEST smoke comparison passed with
+  empty stderr: NPT-3bc `81,88,99,94,95,90,89 ms` (median `90ms`) versus
+  NPT-3bd `88,92,88,90,86,87,95 ms` (median `88ms`). Focused native
+  integration tests for TEST Calc and obfusjack completion also passed.

@@ -1279,3 +1279,42 @@ Performance and GC gates:
     `87,87,84,85,93,98,92 ms` (median `87ms`) versus NPT-3bc
     `88,85,86,86,84,99,94 ms` (median `86ms`). Focused native integration
     tests for TEST Calc and obfusjack completion also passed.
+
+- [x] P25 Fuse primitive int arithmetic into single-arg self tail calls. The
+  translator should fuse only adjacent same-basic-block `ICONST_*`/`BIPUSH`/
+  `SIPUSH`/`ILOAD`, second matching int producer, `IADD`, `ISUB`, or `IMUL`,
+  then a static self-recursive tail call for a method with exactly one `int`
+  argument and a matching return. The fused C must assign the computed
+  expression directly to the restarted local, clear the operand stack, and jump
+  to the existing tail-call landing pad. This must not cross labels between the
+  primitive producers and the self call. Like the existing tail-call rewrite,
+  labels, lines, and frames may appear between the call and the matching return
+  only when no intervening real instruction exists. This must not cross
+  try-handler-covered call sites, object/ref operations, fields, arrays, invokes
+  other than the proven self tail call, monitors, division/remainder,
+  long/float/double arithmetic, multi-argument calls, instance receiver calls,
+  or helper calls. Source evidence: fresh NPT-3bc generated TEST C at
+  `build/neko-native-work/run-20027566395481/neko_native_impl_20.c` shows the
+  generic static self-recursive `int -> void` tail path evaluating
+  `locals[0].i - 1` through `PUSH_I(locals[0].i)`, `PUSH_I(1)`, `ISUB`, then
+  immediately popping that value into `locals[0].i` inside the existing
+  tail-call rewrite.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show the single-arg
+  arithmetic self tail call uses a direct local assignment with the existing
+  `sp = 0; goto __neko_tco_entry;`.
+  - Implementation row recorded 2026-05-22: NPT-3bd will implement this as a
+    primitive-only one-argument static self-tail-call peephole and will reject
+    any non-add/sub/mul, non-int, non-static, multi-argument, non-self, non-tail,
+    active-handler, or producer-to-call label-crossing sequence.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-20650186041509` built
+    `libneko_linux_x64.so` (`1034808` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed `Calc.call(I)V` assigns `locals[0].i - 1`
+    directly in the tail-call restart path while preserving the normal `L3`
+    return epilogue. Static grep found no `NEKO_JNI_FN_PTR`, `(*env)->`, or
+    `env->` markers in the generated work directory. Same-session alternating
+    TEST smoke passed with empty stderr: NPT-3bc `81,88,99,94,95,90,89 ms`
+    (median `90ms`) versus NPT-3bd `88,92,88,90,86,87,95 ms` (median `88ms`).
+    Focused native integration tests for TEST Calc and obfusjack completion
+    also passed.

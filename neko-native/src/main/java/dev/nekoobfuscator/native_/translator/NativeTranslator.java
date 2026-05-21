@@ -213,19 +213,22 @@ public final class NativeTranslator {
             }
             StringConcatPattern concatPattern = renderedStringConcatPattern(insn, selection.owner().name());
             PrimitiveArrayLiteralPattern arrayLiteral = concatPattern == null ? renderedPrimitiveArrayLiteralPattern(insn) : null;
-            PrimitiveIntReturnFusion primitiveIntReturn = (concatPattern == null && arrayLiteral == null)
+            PrimitiveIntTailCallFusion primitiveIntTailCall = (concatPattern == null && arrayLiteral == null)
+                ? tryPrimitiveIntTailCallFusion(opcodes, insn, selection, argTypes, activeHandlers, pcMap)
+                : null;
+            PrimitiveIntReturnFusion primitiveIntReturn = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null)
                 ? tryPrimitiveIntReturnFusion(opcodes, insn)
                 : null;
-            StaticIntAddUpdateFusion staticIntAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntReturn == null)
+            StaticIntAddUpdateFusion staticIntAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null)
                 ? tryStaticIntAddUpdateFusion(opcodes, insn)
                 : null;
-            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntReturn == null && staticIntAddUpdate == null)
+            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
                 ? tryPrimitiveBranchFusion(opcodes, insn, labelMap)
                 : null;
-            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveBranch == null)
+            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveBranch == null)
                 ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap)
                 : null;
-            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveBranch == null && fused == null)
+            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveBranch == null && fused == null)
                 ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
@@ -241,6 +244,14 @@ public final class NativeTranslator {
                 fn.addStatement(new CStatement.RawC(arrayLiteral.code));
                 pendingHandlers = activeHandlers.getOrDefault(pcMap.get(arrayLiteral.newArrayInsn), List.of());
                 insn = arrayLiteral.lastInsn;
+                continue;
+            } else if (primitiveIntTailCall != null) {
+                if (pendingHandlers != null) {
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
+                    pendingHandlers = null;
+                }
+                fn.addStatement(new CStatement.RawC(primitiveIntTailCall.code));
+                insn = primitiveIntTailCall.lastInsn;
                 continue;
             } else if (primitiveIntReturn != null) {
                 if (pendingHandlers != null) {
@@ -327,6 +338,52 @@ public final class NativeTranslator {
             return raw.code().contains(label);
         }
         return false;
+    }
+
+    private record PrimitiveIntTailCallFusion(String code, AbstractInsnNode lastInsn) {}
+
+    private PrimitiveIntTailCallFusion tryPrimitiveIntTailCallFusion(
+        OpcodeTranslator opcodes,
+        AbstractInsnNode insn,
+        MethodSelection selection,
+        Type[] argTypes,
+        Map<Integer, List<TryHandler>> activeHandlers,
+        Map<AbstractInsnNode, Integer> pcMap
+    ) {
+        L1Method current = selection.method();
+        if (!current.isStatic()) return null;
+        if (argTypes.length != 1 || argTypes[0].getSort() != Type.INT) return null;
+
+        String left = opcodes.intPushExpression(insn);
+        if (left == null) return null;
+        AbstractInsnNode rhsInsn = nextNonMetaSameBlock(insn);
+        String right = opcodes.intPushExpression(rhsInsn);
+        if (right == null) return null;
+        AbstractInsnNode arithmeticInsn = nextNonMetaSameBlock(rhsInsn);
+        if (!(arithmeticInsn instanceof InsnNode)) return null;
+        String operator = switch (arithmeticInsn.getOpcode()) {
+            case Opcodes.IADD -> "+";
+            case Opcodes.ISUB -> "-";
+            case Opcodes.IMUL -> "*";
+            default -> null;
+        };
+        if (operator == null) return null;
+        AbstractInsnNode callInsn = nextNonMetaSameBlock(arithmeticInsn);
+        if (!(callInsn instanceof MethodInsnNode mi) || mi.getOpcode() != Opcodes.INVOKESTATIC) return null;
+        if (!mi.owner.equals(selection.owner().name())
+            || !mi.name.equals(current.name())
+            || !mi.desc.equals(current.descriptor())) {
+            return null;
+        }
+        Integer callPc = pcMap.get(callInsn);
+        if (callPc == null || !activeHandlers.getOrDefault(callPc, List.of()).isEmpty()) return null;
+        AbstractInsnNode returnInsn = nextRealInsn(callInsn);
+        if (returnInsn == null || !isMatchingReturn(returnInsn.getOpcode(), Type.getReturnType(current.descriptor()))) return null;
+
+        return new PrimitiveIntTailCallFusion(
+            "{ /* tail-call int arithmetic → goto L0 */ locals[0].i = (jint)((" + left + ") " + operator + " (" + right + ")); sp = 0; goto __neko_tco_entry; }",
+            callInsn
+        );
     }
 
     private record PrimitiveIntReturnFusion(String code, AbstractInsnNode lastInsn) {}
