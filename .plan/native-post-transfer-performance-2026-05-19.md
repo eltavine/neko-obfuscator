@@ -2065,6 +2065,46 @@ the source plan that owns the changed path before it can be considered complete.
   `1034808` to `1034760` bytes. Focused native integration tests for TEST Calc
   and obfusjack completion also passed.
 
+### [x] NPT-3bh: Fuse single int producers into static translated direct calls
+
+- Scope: fuse only adjacent same-basic-block pure `int` producers
+  (`ICONST_*`, `BIPUSH`, `SIPUSH`, or `ILOAD`) feeding an immediate
+  `INVOKESTATIC` whose target is already translated and whose descriptor has
+  exactly one `int` argument. The fused C must call the existing translated
+  direct-call body with the producer expression as the argument and must reuse
+  the existing direct-call target class/guard/result handling. It must not cross
+  labels, fold non-static calls, fold NJX or virtual/interface dispatch, fold
+  multi-argument calls, fold non-int arguments, or alter pending-exception
+  coalescing.
+- Required evidence: fresh NPT-3bg generated TEST C at
+  `build/neko-native-work/run-21666360179964/neko_native_impl_19.c` shows the
+  hot `Calc.runAll` loop still materializes the constant argument to translated
+  static `Calc.call(I)V` through `PUSH_I(100)` and immediate `POP_I()` inside
+  the direct translated call wrapper.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving the
+  direct translated call receives the int expression directly without
+  argument-stack push/pop, default TEST smoke/timing comparison, and focused
+  native integration tests for TEST Calc and obfusjack completion.
+- Completion criteria: only one-int-argument static translated direct calls
+  fuse; label-blocked, non-static, non-translated, multi-argument, and non-int
+  cases retain stack traffic; no JNI/JVMTI/fallback markers are introduced;
+  timing does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-22094701424303` built `libneko_linux_x64.so` at
+  `1034712` bytes with `translated=49 rejected=0`. Generated C inspection
+  showed `Calc.runAll` passes `(jint)(100)` directly to
+  `neko_native_impl_20_body` without argument push/pop, while other dispatch
+  forms remain unchanged. Static grep found no `NEKO_JNI_FN_PTR`, `(*env)->`,
+  or `env->` markers in the generated work directory. Same-session alternating
+  TEST smoke comparison passed with empty stderr: NPT-3bg
+  `84,85,88,88,90,84,90 ms` (median `88ms`) versus NPT-3bh
+  `83,86,84,91,87,88,87 ms` (median `87ms`), with library size reduced from
+  `1034760` to `1034712` bytes. Focused native integration tests for TEST Calc
+  and obfusjack completion also passed.
+
 ### [x] NPT-3bf: Fuse primitive float/double same-local add updates
 
 - Scope: fuse only adjacent same-basic-block `FLOAD` or `DLOAD` of a local,

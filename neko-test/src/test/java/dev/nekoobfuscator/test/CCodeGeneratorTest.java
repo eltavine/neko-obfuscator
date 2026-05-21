@@ -200,7 +200,7 @@ class CCodeGeneratorTest {
         )).source();
 
         String sameCallerBody = lastFunctionSection(source, "neko_native_impl_1_body");
-        assertTrue(sameCallerBody.contains("neko_native_impl_0_body(thread, env, (jclass)clazz, arg0);"), () -> sameCallerBody);
+        assertTrue(sameCallerBody.contains("neko_native_impl_0_body(thread, env, (jclass)clazz, (jint)(7));"), () -> sameCallerBody);
         assertFalse(sameCallerBody.contains("jclass targetCls = (jclass)clazz"), () -> sameCallerBody);
         assertFalse(sameCallerBody.contains("targetCls != NULL"), () -> sameCallerBody);
 
@@ -692,6 +692,70 @@ class CCodeGeneratorTest {
         String nonConstantBody = lastFunctionSection(source, "neko_native_impl_2_body");
         assertTrue(nonConstantBody.contains("PUSH_I(locals[0].i);"), () -> nonConstantBody);
         assertTrue(nonConstantBody.contains("locals[1].i = POP_I();"), () -> nonConstantBody);
+    }
+
+    @Test
+    void singleIntProducersFuseIntoStaticTranslatedDirectCallsWithoutCrossingLabels() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/DirectIntInvokeOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode callee = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "callee", "(I)V", null, null);
+        callee.instructions.add(new InsnNode(Opcodes.RETURN));
+        callee.maxStack = 0;
+        callee.maxLocals = 1;
+        classNode.methods.add(callee);
+
+        MethodNode caller = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "caller", "()V", null, null);
+        caller.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 7));
+        caller.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, classNode.name, "callee", "(I)V", false));
+        caller.instructions.add(new InsnNode(Opcodes.RETURN));
+        caller.maxStack = 1;
+        caller.maxLocals = 0;
+        classNode.methods.add(caller);
+
+        LabelNode boundary = new LabelNode();
+        MethodNode blocked = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "blocked", "()V", null, null);
+        blocked.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 7));
+        blocked.instructions.add(boundary);
+        blocked.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, classNode.name, "callee", "(I)V", false));
+        blocked.instructions.add(new InsnNode(Opcodes.RETURN));
+        blocked.maxStack = 1;
+        blocked.maxLocals = 0;
+        classNode.methods.add(blocked);
+
+        MethodNode nonTranslated = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "nonTranslated", "()V", null, null);
+        nonTranslated.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 7));
+        nonTranslated.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, classNode.name, "unselected", "(I)V", false));
+        nonTranslated.instructions.add(new InsnNode(Opcodes.RETURN));
+        nonTranslated.maxStack = 1;
+        nonTranslated.maxLocals = 0;
+        classNode.methods.add(nonTranslated);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("single-int-direct-invoke-fusion", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("callee", "(I)V")),
+            new MethodSelection(owner, owner.findMethod("caller", "()V")),
+            new MethodSelection(owner, owner.findMethod("blocked", "()V")),
+            new MethodSelection(owner, owner.findMethod("nonTranslated", "()V"))
+        )).source();
+
+        String callerBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(callerBody.contains("neko_native_impl_0_body(thread, env, (jclass)clazz, (jint)(7));"), () -> callerBody);
+        assertFalse(callerBody.contains("PUSH_I(7);"), () -> callerBody);
+        assertFalse(callerBody.contains("arg0 = POP_I();"), () -> callerBody);
+
+        String blockedBody = lastFunctionSection(source, "neko_native_impl_2_body");
+        assertTrue(blockedBody.contains("PUSH_I(7);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("arg0 = POP_I();"), () -> blockedBody);
+
+        String nonTranslatedBody = lastFunctionSection(source, "neko_native_impl_3_body");
+        assertTrue(nonTranslatedBody.contains("PUSH_I(7);"), () -> nonTranslatedBody);
+        assertTrue(nonTranslatedBody.contains("arg0 = POP_I();"), () -> nonTranslatedBody);
     }
 
     @Test

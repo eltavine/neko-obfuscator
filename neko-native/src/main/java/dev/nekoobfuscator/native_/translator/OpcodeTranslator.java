@@ -844,6 +844,46 @@ public final class OpcodeTranslator {
         return sb.toString();
     }
 
+    String translateDirectStaticInvokeWithSingleIntArg(MethodInsnNode mi, String argExpr) {
+        NativeMethodBinding binding = translatedBindings.get(bindingKey(mi.owner, mi.name, mi.desc));
+        if (binding == null || !binding.isStatic()) return null;
+        Type[] args = Type.getArgumentTypes(mi.desc);
+        if (args.length != 1 || args[0].getSort() != Type.INT) return null;
+        Type ret = Type.getReturnType(mi.desc);
+        StringBuilder sb = new StringBuilder("{ ");
+        String receiverExpr;
+        String guardExpr = null;
+        boolean sameOwnerStatic = binding.ownerInternalName().equals(currentOwnerInternalName);
+        String targetClassExpr = binding.ownerInternalName().equals(currentOwnerInternalName)
+            ? "(jclass)clazz"
+            : cachedClassExpression(binding.ownerInternalName());
+        if (sameOwnerStatic) {
+            receiverExpr = targetClassExpr;
+        } else {
+            sb.append("jclass targetCls = ").append(targetClassExpr).append("; ");
+            receiverExpr = "targetCls";
+            guardExpr = "targetCls != NULL";
+        }
+        if (ret.getSort() == Type.VOID) {
+            if (guardExpr != null) {
+                sb.append("if (").append(guardExpr).append(") ");
+            }
+            sb.append(binding.rawFunctionName()).append("_body(thread, env, ").append(receiverExpr);
+        } else {
+            sb.append(jniTypeName(ret)).append(" result = (").append(jniTypeName(ret)).append(")0; ");
+            if (guardExpr != null) {
+                sb.append("if (").append(guardExpr).append(") ");
+            }
+            sb.append("result = ").append(binding.rawFunctionName()).append("_body(thread, env, ").append(receiverExpr);
+        }
+        sb.append(", (jint)(").append(argExpr).append(")); ");
+        if (ret.getSort() != Type.VOID) {
+            sb.append("if (!neko_exception_check(env)) { ").append(pushForType(ret, "result")).append(" } ");
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
     private String translateFieldGet(FieldInsnNode fi, boolean isStatic) {
         if (isPrimitiveFastField(fi.desc)) {
             return translatePrimitiveFieldGet(fi, isStatic);

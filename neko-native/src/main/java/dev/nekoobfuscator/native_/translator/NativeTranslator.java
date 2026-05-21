@@ -222,22 +222,25 @@ public final class NativeTranslator {
             StaticIntAddUpdateFusion staticIntAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null)
                 ? tryStaticIntAddUpdateFusion(opcodes, insn)
                 : null;
-            PrimitiveConstantLocalStoreFusion primitiveConstantLocalStore = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
+            StaticDirectSingleIntInvokeFusion staticDirectSingleIntInvoke = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null)
+                ? tryStaticDirectSingleIntInvokeFusion(opcodes, insn)
+                : null;
+            PrimitiveConstantLocalStoreFusion primitiveConstantLocalStore = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null)
                 ? tryPrimitiveConstantLocalStoreFusion(opcodes, insn)
                 : null;
-            PrimitiveFloatDoubleLocalAddUpdateFusion primitiveFloatDoubleLocalAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveConstantLocalStore == null)
+            PrimitiveFloatDoubleLocalAddUpdateFusion primitiveFloatDoubleLocalAddUpdate = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null)
                 ? tryPrimitiveFloatDoubleLocalAddUpdateFusion(opcodes, insn)
                 : null;
-            PrimitiveCompareBranchFusion primitiveCompareBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null)
+            PrimitiveCompareBranchFusion primitiveCompareBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null)
                 ? tryPrimitiveCompareBranchFusion(opcodes, insn, labelMap)
                 : null;
-            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null)
+            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null)
                 ? tryPrimitiveBranchFusion(opcodes, insn, labelMap)
                 : null;
-            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null)
+            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null)
                 ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap)
                 : null;
-            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null && fused == null)
+            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveIntTailCall == null && primitiveIntReturn == null && staticIntAddUpdate == null && staticDirectSingleIntInvoke == null && primitiveConstantLocalStore == null && primitiveFloatDoubleLocalAddUpdate == null && primitiveCompareBranch == null && primitiveBranch == null && fused == null)
                 ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
@@ -272,6 +275,9 @@ public final class NativeTranslator {
             } else if (staticIntAddUpdate != null) {
                 fn.addStatement(new CStatement.RawC(staticIntAddUpdate.code));
                 insn = staticIntAddUpdate.lastInsn;
+            } else if (staticDirectSingleIntInvoke != null) {
+                fn.addStatement(new CStatement.RawC(staticDirectSingleIntInvoke.code));
+                insn = staticDirectSingleIntInvoke.lastInsn;
             } else if (primitiveConstantLocalStore != null) {
                 fn.addStatement(new CStatement.RawC(primitiveConstantLocalStore.code));
                 insn = primitiveConstantLocalStore.lastInsn;
@@ -447,6 +453,20 @@ public final class NativeTranslator {
         if (!(putInsn instanceof FieldInsnNode put) || put.getOpcode() != Opcodes.PUTSTATIC) return null;
         if (!get.owner.equals(put.owner) || !get.name.equals(put.name) || !get.desc.equals(put.desc)) return null;
         return new StaticIntAddUpdateFusion(opcodes.translateStaticIntAddUpdate(get, rhsExpr), put);
+    }
+
+    private record StaticDirectSingleIntInvokeFusion(String code, AbstractInsnNode lastInsn) {}
+
+    private StaticDirectSingleIntInvokeFusion tryStaticDirectSingleIntInvokeFusion(
+        OpcodeTranslator opcodes,
+        AbstractInsnNode insn
+    ) {
+        String argExpr = opcodes.intPushExpression(insn);
+        if (argExpr == null) return null;
+        AbstractInsnNode callInsn = nextNonMetaSameBlock(insn);
+        if (!(callInsn instanceof MethodInsnNode mi) || mi.getOpcode() != Opcodes.INVOKESTATIC) return null;
+        String code = opcodes.translateDirectStaticInvokeWithSingleIntArg(mi, argExpr);
+        return code == null ? null : new StaticDirectSingleIntInvokeFusion(code, callInsn);
     }
 
     private record PrimitiveConstantLocalStoreFusion(String code, AbstractInsnNode lastInsn) {}
