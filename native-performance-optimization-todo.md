@@ -978,3 +978,46 @@ Performance and GC gates:
     comments or internal JVM symbol names.
 
 - [ ] P15 Tighten native performance tests after P0 baseline exists. Extend native performance tests to record and assert TEST Calc median plus obfusjack parsed matrix/thread medians when those output lines are present. Keep thresholds relative to the immediate baseline until stable absolute gates are justified by current-source measurements. Source evidence: current perf tests only parse TEST Calc at `NativeObfuscationPerfTest.java:71-91`; obfusjack integration currently checks completion, not performance, at `NativeObfuscationIntegrationTest.java:101-109`. Validation: `R-build`, `R-test` x5, `R-obfusjack` x5, `R-native-test`, `R-inspect`.
+
+- [x] P16 Reduce translated-to-translated direct-call raw-entry overhead without
+  changing Java-level method activation semantics. Internal direct calls between
+  translated methods may skip only the redundant runtime capability check after
+  the caller has already executed `neko_hotspot_fast_require(thread, env)` for
+  the same translated call chain. External raw ABI entries, dispatcher/manifest
+  targets, stack/local/monitor storage, local-root reservation where required,
+  shadow-frame push/pop, exception behavior, and target selection must remain
+  unchanged. Source evidence: `CCodeGenerator.renderRawFunction` currently emits
+  `neko_hotspot_fast_require(thread, env)` inside every raw translated function,
+  and `OpcodeTranslator.translateDirectInvoke` calls `binding.rawFunctionName()`
+  directly for static/special/direct-call-safe translated calls. Existing TEST
+  generated C shows `Calc.runAll` calls translated `call`, `runAdd`, and
+  `runStr` 10,000 times and each callee reruns the same raw-entry gate.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`,
+  performance gate; generated C must show external `neko_native_impl_*` entries
+  still call `neko_hotspot_fast_require`, internal direct calls target an
+  internal body entry, body entries preserve roots and shadow frames, and no
+  JNI/JVMTI/fallback markers are introduced.
+  - Implementation row recorded 2026-05-21: NPT-3au will split raw generated
+    methods into an external ABI wrapper and an internal translated body entry.
+    The wrapper keeps `neko_hotspot_fast_require(thread, env)` and then calls the
+    body. The body keeps activation storage, object-local root setup where
+    required, parameter-to-local rooting, and one shadow push/pop, but uses an
+    assumption-only fast-state marker instead of rechecking runtime capability.
+    Only `OpcodeTranslator.translateDirectInvoke` may switch translated internal
+    direct calls to the body symbol; NJX, virtual/interface dispatch, manifest
+    entries, trampoline dispatchers, and external ABI calls must continue to use
+    the wrapper/raw function.
+  - Completed 2026-05-22: focused generator/audit tests passed. First fresh
+    runtime failed with `UnsatisfiedLinkError: undefined symbol:
+    neko_native_impl_19_body`, proving the split-source `_body` prototypes had
+    internal linkage. The generic fix externalizes `_body` prototypes and
+    definitions with the existing raw wrappers. Fresh TEST generation
+    `build/neko-native-work/run-16584698339661` built `libneko_linux_x64.so`
+    (`1034872` bytes) with `translated=49 rejected=0`. Generated C inspection
+    shows wrappers still call `neko_hotspot_fast_require`, body entries call
+    `neko_hotspot_fast_assume`, and `Calc.runAll` direct calls target
+    `neko_native_impl_20_body`, `neko_native_impl_21_body`, and
+    `neko_native_impl_22_body`. Same-session TEST smoke passed with empty
+    stderr: NPT-3at `86,87,90,86,91 ms` (median `87ms`) versus NPT-3au
+    `83,86,84,83,96 ms` (median `84ms`). Focused native integration tests for
+    TEST Calc and obfusjack completion also passed.

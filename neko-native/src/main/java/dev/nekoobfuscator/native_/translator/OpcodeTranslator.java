@@ -769,13 +769,13 @@ public final class OpcodeTranslator {
             if (guardExpr != null) {
                 sb.append("if (").append(guardExpr).append(") ");
             }
-            sb.append(binding.rawFunctionName()).append("(thread, env, ").append(receiverExpr);
+            sb.append(binding.rawFunctionName()).append("_body(thread, env, ").append(receiverExpr);
         } else {
             sb.append(jniTypeName(ret)).append(" result = (").append(jniTypeName(ret)).append(")0; ");
             if (guardExpr != null) {
                 sb.append("if (").append(guardExpr).append(") ");
             }
-            sb.append("result = ").append(binding.rawFunctionName()).append("(thread, env, ").append(receiverExpr);
+            sb.append("result = ").append(binding.rawFunctionName()).append("_body(thread, env, ").append(receiverExpr);
         }
         for (int i = 0; i < args.length; i++) {
             sb.append(", arg").append(i);

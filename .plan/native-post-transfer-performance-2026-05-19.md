@@ -1907,3 +1907,47 @@ the source plan that owns the changed path before it can be considered complete.
   `npt-3ap` Calc samples `89,90,92,90,90 ms` (median `90ms`) versus NPT-3at
   `88,85,83,101,94 ms` (median `88ms`). Focused native integration tests for
   TEST Calc and obfusjack completion also passed.
+
+### [x] NPT-3au: Split translated direct-call body entry
+
+- Scope: reduce translated-to-translated direct-call raw-entry overhead by
+  splitting generated raw methods into an external ABI wrapper and an internal
+  body entry. The body entry may skip only the runtime capability checks already
+  proven by the caller wrapper/dispatcher; it must preserve all Java-level method
+  activation behavior.
+- Required evidence: direct-call audit shows `OpcodeTranslator.translateDirectInvoke`
+  calls `binding.rawFunctionName()` directly, while every generated raw function
+  starts with `neko_hotspot_fast_require(thread, env)`. Fresh NPT-3at TEST C
+  still shows `Calc.runAll` calling `Calc.call`, `Calc.runAdd`, and `Calc.runStr`
+  in the 10,000-iteration loop, with each callee rerunning the same fast gate.
+  `neko_hotspot_fast_require` checks only post-bootstrap fast-state invariants
+  (`neko_const_initialized`, non-null `thread`, and supported GC barrier kind)
+  and then emits compiler assumptions; callee roots and shadow frames remain
+  separate required semantics.
+- Validation command or runtime target: focused generator/audit tests, fresh
+  TEST native generation, generated-C inspection proving external wrappers still
+  call `neko_hotspot_fast_require` and internal direct calls target body symbols,
+  default TEST smoke, same-session timing comparison, and focused native
+  integration tests for TEST Calc and obfusjack completion.
+- Completion criteria: manifest/dispatcher ABI continues to target
+  `neko_native_impl_*` wrappers; translated internal direct calls target
+  `neko_native_impl_*_body`; body entries keep activation arrays, object-local
+  roots where required, parameter-to-local rooting, and shadow push/pop; no
+  JNI/JVMTI/fallback markers or fatal runtime errors appear; timing does not
+  regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. First generated TEST runtime failed with
+  `UnsatisfiedLinkError: undefined symbol: neko_native_impl_19_body`, proving the
+  exact split-source invariant violation: `_body` declarations were static in
+  implementation preludes while callers were in different translation units. The
+  generic fix externalizes `_body` prototypes/definitions alongside raw wrappers.
+  Fresh generation `build/neko-native-work/run-16584698339661` built
+  `libneko_linux_x64.so` at `1034872` bytes with `translated=49 rejected=0`.
+  Generated C shows external wrappers call `neko_hotspot_fast_require`, bodies
+  call `neko_hotspot_fast_assume`, and `Calc.runAll` calls
+  `neko_native_impl_20_body`, `neko_native_impl_21_body`, and
+  `neko_native_impl_22_body`. Same-session smoke comparison passed with stderr
+  empty: NPT-3at `86,87,90,86,91 ms` (median `87ms`) versus NPT-3au
+  `83,86,84,83,96 ms` (median `84ms`). Focused native integration tests for
+  TEST Calc and obfusjack completion also passed.

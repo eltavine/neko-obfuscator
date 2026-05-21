@@ -149,6 +149,14 @@ NEKO_HOT_INLINE void neko_hotspot_fast_require(void *thread, JNIEnv *env) {
     NEKO_ASSUME(neko_const_prim_array_base(NEKO_PRIM_B) >= 0);
 }
 
+NEKO_HOT_INLINE void neko_hotspot_fast_assume(void *thread) {
+    NEKO_ASSUME(neko_const_initialized());
+    NEKO_ASSUME(thread != NULL);
+    NEKO_ASSUME(neko_const_array_length_offset() >= 0);
+    NEKO_ASSUME(neko_const_prim_array_base(NEKO_PRIM_I) >= 0);
+    NEKO_ASSUME(neko_const_prim_array_base(NEKO_PRIM_B) >= 0);
+}
+
 NEKO_HOT_INLINE uintptr_t neko_zgc_addr_mask(void) {
     uintptr_t value;
     if (g_hotspot.z_zglobals_addr_mask_p != NULL) {

@@ -2,6 +2,7 @@ package dev.nekoobfuscator.native_.codegen;
 
 import dev.nekoobfuscator.core.ir.l3.CFunction;
 import dev.nekoobfuscator.core.ir.l3.CStatement;
+import dev.nekoobfuscator.core.ir.l3.CType;
 import dev.nekoobfuscator.core.ir.l3.CVariable;
 import dev.nekoobfuscator.native_.codegen.emit.JniHandlesShimEmitter;
 import dev.nekoobfuscator.native_.codegen.emit.JniOnLoadEmitter;
@@ -1675,18 +1676,21 @@ public final class CCodeGenerator {
 
     private String externalizeRawFunctionPrototypes(String source) {
         return source.replaceAll(
-            "(?m)^static (\\S+\\s+neko_native_impl_\\d+\\([^;]+;)$",
+            "(?m)^static (\\S+\\s+neko_native_impl_\\d+(?:_body)?\\([^;]+;)$",
             "extern $1"
         );
     }
 
     private String externalizeRawFunctionDefinition(String source) {
         return source
-            .replaceFirst(
-                "NEKO_FLATTEN NEKO_HOT static ",
-                "NEKO_FLATTEN NEKO_HOT "
+            .replaceAll(
+                "NEKO_FLATTEN NEKO_HOT static (\\S+\\s+neko_native_impl_\\d+(?:_body)?\\()",
+                "NEKO_FLATTEN NEKO_HOT $1"
             )
-            .replaceFirst("NEKO_HOT static ", "NEKO_HOT ");
+            .replaceAll(
+                "NEKO_HOT static (\\S+\\s+neko_native_impl_\\d+(?:_body)?\\()",
+                "NEKO_HOT $1"
+            );
     }
 
     private int implementationChunkEnd(List<CFunction> functions, int start) {
@@ -2147,25 +2151,40 @@ public final class CCodeGenerator {
 
     private String renderRawFunction(CFunction fn) {
         StringBuilder sb = new StringBuilder();
+        String bodyName = fn.name() + "_body";
         /* `flatten` recursively inlines all `static inline` callees into normal
          * sized impl bodies. Pathological JVM methods can otherwise force one
          * translation unit into a long single-threaded optimizer tail; those
          * keep `hot` and the global -O3 pipeline without the recursive flatten
          * attribute. The threshold is structural, not owner/name based. */
         boolean flatten = fn.body().size() <= MAX_FLATTEN_STATEMENTS;
+        sb.append("NEKO_HOT static ")
+            .append(fn.returnType().jniName())
+            .append(' ')
+            .append(fn.name())
+            .append('(');
+        appendRenderedParams(sb, fn);
+        sb.append(") {\n");
+        sb.append("    neko_hotspot_fast_require(thread, env);\n");
+        if (fn.returnType() == CType.VOID) {
+            sb.append("    ").append(bodyName).append('(');
+            appendParamNames(sb, fn);
+            sb.append(");\n");
+            sb.append("    return;\n");
+        } else {
+            sb.append("    return ").append(bodyName).append('(');
+            appendParamNames(sb, fn);
+            sb.append(");\n");
+        }
+        sb.append("}\n");
         sb.append(
             flatten ? "NEKO_FLATTEN NEKO_HOT static " : "NEKO_HOT static "
         )
             .append(fn.returnType().jniName())
             .append(' ')
-            .append(fn.name())
+            .append(bodyName)
             .append('(');
-        for (int i = 0; i < fn.params().size(); i++) {
-            if (i > 0) {
-                sb.append(", ");
-            }
-            sb.append(renderParam(fn.params().get(i)));
-        }
+        appendRenderedParams(sb, fn);
         sb.append(") {\n");
         sb.append("    neko_slot stack[")
             .append(fn.maxStack() + 16)
@@ -2183,17 +2202,30 @@ public final class CCodeGenerator {
         sb.append("    neko_slot locals[")
             .append(fn.maxLocals() + 8)
             .append("];\n");
-        /* One-shot capability gate at impl entry. After this returns, every
-         * inlined fast helper's per-iteration capability check folds away
-         * via NEKO_ASSUME, removing the redundant g_hotspot.* reloads from
-         * tight inner loops (e.g. matrix-mul Seq). Generic — runs on every
-         * translated method, not benchmark-specific. */
-        sb.append("    neko_hotspot_fast_require(thread, env);\n");
+        sb.append("    neko_hotspot_fast_assume(thread);\n");
         for (CStatement statement : fn.body()) {
             sb.append(renderStatement(statement));
         }
         sb.append("}\n");
         return sb.toString();
+    }
+
+    private void appendRenderedParams(StringBuilder sb, CFunction fn) {
+        for (int i = 0; i < fn.params().size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(renderParam(fn.params().get(i)));
+        }
+    }
+
+    private void appendParamNames(StringBuilder sb, CFunction fn) {
+        for (int i = 0; i < fn.params().size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(fn.params().get(i).name());
+        }
     }
 
     private String renderRawFunctionPrototypes(
@@ -2211,6 +2243,18 @@ public final class CCodeGenerator {
                 sb.append(", jobject self");
             }
             Type[] args = Type.getArgumentTypes(binding.descriptor());
+            for (int i = 0; i < args.length; i++) {
+                sb.append(", ").append(jniType(args[i])).append(" p").append(i);
+            }
+            sb.append(");\n");
+            sb.append("static ")
+                .append(jniType(Type.getReturnType(binding.descriptor())))
+                .append(' ')
+                .append(binding.rawFunctionName())
+                .append("_body(void *thread, JNIEnv *env, jclass clazz");
+            if (!binding.isStatic()) {
+                sb.append(", jobject self");
+            }
             for (int i = 0; i < args.length; i++) {
                 sb.append(", ").append(jniType(args[i])).append(" p").append(i);
             }
