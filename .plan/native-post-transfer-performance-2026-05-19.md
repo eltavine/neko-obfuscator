@@ -3621,3 +3621,87 @@ the source plan that owns the changed path before it can be considered complete.
   `[neko-bootstrap] native layout initialization failed`. No raw
   `String.concat`, JNI/JVMTI, original-bytecode, skip, or collector-disabling
   fallback was introduced.
+
+### [x] NPT-3cf: Select post-publication raw String concat prerequisite
+
+- Scope: re-audit the raw `String.concat` blocker after NPT-3cd/NPT-3ce and
+  NPT-3bw/P43 before selecting another implementation. This is an evidence-only
+  selection subtask. It must not implement raw concat, special-case TEST
+  `Calc.runStr`, retry rejected static-field or call-stub micro-shapes, call
+  JNI/JVMTI, add Java helper layers, or introduce original-bytecode fallback.
+- Required evidence: local OpenJDK 21 source for `String.concat`,
+  `StringConcatHelper.simpleConcat`, `StringConcatHelper.newArray`,
+  `StringConcatHelper.newString`, and package-private
+  `String(byte[],byte)`/`String.getBytes`; current native concat helpers still
+  crossing `neko_njx_V_L_L`/`neko_njx_V_L_L_raw_oop`; P43 object-return
+  publication evidence; and current raw string literal allocation evidence
+  showing which byte-array, `String.value`, `String.coder`, and local-root
+  pieces exist only for bind-time string literals.
+- Validation command or runtime target: source inspection, current generated
+  helper inspection, strict forbidden-fallback review, and selection of one
+  concrete next row with scope/evidence/validation/completion criteria before
+  any runtime edit.
+- Completion criteria: record a concrete implementation row that advances the
+  missing raw returned-String construction invariants without replacing
+  `String.concat` prematurely, or record a no-go if the evidence remains
+  incomplete.
+- Completion evidence 2026-05-22: OpenJDK 21 source proves
+  `String.concat(String)` preserves rhs-null NPE by evaluating
+  `str.isEmpty()`, returns `this` for empty rhs, and otherwise enters
+  `StringConcatHelper.simpleConcat`; `simpleConcat` creates a new `String` copy
+  for either empty side, mixes coder and char length, allocates a byte array via
+  `newArray`, copies bytes with `String.getBytes`, and finalizes with
+  `new String(byte[], byte)` through `newString`. `newArray` throws Java
+  `OutOfMemoryError("Overflow: String length out of range")` on overflow and
+  otherwise uses `Unsafe.allocateUninitializedArray(byte.class, len)`.
+  Current source still routes the hot translated StringBuilder fast path through
+  `neko_require_fast_string_concat_store_local`, which calls the original
+  `String.concat` Method*/entry via `neko_njx_V_L_L_raw_oop` before publishing
+  to a prepared local root. P43 proves the handle-to-raw object-return boundary,
+  but it does not construct a fresh `String`/`byte[]` graph. Bind-time string
+  literal code already proves raw byte-array header/length initialization,
+  direct byte copying, `String.value`/`coder` writes, and bound-string local
+  rooting, but that path is not a returned runtime concat path and does not
+  implement `String.concat` empty-side copy/identity, overflow/OOME behavior,
+  or generic lhs/rhs coder mixing. Selected NPT-3cg/P44 to implement the next
+  generic prerequisite: a source-level raw newborn `String` graph constructor
+  audit helper with full `String` instance sizing, byte-array sizing/copy,
+  coder mixing, local-root publication, and focused runtime coverage, still
+  not wired into the hot `String.concat` path until its exception and
+  unsupported-allocation limits are proven.
+
+### [ ] NPT-3cg: Build raw newborn String graph prerequisite without changing concat dispatch
+
+- Scope: add the smallest generic raw newborn `String` graph construction
+  surface needed before replacing `String.concat`: allocate a fresh byte array
+  and a fresh `java/lang/String` instance using current VM layout metadata,
+  copy/inflate bytes from two existing `jstring` inputs according to their
+  coders, initialize `String.value` and `String.coder`, and publish the result
+  into an already prepared local root for focused validation. This row must not
+  change the production `neko_require_fast_string_concat*` dispatch, must not
+  special-case TEST or any literal value, must not call JNI/JVMTI or add Java
+  helpers, must not fall back to original bytecode, and must hard-abort on
+  missing raw heap, layout, allocation, or barrier capability not explicitly
+  proven by the row.
+- Required evidence: NPT-3cf source evidence; `NativeBindSupportEmitter`
+  bind-time raw string literal allocation currently initializes byte-array
+  header/length, copies Latin1/UTF16 payload, writes `String.value` through
+  `neko_store_oop_raw`, writes `String.coder`, roots the new string with
+  `neko_direct_oop_to_handle_origin`, and interns it; `NativeFastObjectAccessEmitter`
+  already exposes `neko_fast_tlab_alloc`, `neko_init_oop_header`,
+  `neko_fast_string_length`, `neko_store_local_oop_raw`, byte-array klass bits,
+  and object allocation metadata; P43 proves object-return publication ordering
+  but not newborn graph construction.
+- Validation command or runtime target: focused generator/source tests for the
+  helper emission and unchanged concat dispatch; a focused runtime fixture that
+  exercises raw construction for Latin1+Latin1, Latin1+UTF16, empty lhs, empty
+  rhs, and local-root publication without using the hot concat dispatch; fresh
+  TEST native generation; strict generated-C grep for forbidden JNI/fallback
+  markers; default/G1/Serial/Parallel TEST native smoke; and ZGC/Shenandoah
+  strict runs proving either execution on a capable VM or the exact existing
+  fail-closed capability diagnostics.
+- Completion criteria: the helper can build and root fresh `String` graphs with
+  correct bytes/coder under supported collectors, production concat helpers
+  still call the original Method*/entry, no forbidden markers appear, and the
+  row records the exact remaining exception/allocation semantics before a later
+  row may replace the hot concat dispatch.
