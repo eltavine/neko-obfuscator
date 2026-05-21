@@ -710,6 +710,21 @@ Performance and GC gates:
     Calc `63 ms`, obfusjack Platform `45 ms`, Virtual `37 ms`, Seq `17 ms`,
     Parallel `1 ms`, VThreads `1 ms`. This improves TEST versus NPT-3cc default
     median `73 ms` and does not regress obfusjack versus NPT-3cc defaults.
+  - Completed 2026-05-22: NPT-3ce verified the post-NPT-3cd opt-in audit gate
+    before editing code. The perf-capture stderr logs were empty because that
+    harness did not set `NEKO_DIRECT_DEBUG`, not because the StringBuilder audit
+    gate was dead. Direct opt-in/debug TEST runtime completed and printed
+    `V:L:L=510002`, `dispatched=510061`, `handle_direct_total=54`,
+    `njx_return=4`, concat-continuation zero, and
+    `stringbuilder-fast-concat: total=510000 literal=510000 dynamic=0`. Direct
+    opt-in/debug obfusjack completed and printed `dispatched=976247`,
+    `handle_direct_total=854741`, `njx_return=301141`, concat-continuation
+    `accumulate_total=137 accumulate_njx=89 final_push=48 intermediate_candidate=41`,
+    and `stringbuilder-fast-concat: total=0 literal=0 dynamic=0`. No audit code
+    change is justified; this proves the remaining TEST hot boundary is still
+    510000 `V:L:L` `String.concat` call-stub dispatches with raw local
+    publication, while obfusjack remains dominated by other NJX/direct-handle
+    paths.
   - Current implementation row recorded 2026-05-20: remove the per-call full `memset` of NJX `call_params` only. Every used slot must still be initialized exactly: one-slot primitive/object arguments write their own slot, float slots are zeroed before writing the 32-bit payload to preserve the previous high-word state, and two-slot long/double arguments zero the required leading padding slot before writing the payload slot. This is a generic call-stub stack-packing optimization for every NJX target, including original JVM/JDK functions; it must not replace any target method with native code or change which JVM function is called.
   - Validation update 2026-05-20: forbidden Math/libm and other named-JDK
     native substitutions were removed; generated run

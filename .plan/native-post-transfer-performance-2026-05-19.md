@@ -2329,6 +2329,28 @@ the source plan that owns the changed path before it can be considered complete.
   median `73 ms` and does not regress obfusjack versus NPT-3cc defaults
   (`47/41/17 ms` for Platform/Virtual/Seq).
 
+### [x] NPT-3ce: P10 post-NPT-3cd audit gate correction
+
+- Scope: verify whether the post-NPT-3cd opt-in audit silence is an audit-gate
+  defect before editing runtime code. Default builds must remain unchanged.
+- Required evidence: fresh post-NPT-3cd opt-in perf capture generated TEST
+  artifact `run-35475737821910` with `handle.audit.build=true`, and generated C
+  still emits `NEKO_HANDLE_AUDIT_HIT(g_neko_stringbuilder_concat_fast_total_count)`
+  in the hot immediate-`ASTORE` StringBuilder concat loop. The perf-capture
+  stderr logs were empty because that harness did not set `NEKO_DIRECT_DEBUG`,
+  not because the StringBuilder audit gate was dead.
+- Completed 2026-05-22 with no executable change: direct opt-in/debug TEST
+  runtime completed and printed `V:L:L=510002`, `dispatched=510061`,
+  `handle_direct_total=54`, `njx_return=4`, concat-continuation zero, and
+  `stringbuilder-fast-concat: total=510000 literal=510000 dynamic=0`. Direct
+  opt-in/debug obfusjack completed and printed `dispatched=976247`,
+  `handle_direct_total=854741`, `njx_return=301141`, concat-continuation
+  `accumulate_total=137 accumulate_njx=89 final_push=48 intermediate_candidate=41`,
+  and `stringbuilder-fast-concat: total=0 literal=0 dynamic=0`. No audit code
+  change is justified; this proves the remaining TEST hot boundary is still
+  510000 `V:L:L` `String.concat` call-stub dispatches with raw local publication,
+  while obfusjack remains dominated by other NJX/direct-handle paths.
+
 ### [x] NPT-3au: Split translated direct-call body entry
 
 - Scope: reduce translated-to-translated direct-call raw-entry overhead by
