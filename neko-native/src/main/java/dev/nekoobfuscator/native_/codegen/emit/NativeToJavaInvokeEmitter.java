@@ -253,7 +253,7 @@ NEKO_FAST_INLINE void *neko_njx_handle_to_oop(jobject handle) {
  * active JNIHandleBlock. Reuses the AALOAD fast path's helper. */
 NEKO_FAST_INLINE jobject neko_njx_oop_to_handle(void *thread, void *oop) {
     if (oop == NULL) return NULL;
-    return neko_direct_oop_to_handle(thread, oop);
+    return neko_direct_oop_to_handle_origin(thread, oop, NEKO_HANDLE_ORIGIN_NJX_RETURN);
 }
 
 /* Resolve Method* + _from_interpreted_entry. HotSpot's call_stub builds an

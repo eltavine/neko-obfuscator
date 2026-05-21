@@ -536,6 +536,41 @@ Performance and GC gates:
 - [ ] P8 Add loop recognition and range-check hoisting only when JVM exception semantics are proven identical. Build bytecode-level loop metadata from labels/backedges and prove induction variables, invariant array reference, monotonic step, dominated upper bound, no side effects before the original first failing access, and unchanged null-check ordering. When proven, emit one preheader guard and remove per-iteration bounds checks for covered primitive/object array operations. If proof is incomplete, keep per-access checks. This must preserve NPE vs AIOOBE order, the index reported by AIOOBE where applicable, side-effect ordering, deoptimization-free native behavior, and try/catch handler selection. Source evidence: array access is emitted per opcode by `OpcodeTranslator.arrayAccessBody` at `OpcodeTranslator.java:168-174`; fast helpers also check every access at `CCodeGenerator.java:5435-5452` and `CCodeGenerator.java:5907-5925`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; negative tests must preserve NPE/AIOOBE behavior, side effects, and catch behavior when proof fails.
 
 - [ ] P9 Generalize nested-array raw-oop lifetime beyond the current peephole without weakening GC safety. Track short-lived object-array element oops through a small SSA-like model. If an `AALOAD` result is consumed only by dominated array/field operations before any call, safepoint, allocation, exception creation, store, monitor operation, or escape, keep it as raw oop and skip local-handle creation. Materialize a local handle before any operation that may expose the object to Java, require a JNI local reference, or allow GC movement/relocation to matter. Source evidence: current fusion only matches adjacent `AALOAD; <int-push>; XALOAD` in `OpcodeTranslator.java:98-143`; regular `AALOAD` materializes handles through `neko_fast_aaload` at `CCodeGenerator.java:5435-5452`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; generated C audit must show fewer `neko_direct_oop_to_handle` calls only in proven safe regions.
+  - Implementation row recorded 2026-05-22: NPT-3bz will add a default-off
+    direct-handle origin audit before any P9 lifetime rewrite. It may add
+    counters only under `NEKO_NATIVE_HANDLE_AUDIT=1` and must not change default
+    generated runtime semantics. Required evidence: post-NPT-3by opt-in audit
+    still shows high direct-handle volume despite reduced overflow allocation
+    calls, so the next P9 prerequisite is to identify whether runtime
+    `neko_direct_oop_to_handle` traffic is dominated by `AALOAD` materialization,
+    object field results, allocation returns, string/object helpers, or other
+    paths. Validation: focused generator/audit tests, fresh opt-in TEST and
+    obfusjack generation/runtime with origin counters, default generated-C grep
+    proving audit code is compiled out without `NEKO_NATIVE_HANDLE_AUDIT`, and
+    forbidden-JNI inspection. Completion requires no default behavior change and
+    a concrete origin distribution for both TEST and obfusjack.
+  - Completed 2026-05-22: NPT-3bz added opt-in origin counters compiled only
+    under `NEKO_HANDLE_AUDIT`. Focused `CCodeGeneratorTest` and
+    `NativeGeneratedCHotPathAuditTest` passed. Fresh default TEST
+    `build/npt-3bz/TEST-default.jar` came from
+    `build/neko-native-work/run-32880538686672` with `translated=49 rejected=0`,
+    `handle.audit.build=false`, and lib `1084344`; default obfusjack came from
+    `run-32883581015154` with `translated=93 rejected=0`,
+    `handle.audit.build=false`, and lib `1876824`. Default smoke passed without
+    `[neko-direct]` stats: TEST `Calc: 70ms`, obfusjack Platform `41ms`,
+    Virtual `36ms`, Seq `17ms`. Strict forbidden-JNI grep returned no matches.
+    Opt-in TEST `run-32932004575725` reported dominant
+    `handle_direct_total=510054`, `njx_return=510004`, `object_alloc=16`,
+    `static_object_field=24`, `bound_string=10`, all AALOAD origins `0`, and
+    `handle_direct_unavailable=0`; its second stats row reconciled to `172`
+    with `checked_aaload=8`. Opt-in obfusjack `run-32935171276056` reported
+    `handle_direct_total=854741`, `njx_return=301141`, `object_alloc=200430`,
+    `static_object_field=200096`, `checked_aaload=148993`,
+    `object_field=3484`, `primitive_array_alloc=577`, `object_array_alloc=13`,
+    `fused_aaload_aaload=1`, `bound_string=6`, `other=0`, and
+    `handle_direct_unavailable=0`. Conclusion: P9 is an obfusjack contributor,
+    but TEST Calc is dominated by NJX-return handle materialization, so the next
+    generic performance substep should target NJX return handles first.
 
 - [-] P10 Reduce NJX call-stub per-call allocation and zeroing. Replace per-call `calloc/free` of the temporary Java handle block with a scoped reusable per-thread or caller-owned block that preserves GC root visibility and nested-call semantics. Remove full `memset` of call parameter arrays when all used slots are explicitly written, while keeping required two-slot padding initialized. Source evidence: `NativeToJavaInvokeEmitter.java:187-222` allocates/frees handle blocks; `NativeToJavaInvokeEmitter.java:304` and `:348` zero buffers in the generic path; shape-specific generation also emits `memset` in `NativeToJavaInvokeEmitter.java:813` and `:844`. Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, performance gate, GC strict compatibility gate; stress tests must prove no stale roots or handle-chain corruption.
   - Current implementation row recorded 2026-05-20: remove the per-call full `memset` of NJX `call_params` only. Every used slot must still be initialized exactly: one-slot primitive/object arguments write their own slot, float slots are zeroed before writing the 32-bit payload to preserve the previous high-word state, and two-slot long/double arguments zero the required leading padding slot before writing the payload slot. This is a generic call-stub stack-packing optimization for every NJX target, including original JVM/JDK functions; it must not replace any target method with native code or change which JVM function is called.

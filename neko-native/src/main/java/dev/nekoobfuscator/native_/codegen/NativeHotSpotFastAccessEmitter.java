@@ -962,6 +962,17 @@ static volatile uint64_t g_neko_icache_unresolved_count = 0;
 #ifndef NEKO_HANDLE_AUDIT
 #define NEKO_HANDLE_AUDIT 0
 #endif
+#define NEKO_HANDLE_ORIGIN_OTHER 0
+#define NEKO_HANDLE_ORIGIN_OBJECT_ARRAY_ALLOC 1
+#define NEKO_HANDLE_ORIGIN_PRIMITIVE_ARRAY_ALLOC 2
+#define NEKO_HANDLE_ORIGIN_OBJECT_ALLOC 3
+#define NEKO_HANDLE_ORIGIN_AALOAD 4
+#define NEKO_HANDLE_ORIGIN_CHECKED_AALOAD 5
+#define NEKO_HANDLE_ORIGIN_FUSED_AALOAD_AALOAD 6
+#define NEKO_HANDLE_ORIGIN_OBJECT_FIELD 7
+#define NEKO_HANDLE_ORIGIN_STATIC_OBJECT_FIELD 8
+#define NEKO_HANDLE_ORIGIN_NJX_RETURN 9
+#define NEKO_HANDLE_ORIGIN_BOUND_STRING 10
 #if NEKO_HANDLE_AUDIT
 static volatile uint64_t g_neko_handle_direct_total_count = 0;
 static volatile uint64_t g_neko_handle_direct_fast_slot_count = 0;
@@ -969,6 +980,17 @@ static volatile uint64_t g_neko_handle_direct_overflow_alloc_count = 0;
 static volatile uint64_t g_neko_handle_direct_unavailable_count = 0;
 static volatile uint64_t g_neko_handle_direct_max_top = 0;
 static volatile uint64_t g_neko_handle_direct_max_capacity = 0;
+static volatile uint64_t g_neko_handle_origin_other_count = 0;
+static volatile uint64_t g_neko_handle_origin_object_array_alloc_count = 0;
+static volatile uint64_t g_neko_handle_origin_primitive_array_alloc_count = 0;
+static volatile uint64_t g_neko_handle_origin_object_alloc_count = 0;
+static volatile uint64_t g_neko_handle_origin_aaload_count = 0;
+static volatile uint64_t g_neko_handle_origin_checked_aaload_count = 0;
+static volatile uint64_t g_neko_handle_origin_fused_aaload_aaload_count = 0;
+static volatile uint64_t g_neko_handle_origin_object_field_count = 0;
+static volatile uint64_t g_neko_handle_origin_static_object_field_count = 0;
+static volatile uint64_t g_neko_handle_origin_njx_return_count = 0;
+static volatile uint64_t g_neko_handle_origin_bound_string_count = 0;
 #endif
 static volatile int g_neko_njx_stats_printed = 0;
 NEKO_FAST_INLINE int neko_njx_debug(void) { return g_neko_njx_debug_cached; }
@@ -998,6 +1020,23 @@ NEKO_FAST_INLINE int neko_njx_enabled(void) {
         __atomic_fetch_add(&(counter), 1, __ATOMIC_RELAXED); \
     } \
 } while (0)
+#define NEKO_HANDLE_AUDIT_ORIGIN(origin) do { \
+    if (__builtin_expect(neko_njx_debug(), 0)) { \
+        switch (origin) { \
+            case NEKO_HANDLE_ORIGIN_OBJECT_ARRAY_ALLOC: __atomic_fetch_add(&g_neko_handle_origin_object_array_alloc_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_PRIMITIVE_ARRAY_ALLOC: __atomic_fetch_add(&g_neko_handle_origin_primitive_array_alloc_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_OBJECT_ALLOC: __atomic_fetch_add(&g_neko_handle_origin_object_alloc_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_AALOAD: __atomic_fetch_add(&g_neko_handle_origin_aaload_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_CHECKED_AALOAD: __atomic_fetch_add(&g_neko_handle_origin_checked_aaload_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_FUSED_AALOAD_AALOAD: __atomic_fetch_add(&g_neko_handle_origin_fused_aaload_aaload_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_OBJECT_FIELD: __atomic_fetch_add(&g_neko_handle_origin_object_field_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_STATIC_OBJECT_FIELD: __atomic_fetch_add(&g_neko_handle_origin_static_object_field_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_NJX_RETURN: __atomic_fetch_add(&g_neko_handle_origin_njx_return_count, 1, __ATOMIC_RELAXED); break; \
+            case NEKO_HANDLE_ORIGIN_BOUND_STRING: __atomic_fetch_add(&g_neko_handle_origin_bound_string_count, 1, __ATOMIC_RELAXED); break; \
+            default: __atomic_fetch_add(&g_neko_handle_origin_other_count, 1, __ATOMIC_RELAXED); break; \
+        } \
+    } \
+} while (0)
 static inline void neko_handle_audit_max(volatile uint64_t *slot, uint64_t value) {
     if (__builtin_expect(neko_njx_debug(), 0)) {
         uint64_t current = __atomic_load_n(slot, __ATOMIC_RELAXED);
@@ -1009,6 +1048,7 @@ static inline void neko_handle_audit_max(volatile uint64_t *slot, uint64_t value
 }
 #else
 #define NEKO_HANDLE_AUDIT_HIT(counter) ((void)0)
+#define NEKO_HANDLE_AUDIT_ORIGIN(origin) ((void)0)
 #define neko_handle_audit_max(slot, value) ((void)0)
 #endif
 
@@ -1266,6 +1306,20 @@ __attribute__((used)) static void neko_njx_dump_stats_at_exit(void) {
     fprintf(stderr, "[neko-direct] stats: dispatched=%llu resolve_failed=%llu\\n",
         (unsigned long long)hits, (unsigned long long)fails);
 #endif
+#endif
+#if NEKO_HANDLE_AUDIT
+    fprintf(stderr, "[neko-direct] handle-origins: other=%llu object_array_alloc=%llu primitive_array_alloc=%llu object_alloc=%llu aaload=%llu checked_aaload=%llu fused_aaload_aaload=%llu object_field=%llu static_object_field=%llu njx_return=%llu bound_string=%llu\\n",
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_other_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_object_array_alloc_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_primitive_array_alloc_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_object_alloc_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_aaload_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_checked_aaload_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_fused_aaload_aaload_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_object_field_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_static_object_field_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_njx_return_count, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&g_neko_handle_origin_bound_string_count, __ATOMIC_RELAXED));
 #endif
 }
 __attribute__((constructor)) static void neko_njx_register_atexit(void) {

@@ -2078,6 +2078,61 @@ the source plan that owns the changed path before it can be considered complete.
   with `handle_direct_unavailable=0`; opt-in obfusjack dropped from `8587` to
   `898` with `handle_direct_unavailable=0`.
 
+### [x] NPT-3bz: P9 default-off direct-handle origin audit
+
+- Scope: add a default-off origin audit for calls into
+  `neko_direct_oop_to_handle` so P9 can choose a generic raw-oop lifetime
+  target from runtime evidence instead of static callsite counts. The audit is
+  permitted only under `NEKO_NATIVE_HANDLE_AUDIT=1`; default native artifacts
+  must keep the same semantics and must not emit or execute audit-specific
+  origin accounting.
+- Required evidence: after NPT-3by, opt-in TEST still reports
+  `handle_direct_total=510054` and obfusjack reports
+  `handle_direct_total=854741`, while allocation-call counts fell sharply. This
+  proves the remaining P9 question is not overflow allocation but which generic
+  producer is causing direct-handle materialization. Source evidence: the
+  existing fusion only handles adjacent `AALOAD; <int-push>; XALOAD` in
+  `OpcodeTranslator`, while regular `neko_fast_aaload` still materializes a
+  `jobject` through `neko_direct_oop_to_handle`.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`, fresh opt-in TEST and obfusjack
+  generation/runtime with `NEKO_DIRECT_DEBUG=1`, generated-C inspection proving
+  origin counters exist only in `NEKO_NATIVE_HANDLE_AUDIT` builds, default
+  generated-C/manifest inspection proving `handle.audit.build=false` artifacts
+  compile out the origin counters, and forbidden-JNI/JVMTI/fallback grep.
+- Completion criteria: default runtime behavior and generated helper call
+  shapes are unchanged; opt-in TEST and obfusjack complete without fatal/error
+  output; origin counter totals reconcile with `handle_direct_total`; no
+  `handle_direct_unavailable` path appears; the recorded evidence identifies
+  whether P9 should target `AALOAD` raw-oop lifetime or a different generic
+  producer first.
+- Completed 2026-05-22: added opt-in origin counters compiled under
+  `NEKO_HANDLE_AUDIT` only. Focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest` passed. Fresh default artifacts:
+  `build/npt-3bz/TEST-default.jar` from
+  `build/neko-native-work/run-32880538686672` (`translated=49 rejected=0`,
+  `handle.audit.build=false`, lib `1084344`) and
+  `build/npt-3bz/obfusjack-default.jar` from `run-32883581015154`
+  (`translated=93 rejected=0`, `handle.audit.build=false`, lib `1876824`).
+  Default smoke passed with TEST `Calc: 70ms` and obfusjack Platform `41ms`,
+  Virtual `36ms`, Seq `17ms`; neither emitted `[neko-direct]` stats. Strict
+  generated-C forbidden grep returned no matches. Fresh opt-in artifacts:
+  TEST `build/npt-3bz/TEST-handle-origin-audit.jar` from `run-32932004575725`
+  and obfusjack `build/npt-3bz/obfusjack-handle-origin-audit.jar` from
+  `run-32935171276056`, both `handle.audit.build=true`; strict forbidden grep
+  returned no matches. TEST dominant origin row reconciled exactly to
+  `handle_direct_total=510054`: `njx_return=510004`, `object_alloc=16`,
+  `static_object_field=24`, `bound_string=10`, all AALOAD origins `0`, and
+  `handle_direct_unavailable=0`. The second TEST stats row reconciled to
+  `172`, with only `checked_aaload=8`. Obfusjack origins reconciled to
+  `handle_direct_total=854741`: `njx_return=301141`, `object_alloc=200430`,
+  `static_object_field=200096`, `checked_aaload=148993`, `object_field=3484`,
+  `primitive_array_alloc=577`, `object_array_alloc=13`, `fused_aaload_aaload=1`,
+  `bound_string=6`, `other=0`, and `handle_direct_unavailable=0`. Conclusion:
+  P9 AALOAD lifetime is relevant for obfusjack but not the dominant TEST Calc
+  lever; the next generic performance substep should prioritize NJX return
+  handle materialization before a P9 lifetime rewrite.
+
 ### [x] NPT-3au: Split translated direct-call body entry
 
 - Scope: reduce translated-to-translated direct-call raw-entry overhead by

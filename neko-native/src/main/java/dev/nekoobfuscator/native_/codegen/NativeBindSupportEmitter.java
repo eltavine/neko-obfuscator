@@ -776,7 +776,7 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
     neko_init_oop_header(string_oop, g_neko_string_klass_bits);
     neko_store_oop_raw(string_oop, (jlong)value_field.offset, array_oop);
     *(jbyte*)(string_oop + coder_field.offset) = shape.latin1 ? 0 : 1;
-    local_string = (jstring)neko_direct_oop_to_handle(thread, string_oop);
+    local_string = (jstring)neko_direct_oop_to_handle_origin(thread, string_oop, NEKO_HANDLE_ORIGIN_BOUND_STRING);
     interned = ((neko_jvm_intern_string_t)g_neko_method_layout.sym_jvm_intern_string)(env, local_string);
     if (interned == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
@@ -1285,7 +1285,7 @@ static void neko_bind_string_slot(void *thread, JNIEnv *env, jstring *slot, cons
         restoreJavaState = JNI_TRUE;
     }
     string_oop = neko_intern_string(thread, env, (const uint8_t*)utf, strlen(utf));
-    localString = (jstring)neko_direct_oop_to_handle(thread, string_oop);
+    localString = (jstring)neko_direct_oop_to_handle_origin(thread, string_oop, NEKO_HANDLE_ORIGIN_BOUND_STRING);
     globalRef = g_neko_jni_new_global_ref_fn(env, localString);
     if (globalRef == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);

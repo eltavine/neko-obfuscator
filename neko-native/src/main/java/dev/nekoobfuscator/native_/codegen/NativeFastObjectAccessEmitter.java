@@ -66,6 +66,7 @@ static void *g_neko_unsafe_allocate_instance_method = NULL;
 static void *g_neko_unsafe_allocate_instance_entry = NULL;
 static jboolean g_neko_unsafe_allocate_instance_ready = JNI_FALSE;
 
+NEKO_FAST_INLINE jobject neko_direct_oop_to_handle_origin(void *thread, void *raw_oop, int origin);
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop);
 
 /* T4.7 — `neko_fast_string_runtime_init` deleted. The probe used JNI
@@ -272,6 +273,11 @@ NEKO_FAST_INLINE jstring neko_string_value_of_L(
 }
 
 NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) {
+    return neko_direct_oop_to_handle_origin(thread, raw_oop, NEKO_HANDLE_ORIGIN_OTHER);
+}
+
+NEKO_FAST_INLINE jobject neko_direct_oop_to_handle_origin(void *thread, void *raw_oop, int origin) {
+    NEKO_HANDLE_AUDIT_ORIGIN(origin);
     NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_total_count);
     if (raw_oop == NULL) return NULL;
     raw_oop = neko_zgc_good_oop(raw_oop);
@@ -439,7 +445,7 @@ NEKO_FAST_INLINE jobjectArray neko_fast_new_object_array(void *thread, JNIEnv *e
                     neko_store_oop_raw(array_oop, (jlong)(base + ((size_t)i * ref_size)), init_oop);
                 }
             }
-            return (jobjectArray)neko_direct_oop_to_handle(thread, array_oop);
+            return (jobjectArray)neko_direct_oop_to_handle_origin(thread, array_oop, NEKO_HANDLE_ORIGIN_OBJECT_ARRAY_ALLOC);
         }
     }
     fprintf(stderr, "[neko-direct] object array allocation direct path unavailable len=%d klass=0x%llx thread=%p init=%d raw=%d zgc=%d coh=%d tlab=%d base=%d\\n",
@@ -478,7 +484,7 @@ NEKO_FAST_INLINE jarray neko_fast_new_primitive_array(void *thread, JNIEnv *env,
             neko_init_oop_header(array_oop, g_hotspot.primitive_array_klass_bits[kind]);
             *(jint*)(array_oop + base - 4u) = len;
             memset(array_oop + base, 0, ((size_t)len * scale));
-            return (jarray)neko_direct_oop_to_handle(thread, array_oop);
+            return (jarray)neko_direct_oop_to_handle_origin(thread, array_oop, NEKO_HANDLE_ORIGIN_PRIMITIVE_ARRAY_ALLOC);
         }
     }
     fprintf(stderr, "[neko-direct] primitive array allocation direct path unavailable len=%d kind=%d thread=%p init=%d klass=0x%llx base=%d scale=%d raw=%d zgc=%d coh=%d tlab=%d\\n",
@@ -592,7 +598,7 @@ NEKO_FAST_INLINE jobject neko_fast_alloc_object(void *thread, JNIEnv *env, jclas
         abort();
     }
     neko_init_oop_header(oop, klass_bits);
-    return neko_direct_oop_to_handle(thread, oop);
+    return neko_direct_oop_to_handle_origin(thread, oop, NEKO_HANDLE_ORIGIN_OBJECT_ALLOC);
 }
 
 NEKO_FAST_INLINE void *neko_raw_oop_klass(char *oop) {
@@ -950,7 +956,7 @@ NEKO_HOT_INLINE jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray
                     (size_t)neko_const_prim_array_base(NEKO_PRIM_I),
                     idx,
                     neko_const_oop_ref_size());
-                return neko_direct_oop_to_handle(thread, element_oop);
+                return neko_direct_oop_to_handle_origin(thread, element_oop, NEKO_HANDLE_ORIGIN_AALOAD);
             }
         }
     }
@@ -1021,7 +1027,7 @@ NEKO_FAST_INLINE jobject neko_fast_get_object_field(void *thread, JNIEnv *env, j
                 element_oop = *(void**)field_addr;
             }
             element_oop = neko_barrier_load_oop_field(field_addr, element_oop);
-            return neko_direct_oop_to_handle(thread, element_oop);
+            return neko_direct_oop_to_handle_origin(thread, element_oop, NEKO_HANDLE_ORIGIN_OBJECT_FIELD);
         }
     }
     neko_abort_object_getfield_unavailable(obj, offset, thread);
@@ -1043,7 +1049,7 @@ NEKO_FAST_INLINE jobject neko_fast_get_static_object_field(void *thread, JNIEnv 
                 element_oop = *(void**)field_addr;
             }
             element_oop = neko_barrier_load_oop_field(field_addr, element_oop);
-            return neko_direct_oop_to_handle(thread, element_oop);
+            return neko_direct_oop_to_handle_origin(thread, element_oop, NEKO_HANDLE_ORIGIN_STATIC_OBJECT_FIELD);
         }
     }
     neko_abort_object_getstatic_unavailable(thread, cls, staticBase, offset);
@@ -1209,7 +1215,7 @@ NEKO_HOT_INLINE jboolean neko_checked_aaload(void *thread, JNIEnv *env, jobjectA
     jint len = *(jint*)(oop + base - 4u);
     if (NEKO_UNLIKELY(idx < 0 || idx >= len)) { if (reason != NULL) *reason = NEKO_FAST_ARRAY_OUTER_BOUNDS; return JNI_FALSE; }
     void *element_oop = neko_load_object_array_slot(oop, base, idx, neko_const_oop_ref_size());
-    if (out != NULL) *out = neko_direct_oop_to_handle(thread, element_oop);
+    if (out != NULL) *out = neko_direct_oop_to_handle_origin(thread, element_oop, NEKO_HANDLE_ORIGIN_CHECKED_AALOAD);
     return JNI_TRUE;
 }
 
@@ -1288,7 +1294,7 @@ NEKO_HOT_INLINE jobject neko_fast_aaload_aaload(void *thread, JNIEnv *env, jobje
         (size_t)neko_const_prim_array_base(NEKO_PRIM_I),
         idx2,
         neko_const_oop_ref_size());
-    return neko_direct_oop_to_handle(thread, element_oop);
+    return neko_direct_oop_to_handle_origin(thread, element_oop, NEKO_HANDLE_ORIGIN_FUSED_AALOAD_AALOAD);
 }
 
 /* Cold + noinline: the fused-aaload error dispatch is only reached on a

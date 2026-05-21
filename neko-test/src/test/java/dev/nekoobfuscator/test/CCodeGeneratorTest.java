@@ -856,6 +856,10 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("#ifndef NEKO_HANDLE_AUDIT"), source);
         assertTrue(source.contains("handle_direct_overflow_alloc"), source);
         assertTrue(source.contains("NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_total_count);"), source);
+        assertTrue(source.contains("NEKO_HANDLE_AUDIT_ORIGIN(origin);"), source);
+        assertTrue(source.contains("handle-origins:"), source);
+        assertTrue(source.contains("NEKO_HANDLE_ORIGIN_AALOAD"), source);
+        assertTrue(source.contains("NEKO_HANDLE_ORIGIN_OBJECT_FIELD"), source);
         assertTrue(source.contains("#define NEKO_JNIH_RECYCLE_MAX 64"), source);
         assertTrue(source.contains("#define NEKO_JNIH_BATCH_BLOCKS 64"), source);
         assertTrue(source.contains("void *neko_take_recycled_jnih_block(void)"), source);
