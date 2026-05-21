@@ -151,6 +151,22 @@ public final class OpcodeTranslator {
         return null;
     }
 
+    String translateStaticIntAddUpdate(FieldInsnNode field, String rhsExpr) {
+        StringBuilder sb = new StringBuilder("{ ");
+        sb.append("jint val = neko_fast_get_static_I_field_ref(env, &")
+            .append(staticFieldRefExpression(field.owner, field.name, field.desc))
+            .append(") + (jint)(").append(rhsExpr).append("); ");
+        sb.append("jclass cls = ").append(cachedClassExpression(field.owner)).append("; ");
+        sb.append(staticClassInitExpression(field.owner)).append(' ');
+        sb.append("jfieldID fid = ").append(cachedFieldExpression(field.owner, field.name, field.desc, true)).append("; ");
+        sb.append("neko_fast_set_static_I_field(env, cls, fid, ")
+            .append(codeGenerator.staticFieldBaseSlotName(field.owner, field.name, field.desc, true)).append(", ")
+            .append(codeGenerator.staticFieldOffsetSlotName(field.owner, field.name, field.desc, true)).append(", ")
+            .append(codeGenerator.fieldAccessFlagsSlotName(field.owner, field.name, field.desc, true)).append(", val); ");
+        sb.append("}");
+        return sb.toString();
+    }
+
     private FusedTranslation buildFusedAALoad(String idx2Expr, AbstractInsnNode loadInsn, AbstractInsnNode firstThrowInsn) {
         String prelude = "{ jint __idx2 = " + idx2Expr + "; jint __idx1 = POP_I(); jobjectArray __outer = (jobjectArray)POP_O(); ";
         return switch (loadInsn.getOpcode()) {

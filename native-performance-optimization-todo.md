@@ -1179,3 +1179,35 @@ Performance and GC gates:
     `89,83,83,88,88,85,91 ms` (median `88ms`) versus NPT-3az
     `87,82,89,84,105,88,85 ms` (median `87ms`). Focused native integration
     tests for TEST Calc and obfusjack completion also passed.
+
+- [x] P22 Fuse same-field static int add updates without changing field helper
+  shape. The translator should fuse only adjacent same-basic-block
+  `GETSTATIC int`, primitive int constant producer, `IADD`, and matching
+  `PUTSTATIC int` for the same owner/name/descriptor. The fused C must keep the
+  existing get helper, class binding, class initialization, field binding, and
+  set helper calls in the same relative order; it may only replace stack
+  traffic with a primitive local value expression. This is not the rejected
+  static primitive field-ref fast path and must not alter static field-ref
+  metadata, static base/offset binding, class initialization, instance fields,
+  object/reference fields, non-int primitives, generic arithmetic, labels,
+  pending-exception dispatch, invokes, arrays, monitors, or fallback behavior.
+  Source evidence: fresh NPT-3az generated TEST C shows `Calc.call`,
+  `Calc.runAdd`, and `Calc.runStr` all execute `GETSTATIC Calc.errors`, push
+  `1`, perform `IADD`, and pop into `PUTSTATIC Calc.errors`.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show the Calc static int
+  updates use one primitive local and unchanged get/class-init/set helpers.
+  - Implementation row recorded 2026-05-22: NPT-3ba will implement this as a
+    same-basic-block multi-instruction peephole and will reject any nonmatching
+    field identity or non-int/non-add sequence.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-19381987030477` built
+    `libneko_linux_x64.so` (`1034808` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed `Calc.call`, `Calc.runAdd`, and `Calc.runStr`
+    static int updates use a single primitive `val` expression while retaining
+    the existing static get, class bind/init, field bind, and static set
+    helpers. Static grep found no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->`
+    markers in the generated work directory. Same-session alternating TEST
+    smoke passed with empty stderr: NPT-3az `86,85,89,95,90,82,89 ms` (median
+    `89ms`) versus NPT-3ba `83,87,94,89,85,101,88 ms` (median `88ms`). Focused
+    native integration tests for TEST Calc and obfusjack completion also passed.

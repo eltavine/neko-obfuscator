@@ -284,6 +284,58 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void sameStaticIntAddUpdateFusesWithoutChangingFieldHelpers() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/StaticIntUpdateOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.fields = new ArrayList<>();
+        classNode.methods = new ArrayList<>();
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "COUNT", "I", null, null));
+        classNode.fields.add(new FieldNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "OTHER", "I", null, null));
+
+        MethodNode sameField = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "sameField", "()V", null, null);
+        sameField.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, classNode.name, "COUNT", "I"));
+        sameField.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        sameField.instructions.add(new InsnNode(Opcodes.IADD));
+        sameField.instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, classNode.name, "COUNT", "I"));
+        sameField.instructions.add(new InsnNode(Opcodes.RETURN));
+        sameField.maxStack = 2;
+        sameField.maxLocals = 0;
+        classNode.methods.add(sameField);
+
+        MethodNode differentField = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "differentField", "()V", null, null);
+        differentField.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, classNode.name, "COUNT", "I"));
+        differentField.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        differentField.instructions.add(new InsnNode(Opcodes.IADD));
+        differentField.instructions.add(new FieldInsnNode(Opcodes.PUTSTATIC, classNode.name, "OTHER", "I"));
+        differentField.instructions.add(new InsnNode(Opcodes.RETURN));
+        differentField.maxStack = 2;
+        differentField.maxLocals = 0;
+        classNode.methods.add(differentField);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("static-int-update-fusion", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("sameField", "()V")),
+            new MethodSelection(owner, owner.findMethod("differentField", "()V"))
+        )).source();
+
+        String sameBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        assertTrue(sameBody.contains("jint val = neko_fast_get_static_I_field_ref(env, &g_static_field_ref_"), () -> sameBody);
+        assertTrue(sameBody.contains("+ (jint)(1);"), () -> sameBody);
+        assertTrue(sameBody.contains("neko_ensure_class_initialized_once(env, cls,"), () -> sameBody);
+        assertTrue(sameBody.contains("neko_fast_set_static_I_field(env, cls, fid,"), () -> sameBody);
+        assertFalse(sameBody.contains("PUSH_I(1);"), () -> sameBody);
+        assertFalse(sameBody.contains("PUSH_I(a + b);"), () -> sameBody);
+
+        String differentBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(differentBody.contains("PUSH_I(1);"), () -> differentBody);
+        assertTrue(differentBody.contains("PUSH_I(a + b);"), () -> differentBody);
+    }
+
+    @Test
     void hotspotProbeEmitted() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;
