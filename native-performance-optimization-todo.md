@@ -1089,3 +1089,29 @@ Performance and GC gates:
     `94,91,84,85,87 ms` (median `87ms`) versus NPT-3aw
     `84,84,84,87,86 ms` (median `84ms`). Focused native integration tests for
     TEST Calc and obfusjack completion also passed.
+
+- [x] P19 Elide unreferenced translated exception-exit blocks. Generated raw
+  bodies should emit `__neko_exception_exit` and the default shadow-pop/return
+  tail only when the translated body structurally references that label. This
+  must be based on generated statements, not class/method names. Source
+  evidence: NPT-3aw generated TEST C shows `Calc.call` and `Calc.runAdd` carry
+  an exception-exit block with no `goto __neko_exception_exit`, while
+  `Calc.runAll` and `Calc.runStr` do branch to it and must retain it.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show every remaining
+  `goto __neko_exception_exit` has a matching label and methods without such a
+  reference omit only the unreachable exception-exit tail.
+  - Implementation row recorded 2026-05-22: NPT-3ax will scan generated
+    `CStatement`s before appending the exception-exit label. If no statement
+    references `__neko_exception_exit`, the label/default-return tail is omitted.
+    Normal return paths, shadow pops, pending-exception dispatch, catch-handler
+    branches, and opcode translation must remain unchanged.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-17954422278482` built
+    `libneko_linux_x64.so` (`1034872` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed `Calc.call` and `Calc.runAdd` omit
+    `__neko_exception_exit`, while `Calc.runAll` and `Calc.runStr` keep the label
+    for real pending-exception branches. Same-session TEST smoke passed with
+    empty stderr: NPT-3aw `92,90,89,94,91 ms` (median `91ms`) versus NPT-3ax
+    `89,85,90,92,89 ms` (median `89ms`). Focused native integration tests for
+    TEST Calc and obfusjack completion also passed.

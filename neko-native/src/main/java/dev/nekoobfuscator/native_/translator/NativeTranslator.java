@@ -261,9 +261,44 @@ public final class NativeTranslator {
             fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
         }
 
-        fn.addStatement(new CStatement.Label("__neko_exception_exit"));
-        emitDefaultReturn(fn, cReturnType, shadowEnabled);
+        if (referencesLabel(fn.body(), "__neko_exception_exit")) {
+            fn.addStatement(new CStatement.Label("__neko_exception_exit"));
+            emitDefaultReturn(fn, cReturnType, shadowEnabled);
+        }
         return fn;
+    }
+
+    private boolean referencesLabel(List<CStatement> statements, String label) {
+        for (CStatement statement : statements) {
+            if (statementReferencesLabel(statement, label)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean statementReferencesLabel(CStatement statement, String label) {
+        if (statement instanceof CStatement.Goto gotoStatement) {
+            return label.equals(gotoStatement.label());
+        }
+        if (statement instanceof CStatement.CheckException check) {
+            return label.equals(check.handlerLabel());
+        }
+        if (statement instanceof CStatement.SetJmp setJmp) {
+            return label.equals(setJmp.handlerLabel());
+        }
+        if (statement instanceof CStatement.If ifStatement) {
+            return referencesLabel(ifStatement.thenBlock(), label)
+                || referencesLabel(ifStatement.elseBlock(), label);
+        }
+        if (statement instanceof CStatement.Switch switchStatement) {
+            return referencesLabel(switchStatement.defaultCase(), label)
+                || switchStatement.cases().values().stream().anyMatch(block -> referencesLabel(block, label));
+        }
+        if (statement instanceof CStatement.RawC raw) {
+            return raw.code().contains(label);
+        }
+        return false;
     }
 
     private Map<LabelNode, String> buildLabelMap(MethodNode node) {

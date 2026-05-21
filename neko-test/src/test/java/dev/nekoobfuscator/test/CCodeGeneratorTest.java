@@ -402,6 +402,43 @@ class CCodeGeneratorTest {
     }
 
     @Test
+    void exceptionExitBlockIsOnlyDeclaredWhenReferenced() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/ExceptionExitOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        MethodNode noExceptionExit = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "noExceptionExit", "()V", null, null);
+        noExceptionExit.instructions.add(new InsnNode(Opcodes.RETURN));
+        noExceptionExit.maxStack = 0;
+        noExceptionExit.maxLocals = 0;
+        classNode.methods.add(noExceptionExit);
+
+        MethodNode referencedExceptionExit = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "referencedExceptionExit", "(Ljava/lang/Throwable;)V", null, null);
+        referencedExceptionExit.instructions.add(new VarInsnNode(Opcodes.ALOAD, 0));
+        referencedExceptionExit.instructions.add(new InsnNode(Opcodes.ATHROW));
+        referencedExceptionExit.maxStack = 1;
+        referencedExceptionExit.maxLocals = 1;
+        classNode.methods.add(referencedExceptionExit);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("exception-exit", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("noExceptionExit", "()V")),
+            new MethodSelection(owner, owner.findMethod("referencedExceptionExit", "(Ljava/lang/Throwable;)V"))
+        )).source();
+
+        String noExitBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        String referencedExitBody = lastFunctionSection(source, "neko_native_impl_1_body");
+
+        assertFalse(noExitBody.contains("__neko_exception_exit"), () -> noExitBody);
+        assertTrue(referencedExitBody.contains("goto __neko_exception_exit"), () -> referencedExitBody);
+        assertTrue(referencedExitBody.contains("__neko_exception_exit:"), () -> referencedExitBody);
+    }
+
+    @Test
     void objectFieldStoresUseBarrierAwareDirectHelpers() {
         ClassNode classNode = new ClassNode();
         classNode.version = Opcodes.V1_8;

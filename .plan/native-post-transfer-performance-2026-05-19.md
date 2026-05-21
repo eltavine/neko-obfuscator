@@ -2027,3 +2027,35 @@ the source plan that owns the changed path before it can be considered complete.
   passed with stderr empty: NPT-3au `94,91,84,85,87 ms` (median `87ms`) versus
   NPT-3aw `84,84,84,87,86 ms` (median `84ms`). Focused native integration tests
   for TEST Calc and obfusjack completion also passed.
+
+### [x] NPT-3ax: Elide unreferenced exception-exit blocks
+
+- Scope: omit the generated `__neko_exception_exit` label and default return
+  tail only for translated methods whose generated body contains no structural
+  branch/reference to that label. This is a generic generated-body invariant,
+  not an owner/name/benchmark special case.
+- Required evidence: fresh NPT-3aw generated TEST C shows `Calc.call` and
+  `Calc.runAdd` still emit `__neko_exception_exit` plus shadow-pop/default
+  return despite having no `goto __neko_exception_exit`. Methods such as
+  `Calc.runAll` and `Calc.runStr` do contain pending-exception branches to the
+  label and must retain the block.
+- Validation command or runtime target: focused generator/audit tests, fresh
+  TEST native generation, generated-C inspection proving no-reference methods
+  omit the exception-exit block and referenced methods retain it, default TEST
+  smoke/timing comparison, and focused native integration tests for TEST Calc
+  and obfusjack completion.
+- Completion criteria: every generated `goto __neko_exception_exit` still has a
+  matching label; methods without a generated reference omit only unreachable
+  cleanup; normal return paths and shadow pops remain unchanged; no
+  JNI/JVMTI/fallback markers are introduced; timing does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-17954422278482` built `libneko_linux_x64.so` at
+  `1034872` bytes with `translated=49 rejected=0`. Generated C inspection showed
+  `Calc.call` and `Calc.runAdd` omit `__neko_exception_exit`, while `Calc.runAll`
+  and `Calc.runStr` keep the label for real pending-exception branches.
+  Same-session smoke comparison passed with stderr empty: NPT-3aw
+  `92,90,89,94,91 ms` (median `91ms`) versus NPT-3ax
+  `89,85,90,92,89 ms` (median `89ms`). Focused native integration tests for
+  TEST Calc and obfusjack completion also passed.
