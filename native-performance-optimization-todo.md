@@ -1146,3 +1146,36 @@ Performance and GC gates:
     medians: NPT-3ax `93,88,89,84,85,89,96 ms` (median `89ms`) versus NPT-3ay
     `88,89,98,85,101,89,85 ms` (median `89ms`). Focused native integration
     tests for TEST Calc and obfusjack completion also passed.
+
+- [x] P21 Fuse primitive integer branch producers. The translator should fuse
+  only adjacent same-basic-block primitive integer producers
+  (`ICONST_*`/`BIPUSH`/`SIPUSH`/`ILOAD`) feeding
+  `IFEQ`/`IFNE`/`IFLT`/`IFGE`/`IFGT`/`IFLE`, or two such producers feeding
+  `IF_ICMP*`, and emit direct primitive branch C without stack mutation. This
+  must not cross labels, try-handler boundary flushes, pending-exception
+  dispatch, object/ref stack operations, fields, arrays, invokes, monitors,
+  arithmetic, division, floating-point comparisons, or helper calls. Source
+  evidence: fresh generated TEST C contains generic round trips such as
+  `PUSH_I(local); if (POP_I() != 0)` and `PUSH_I(local); PUSH_I(const);
+  POP/POP; if (...)`, while `OpcodeTranslator.intPushExpression` already
+  restricts recognized producers to primitive constants and `ILOAD`.
+  Validation: `R-build`, `R-test`, `R-obfusjack`, `R-native-test`,
+  `R-inspect`, performance gate; generated C must show known integer branch
+  round trips replaced and object/field/invoke paths unchanged.
+  - Implementation row recorded 2026-05-22: NPT-3az will implement this as a
+    `NativeTranslator` multi-instruction peephole so it can consume the branch
+    bytecode and preserve the existing pending-exception flush rules before
+    branches. Fused C must be primitive-only, same-basic-block, and
+    non-throwing.
+  - Completed 2026-05-22: focused generator/audit tests passed. Fresh TEST
+    generation `build/neko-native-work/run-19020205937571` built
+    `libneko_linux_x64.so` (`1034840` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed `Calc.runAll` and `Digi.run` loop guards use
+    direct primitive compare C, and `Tracee.toTrace` uses
+    `if (locals[1].i != 0)` without stack mutation; object/field/invoke paths
+    remained outside the fused slice. Static grep found no `NEKO_JNI_FN_PTR`,
+    `(*env)->`, or `env->` markers in the generated work directory.
+    Same-session alternating TEST smoke passed with empty stderr: NPT-3ay
+    `89,83,83,88,88,85,91 ms` (median `88ms`) versus NPT-3az
+    `87,82,89,84,105,88,85 ms` (median `87ms`). Focused native integration
+    tests for TEST Calc and obfusjack completion also passed.

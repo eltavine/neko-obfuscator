@@ -17,6 +17,8 @@ import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodInsnNode;
@@ -205,6 +207,80 @@ class CCodeGeneratorTest {
         String crossCallerBody = lastFunctionSection(source, "neko_native_impl_3_body");
         assertTrue(crossCallerBody.contains("jclass targetCls = neko_bound_class_ref(env, &g_class_ref_"), () -> crossCallerBody);
         assertTrue(crossCallerBody.contains("if (targetCls != NULL) neko_native_impl_2_body(thread, env, targetCls);"), () -> crossCallerBody);
+    }
+
+    @Test
+    void primitiveIntegerBranchProducersFuseInsideOneBasicBlockOnly() {
+        ClassNode classNode = new ClassNode();
+        classNode.version = Opcodes.V1_8;
+        classNode.access = Opcodes.ACC_PUBLIC;
+        classNode.name = "pkg/BranchOwner";
+        classNode.superName = "java/lang/Object";
+        classNode.methods = new ArrayList<>();
+
+        LabelNode zeroTarget = new LabelNode();
+        MethodNode zeroBranch = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "zeroBranch", "(I)I", null, null);
+        zeroBranch.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        zeroBranch.instructions.add(new JumpInsnNode(Opcodes.IFEQ, zeroTarget));
+        zeroBranch.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        zeroBranch.instructions.add(new InsnNode(Opcodes.IRETURN));
+        zeroBranch.instructions.add(zeroTarget);
+        zeroBranch.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        zeroBranch.instructions.add(new InsnNode(Opcodes.IRETURN));
+        zeroBranch.maxStack = 1;
+        zeroBranch.maxLocals = 1;
+        classNode.methods.add(zeroBranch);
+
+        LabelNode compareTarget = new LabelNode();
+        MethodNode compareBranch = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "compareBranch", "(I)I", null, null);
+        compareBranch.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        compareBranch.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 10));
+        compareBranch.instructions.add(new JumpInsnNode(Opcodes.IF_ICMPGE, compareTarget));
+        compareBranch.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        compareBranch.instructions.add(new InsnNode(Opcodes.IRETURN));
+        compareBranch.instructions.add(compareTarget);
+        compareBranch.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        compareBranch.instructions.add(new InsnNode(Opcodes.IRETURN));
+        compareBranch.maxStack = 2;
+        compareBranch.maxLocals = 1;
+        classNode.methods.add(compareBranch);
+
+        LabelNode boundary = new LabelNode();
+        LabelNode blockedTarget = new LabelNode();
+        MethodNode labelBlocked = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "labelBlocked", "(I)I", null, null);
+        labelBlocked.instructions.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        labelBlocked.instructions.add(boundary);
+        labelBlocked.instructions.add(new JumpInsnNode(Opcodes.IFEQ, blockedTarget));
+        labelBlocked.instructions.add(new InsnNode(Opcodes.ICONST_1));
+        labelBlocked.instructions.add(new InsnNode(Opcodes.IRETURN));
+        labelBlocked.instructions.add(blockedTarget);
+        labelBlocked.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        labelBlocked.instructions.add(new InsnNode(Opcodes.IRETURN));
+        labelBlocked.maxStack = 1;
+        labelBlocked.maxLocals = 1;
+        classNode.methods.add(labelBlocked);
+
+        L1Class owner = new L1Class(classNode);
+        NativeTranslator translator = new NativeTranslator("primitive-branch-fusion", false, false, 12345L);
+        String source = translator.translate(List.of(
+            new MethodSelection(owner, owner.findMethod("zeroBranch", "(I)I")),
+            new MethodSelection(owner, owner.findMethod("compareBranch", "(I)I")),
+            new MethodSelection(owner, owner.findMethod("labelBlocked", "(I)I"))
+        )).source();
+
+        String zeroBody = lastFunctionSection(source, "neko_native_impl_0_body");
+        assertTrue(zeroBody.contains("if (locals[0].i == 0) goto "), () -> zeroBody);
+        assertFalse(zeroBody.contains("PUSH_I(locals[0].i);"), () -> zeroBody);
+        assertFalse(zeroBody.contains("if (POP_I() == 0)"), () -> zeroBody);
+
+        String compareBody = lastFunctionSection(source, "neko_native_impl_1_body");
+        assertTrue(compareBody.contains("{ jint a = locals[0].i; jint b = 10; if (a >= b) goto "), () -> compareBody);
+        assertFalse(compareBody.contains("PUSH_I(locals[0].i);"), () -> compareBody);
+        assertFalse(compareBody.contains("PUSH_I(10);"), () -> compareBody);
+
+        String blockedBody = lastFunctionSection(source, "neko_native_impl_2_body");
+        assertTrue(blockedBody.contains("PUSH_I(locals[0].i);"), () -> blockedBody);
+        assertTrue(blockedBody.contains("if (POP_I() == 0) goto "), () -> blockedBody);
     }
 
     @Test

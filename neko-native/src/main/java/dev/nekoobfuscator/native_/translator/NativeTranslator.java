@@ -213,8 +213,13 @@ public final class NativeTranslator {
             }
             StringConcatPattern concatPattern = renderedStringConcatPattern(insn, selection.owner().name());
             PrimitiveArrayLiteralPattern arrayLiteral = concatPattern == null ? renderedPrimitiveArrayLiteralPattern(insn) : null;
-            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null) ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap) : null;
-            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && fused == null)
+            PrimitiveBranchFusion primitiveBranch = (concatPattern == null && arrayLiteral == null)
+                ? tryPrimitiveBranchFusion(opcodes, insn, labelMap)
+                : null;
+            OpcodeTranslator.FusedTranslation fused = (concatPattern == null && arrayLiteral == null && primitiveBranch == null)
+                ? tryFusedAALoad(opcodes, insn, activeHandlers, pcMap)
+                : null;
+            TailCallRewrite tail = (concatPattern == null && arrayLiteral == null && primitiveBranch == null && fused == null)
                 ? tryTailRecursion(insn, selection, argTypes, activeHandlers, pcMap)
                 : null;
             if (insn instanceof JumpInsnNode jumpInsn) {
@@ -231,6 +236,13 @@ public final class NativeTranslator {
                 pendingHandlers = activeHandlers.getOrDefault(pcMap.get(arrayLiteral.newArrayInsn), List.of());
                 insn = arrayLiteral.lastInsn;
                 continue;
+            } else if (primitiveBranch != null) {
+                if (pendingHandlers != null) {
+                    fn.addStatement(new CStatement.RawC(renderExceptionDispatch(pendingHandlers, selection.owner().name())));
+                    pendingHandlers = null;
+                }
+                fn.addStatement(new CStatement.RawC(primitiveBranch.code));
+                insn = primitiveBranch.lastInsn;
             } else if (fused != null) {
                 fn.addStatement(new CStatement.RawC(fused.code()));
                 insn = fused.lastInsn();
@@ -299,6 +311,62 @@ public final class NativeTranslator {
             return raw.code().contains(label);
         }
         return false;
+    }
+
+    private record PrimitiveBranchFusion(String code, AbstractInsnNode lastInsn) {}
+
+    private PrimitiveBranchFusion tryPrimitiveBranchFusion(
+        OpcodeTranslator opcodes,
+        AbstractInsnNode insn,
+        Map<LabelNode, String> labelMap
+    ) {
+        String left = opcodes.intPushExpression(insn);
+        if (left == null) return null;
+        AbstractInsnNode next = nextNonMetaSameBlock(insn);
+        if (next instanceof JumpInsnNode jumpInsn) {
+            String condition = intZeroBranchCondition(jumpInsn.getOpcode(), left);
+            if (condition == null) return null;
+            return new PrimitiveBranchFusion("if (" + condition + ") goto " + labelMap.get(jumpInsn.label) + ";", jumpInsn);
+        }
+        String right = opcodes.intPushExpression(next);
+        if (right == null) return null;
+        AbstractInsnNode branch = nextNonMetaSameBlock(next);
+        if (!(branch instanceof JumpInsnNode jumpInsn)) return null;
+        String condition = intCompareBranchCondition(jumpInsn.getOpcode(), left, right);
+        if (condition == null) return null;
+        return new PrimitiveBranchFusion("{ jint a = " + left + "; jint b = " + right + "; if (" + condition + ") goto " + labelMap.get(jumpInsn.label) + "; }", jumpInsn);
+    }
+
+    private AbstractInsnNode nextNonMetaSameBlock(AbstractInsnNode insn) {
+        AbstractInsnNode next = insn == null ? null : insn.getNext();
+        while (next instanceof LineNumberNode || next instanceof FrameNode) {
+            next = next.getNext();
+        }
+        return next instanceof LabelNode ? null : next;
+    }
+
+    private String intZeroBranchCondition(int opcode, String expr) {
+        return switch (opcode) {
+            case Opcodes.IFEQ -> expr + " == 0";
+            case Opcodes.IFNE -> expr + " != 0";
+            case Opcodes.IFLT -> expr + " < 0";
+            case Opcodes.IFGE -> expr + " >= 0";
+            case Opcodes.IFGT -> expr + " > 0";
+            case Opcodes.IFLE -> expr + " <= 0";
+            default -> null;
+        };
+    }
+
+    private String intCompareBranchCondition(int opcode, String left, String right) {
+        return switch (opcode) {
+            case Opcodes.IF_ICMPEQ -> "a == b";
+            case Opcodes.IF_ICMPNE -> "a != b";
+            case Opcodes.IF_ICMPLT -> "a < b";
+            case Opcodes.IF_ICMPGE -> "a >= b";
+            case Opcodes.IF_ICMPGT -> "a > b";
+            case Opcodes.IF_ICMPLE -> "a <= b";
+            default -> null;
+        };
     }
 
     private Map<LabelNode, String> buildLabelMap(MethodNode node) {

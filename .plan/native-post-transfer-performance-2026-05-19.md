@@ -2096,3 +2096,44 @@ the source plan that owns the changed path before it can be considered complete.
   `93,88,89,84,85,89,96 ms` (median `89ms`) versus NPT-3ay
   `88,89,98,85,101,89,85 ms` (median `89ms`). Focused native integration tests
   for TEST Calc and obfusjack completion also passed.
+
+### [x] NPT-3az: Fuse primitive integer branch producers
+
+- Scope: fuse only adjacent same-basic-block primitive integer branch producer
+  sequences in `NativeTranslator`: `ICONST_*`/`BIPUSH`/`SIPUSH`/`ILOAD`
+  followed by `IFEQ`/`IFNE`/`IFLT`/`IFGE`/`IFGT`/`IFLE`, and two such
+  producers followed by `IF_ICMP*`. The fused C branch must read the primitive
+  expression directly and avoid stack mutation. It must not cross labels,
+  branches, try-handler boundary flushes, pending-exception dispatch, fields,
+  arrays, invokes, monitors, object/ref stack operations, arithmetic, division,
+  floating-point comparisons, or helper calls.
+- Required evidence: fresh NPT-3ax/NPT-3ay generated TEST C contains generic
+  straight-line integer branch stack round trips such as `PUSH_I(local);
+  if (POP_I() != 0)` and `PUSH_I(local); PUSH_I(const); POP/POP; if (...)`.
+  Source inspection shows `OpcodeTranslator.intPushExpression` already
+  recognizes only primitive constants and `ILOAD`, while the central
+  `NativeTranslator` bytecode walk is where multi-instruction peepholes can
+  consume the branch bytecode and preserve pending-exception flush ordering.
+- Validation command or runtime target: focused translator/generator/audit
+  tests, fresh TEST native generation, generated-C inspection proving the known
+  integer branch round trips are replaced without touching object/field/invoke
+  paths, default TEST smoke/timing comparison, and focused native integration
+  tests for TEST Calc and obfusjack completion.
+- Completion criteria: branch targets and comparison semantics match JVM
+  bytecode; fused producers are primitive-only and non-throwing; no label or
+  handler boundary is crossed; pending-exception checks still flush before the
+  branch when required; no JNI/JVMTI/fallback markers are introduced; timing
+  does not regress.
+- Completed 2026-05-22. Focused generator/audit tests passed:
+  `CCodeGeneratorTest`, `OpcodeTranslatorUnitTest`, and
+  `NativeGeneratedCHotPathAuditTest`. Fresh TEST generation
+  `build/neko-native-work/run-19020205937571` built `libneko_linux_x64.so` at
+  `1034840` bytes with `translated=49 rejected=0`. Generated C inspection
+  showed `Calc.runAll` and `Digi.run` loop guards use direct primitive compare
+  C, and `Tracee.toTrace` uses `if (locals[1].i != 0)` without stack mutation;
+  object/field/invoke paths remained outside the fused slice. Static grep found
+  no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->` markers in the generated work
+  directory. Same-session alternating smoke comparison passed with empty stderr:
+  NPT-3ay `89,83,83,88,88,85,91 ms` (median `88ms`) versus NPT-3az
+  `87,82,89,84,105,88,85 ms` (median `87ms`). Focused native integration tests
+  for TEST Calc and obfusjack completion also passed.

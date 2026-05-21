@@ -141,7 +141,8 @@ public final class OpcodeTranslator {
         return n;
     }
 
-    private String intPushExpression(AbstractInsnNode insn) {
+    String intPushExpression(AbstractInsnNode insn) {
+        if (insn == null) return null;
         int op = insn.getOpcode();
         if (op == Opcodes.ICONST_M1) return "-1";
         if (op >= Opcodes.ICONST_0 && op <= Opcodes.ICONST_5) return String.valueOf(op - Opcodes.ICONST_0);
