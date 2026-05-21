@@ -563,6 +563,24 @@ Performance and GC gates:
     and non-flattened raw translated bodies selected by statement count, and a
     performance/runtime report that does not regress the current accepted
     baseline.
+  - Rejected row update 2026-05-21: NPT-3ac is not accepted as a performance
+    win. Fresh TEST generation translated `49` methods with `rejected=0` and
+    showed both selection paths (`neko_native_impl_0.c` emitted `NEKO_HOT`
+    without `NEKO_FLATTEN`; small bodies such as `neko_native_impl_8.c` kept
+    `NEKO_FLATTEN NEKO_HOT`). Fresh obfusjack generation translated `93`
+    methods with `rejected=0` and showed the same generic structural selection:
+    large bodies `neko_native_impl_39.c` (`1085` lines),
+    `neko_native_impl_44.c` (`181` lines), and `neko_native_impl_46.c` (`146`
+    lines) emitted without `NEKO_FLATTEN`, while small bodies such as
+    `neko_native_impl_13.c` (`38` lines) kept `NEKO_FLATTEN NEKO_HOT`.
+    Runtime results: TEST Calc median `86 ms` versus accepted NPT-3y `87 ms`,
+    but obfusjack medians were Platform `45 ms`, Virtual `43 ms`, and Seq
+    `17 ms`; Platform and Virtual regressed versus accepted NPT-3y and missed
+    the gate (`Platform <= 44 ms`, `Virtual <= 35 ms`, `Seq <= 14 ms`). A
+    120s obfusjack run timed out after printing completion, while a 180s rerun
+    exited `0`, so the rejection is performance-gate based, not a crash/fatal
+    or fallback finding. Do not tune the threshold without new compiler-layout
+    evidence.
 
 - [x] P14 Add native compiler optimization diagnostics mode. Add a repository-controlled environment flag that appends compiler diagnostics such as optimization remarks, inlining reports, assembly, or equivalent zig/clang output for selected generated C artifacts, without changing normal release flags. Use this to verify P4/P6/P8/P13 rather than guessing about compiler behavior. Source evidence: `NativeBuildEngine.java:43-94` currently supports debug/release flags but no optimization-report mode. Validation: `R-build`, `R-inspect`; diagnostics mode must be optional and must not affect normal native artifacts.
   - Accepted implementation row recorded 2026-05-21: NPT-3ad added only an

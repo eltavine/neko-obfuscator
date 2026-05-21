@@ -1184,6 +1184,32 @@ the source plan that owns the changed path before it can be considered complete.
   no CFF block change, no bytecode translation change, no JNI/JVMTI fallback,
   no skip/original-bytecode fallback, and no accepted runtime/performance
   regression.
+- Rejected validation 2026-05-21: the structural heuristic is generic and was
+  present in source, but this row is not accepted as a performance win. Source
+  evidence: `CCodeGenerator.MAX_FLATTEN_STATEMENTS = 128`,
+  `fn.body().size() > MAX_FLATTEN_STATEMENTS`, and conditional raw emission at
+  `CCodeGenerator.java:2150-2157`. Fresh TEST native generation translated
+  `49` methods with `rejected=0`; generated C showed large
+  `neko_native_impl_0.c` emitted as `NEKO_HOT` without `NEKO_FLATTEN` while
+  small bodies such as `neko_native_impl_8.c` kept
+  `NEKO_FLATTEN NEKO_HOT`. Fresh obfusjack native generation translated `93`
+  methods with `rejected=0`; generated C showed large bodies
+  `neko_native_impl_39.c` (`1085` lines), `neko_native_impl_44.c` (`181`
+  lines), and `neko_native_impl_46.c` (`146` lines) emitted as `NEKO_HOT`
+  without `NEKO_FLATTEN`, while small bodies such as `neko_native_impl_13.c`
+  (`38` lines) and `neko_native_impl_0.c` (`30` lines) kept
+  `NEKO_FLATTEN NEKO_HOT`. Runtime evidence: TEST native completed five fresh
+  runs with Calc `86/90/85/90/83 ms`, median `86 ms`, which is below the
+  accepted NPT-3y TEST median `87 ms`. Obfusjack native completed fresh runs
+  with Platform `45/48/50/45/45 ms`, Virtual `47/37/39/48/43 ms`, and Seq
+  `17/19/17/17/17 ms`; medians were Platform `45 ms`, Virtual `43 ms`, and
+  Seq `17 ms`. One 120s run timed out after printing `=== All tests completed
+  ===`; a 180s rerun exited `0` with Platform `44 ms`, Virtual `42 ms`, and
+  Seq `18 ms`, so no crash/fatal/JNI fallback was observed. The row remains
+  rejected because obfusjack Platform and Virtual regressed versus the accepted
+  baseline and missed the performance gate (`Platform <= 44 ms`,
+  `Virtual <= 35 ms`, `Seq <= 14 ms`). Do not change the flattening threshold
+  or selection shape without new generated-code and compiler-layout evidence.
 
 ### [x] NPT-3ad: Runtime P14 opt-in native compiler diagnostics
 
