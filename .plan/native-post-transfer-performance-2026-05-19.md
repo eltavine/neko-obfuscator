@@ -2979,7 +2979,7 @@ the source plan that owns the changed path before it can be considered complete.
   fresh oop publication/rooting/barrier/exception prerequisite without
   replacing `String.concat` yet.
 
-### [ ] NPT-3bt: Prove and harden returned fresh oop publication for translated native returns
+### [x] NPT-3bt: Reject/defer returned fresh oop publication until strict-GC barrier mapping is fixed
 
 - Scope: implement the smallest generic prerequisite needed before raw native
   `String.concat`: a returned-fresh-object publication surface for translated
@@ -3014,3 +3014,55 @@ the source plan that owns the changed path before it can be considered complete.
   collectors, with exact recorded limits for which Java exception paths are
   implemented versus still blocking raw concat. Raw native `String.concat`
   remains out of scope until this row is completed and committed.
+- Completion evidence: rejected/deferred 2026-05-22. The implementation
+  hardened object-return dispatch by converting non-null return handles through
+  a generated `neko_prepare_return_oop(thread, __ret, "sigN")` before
+  restoring the handle window. Focused generator and hot-path audit tests
+  passed. Fresh TEST generation produced `build/npt-3bt/TEST-native.jar` from
+  `build/neko-native-work/run-27224871548608` with `translated=49`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1035848` bytes; fresh
+  obfusjack generation produced `build/npt-3bt/obfusjack-native.jar` from
+  `build/neko-native-work/run-27238526919313` with `translated=93`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1803816` bytes. Generated C
+  used `neko_prepare_return_oop` before `neko_handle_restore`, and strict
+  forbidden JNI grep over both run directories returned no matches. Default
+  TEST timing was `71,70,68,69,84 ms` (median `70ms`); obfusjack smoke was
+  green with Platform `44,43,32 ms`, Virtual `46,36,46 ms`, Seq `17,17,17 ms`,
+  and Parallel `1ms`. G1, Serial, and Parallel TEST GC runs passed with Calc
+  `69ms`, `71ms`, and `68ms`. ZGC with `ZVerifyViews` and Shenandoah with
+  verification aborted during native layout initialization before the changed
+  object-return path. The same ZGC/Shenandoah bootstrap failure reproduces on
+  the pre-P41 `build/npt-3bs/TEST-native.jar` baseline. Patch-debug evidence
+  shows BarrierSet `tag=5`, VMStruct constants `z=-1` and `shen=-1`,
+  `use_zgc=0`, `use_shen=0`, and the selected GC barrier path not ready. The
+  source/test implementation was reverted. Do not resume this row until the
+  strict-GC barrier mapping/capability prerequisite is fixed and validated.
+
+### [ ] NPT-3bu: Fix strict-GC barrier tag and capability detection for ZGC/Shenandoah bootstrap
+
+- Scope: limit the implementation to generic HotSpot GC barrier identification
+  and readiness detection during native layout/bootstrap. It must map or
+  structurally detect current ZGC and Shenandoah BarrierSet layouts so the
+  native runtime selects a complete supported barrier path, or hard-aborts with
+  an exact missing-symbol or missing-capability diagnostic. This must not skip
+  classes or methods, fall back to JNI/JVMTI/original bytecode, disable
+  ZGC/Shenandoah, weaken barriers, implement raw `String.concat`, or change
+  unrelated opcode/runtime behavior.
+- Required evidence: strict ZGC patch-debug bootstrap for both NPT-3bt and the
+  NPT-3bs baseline reports a live BarrierSet `tag=5`, missing VMStruct
+  ZGC/Shenandoah tag constants (`z=-1`, `shen=-1`), `use_zgc=0`,
+  `use_shen=0`, and a selected barrier kind whose required path is not ready,
+  causing `[neko-bootstrap] native layout initialization failed`. The failing
+  invariant is bootstrap selecting/validating GC barrier capability from
+  incomplete tag metadata before any translated object-return change executes.
+- Validation command or runtime target: focused generator/source tests for the
+  barrier detection shape, fresh TEST native generation, `R-inspect` strict
+  forbidden JNI/fallback grep, TEST native runs under G1, Serial, Parallel,
+  ZGC with `ZVerifyViews`, and Shenandoah verification. If ZGC or Shenandoah
+  required symbols are absent, the runtime must hard-abort with an exact
+  missing capability message rather than misclassifying the collector or
+  falling back.
+- Completion criteria: fresh generated TEST initializes native layout under all
+  required supported collectors or fails closed with exact capability
+  diagnostics for genuinely missing required VM support; no forbidden fallback
+  markers appear.
