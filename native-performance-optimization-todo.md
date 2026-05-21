@@ -1828,3 +1828,79 @@ Performance and GC gates:
   `74,68,67,74,78,72,80 ms` (median `74ms`). Source/test edits were reverted.
   Do not retry this operand-stack shuffle fusion without new code-layout or
   optimizer evidence.
+
+- [x] P38 Reject raw native `String.concat` implementation until returned-String
+  publication invariants are proven.
+  Compare JDK 21 `java/lang/String.concat`, `StringConcatHelper.simpleConcat`,
+  `newArray`, `newString`, `String(byte[],byte)`, and `String(String)`
+  semantics against the current native raw allocation, compact-string field,
+  byte-array allocation, copy, exception, TLAB refill, OOME/overflow, GC
+  barrier, and strict-GC capability surface. This is an evidence-only
+  selection subtask. It must not implement raw native String construction,
+  special-case Calc or obfusjack, retry rejected NPT-3bj/NPT-3bk/NPT-3bl/
+  NPT-3bm/NPT-3bp shapes, introduce JNI/JVMTI/original-bytecode fallback,
+  weaken hard abort behavior, or change runtime behavior.
+  Source evidence required: local JDK bytecode for `String.concat` and
+  `StringConcatHelper` proving empty-string identity/copy behavior,
+  compact-string coder propagation, overflow/OOME behavior, byte-array
+  allocation size calculation, and final `String` field initialization;
+  current generated native support evidence for `neko_require_fast_string_concat`
+  still crossing `neko_njx_V_L_L`; current raw string literal allocation and
+  `neko_store_oop_raw` evidence showing which allocation/barrier pieces already
+  exist; and explicit missing-invariant notes for any unsupported coder,
+  allocation, GC, or exception path.
+  Validation: source and bytecode inspection, generated-C inspection on the
+  fresh P36/P37 native artifacts, strict forbidden JNI/fallback marker review
+  of the current native support surface, and subagent audit cross-checks.
+  Completion criteria: record either a concrete next implementation row with a
+  complete invariant/evidence chain and runtime validation target, or record a
+  no-go/rejection because a required compact-string, allocation, exception, or
+  GC invariant is not yet proven. No source implementation may start until this
+  row is completed and committed.
+  Rejected 2026-05-22: local JDK is OpenJDK `21.0.11+10`, and bytecode
+  inspection proves `String.concat(String)` first evaluates `rhs.isEmpty()`
+  (preserving null-rhs NPE), returns the original receiver for empty rhs, and
+  otherwise dispatches to `StringConcatHelper.simpleConcat`. `simpleConcat`
+  preserves additional empty-side copy behavior with `new String(other)`,
+  computes compact-string coder and length through `mix`, allocates byte arrays
+  through `newArray`, copies through `String.getBytes(byte[], int, byte)`, and
+  returns `newString(byte[], long)`. `newArray` throws Java
+  `OutOfMemoryError("Overflow: String length out of range")` for overflow and
+  uses `Unsafe.allocateUninitializedArray(Byte.TYPE, len)`. Current native
+  support still routes concat through `neko_require_fast_string_concat` and
+  `neko_njx_V_L_L`; raw String allocation exists only in string literal/intern
+  binding, not as a generic returned Java object path. The audit did not find
+  complete evidence for freshly allocated returned `String` publication under
+  G1, Serial, Parallel, ZGC, and Shenandoah, nor a generic Java-exception path
+  matching JDK concat overflow and rhs-null behavior. Missing invariants are:
+  returned raw `String`/`byte[]` publication without constructor/NJX,
+  collector-specific or generic barriered `String.value` initialization,
+  exact Latin1/UTF16 `String.getBytes` copy/inflation, Java OOME/NPE behavior,
+  and empty-side identity/copy behavior. No raw concat implementation is
+  justified until those prerequisites are proven.
+
+- [ ] P39 Reuse resolved static-field ref in fused static int add updates.
+  For the existing generic same-field fusion
+  `GETSTATIC int; const-int; IADD; PUTSTATIC same int field`, resolve the
+  `neko_static_field_ref` once and reuse that same carrier for both read and
+  write. This must preserve class-initialization ordering, field metadata
+  hard-aborts, volatile access flags, static-base handling, same-field proof,
+  and non-fused behavior. It must not change raw String construction, retry any
+  rejected concat/Math/stack-shuffle shape, introduce JNI/JVMTI/original-bytecode
+  fallback, or special-case Calc or obfusjack.
+  Source evidence: fresh P36 generated TEST C emits
+  `neko_fast_get_static_I_field_ref(env, &g_static_field_ref_3)` and then
+  separately emits `neko_bound_class_ref`, `neko_ensure_class_initialized_once`,
+  `neko_bound_field_ref`, and `neko_fast_set_static_I_field` for the same
+  proven field. `neko_static_field_ref` already carries class, init, field,
+  static-base, offset, and access-flag slots; `tryStaticIntAddUpdateFusion`
+  already proves same owner/name/descriptor and same basic block.
+  Validation: focused generator coverage for the fused same-field shape,
+  fresh TEST native generation, generated-C inspection proving the duplicate
+  class/init/field binding sequence is removed only for the fused same-field
+  update, strict forbidden JNI/fallback grep, repeated same-session TEST timing
+  against the current-head baseline, and focused TEST/obfusjack native smoke.
+  Completion criteria: generated static int updates reuse one resolved
+  `neko_static_field_ref` while retaining hard-abort metadata checks and exact
+  field semantics; non-same-field updates remain unfused; no forbidden
+  markers appear; timing does not regress.
