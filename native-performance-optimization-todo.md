@@ -1919,3 +1919,83 @@ Performance and GC gates:
   P39 `80,68,71,71,75,82,74 ms` (median `74ms`). Source/test edits were
   reverted. Do not retry this helper shape without new inlining or code-layout
   evidence.
+
+- [x] P40 Post-P39 bottleneck selection and raw-publication prerequisite decision.
+  Re-audit the current post-P35/P39 state before selecting another runtime
+  implementation. This is an evidence-only selection subtask. It may inspect
+  generated C, runtime timings, native support helpers, existing todo
+  prerequisites, and subagent audit results. It must not implement code,
+  special-case a fixture, retry rejected NPT-3bj/NPT-3bk/NPT-3bl/NPT-3bm/
+  NPT-3bp/NPT-3br shapes, or implement raw native `String.concat` before the
+  returned-String publication invariants from P38 are proven.
+  Source evidence required: current generated TEST/obfusjack C showing the
+  remaining hot runtime path, strict JNI/fallback marker status, current
+  baseline timings after reverted P39 source, and explicit comparison between
+  any non-raw-string candidate and the raw-publication prerequisite route.
+  Validation: source/generated-C inspection, repeated runtime timing where a
+  fresh current artifact is needed, strict forbidden marker grep, and subagent
+  cross-checks for both generic hot-path candidates and raw returned-String
+  prerequisites.
+  Completion criteria: record a concrete next implementation/prerequisite row
+  with complete scope, evidence, validation target, and completion criteria, or
+  record that no implementation is justified yet because the evidence chain is
+  incomplete.
+  Completed 2026-05-22: fresh current-head TEST generation after the reverted
+  P39 source produced `build/npt-3bs/TEST-native.jar` from
+  `build/neko-native-work/run-26815840155097` with `translated=49`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1035992` bytes. Fresh
+  obfusjack generation produced `build/npt-3bs/obfusjack-native.jar` from
+  `build/neko-native-work/run-26860456274238` with `translated=93`,
+  `rejected=0`, and `libneko_linux_x64.so` size `1810760` bytes. Strict
+  forbidden JNI grep over both run directories returned no matches. Current
+  TEST timing was `67,69,70,69,70,70,72 ms` (median `70ms`). Current obfusjack
+  timing was Platform `43,47,44,42,45 ms` (median `44ms`), Virtual
+  `40,38,43,44,32 ms` (median `40ms`), Seq `17,17,17,17,22 ms` (median
+  `17ms`), and Parallel `1ms`. Generated TEST still has the hot
+  `neko_fast_string_length` plus `neko_concat_append_inline` path, and the
+  inline append still reaches the `neko_njx_V_L_L` `String.concat` call stub.
+  Generated current artifacts contain 58 TEST and 182 obfusjack `neko_njx_*`
+  call sites, with one TEST `neko_concat_append_inline` and one generated
+  concat literal binding at the hot `runStr` site. A sidecar audit proposed
+  inlining `neko_bound_method_ref` as a generic micro-optimization, but the
+  current large blocker remains raw returned `String` publication; the method
+  binding slice is deferred because it cannot plausibly close the TEST
+  `<=20ms` gap. Selected P41/NPT-3bt to prove and harden the generic returned
+  fresh oop publication/rooting/barrier/exception prerequisite without
+  replacing `String.concat` yet.
+
+- [ ] P41 Prove and harden returned fresh oop publication for translated native
+  returns before raw String construction.
+  Implement the smallest generic prerequisite needed before raw native
+  `String.concat`: a returned-fresh-object publication surface for translated
+  native object returns. Scope is limited to freshly allocated object/array
+  graphs, immediate local rooting before any possible safepoint or VM/NJX call,
+  return-handle to raw-oop handoff, collector-valid field/array store barriers,
+  and Java exception propagation for allocation/length failures. This must not
+  replace `String.concat`, special-case benchmark code, add JNI/JVMTI/original
+  bytecode fallback, introduce Java helper layers, or weaken hard-abort
+  behavior for missing native capabilities.
+  Source evidence: `ARETURN` currently returns a `jobject` from translated
+  native code; object-return dispatch converts handle to raw oop and restores
+  the handle window before returning to the trampoline; existing
+  `neko_direct_oop_to_handle` and pre-reserved local root slots provide local
+  rooting primitives but are not yet tied to freshly constructed returned
+  object graphs; raw primitive array allocation currently returns handles and
+  aborts on negative/allocation failures; string literal binding allocates
+  `byte[]` and `String` only for bind-time/intern paths; `neko_store_oop_raw`
+  colors ZGC oops but ordinary object field stores use the full selected
+  pre/post barrier path.
+  Validation: focused generator/runtime coverage for freshly allocated returned
+  object and byte-array graphs, source/generated-C inspection proving immediate
+  rooting and no forbidden JNI/JVMTI/original-bytecode fallback, `R-build`,
+  `R-test`, `R-native-test`, `R-inspect`, and GC strict runs under G1, Serial,
+  Parallel, ZGC with `ZVerifyViews`, and Shenandoah verification. Negative
+  coverage must prove length/allocation/overflow failures become Java
+  exceptions where the raw returned-object surface claims Java-equivalent
+  behavior, otherwise the path must hard abort before being used by raw
+  `String.concat`.
+  Completion criteria: a generic returned fresh oop graph can survive the
+  translated return handoff and GC/safepoint pressure under all required
+  collectors, with exact recorded limits for which Java exception paths are
+  implemented versus still blocking raw concat. Raw native `String.concat`
+  remains out of scope until this row is completed and committed.
