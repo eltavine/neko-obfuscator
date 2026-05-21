@@ -301,19 +301,21 @@ NEKO_FAST_INLINE jobject neko_build_raw_string_graph_store_local(
             abort();
         }
     }
-    left_oop = (char*)neko_handle_oop((jobject)left);
-    right_oop = (char*)neko_handle_oop((jobject)right);
-    if (NEKO_UNLIKELY(left_oop == NULL || right_oop == NULL)) {
-        fprintf(stderr, "[neko-direct] raw String graph input unresolved after byte[] allocation left=%p/%p right=%p/%p\\n",
-            (void*)left, (void*)left_oop, (void*)right, (void*)right_oop);
-        abort();
-    }
-    left_value = (char*)neko_load_oop_field_raw(left_oop, valueOffset);
-    right_value = (char*)neko_load_oop_field_raw(right_oop, valueOffset);
-    if (NEKO_UNLIKELY(left_value == NULL || right_value == NULL)) {
-        fprintf(stderr, "[neko-direct] raw String graph value array unresolved after byte[] allocation leftValue=%p rightValue=%p\\n",
-            (void*)left_value, (void*)right_value);
-        abort();
+    if (array_handle != NULL) {
+        left_oop = (char*)neko_handle_oop((jobject)left);
+        right_oop = (char*)neko_handle_oop((jobject)right);
+        if (NEKO_UNLIKELY(left_oop == NULL || right_oop == NULL)) {
+            fprintf(stderr, "[neko-direct] raw String graph input unresolved after byte[] allocation left=%p/%p right=%p/%p\\n",
+                (void*)left, (void*)left_oop, (void*)right, (void*)right_oop);
+            abort();
+        }
+        left_value = (char*)neko_load_oop_field_raw(left_oop, valueOffset);
+        right_value = (char*)neko_load_oop_field_raw(right_oop, valueOffset);
+        if (NEKO_UNLIKELY(left_value == NULL || right_value == NULL)) {
+            fprintf(stderr, "[neko-direct] raw String graph value array unresolved after byte[] allocation leftValue=%p rightValue=%p\\n",
+                (void*)left_value, (void*)right_value);
+            abort();
+        }
     }
     neko_copy_string_payload(array_oop, 0, result_coder, left_value, left_chars, left_coder);
     neko_copy_string_payload(array_oop, left_chars, result_coder, right_value, right_chars, right_coder);

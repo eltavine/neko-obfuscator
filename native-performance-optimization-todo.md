@@ -2623,3 +2623,62 @@ Performance and GC gates:
   initialization failed`. This row improves the raw graph opt-in path but is
   not sufficient for the final target; the next row must reduce the remaining
   raw allocation/copy cost and eventually make a fully proven path default.
+
+- [x] P48 Skip raw String input reloads when byte-array allocation cannot
+  safepoint.
+  Remove only the redundant lhs/rhs handle and `String.value` reload block in
+  `neko_build_raw_string_graph_store_local` when the intermediate byte array
+  was allocated by the TLAB fast path and no allocation-capable slow path has
+  run. Keep the existing reload and validation block when `array_handle !=
+  NULL`, which covers slow byte-array allocation and any path where the byte
+  array was rooted because a safepoint-capable operation has already happened.
+  This must not skip reloads after slow allocation, TLAB refill, managed String
+  allocation, NJX, or any future safepoint-capable path, and must not change
+  concat selection, CFF, JNI/JVMTI usage, fallback policy, or exception/abort
+  behavior.
+  Source evidence: P47 opt-in TEST audit showed the raw graph path now has low
+  dispatch and handle traffic (`dispatched=62`, `handle_direct_total=87`,
+  `primitive_array_alloc=32`) while still executing
+  `stringbuilder-fast-concat: total=510000 literal=510000 dynamic=0` and
+  median `42ms`. Current source still reloads `left_oop`, `right_oop`,
+  `left_value`, and `right_value` unconditionally after byte-array allocation,
+  even though the all-TLAB path between the initial reads and payload copy only
+  performs `neko_fast_tlab_alloc`, `neko_init_oop_header`, and the byte-array
+  length store. That path cannot safepoint, so the reloads are required only
+  when `array_handle != NULL` proves a slow/rooted byte-array path already
+  occurred.
+  Validation: focused generator/source tests; fresh raw-string graph runtime
+  fixture; fresh handle-audit TEST generation; opt-in TEST audit proving
+  dispatch and handle counters remain low; opt-in/default TEST timing
+  comparison; obfusjack smoke; strict generated-C grep for forbidden JNI
+  wrappers; and G1/Serial/Parallel plus ZGC/Shenandoah fail-closed smokes.
+  Completion criteria: generated raw graph helper guards the post-byte-array
+  lhs/rhs reload block with `if (array_handle != NULL)`, all slow/rooted paths
+  retain the reload and null checks, all-TLAB raw concat keeps correct
+  Latin1/UTF16/empty-shape output, no forbidden markers appear, and timing does
+  not regress versus P47 opt-in/default medians.
+  Completion evidence 2026-05-22: `neko_build_raw_string_graph_store_local`
+  now executes the post-byte-array lhs/rhs and value reload block only when
+  `array_handle != NULL`; slow/rooted paths still keep the existing null checks
+  and all-TLAB raw concat proceeds directly to the payload copies. Focused
+  validation passed:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home-native-coverage bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest --tests dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_rawStringGraphOptInRunsConcatShapes -Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/native-run-tmp --rerun-tasks`.
+  Fresh handle-audit generation passed with TEST at
+  `build/neko-native-work/run-39101082444663` and obfusjack at
+  `build/neko-native-work/run-39104735242967`. Generated-C inspection found
+  the guarded reload block and strict grep over both fresh dirs found no
+  `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->`. Opt-in TEST audit reported
+  `dispatched=61`, `V:L:L=2`, `handle_direct_total=74`, and
+  `primitive_array_alloc=20` while retaining
+  `stringbuilder-fast-concat: total=510000 literal=510000 dynamic=0`. Opt-in
+  TEST x5 was `32/30/31/31/38 ms` (median `31ms`) versus P47 opt-in median
+  `42ms`; default TEST remained on the original dispatch path with x5
+  `64/71/67/65/68 ms` (median `67ms`). Default obfusjack reached
+  `=== All tests completed ===` with Platform `43ms`, Virtual `40ms`, Seq
+  `17ms`, Parallel `1ms`, and VThreads `1ms`. Opt-in G1/Serial/Parallel TEST
+  smokes passed with `Calc: 46ms`, `32ms`, and `33ms`. ZGC with
+  `ZVerifyViews` and Shenandoah with verification both failed closed at
+  bootstrap with `[neko-bootstrap] native layout initialization failed`. This
+  row materially improves the raw graph opt-in path but final acceptance is
+  still open because default TEST remains above target and raw graph still
+  requires opt-in.
