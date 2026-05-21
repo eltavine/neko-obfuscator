@@ -1553,3 +1553,47 @@ Performance and GC gates:
     (median `74ms`), and the native library grew from `1036696` to `1036744`
     bytes. Source/test edits were reverted. Do not retry this branch-fusion
     shape without new code-size or branch-layout evidence.
+
+- [x] P32 Reject guarded generated concat literal string binding.
+  Rejected on thread-safety evidence.
+  When native string-concat pattern emission creates a generated static
+  `jstring` literal slot, emit a slot-null guard around the existing
+  `neko_bind_string_slot(thread, env, &slot, "...")` call. The change may only
+  affect generated concat literal slots created by `literalStringProducer`; it
+  must not change owner string binding, intern/global-ref creation,
+  `neko_concat_append`, `StringConcatFactory` recipe lowering, raw string
+  construction, JNI usage, exception behavior, or GC barriers.
+  Source evidence: fresh NPT-3bi generated TEST C at
+  `build/neko-native-work/run-22968063094268/neko_native_impl_22.c` shows the
+  hot `Calc.runStr` loop executes `neko_bind_string_slot(thread, env,
+  &__neko_concat_lit_0, "ax")` on every concat iteration before
+  `neko_concat_append`. The helper itself returns immediately when `slot !=
+  NULL && *slot != NULL` (`NativeBindSupportEmitter`), so the generated guard
+  is the same predicate moved to the call site. The helper already writes a
+  global reference into the static slot, and concurrent first binds are already
+  governed by the helper's unsynchronized slot check; adding the same outer
+  check must not introduce a new race class.
+  Validation: `R-build`, focused translator/generator/audit tests, fresh TEST
+  native generation, generated-C inspection proving concat literal sites emit
+  `if (__neko_concat_lit_N == NULL) neko_bind_string_slot(...)` and no hot
+  unconditional bind call, `R-test` repeated timing comparison,
+  `R-native-test`, `R-inspect`, and focused native integration tests for TEST
+  Calc and obfusjack completion.
+  Completion criteria: only generated concat literal slots gain the guard;
+  first-use bind still hard-aborts on missing thread/env/global-ref failure;
+  subsequent uses reuse the same global slot; generated C has no forbidden
+  JNI/JVMTI/fallback markers; timing does not regress.
+  - Rejected 2026-05-22: focused generator/audit tests passed and fresh TEST
+    generation `build/neko-native-work/run-23910172237245` built
+    `libneko_linux_x64.so` (`1036712` bytes) with `translated=49 rejected=0`.
+    Generated C inspection showed the intended
+    `if (__neko_concat_lit_0 == NULL) { neko_bind_string_slot(...) }` shape in
+    `Calc.runStr`, and strict JNI marker grep for `NEKO_JNI_FN_PTR`,
+    `(*env)->`, and `env->` was clean. The slice was rejected before timing
+    acceptance because the generated outer guard performs a plain non-atomic
+    read of a function-local static `jstring` while `neko_bind_string_slot`
+    publishes the slot through a plain non-atomic write. Concurrent first use
+    would therefore keep the existing duplicate-bind race and add a C data-race
+    read in generated hot code. Source/test edits were reverted. Do not retry
+    local static concat literal slot guarding without atomic publication and
+    losing-global-ref cleanup evidence.
