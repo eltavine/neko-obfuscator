@@ -34,6 +34,7 @@ final class NativeFastObjectAccessEmitter {
         sb.append("""
 static uintptr_t g_neko_string_klass_bits = 0;
 static uintptr_t g_neko_byte_array_klass_bits = 0;
+static size_t g_neko_string_instance_bytes = 0;
 static jboolean g_neko_fast_string_alloc_ready = JNI_FALSE;
 
 /* TLAB-NULL fix: NJX-cached java.lang.String.concat(String) Method* + entry
@@ -133,6 +134,259 @@ NEKO_FAST_INLINE void neko_store_oop_raw(char *oop, jlong offset, void *value) {
     }
 }
 
+NEKO_FAST_INLINE void *neko_load_oop_field_raw(char *oop, jlong offset) {
+    char *field_addr;
+    void *value;
+    if (oop == NULL || offset <= 0) return NULL;
+    field_addr = oop + offset;
+    if (g_hotspot.compressed_oops_enabled) {
+        value = neko_decode_narrow_oop(*(uint32_t*)field_addr);
+    } else {
+        value = *(void**)field_addr;
+    }
+    return neko_barrier_load_oop_field(field_addr, value);
+}
+
+NEKO_FAST_INLINE void neko_copy_string_payload(
+    char *dst_array_oop,
+    jint dst_char_index,
+    jbyte dst_coder,
+    char *src_array_oop,
+    jint src_chars,
+    jbyte src_coder
+) {
+    size_t base;
+    uint8_t *dst;
+    uint8_t *src;
+    if (src_chars <= 0) return;
+    if (dst_array_oop == NULL || src_array_oop == NULL || neko_const_prim_array_base(NEKO_PRIM_B) < 0) {
+        fprintf(stderr, "[neko-direct] raw String graph copy layout unavailable dst=%p src=%p base=%d\\n",
+            (void*)dst_array_oop, (void*)src_array_oop, (int)neko_const_prim_array_base(NEKO_PRIM_B));
+        abort();
+    }
+    base = (size_t)neko_const_prim_array_base(NEKO_PRIM_B);
+    dst = (uint8_t*)dst_array_oop + base + (((size_t)dst_char_index) << (((uint8_t)dst_coder) & 1u));
+    src = (uint8_t*)src_array_oop + base;
+    if ((((uint8_t)src_coder) & 1u) == (((uint8_t)dst_coder) & 1u)) {
+        memcpy(dst, src, ((size_t)src_chars) << (((uint8_t)src_coder) & 1u));
+        return;
+    }
+    if ((((uint8_t)src_coder) & 1u) == 0u && (((uint8_t)dst_coder) & 1u) == 1u) {
+        for (jint i = 0; i < src_chars; i++) {
+            dst[((size_t)i) * 2u] = src[i];
+            dst[((size_t)i) * 2u + 1u] = 0u;
+        }
+        return;
+    }
+    fprintf(stderr, "[neko-direct] unsupported raw String graph coder copy src=%d dst=%d chars=%d\\n",
+        (int)src_coder, (int)dst_coder, (int)src_chars);
+    abort();
+}
+
+NEKO_FAST_INLINE jobject neko_build_raw_string_graph_store_local(
+    void *thread,
+    JNIEnv *env,
+    jobject *slot_ref,
+    jstring left,
+    jstring right,
+    jlong valueOffset,
+    jlong coderOffset
+) {
+    char *left_oop;
+    char *right_oop;
+    char *left_value;
+    char *right_value;
+    char *array_oop;
+    char *string_oop;
+    jarray local_array;
+    jobject array_handle;
+    jobject string_handle;
+    jint left_bytes;
+    jint right_bytes;
+    jint left_chars;
+    jint right_chars;
+    jint total_chars;
+    jint payload_bytes;
+    jbyte left_coder;
+    jbyte right_coder;
+    jbyte result_coder;
+    size_t array_bytes;
+    if (NEKO_UNLIKELY(thread == NULL || env == NULL || slot_ref == NULL || left == NULL || right == NULL
+        || valueOffset <= 0 || coderOffset <= 0)) {
+        fprintf(stderr, "[neko-direct] raw String graph precondition failed thread=%p env=%p slot=%p left=%p right=%p value=%lld coder=%lld\\n",
+            thread, (void*)env, (void*)slot_ref, (void*)left, (void*)right,
+            (long long)valueOffset, (long long)coderOffset);
+        abort();
+    }
+    if (NEKO_UNLIKELY(!neko_const_initialized()
+        || ((neko_const_fast_bits() & NEKO_FAST_PRIM_ARRAY) == 0 && !neko_const_use_zgc())
+        || neko_const_array_length_offset() < 0
+        || neko_const_prim_array_base(NEKO_PRIM_B) < 0)) {
+        fprintf(stderr, "[neko-direct] raw String graph array layout unavailable init=%d fast=0x%x lenOff=%d base=%d\\n",
+            (int)neko_const_initialized(), (unsigned)neko_const_fast_bits(),
+            (int)neko_const_array_length_offset(), (int)neko_const_prim_array_base(NEKO_PRIM_B));
+        abort();
+    }
+    neko_ensure_string_alloc_bits(env);
+    if (NEKO_UNLIKELY(!g_neko_fast_string_alloc_ready
+        || g_neko_string_klass_bits == 0
+        || g_neko_byte_array_klass_bits == 0
+        || g_neko_string_instance_bytes == 0)) {
+        fprintf(stderr, "[neko-direct] raw String graph allocation metadata unavailable ready=%d stringBits=0x%llx byteBits=0x%llx stringBytes=%zu\\n",
+            (int)g_neko_fast_string_alloc_ready,
+            (unsigned long long)g_neko_string_klass_bits,
+            (unsigned long long)g_neko_byte_array_klass_bits,
+            g_neko_string_instance_bytes);
+        abort();
+    }
+    left_oop = (char*)neko_handle_oop((jobject)left);
+    right_oop = (char*)neko_handle_oop((jobject)right);
+    if (NEKO_UNLIKELY(left_oop == NULL || right_oop == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph input handle unresolved left=%p/%p right=%p/%p\\n",
+            (void*)left, (void*)left_oop, (void*)right, (void*)right_oop);
+        abort();
+    }
+    left_value = (char*)neko_load_oop_field_raw(left_oop, valueOffset);
+    right_value = (char*)neko_load_oop_field_raw(right_oop, valueOffset);
+    if (NEKO_UNLIKELY(left_value == NULL || right_value == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph value array unresolved leftValue=%p rightValue=%p\\n",
+            (void*)left_value, (void*)right_value);
+        abort();
+    }
+    left_coder = (jbyte)(*(jbyte*)(left_oop + coderOffset) & 1);
+    right_coder = (jbyte)(*(jbyte*)(right_oop + coderOffset) & 1);
+    left_bytes = *(jint*)(left_value + neko_const_array_length_offset());
+    right_bytes = *(jint*)(right_value + neko_const_array_length_offset());
+    if (NEKO_UNLIKELY(left_bytes < 0 || right_bytes < 0)) {
+        fprintf(stderr, "[neko-direct] raw String graph negative byte length left=%d right=%d\\n",
+            (int)left_bytes, (int)right_bytes);
+        abort();
+    }
+    left_chars = left_bytes >> ((jint)((uint8_t)left_coder) & 1);
+    right_chars = right_bytes >> ((jint)((uint8_t)right_coder) & 1);
+    if (NEKO_UNLIKELY(left_chars > INT32_MAX - right_chars)) {
+        fprintf(stderr, "[neko-direct] raw String graph char length overflow left=%d right=%d\\n",
+            (int)left_chars, (int)right_chars);
+        abort();
+    }
+    total_chars = left_chars + right_chars;
+    result_coder = (jbyte)((left_coder | right_coder) & 1);
+    if (NEKO_UNLIKELY(result_coder != 0 && total_chars > (INT32_MAX >> 1))) {
+        fprintf(stderr, "[neko-direct] raw String graph byte length overflow chars=%d coder=%d\\n",
+            (int)total_chars, (int)result_coder);
+        abort();
+    }
+    payload_bytes = total_chars << ((jint)((uint8_t)result_coder) & 1);
+    array_bytes = (size_t)neko_const_prim_array_base(NEKO_PRIM_B) + (size_t)payload_bytes;
+    local_array = NULL;
+    string_handle = NULL;
+    array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
+    if (array_oop == NULL) {
+        array_oop = neko_alloc_jbyte_array_oop_slow(env, payload_bytes, &local_array);
+    } else {
+        neko_init_oop_header(array_oop, g_neko_byte_array_klass_bits);
+        *(jint*)(array_oop + neko_const_prim_array_base(NEKO_PRIM_B) - 4) = payload_bytes;
+    }
+    if (NEKO_UNLIKELY(array_oop == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph byte[] allocation failed bytes=%d totalBytes=%zu slowRef=%p\\n",
+            (int)payload_bytes, array_bytes, (void*)local_array);
+        abort();
+    }
+    array_handle = local_array != NULL
+        ? (jobject)local_array
+        : neko_direct_oop_to_handle_origin(thread, array_oop, NEKO_HANDLE_ORIGIN_PRIMITIVE_ARRAY_ALLOC);
+    if (NEKO_UNLIKELY(array_handle == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph byte[] root publication failed\\n");
+        abort();
+    }
+    array_oop = (char*)neko_handle_oop(array_handle);
+    if (NEKO_UNLIKELY(array_oop == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph rooted byte[] unresolved handle=%p\\n", (void*)array_handle);
+        abort();
+    }
+    left_oop = (char*)neko_handle_oop((jobject)left);
+    right_oop = (char*)neko_handle_oop((jobject)right);
+    if (NEKO_UNLIKELY(left_oop == NULL || right_oop == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph input unresolved after byte[] allocation left=%p/%p right=%p/%p\\n",
+            (void*)left, (void*)left_oop, (void*)right, (void*)right_oop);
+        abort();
+    }
+    left_value = (char*)neko_load_oop_field_raw(left_oop, valueOffset);
+    right_value = (char*)neko_load_oop_field_raw(right_oop, valueOffset);
+    if (NEKO_UNLIKELY(left_value == NULL || right_value == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph value array unresolved after byte[] allocation leftValue=%p rightValue=%p\\n",
+            (void*)left_value, (void*)right_value);
+        abort();
+    }
+    neko_copy_string_payload(array_oop, 0, result_coder, left_value, left_chars, left_coder);
+    neko_copy_string_payload(array_oop, left_chars, result_coder, right_value, right_chars, right_coder);
+    string_oop = (char*)neko_fast_tlab_alloc(thread, g_neko_string_instance_bytes);
+    if (string_oop == NULL) {
+        neko_refill_tlab_with_slow_byte_array(env,
+            g_neko_string_instance_bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)g_neko_string_instance_bytes);
+        string_oop = (char*)neko_fast_tlab_alloc(thread, g_neko_string_instance_bytes);
+    }
+    if (string_oop == NULL) {
+        jclass string_mirror;
+        jvalue alloc_arg;
+        jvalue alloc_result;
+        string_mirror = neko_resolve_class_mirror_with_env(env, "java/lang/String", NULL, NULL);
+        if (NEKO_UNLIKELY(string_mirror == NULL || neko_exception_check(env))) {
+            if (neko_exception_check(env)) neko_exception_clear_direct(env);
+            fprintf(stderr, "[neko-direct] raw String graph String mirror unavailable for managed allocation\\n");
+            abort();
+        }
+        if (!g_neko_unsafe_allocate_instance_ready) {
+            neko_ensure_unsafe_allocate_instance_njx_cache(env);
+        }
+        if (NEKO_UNLIKELY(!g_neko_unsafe_allocate_instance_ready
+            || g_neko_unsafe_instance_global == NULL
+            || g_neko_unsafe_allocate_instance_method == NULL
+            || g_neko_unsafe_allocate_instance_entry == NULL)) {
+            fprintf(stderr, "[neko-direct] raw String graph Unsafe.allocateInstance cache unavailable ready=%d unsafe=%p method=%p entry=%p\\n",
+                (int)g_neko_unsafe_allocate_instance_ready, (void*)g_neko_unsafe_instance_global,
+                g_neko_unsafe_allocate_instance_method, g_neko_unsafe_allocate_instance_entry);
+            abort();
+        }
+        alloc_arg.l = (jobject)string_mirror;
+        alloc_result = neko_njx_V_L_L(thread, env,
+            g_neko_unsafe_allocate_instance_method,
+            g_neko_unsafe_allocate_instance_entry,
+            g_neko_unsafe_instance_global, &alloc_arg);
+        if (NEKO_UNLIKELY(alloc_result.l == NULL || neko_exception_check(env))) {
+            if (neko_exception_check(env)) neko_exception_clear_direct(env);
+            fprintf(stderr, "[neko-direct] raw String graph Unsafe.allocateInstance failed bytes=%zu\\n",
+                g_neko_string_instance_bytes);
+            abort();
+        }
+        string_handle = alloc_result.l;
+        string_oop = (char*)neko_handle_oop(string_handle);
+        if (NEKO_UNLIKELY(string_oop == NULL)) {
+            fprintf(stderr, "[neko-direct] raw String graph managed String handle unresolved handle=%p\\n",
+                (void*)string_handle);
+            abort();
+        }
+    } else {
+        neko_init_oop_header(string_oop, g_neko_string_klass_bits);
+    }
+    array_oop = (char*)neko_handle_oop(array_handle);
+    if (NEKO_UNLIKELY(array_oop == NULL)) {
+        fprintf(stderr, "[neko-direct] raw String graph byte[] unresolved after String allocation handle=%p stringHandle=%p\\n",
+            (void*)array_handle, (void*)string_handle);
+        abort();
+    }
+    neko_store_oop_raw(string_oop, valueOffset, array_oop);
+    *(jbyte*)(string_oop + coderOffset) = result_coder;
+    return neko_store_local_oop_raw(thread, slot_ref, string_oop);
+}
+
+NEKO_FAST_INLINE jboolean neko_raw_string_graph_prereq_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        cached = getenv("NEKO_RAW_STRING_GRAPH_PREREQ") != NULL ? 1 : 0;
+    }
+    return cached != 0 ? JNI_TRUE : JNI_FALSE;
+}
 
 NEKO_FAST_INLINE jobject neko_require_fast_string_concat(
     void *thread,
@@ -179,6 +433,9 @@ NEKO_FAST_INLINE jobject neko_require_fast_string_concat_store_local(
      * raw oop is published directly into an already prepared translated local
      * root when the bytecode consumer is an immediate ASTORE.
      */
+    if (neko_raw_string_graph_prereq_enabled() && left != NULL && right != NULL) {
+        return neko_build_raw_string_graph_store_local(thread, env, slot_ref, left, right, valueOffset, coderOffset);
+    }
     if (g_neko_string_concat_ready && left != NULL && right != NULL) {
         jvalue concat_arg;
         void *concat_raw;

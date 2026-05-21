@@ -2430,7 +2430,7 @@ Performance and GC gates:
   or generic lhs/rhs coder mixing. Selected P45/NPT-3cg to implement the next
   generic prerequisite without wiring it into hot concat dispatch yet.
 
-- [ ] P45 Build raw newborn String graph prerequisite without changing concat
+- [x] P45 Build raw newborn String graph prerequisite without changing concat
   dispatch.
   Add the smallest generic raw newborn `String` graph construction surface
   needed before replacing `String.concat`: allocate a fresh byte array and a
@@ -2465,3 +2465,29 @@ Performance and GC gates:
   still call the original Method*/entry, no forbidden markers appear, and the
   row records the exact remaining exception/allocation semantics before a later
   row may replace the hot concat dispatch.
+  Completion evidence 2026-05-22: implemented a default-off raw newborn
+  `String` graph helper behind `NEKO_RAW_STRING_GRAPH_PREREQ`; default
+  production concat dispatch still emits the original `neko_njx_V_L_L(...)`
+  Method*/entry path. The helper allocates and roots a fresh byte array,
+  reloads lhs/rhs value pointers after any allocation-capable transition,
+  copies/inflates Latin1/UTF16 payloads, allocates a fresh `String` with a TLAB
+  fast path and existing managed allocation cache only when needed, reloads the
+  byte-array handle after String allocation, writes `String.value`/`coder`, and
+  publishes the result into the prepared local root. Focused validation passed:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home-native-coverage bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest --tests dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_rawStringGraphOptInRunsConcatShapes -Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/native-run-tmp --rerun-tasks`.
+  The focused runtime fixture printed `raw-string-graph-ok` under the opt-in
+  helper after exercising Latin1+Latin1, Latin1+UTF16, empty lhs, and empty rhs
+  concat shapes. Fresh direct smokes passed: opt-in TEST native `Calc: 71ms`,
+  default TEST native `Calc: 65ms`, and obfusjack reached
+  `=== All tests completed ===`. G1/Serial/Parallel TEST smokes passed with
+  `Calc: 64ms`, `58ms`, and `60ms`. Strict generated-C grep over
+  `run-37288355022467`, `run-37292658797327`, and `run-37295214600332` found
+  no `NEKO_JNI_FN_PTR`, `(*env)->`, or `env->`. ZGC and Shenandoah strict runs
+  failed closed with the existing diagnostics: `ZGC barrier capability missing`
+  / `Shenandoah barrier capability missing`, `gc barrier path not ready`, and
+  `[neko-bootstrap] native layout initialization failed`.
+  Remaining semantics before default hot concat replacement: Java-visible
+  `String.concat` empty-side identity, Java exception delivery for allocation
+  failures, and final default dispatch replacement are not claimed by this
+  prerequisite; missing layout/allocation/cache/barrier capability still hard
+  aborts.

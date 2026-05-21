@@ -210,6 +210,7 @@ static uintptr_t neko_klass_header_bits(void *klass) {
 
 static void neko_ensure_string_alloc_bits(JNIEnv *env) {
     void *string_klass;
+    jint layout_helper;
     if (g_neko_fast_string_alloc_ready) return;
     if (!g_hotspot.initialized
         || (g_hotspot.fast_bits & NEKO_HOTSPOT_FAST_RAW_HEAP) == 0
@@ -221,10 +222,22 @@ static void neko_ensure_string_alloc_bits(JNIEnv *env) {
         abort();
     }
     string_klass = neko_resolve_class_with_env(env, "java/lang/String", NULL);
+    if (g_neko_method_layout.off_klass_layout_helper < 0 || string_klass == NULL) {
+        fprintf(stderr, "[neko-bind] direct String allocation layout helper unavailable klass=%p off=%td\\n",
+            string_klass, g_neko_method_layout.off_klass_layout_helper);
+        abort();
+    }
+    layout_helper = *(jint*)((char*)string_klass + g_neko_method_layout.off_klass_layout_helper);
+    if (layout_helper <= 0) {
+        fprintf(stderr, "[neko-bind] direct String allocation invalid layout helper klass=%p layout=%d\\n",
+            string_klass, (int)layout_helper);
+        abort();
+    }
     g_neko_string_klass_bits = neko_klass_header_bits(string_klass);
     g_neko_byte_array_klass_bits = g_hotspot.primitive_array_klass_bits[NEKO_PRIM_B];
+    g_neko_string_instance_bytes = (size_t)layout_helper * sizeof(void*);
     g_neko_fast_string_alloc_ready =
-        (g_neko_string_klass_bits != 0 && g_neko_byte_array_klass_bits != 0) ? JNI_TRUE : JNI_FALSE;
+        (g_neko_string_klass_bits != 0 && g_neko_byte_array_klass_bits != 0 && g_neko_string_instance_bytes != 0) ? JNI_TRUE : JNI_FALSE;
     if (!g_neko_fast_string_alloc_ready) {
         fprintf(stderr, "[neko-bind] direct String allocation klass bits unavailable\\n");
         abort();
@@ -762,8 +775,14 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
     }
     neko_fill_string_bytes((uint8_t*)array_oop + g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B], modutf, len, shape.latin1);
     ref_size = g_hotspot.compressed_oops_enabled ? 4u : sizeof(void*);
-    string_bytes = (size_t)value_field.offset + ref_size;
-    if ((size_t)coder_field.offset + 1u > string_bytes) string_bytes = (size_t)coder_field.offset + 1u;
+    string_bytes = g_neko_string_instance_bytes;
+    if (string_bytes == 0
+        || (size_t)value_field.offset + ref_size > string_bytes
+        || (size_t)coder_field.offset + 1u > string_bytes) {
+        fprintf(stderr, "[neko-bind] java/lang/String instance size too small bytes=%zu value=%u coder=%u\\n",
+            string_bytes, value_field.offset, coder_field.offset);
+        abort();
+    }
     string_oop = (char*)neko_fast_tlab_alloc(thread, string_bytes);
     if (string_oop == NULL) {
         neko_refill_tlab_with_slow_byte_array(env, string_bytes > (size_t)INT32_MAX ? INT32_MAX : (jint)string_bytes);

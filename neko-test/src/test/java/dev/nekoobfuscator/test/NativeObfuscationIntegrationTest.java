@@ -288,6 +288,41 @@ class NativeObfuscationIntegrationTest {
 
     @Test
     @Timeout(2)
+    void nativeObfuscation_rawStringGraphOptInRunsConcatShapes() throws Exception {
+        Path workDir = NativeObfuscationHelper.nativeWorkDir();
+        Path input = workDir.resolve("raw-string-graph.jar");
+        Path output = workDir.resolve("raw-string-graph-native.jar");
+        writeRawStringGraphJar(input);
+
+        NativeObfuscationHelper.ObfuscationRunResult obfuscation = NativeObfuscationHelper.obfuscateJar(
+            input,
+            output,
+            NativeObfuscationHelper.configsDir().resolve("native-test.yml"),
+            Duration.ofMinutes(2)
+        );
+        String obfuscationLog = obfuscation.combinedOutput();
+        assertTrue(obfuscationLog.contains("Native stage: translated="), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("Native compilation produced no libraries"), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("translated=0"), () -> obfuscationLog);
+
+        NativeObfuscationHelper.JarRunResult result = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("raw-string-graph-native.stdout.log"),
+            workDir.resolve("raw-string-graph-native.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_RAW_STRING_GRAPH_PREREQ", "1")
+        );
+
+        String combined = result.combinedOutput();
+        assertEquals(0, result.exitCode(), () -> combined);
+        NativeObfuscationHelper.assertNoFatalNativeCrash(result);
+        assertTrue(combined.contains("raw-string-graph-ok"), () -> combined);
+    }
+
+    @Test
+    @Timeout(2)
     void nativeObfuscation_dependencyCallerObservesTranslatedStackTrace() throws Exception {
         Path workDir = NativeObfuscationHelper.nativeWorkDir();
         Path input = workDir.resolve("dependency-shadow-target.jar");
@@ -488,6 +523,19 @@ class NativeObfuscationIntegrationTest {
         try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(jar), manifest)) {
             out.putNextEntry(new JarEntry("pkg/ImplicitExceptionRuntime.class"));
             out.write(implicitExceptionsClassBytes());
+            out.closeEntry();
+        }
+    }
+
+    private static void writeRawStringGraphJar(Path jar) throws Exception {
+        Files.createDirectories(jar.getParent());
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        manifest.getMainAttributes().put(Attributes.Name.MAIN_CLASS, "pkg.RawStringGraphRuntime");
+
+        try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(jar), manifest)) {
+            out.putNextEntry(new JarEntry("pkg/RawStringGraphRuntime.class"));
+            out.write(rawStringGraphClassBytes());
             out.closeEntry();
         }
     }
@@ -773,6 +821,66 @@ class NativeObfuscationIntegrationTest {
 
         cw.visitEnd();
         return cw.toByteArray();
+    }
+
+    private static byte[] rawStringGraphClassBytes() {
+        String owner = "pkg/RawStringGraphRuntime";
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+
+        var init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        init.visitCode();
+        init.visitVarInsn(Opcodes.ALOAD, 0);
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        init.visitInsn(Opcodes.RETURN);
+        init.visitMaxs(0, 0);
+        init.visitEnd();
+
+        var main = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null);
+        Label fail = new Label();
+        main.visitCode();
+        emitStringConcatCase(main, fail, "ab", "cd", "abcd", 1);
+        emitStringConcatCase(main, fail, "ab", "水星", "ab水星", 1);
+        emitStringConcatCase(main, fail, "", "rhs", "rhs", 1);
+        emitStringConcatCase(main, fail, "lhs", "", "lhs", 1);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("raw-string-graph-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitLabel(fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("raw-string-graph-bad");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.ICONST_1);
+        main.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "exit", "(I)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitMaxs(0, 0);
+        main.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
+    private static void emitStringConcatCase(
+        MethodVisitor main,
+        Label fail,
+        String left,
+        String right,
+        String expected,
+        int local
+    ) {
+        main.visitLdcInsn(left);
+        main.visitLdcInsn(right);
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;", false);
+        main.visitVarInsn(Opcodes.ASTORE, local);
+        main.visitVarInsn(Opcodes.ALOAD, local);
+        main.visitLdcInsn(expected);
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+        main.visitJumpInsn(Opcodes.IFEQ, fail);
+        main.visitVarInsn(Opcodes.ALOAD, local);
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false);
+        main.visitLdcInsn(expected.length());
+        main.visitJumpInsn(Opcodes.IF_ICMPNE, fail);
     }
 
     private static byte[] objectFieldStoreClassBytes() {
