@@ -856,6 +856,11 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("#ifndef NEKO_HANDLE_AUDIT"), source);
         assertTrue(source.contains("handle_direct_overflow_alloc"), source);
         assertTrue(source.contains("NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_total_count);"), source);
+        assertTrue(source.contains("#define NEKO_JNIH_RECYCLE_MAX 64"), source);
+        assertTrue(source.contains("#define NEKO_JNIH_BATCH_BLOCKS 64"), source);
+        assertTrue(source.contains("void *neko_take_recycled_jnih_block(void)"), source);
+        assertTrue(source.contains("void neko_recycle_jnih_block(void *block)"), source);
+        assertTrue(source.contains("void *neko_alloc_jnih_block(jboolean *new_allocation)"), source);
         assertTrue(source.contains("static void neko_raise_implicit_exception(void *thread, JNIEnv *env, jclass cls, void *ctor_method, void *ctor_entry"));
         assertFalse(source.contains("static inline jint neko_throw("), source);
         assertFalse(source.contains("static inline jint neko_throw_new("), source);

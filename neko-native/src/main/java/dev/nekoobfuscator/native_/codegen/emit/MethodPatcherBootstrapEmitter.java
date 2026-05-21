@@ -721,6 +721,112 @@ static jboolean neko_method_layout_init(JNIEnv *env) {
  * stall on the indirect call edge per dispatch, which adds up across hot
  * loops in obfusjack microbenches. */
 
+#define NEKO_JNIH_RECYCLE_MAX 64
+#define NEKO_JNIH_BATCH_BLOCKS 64
+typedef struct neko_jnih_slab_header {
+    struct neko_jnih_slab_header *next;
+    char *block_start;
+    char *block_end;
+} neko_jnih_slab_header_t;
+__attribute__((visibility("hidden"))) __thread void *g_neko_recycled_jnih_blocks = NULL;
+__attribute__((visibility("hidden"))) __thread int32_t g_neko_recycled_jnih_block_count = 0;
+__attribute__((visibility("hidden"))) __thread neko_handle_save_t *g_neko_current_handle_scope = NULL;
+
+static inline __attribute__((always_inline))
+void *neko_take_recycled_jnih_block(void) {
+    void *block;
+    void *next;
+    if (g_neko_method_layout.sizeof_JNIHandleBlock <= 0
+        || g_neko_method_layout.off_jnih_block_next <= 0) {
+        return NULL;
+    }
+    block = g_neko_recycled_jnih_blocks;
+    if (block == NULL) return NULL;
+    next = *(void**)((char*)block + g_neko_method_layout.off_jnih_block_next);
+    g_neko_recycled_jnih_blocks = next;
+    if (g_neko_recycled_jnih_block_count > 0) {
+        g_neko_recycled_jnih_block_count--;
+    }
+    memset(block, 0, g_neko_method_layout.sizeof_JNIHandleBlock);
+    return block;
+}
+
+static inline __attribute__((always_inline))
+void neko_recycle_jnih_block(void *block) {
+    if (block == NULL) return;
+    if (g_neko_method_layout.sizeof_JNIHandleBlock <= 0
+        || g_neko_method_layout.off_jnih_block_next <= 0
+        || g_neko_recycled_jnih_block_count >= NEKO_JNIH_RECYCLE_MAX) {
+        free(block);
+        return;
+    }
+    memset(block, 0, g_neko_method_layout.sizeof_JNIHandleBlock);
+    *(void**)((char*)block + g_neko_method_layout.off_jnih_block_next) =
+        g_neko_recycled_jnih_blocks;
+    g_neko_recycled_jnih_blocks = block;
+    g_neko_recycled_jnih_block_count++;
+}
+
+static inline __attribute__((always_inline))
+size_t neko_jnih_slab_header_size(void) {
+    return (sizeof(neko_jnih_slab_header_t) + sizeof(void*) - 1u) & ~(sizeof(void*) - 1u);
+}
+
+static inline __attribute__((always_inline))
+void neko_free_scoped_jnih_slabs(neko_handle_save_t *scope) {
+    neko_jnih_slab_header_t *slab;
+    if (scope == NULL) return;
+    slab = (neko_jnih_slab_header_t*)scope->scope_slabs;
+    while (slab != NULL) {
+        neko_jnih_slab_header_t *next = slab->next;
+        free(slab);
+        slab = next;
+    }
+    scope->scope_slabs = NULL;
+    scope->scope_cursor = NULL;
+    scope->scope_end = NULL;
+}
+
+static inline __attribute__((always_inline))
+void *neko_alloc_jnih_block(jboolean *new_allocation) {
+    size_t block_size;
+    neko_handle_save_t *scope;
+    if (new_allocation != NULL) *new_allocation = JNI_FALSE;
+    if (g_neko_method_layout.sizeof_JNIHandleBlock <= 0
+        || g_neko_method_layout.off_jnih_block_next <= 0) {
+        return NULL;
+    }
+    block_size = (size_t)g_neko_method_layout.sizeof_JNIHandleBlock;
+    scope = g_neko_current_handle_scope;
+    if (scope != NULL) {
+        char *cursor = scope->scope_cursor;
+        if (cursor == NULL || cursor + block_size > scope->scope_end) {
+            size_t header_size = neko_jnih_slab_header_size();
+            size_t payload_size = block_size * (size_t)NEKO_JNIH_BATCH_BLOCKS;
+            neko_jnih_slab_header_t *slab = (neko_jnih_slab_header_t*)calloc(1, header_size + payload_size);
+            if (slab == NULL) return NULL;
+            slab->next = (neko_jnih_slab_header_t*)scope->scope_slabs;
+            slab->block_start = (char*)slab + header_size;
+            slab->block_end = slab->block_start + payload_size;
+            scope->scope_slabs = slab;
+            scope->scope_cursor = slab->block_start;
+            scope->scope_end = slab->block_end;
+            cursor = scope->scope_cursor;
+            if (new_allocation != NULL) *new_allocation = JNI_TRUE;
+        }
+        scope->scope_cursor = cursor + block_size;
+        return cursor;
+    }
+
+    {
+        void *block = neko_take_recycled_jnih_block();
+        if (block != NULL) return block;
+        block = calloc(1, block_size);
+        if (block != NULL && new_allocation != NULL) *new_allocation = JNI_TRUE;
+        return block;
+    }
+}
+
 static inline __attribute__((always_inline))
 void neko_handle_save(void *thread, neko_handle_save_t *save) {
     save->thread = thread;
@@ -728,6 +834,11 @@ void neko_handle_save(void *thread, neko_handle_save_t *save) {
     save->saved_next = NULL;
     save->saved_last = NULL;
     save->saved_top = 0;
+    save->prev_scope = g_neko_current_handle_scope;
+    save->scope_slabs = NULL;
+    save->scope_cursor = NULL;
+    save->scope_end = NULL;
+    g_neko_current_handle_scope = save;
     if (!g_neko_handle_push_ready || thread == NULL) return;
     void *block = *(void**)((char*)thread + g_neko_off_thread_active_handles);
     if (block == NULL) return;
@@ -744,22 +855,30 @@ static inline __attribute__((always_inline))
 void neko_handle_restore(neko_handle_save_t *save) {
     void *thread;
     void *active;
-    if (save->block == NULL) return;
+    if (save->block == NULL) {
+        neko_free_scoped_jnih_slabs(save);
+        g_neko_current_handle_scope = (neko_handle_save_t*)save->prev_scope;
+        return;
+    }
     thread = save->thread;
     if (thread != NULL && g_neko_off_thread_active_handles > 0 && g_neko_method_layout.off_jnih_block_next > 0) {
         active = *(void**)((char*)thread + g_neko_off_thread_active_handles);
+        *(void**)((char*)thread + g_neko_off_thread_active_handles) = save->block;
         while (active != NULL && active != save->block) {
             void *next = *(void**)((char*)active + g_neko_method_layout.off_jnih_block_next);
-            free(active);
+            if (save->scope_slabs == NULL) {
+                neko_recycle_jnih_block(active);
+            }
             active = next;
         }
-        *(void**)((char*)thread + g_neko_off_thread_active_handles) = save->block;
     }
     if (g_neko_method_layout.off_jnih_block_next > 0) {
         void *next = *(void**)((char*)save->block + g_neko_method_layout.off_jnih_block_next);
         while (next != NULL && next != save->saved_next) {
             void *after = *(void**)((char*)next + g_neko_method_layout.off_jnih_block_next);
-            free(next);
+            if (save->scope_slabs == NULL) {
+                neko_recycle_jnih_block(next);
+            }
             next = after;
         }
         *(void**)((char*)save->block + g_neko_method_layout.off_jnih_block_next) = save->saved_next;
@@ -769,6 +888,8 @@ void neko_handle_restore(neko_handle_save_t *save) {
         ptrdiff_t off_last = g_neko_method_layout.off_jnih_block_next + 8;
         *(void**)((char*)save->block + off_last) = save->saved_last != NULL ? save->saved_last : save->block;
     }
+    neko_free_scoped_jnih_slabs(save);
+    g_neko_current_handle_scope = (neko_handle_save_t*)save->prev_scope;
 }
 
 static inline __attribute__((always_inline))
@@ -812,7 +933,7 @@ void *neko_handle_push(void *thread, void *raw_oop) {
     int32_t top = *top_ptr;
     if (top >= g_neko_jnih_block_capacity) {
         if (g_neko_method_layout.sizeof_JNIHandleBlock > 0 && g_neko_method_layout.off_jnih_block_next > 0) {
-            void *new_block = calloc(1, g_neko_method_layout.sizeof_JNIHandleBlock);
+            void *new_block = neko_alloc_jnih_block(NULL);
             if (new_block != NULL) {
                 void **new_handles = (void**)((char*)new_block + g_neko_off_jnih_block_handles);
                 new_handles[0] = raw_oop;

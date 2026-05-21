@@ -892,6 +892,41 @@ Performance and GC gates:
     non-audit TEST reported `handle.audit.build=false`, completed with
     `Calc: 73ms`, and emitted no stats line. This justifies a generic P11
     reusable-block/window implementation as the next P11 substep.
+  - Implementation row recorded 2026-05-22: NPT-3by will replace only the
+    repeated overflow `calloc` in `neko_direct_oop_to_handle` with scoped
+    native-owned JNIHandleBlock slab allocation plus a bounded per-thread
+    recycle list. Fresh opt-in evidence from the first recycle-only attempt
+    showed TEST still at `handle_direct_overflow_alloc=18336`, proving TEST
+    creates its overflow blocks inside a long translated invocation where
+    end-of-invocation recycling cannot help. The revised generic path may batch
+    blocks only inside a `neko_handle_save`/`neko_handle_restore` scope, may
+    recycle only blocks above the saved active block or between the saved block
+    and `saved_next`, must never recycle caller/VM-owned pre-existing blocks,
+    must clear stored oop slots before reuse, must free scoped slabs at restore,
+    must preserve `_top`, `_next`, `_last`, active-handle restoration, GC
+    visibility while handles are live, and hard-abort behavior when no block can
+    be obtained. Validation: focused generator/audit tests, fresh TEST and
+    obfusjack generation/runtime, opt-in handle audit proving overflow
+    allocation calls drop while fast-slot/total counts remain coherent, default
+    timing compare, and forbidden-JNI/fallback inspection.
+  - Completed 2026-05-22: NPT-3by implemented scoped native-owned
+    JNIHandleBlock slab allocation under the existing handle save/restore
+    window, retaining the bounded no-scope recycle list. Focused
+    `CCodeGeneratorTest` and `NativeGeneratedCHotPathAuditTest` passed. Fresh
+    default TEST artifact `build/npt-3by-slab/TEST-default-r2.jar` came from
+    `build/neko-native-work/run-32502768700627` with `translated=49 rejected=0`,
+    `handle.audit.build=false`, and lib `1079896`; default obfusjack
+    `build/npt-3by-slab/obfusjack-default-r2.jar` came from
+    `run-32505682956586` with `translated=93 rejected=0`,
+    `handle.audit.build=false`, and lib `1880200`. Strict generated-C grep for
+    `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` returned no matches. Default TEST
+    x5 Calc `68/70/76/78/67` ms, median `70`; default obfusjack x5 Platform
+    `44/42/43/44/47` ms, median `44`, Virtual `36/37/44/38/41` ms, median `38`,
+    Seq `17/17/18/17/17` ms, median `17`. Fresh opt-in audit artifacts from
+    `run-32559694871235` and `run-32562676424869` were `handle.audit.build=true`;
+    TEST dominant `handle_direct_overflow_alloc` dropped from NPT-3bx `18336`
+    to `286`, and obfusjack dropped from `8587` to `898`, both with
+    `handle_direct_unavailable=0`.
   - Implementation row recorded 2026-05-21: NPT-3at will reduce translated
     local-root handle reservation only for methods whose ABI and bytecode prove
     they do not store references in locals. Source evidence: `NativeTranslator`

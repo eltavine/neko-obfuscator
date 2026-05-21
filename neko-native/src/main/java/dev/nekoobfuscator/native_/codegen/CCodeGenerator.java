@@ -785,7 +785,7 @@ public final class CCodeGenerator {
          * here — extern would shadow the inline definitions and force the
          * dispatcher to make a real function call. */
         sb.append(
-            "typedef struct { void *thread; void *block; void *saved_next; void *saved_last; int32_t saved_top; } neko_handle_save_t;\n"
+            "typedef struct { void *thread; void *block; void *saved_next; void *saved_last; int32_t saved_top; void *prev_scope; void *scope_slabs; char *scope_cursor; char *scope_end; } neko_handle_save_t;\n"
         );
         /* T4.6 — neko_handle_save / _restore are defined inline in
          * methodPatcherEmitter (rendered later). The T4.6 window primitives

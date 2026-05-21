@@ -2025,6 +2025,59 @@ the source plan that owns the changed path before it can be considered complete.
   to justify a generic reusable-block/window implementation; do not defer P11
   on zero-overflow grounds.
 
+### [x] NPT-3by: P11 batch native-owned JNIHandleBlock overflow blocks
+
+- Scope: reduce the measured P11 overflow allocation cost by batching and
+  recycling only JNIHandleBlock memory allocated by generated native code. This
+  is a generic scoped block allocator below the existing native/bootstrap
+  surface, not a JNI fallback and not a benchmark-specific capacity tweak.
+- Required evidence: NPT-3bx opt-in audit proves overflow allocation is hot:
+  TEST `handle_direct_overflow_alloc=18336` and obfusjack
+  `handle_direct_overflow_alloc=8587`, both with `handle_direct_max_top=32` and
+  `handle_direct_max_capacity=32`. Source evidence must show restore knows the
+  saved active block and `saved_next`, so blocks above that boundary are
+  native-owned by the current translated scope and may be cleared and recycled
+  only after they are removed from active JNI handle visibility. Fresh
+  recycle-only audit then reported TEST still at
+  `handle_direct_overflow_alloc=18336`, proving long single-invocation handle
+  bursts need scoped batching before restore-time recycling can help.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`, fresh TEST and obfusjack native
+  generation, default TEST/obfusjack runtime, opt-in `NEKO_NATIVE_HANDLE_AUDIT=1`
+  TEST/obfusjack generation and `NEKO_DIRECT_DEBUG=1` runtime proving overflow
+  allocation count drops and unavailable count remains zero, generated-C
+  inspection for bounded recycle helpers and forbidden JNI/JVMTI/fallback
+  markers, and repeated timing comparison against the before-edit default
+  artifacts.
+- Completion criteria: live JNI handles remain visible until restore; restore
+  returns the active block, `_top`, `_next`, and `_last` to the saved state;
+  scoped slabs are freed only after their blocks leave the active handle chain;
+  recycled blocks are zeroed before reuse/pooling; the recycle list is bounded
+  and per-thread; missing allocation still hard aborts; runtime artifacts report
+  `translated>0 rejected=0`; TEST and obfusjack complete without fatal/error
+  output; performance does not regress.
+- Completed 2026-05-22: implemented scoped native-owned JNIHandleBlock slab
+  allocation under the existing handle save/restore window, with the no-scope
+  per-thread recycle list retained as a bounded fallback. Focused validation
+  passed with `CCodeGeneratorTest` and `NativeGeneratedCHotPathAuditTest`.
+  Fresh default artifacts: TEST `build/npt-3by-slab/TEST-default-r2.jar` from
+  `build/neko-native-work/run-32502768700627` (`translated=49 rejected=0`,
+  `handle.audit.build=false`, lib `1079896`), obfusjack
+  `build/npt-3by-slab/obfusjack-default-r2.jar` from
+  `build/neko-native-work/run-32505682956586` (`translated=93 rejected=0`,
+  `handle.audit.build=false`, lib `1880200`). Strict generated-C grep for
+  `NEKO_JNI_FN_PTR`, `(*env)->`, and `env->` returned no matches. Default TEST
+  x5 Calc `68/70/76/78/67` ms, median `70`; default obfusjack x5 Platform
+  `44/42/43/44/47` ms, median `44`, Virtual `36/37/44/38/41` ms, median `38`,
+  Seq `17/17/18/17/17` ms, median `17`, Parallel/VThreads `1/1`. Fresh opt-in
+  audit artifacts: TEST `build/npt-3by-slab/TEST-handle-audit-r2.jar` from
+  `run-32559694871235`, obfusjack
+  `build/npt-3by-slab/obfusjack-handle-audit-r2.jar` from
+  `run-32562676424869`, both `handle.audit.build=true`. Opt-in TEST dominant
+  stats dropped `handle_direct_overflow_alloc` from NPT-3bx `18336` to `286`
+  with `handle_direct_unavailable=0`; opt-in obfusjack dropped from `8587` to
+  `898` with `handle_direct_unavailable=0`.
+
 ### [x] NPT-3au: Split translated direct-call body entry
 
 - Scope: reduce translated-to-translated direct-call raw-entry overhead by

@@ -295,10 +295,13 @@ NEKO_FAST_INLINE jobject neko_direct_oop_to_handle(void *thread, void *raw_oop) 
                 return (jobject)&handles[top];
             }
             if (g_neko_method_layout.sizeof_JNIHandleBlock > 0 && g_neko_method_layout.off_jnih_block_next > 0) {
-                void *new_block = calloc(1, g_neko_method_layout.sizeof_JNIHandleBlock);
+                jboolean new_allocation = JNI_FALSE;
+                void *new_block = neko_alloc_jnih_block(&new_allocation);
+                if (new_block != NULL && new_allocation) {
+                    NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_overflow_alloc_count);
+                }
                 if (new_block != NULL) {
                     void **new_handles = (void**)((char*)new_block + g_neko_off_jnih_block_handles);
-                    NEKO_HANDLE_AUDIT_HIT(g_neko_handle_direct_overflow_alloc_count);
                     new_handles[0] = raw_oop;
                     *(int32_t*)((char*)new_block + g_neko_off_jnih_block_top) = 1;
                     *(void**)((char*)new_block + g_neko_method_layout.off_jnih_block_next) = block;
