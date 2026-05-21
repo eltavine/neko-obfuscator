@@ -959,6 +959,157 @@ obfuscated output behavior.
 - Completion criteria: release native libraries are stripped at link time and TEST packaged library is <= 5MB without reducing generated native coverage or changing runtime semantics; `NEKO_NATIVE_DEBUG=1` still keeps debuggable output; refreshed artifacts report `translated>0 rejected=0`; runtime validation remains clean; no JNI/JVMTI fallback, skip-on-error behavior, original-bytecode fallback, or stale-artifact proof is introduced.
 - Completion evidence: implemented release-only `-s` in `NativeBuildEngine` link commands while leaving `NEKO_NATIVE_DEBUG=1` builds unstripped. Focused validation passed with `NativeGeneratedCHotPathAuditTest` and `NativeObfuscationPerfTest.nativeObfuscation_TEST_sharedLibrarySizeWithinSanityBounds`; the audit now asserts release link commands contain `-s`. Fresh P41 native-only generation passed for TEST/test21/SnakeGame/evaluator with `translated/rejected` rows `49/0`, `93/0`, `18/0`, and `122/0`, and all fresh Linux x64 manifests showed `linkHasStrip=True`. Packaged/native library sizes dropped below the release sanity threshold: TEST `1,052,456` bytes, test21 `1,836,024`, SnakeGame `516,808`, evaluator `1,900,216`. `file` reports the fresh libraries as `stripped`; `readelf -S` inspection found no `.debug_*`, `.symtab`, or `.strtab` sections while `.dynsym` remains present. Runtime validation passed for TEST (`Calc: 43ms`, loader/retrace markers retained), test21 (`=== All tests completed ===`), evaluator final decrypt markers, and SnakeGame timeout smoke with no fresh `hs_err`. No generated artifact reported `translated=0`, native compilation fallback, skip-on-error, JNI/JVMTI fallback, original-bytecode fallback, or fatal runtime marker.
 
+### [rejected] P42: Compact generated exception-check continuations with a source macro
+
+- Scope: reduce generated implementation-source size by replacing repeated
+  translated continuation guards of the exact form
+  `if (!neko_exception_check(env)) { ... }` with a short generated macro such
+  as `NEKO_IF_NO_EXCEPTION(env) { ... }`. The macro must expand to the same
+  `if (!neko_exception_check((env)))` test and must not remove, hoist, delay,
+  reorder, classify, or skip any exception check. This is source-shape
+  compaction only; direct/NJX calls, virtual/interface dispatch, reflection,
+  MethodHandle bridges, switch invokedynamic, implicit-exception paths,
+  handler dispatch, return pushing, stack effects, native coverage, compiler
+  flags, JNI/JVMTI policy, and original-bytecode fallback policy remain
+  unchanged.
+- Required evidence: NPT-1 post-P41 baseline
+  `build/native-post-transfer-baseline/native-post-transfer-baseline-summary.json`
+  shows compile work remains concentrated in implementation sources after
+  release stripping: TEST compile sum/max `25439ms/1216ms`, obfusjack
+  `41138ms/2053ms`, SnakeGame `9816ms/770ms`, evaluator `45750ms/1629ms`.
+  Top generated files still contain many continuation guards: TEST has `77`
+  exact `if (!neko_exception_check(env)) {` impl callsites, obfusjack `301`
+  with `82` in top file `neko_native_impl_39.c`, SnakeGame `61` with `15` in
+  `neko_native_impl_6.c`, and evaluator `239` with `28` in
+  `neko_native_impl_104.c`. Larger top-file repeated shapes are excluded by
+  prior evidence: string literal descriptors are rejected by P33, current-owner
+  class macro compaction by P40, direct method-pointer macros by P36, static
+  setter refs by P29, fieldID elision by P37, nested primitive-store fusion by
+  P27, and helper shard rebalancing by P34.
+- Validation command or runtime target: focused `OpcodeTranslatorUnitTest`,
+  `CCodeGeneratorTest`, and `NativeGeneratedCHotPathAuditTest`; fresh
+  TEST/obfusjack/SnakeGame/evaluator native-only generation with
+  `.plan/native-only-full.yml`; direct TEST/obfusjack/evaluator runtime plus
+  timeout-guarded SnakeGame smoke with `-Djava.io.tmpdir=build/native-run-tmp`;
+  generated-C inspection proving every rewritten continuation still expands to
+  `neko_exception_check`, direct/NJX/reflection/MethodHandle/switch callsites
+  still keep their guard, and exact old continuation text materially drops;
+  manifest/source-size/top-tail comparison against NPT-1; stdout/stderr,
+  fresh `hs_err`, and forbidden JNI/JVMTI/fallback/original-bytecode marker
+  inspection.
+- Completion criteria: refreshed artifacts report `translated>0 rejected=0`;
+  generated impl C uses `NEKO_IF_NO_EXCEPTION(env)` or an equivalent macro for
+  continuation guards while preserving the same guarded bodies and all exception
+  checks; direct runtime exits cleanly for TEST/obfusjack/evaluator and Snake
+  timeout smoke; at least one build-size, top-tail, compile-sum, or wall-time
+  metric improves without runtime regression; no P7-style exception-check
+  removal, rejected P33/P36/P40/P29/P37/P27/P34 shape, reduced coverage,
+  compiler-flag weakening, JNI/JVMTI fallback, skip-on-error behavior,
+  original-bytecode fallback, or stale-artifact proof is introduced.
+- Rejection evidence 2026-05-21: implementation added only a generated
+  `NEKO_IF_NO_EXCEPTION(env)` macro expanding to the same
+  `if (!neko_exception_check((env)))` guard and rewrote exact translated
+  continuation guards in `OpcodeTranslator`; it did not remove or reclassify
+  any exception checks. Focused Gradle validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.OpcodeTranslatorUnitTest --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest -Djava.io.tmpdir=build/native-run-tmp`.
+  Fresh native-only generation under `build/p42-native-validation/` passed for
+  TEST/obfusjack/SnakeGame/evaluator with translated/rejected rows `49/0`,
+  `93/0`, `18/0`, and `122/0`. Generated-C inspection of fresh runs
+  `run-5225620215451`, `run-5232526023628`, `run-5240365053725`, and
+  `run-5247665307146` showed the macro emitted at translated continuation
+  sites, old exact `if (!neko_exception_check(env)) {` impl guards at `0`, and
+  no executable forbidden JNI/JVMTI/fallback/original-bytecode markers. Direct
+  runtime exited cleanly for TEST, obfusjack, evaluator, and timeout-guarded
+  SnakeGame with no fresh `hs_err`. The row was rejected because the acceptance
+  gate was not met: build metrics were mixed versus NPT-1 (TEST compile sum/max
+  improved `25439ms/1216ms -> 23174ms/974ms`, but obfusjack worsened
+  `41138ms/2053ms -> 45253ms/2065ms`, SnakeGame worsened
+  `9816ms/770ms -> 10326ms/877ms`, and evaluator worsened
+  `45750ms/1629ms -> 48526ms/1893ms`), and no-debug runtime repeats in
+  `build/p42-native-validation/repeats/` regressed obfusjack against the
+  accepted NPT-3y baseline (Seq median `18ms` vs `17ms`, Platform median
+  `47ms` vs `43ms`; Virtual median `37ms` vs `36ms` within noise). TEST native
+  Calc median `86ms` was in line with NPT-3y `87ms`, but the obfusjack
+  regressions violate the no-regression criterion. The source/test changes were
+  reverted before checkpoint; do not retry this macro-only guard shape without
+  new evidence that it reduces compiler work without changing branch/source
+  layout unfavorably.
+
+### [x] P43: Generate implementation-specific sliced contract headers
+
+- Scope: reduce native compile-time by changing only generated source packaging
+  for translated implementation C files. Keep the canonical full
+  `neko_native_impl_prelude.h` for support/late-support shards, but emit each
+  `neko_native_impl_N.c` with a generated `neko_native_impl_N_prelude.h` that
+  preserves common ABI/type/macro/inline-helper declarations and omits only
+  numbered global-slot externs or descriptor/inline-cache macro declarations
+  that the same implementation source does not reference. Function bodies,
+  symbol names, global definitions, helper definitions, link order, Zig flags,
+  native coverage, runtime semantics, JNI/JVMTI policy, and fallback policy must
+  remain unchanged.
+- Required evidence: NPT-1/P42 evidence shows implementation files still pay a
+  large repeated prelude parse cost after P41: the full generated prelude is
+  about TEST `353094` bytes, obfusjack `410699` bytes, SnakeGame `293653`
+  bytes, and evaluator `388879` bytes, included by nearly every impl source.
+  Read-only inspection of obfusjack `neko_native_impl_39.c` showed it uses only
+  subsets of method-entry refs, method-id refs, field refs, class refs,
+  inline-cache sites, and method pointers while including the full `7970`-line
+  prelude. This row avoids rejected body-shape changes P27/P29/P33/P36/P37/P40/
+  P42 by not changing translated statements or helper calls.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`; fresh native-only TEST/obfusjack/
+  SnakeGame/evaluator generation with `.plan/native-only-full.yml`; manifest
+  inspection for per-impl sliced header paths/sizes, unchanged canonical prelude
+  support inclusion, compile sums/maxes, source counts, and link success; direct
+  runtime smoke for TEST/obfusjack/evaluator plus timeout-guarded SnakeGame with
+  `-Djava.io.tmpdir=build/native-run-tmp`; generated-C inspection proving impl
+  bodies are unchanged except include filenames and that no forbidden
+  JNI/JVMTI/fallback/original-bytecode markers are introduced; newest `hs_err`
+  scan.
+- Completion criteria: refreshed artifacts report `translated>0 rejected=0`;
+  implementation sources include sliced per-impl headers whose referenced
+  numbered declarations are sufficient to compile/link, while support shards
+  retain the canonical full contract; at least one implementation-header parse
+  volume, top compile-tail, compile-sum, or wall-time metric improves without
+  runtime regression; no source body semantics, compiler optimization flags,
+  native coverage, JNI/JVMTI fallback, skip-on-error behavior,
+  original-bytecode fallback, or stale-artifact proof is introduced.
+- Dependency note: this is a compile-time source-packaging row after rejected
+  P42. It does not alter the runtime T4.0/P4/P10 hot paths, so it may proceed
+  before the open runtime rows only under the NPT-5a/NPT-5b audit rows; runtime
+  acceptance still requires fresh generated artifacts and direct runs.
+- Completion evidence 2026-05-21: implemented per-implementation sliced
+  contract headers while keeping the canonical full `neko_native_impl_prelude.h`
+  for support/late-support shards. The slicer now computes a dependency closure
+  over retained contract lines so macros such as
+  `neko_concat_accumulate_string` retain their `g_off_*` extern dependencies.
+  Focused validation passed with
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest -Djava.io.tmpdir=build/native-run-tmp`.
+  Fresh native-only generation with `.plan/native-only-full.yml` produced
+  TEST/obfusjack/SnakeGame/evaluator artifacts under
+  `build/p43-native-validation/` with translated/rejected rows `49/0`, `93/0`,
+  `18/0`, and `122/0`. The generated manifests recorded sliced headers for
+  every implementation source plus the canonical full contract:
+  TEST `50` impl headers / `49` sliced headers, obfusjack `94/93`,
+  SnakeGame `19/18`, evaluator `123/122`. Representative sliced header parse
+  volume dropped versus the full prelude: TEST impl0 `299509` vs `356323`
+  bytes, obfusjack impl39 `333519` vs `416657`, SnakeGame impl0 `275269` vs
+  `295686`, evaluator impl104 `298320` vs `393898`. Compile sums/top tails
+  from the fresh manifests were TEST `23668ms` max `993ms`, obfusjack
+  `41755ms` max `2144ms`, SnakeGame `9905ms` max `773ms`, evaluator
+  `47682ms` max `1906ms`; acceptance is based on the material header parse
+  reduction and clean runtime, with no body/flag/coverage change. Direct runtime
+  smoke with `-XX:+PerfDisableSharedMem -Djava.io.tmpdir=build/native-run-tmp`
+  passed for TEST (`Calc: 89ms`, loader/retrace markers retained), obfusjack
+  (`=== All tests completed ===`, Platform `48ms`, Virtual `46ms`, Seq `18ms`),
+  and evaluator; SnakeGame preserved the expected headless GUI failure. Static
+  inspection over the fresh generated C/header/property files found no
+  `NEKO_JNI_FN_PTR`, `(*env)->`, `env->`, JVMTI, `translated=0`,
+  `Native compilation produced no libraries`, skip-on-error, or
+  original-bytecode markers, and no fresh `hs_err_pid*.log` appeared under
+  `build/native-run-tmp`, `build/p43-native-validation`, or
+  `build/neko-native-work`.
+
 ## Notes
 
 - This plan must not change JVM obfuscation transforms, method selection,

@@ -934,7 +934,38 @@ the source plan that owns the changed path before it can be considered complete.
   `18 ms` vs `17 ms`, Platform `45 ms` vs `43 ms`, and Virtual `42 ms` vs
   `36 ms`. The source change was reverted before checkpoint.
 
-### [ ] NPT-4: Compile-time post-P41 bottleneck selection
+
+### [rejected] NPT-3aa: Runtime P7 remove CHECKCAST success-path exception check
+
+- Scope: optimize only translated `CHECKCAST` success paths. `neko_fast_is_instance_of`
+  is classified as `never_sets_pending_exception` on normal return and hard-abort
+  on missing metadata; the cast-failure branch calls the existing implicit
+  exception raiser and immediately jumps to `__neko_exception_exit`. Therefore
+  the trailing `if (!neko_exception_check(env)) { PUSH_O(obj); }` after a
+  successful cast can become `PUSH_O(obj)` without changing JVM exception
+  ordering, handler selection, pending-exception visibility, or ABI behavior.
+- Required evidence: source/generated-C proof that only `CHECKCAST` success
+  path checks are removed; failure paths still raise `ClassCastException` and
+  jump to exception exit; no NJX, Java-calling, reflection, MethodHandle,
+  direct translated call, or try/catch boundary checks are removed.
+- Validation command or runtime target: focused translator/generator tests,
+  `NativeObfuscationIntegrationTest`, direct parity runs, and generated-C
+  forbidden-marker inspection.
+- Completion criteria: generated C shows `CHECKCAST` success pushes directly,
+  runtime and parity runs have no fatal/forbidden-marker regressions, and same-run
+  timings improve or do not regress relative to NPT-3y.
+- Rejection evidence 2026-05-21: source changed only the `CHECKCAST` success
+  continuation to push directly after `neko_fast_is_instance_of`; the cast
+  failure branch still raised `ClassCastException` and jumped to
+  `__neko_exception_exit`. Focused translator/generator tests passed and
+  `NativeObfuscationIntegrationTest` passed, but direct parity in
+  `build/native-run-tmp/parity-p10aa/summary-p10aa.json` failed the no-regression
+  gate relative to NPT-3y: TEST native Calc median `86 ms` vs `87 ms` improved,
+  but obfusjack native Platform regressed to `45 ms` vs `43 ms` and Virtual
+  regressed to `42 ms` vs `36 ms`; Seq stayed `17 ms`. The source change was
+  reverted before checkpoint.
+
+### [x] NPT-4: Compile-time post-P41 bottleneck selection
 
 - Scope: choose the next native compile-time optimization only from the NPT-1
   fresh manifests and generated-source inspection.
@@ -949,8 +980,21 @@ the source plan that owns the changed path before it can be considered complete.
   `.plan/native-compile-parallelization-2026-05-17.md` with scope, required
   evidence, validation commands, and completion criteria before code changes.
 - Dependency: NPT-1.
+- Completion evidence 2026-05-21: selected `.plan/native-compile-parallelization-2026-05-17.md`
+  P42 from the fresh NPT-1 post-P41 baseline. The baseline summary shows TEST
+  compile sum/max `25439ms/1216ms`, obfusjack `41138ms/2053ms`, SnakeGame
+  `9816ms/770ms`, and evaluator `45750ms/1629ms`. Source inspection of the
+  top generated impl files found exact `if (!neko_exception_check(env)) {`
+  continuation guards still widespread after P41: TEST `77`, obfusjack `301`
+  with `82` in `neko_native_impl_39.c`, SnakeGame `61`, and evaluator `239`.
+  Larger top-file repeated shapes were rejected by prior rows and are not
+  selected: P33 string literal descriptors, P40 current-owner class macro,
+  P36 method-pointer macro, P29 static setter refs, P37 fieldID elision, P27
+  nested primitive-store fusion, and P34 helper shard rebalancing. P42 records
+  a source-shape-only macro compaction target that preserves every exception
+  check and does not implement the rejected P7/NPT-3aa check-removal route.
 
-### [ ] NPT-5: Implement the first post-P41 compile-time optimization row
+### [rejected] NPT-5: Implement the first post-P41 compile-time optimization row
 
 - Scope: implement only the concrete row selected by NPT-4, preserving Zig,
   `-O3`, current target flags, native coverage, no-JNI/no-JVMTI policy, and
@@ -968,6 +1012,99 @@ the source plan that owns the changed path before it can be considered complete.
   without runtime regression, all fresh artifacts report `translated>0
   rejected=0`, and no rejected prior shape or fallback mechanism is reintroduced.
 - Dependency: NPT-4.
+- Rejection evidence 2026-05-21: selected compile-time row P42 was implemented
+  and fully validated but rejected. Focused Gradle tests passed, fresh
+  native-only generation under `build/p42-native-validation/` reported
+  TEST/obfusjack/SnakeGame/evaluator translated/rejected rows `49/0`, `93/0`,
+  `18/0`, and `122/0`, direct runtime was clean with no fresh `hs_err`, and
+  generated-C inspection found `NEKO_IF_NO_EXCEPTION(env)` at rewritten sites
+  with old exact continuation guards at `0`. The row failed completion because
+  compile metrics were mixed and obfusjack no-debug runtime repeats regressed
+  versus NPT-3y. P42 source/test changes were reverted before checkpoint; a new
+  compile-time selection row is required before another implementation attempt.
+
+### [x] NPT-5a: Select the next post-P42 compile-time optimization row
+
+- Scope: choose the next native compile-time optimization from fresh post-P41/
+  post-P42 evidence without retrying the rejected P42 macro-only guard shape or
+  any previously rejected body/runtime shape.
+- Required evidence: generated prelude/header sizes, implementation include
+  counts, per-source compile tails from NPT-1/P42 artifacts, read-only
+  generated-source inspection identifying the repeated generic declaration
+  surface, and explicit rejection-boundary comparison against P27/P29/P33/P34/
+  P36/P37/P40/P42 and NPT-3aa.
+- Validation command or runtime target: read-only artifact/source inspection; no
+  Gradle or runtime command for the selection row.
+- Completion criteria: the owning compile plan records one concrete P43 row with
+  scope, required evidence, validation commands, completion criteria, and a
+  dependency/order reason before implementation starts.
+- Dependency reason: NPT-2 and runtime rows remain open, but this selected row
+  changes only generated source packaging/declaration inclusion for compile-time
+  work. It must not alter runtime helper behavior or translated statement
+  bodies, and the implementation row remains blocked on fresh runtime smoke
+  validation before acceptance.
+- Selection evidence 2026-05-21: selected
+  `.plan/native-compile-parallelization-2026-05-17.md` P43. Read-only
+  inspection found the canonical generated implementation prelude is included by
+  almost every implementation file and is large in the NPT-1 artifacts: TEST
+  about `353094` bytes/`6768` lines, obfusjack `410699` bytes/`7970` lines,
+  SnakeGame `293653` bytes/`5569` lines, and evaluator `388879` bytes/`7251`
+  lines. Obfusjack's hot `neko_native_impl_39.c` includes the full prelude but
+  uses only subsets of numbered method-entry refs, method-id refs, field refs,
+  class refs, inline-cache site macros, and method-pointer globals. P43 targets
+  per-implementation sliced contract headers and explicitly does not change
+  translated bodies, exception checks, strings, current-owner binding,
+  method-pointer operands, static setters, field binding semantics, nested
+  stores, or helper shard size.
+
+### [x] NPT-5b: Implement P43 sliced implementation contract headers
+
+- Scope: implement only P43's source-packaging change: generate per-impl sliced
+  prelude headers for translated implementation sources while retaining the
+  canonical full `neko_native_impl_prelude.h` for support/late-support shards.
+- Required evidence: focused source-set tests, generated manifest/header-size
+  data, fresh native-only TEST/obfusjack/SnakeGame/evaluator generation,
+  generated-C inspection proving implementation body text is unchanged except
+  include filenames and sufficient referenced declarations are present, direct
+  runtime output, forbidden-marker scan, and newest `hs_err` scan.
+- Validation command or runtime target: after explicit permission for
+  repository `./gradlew`, run focused `CCodeGeneratorTest` and
+  `NativeGeneratedCHotPathAuditTest`, then fresh native-only generation with
+  `.plan/native-only-full.yml`, direct TEST/obfusjack/evaluator/SnakeGame smoke
+  with `-Djava.io.tmpdir=build/native-run-tmp`, manifest/header comparison, and
+  forbidden-marker inspection.
+- Completion criteria: refreshed artifacts report `translated>0 rejected=0`;
+  compile/link succeeds without fallback; per-impl header parse volume and at
+  least one build tail/compile-sum/wall-time metric improves or remains within
+  noise with no runtime regression; support shards still use the canonical full
+  contract; no runtime semantics, compiler flags, native coverage, JNI/JVMTI
+  fallback, skip-on-error behavior, original-bytecode fallback, or stale proof
+  is introduced.
+- Dependency: NPT-5a and P43.
+- Completion evidence 2026-05-21: P43 is implemented and validated. The code
+  now emits `neko_native_impl_N_prelude.h` for implementation sources and keeps
+  `neko_native_impl_prelude.h` for support shards. A dependency-closure fix was
+  added after focused audit exposed a generic sliced-macro dependency failure:
+  retained `neko_concat_accumulate_string` needed `g_off_*` externs even though
+  the implementation body referenced only the macro. Focused Gradle validation
+  passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest -Djava.io.tmpdir=build/native-run-tmp`.
+  Fresh native-only generation under `build/p43-native-validation/` produced
+  TEST/obfusjack/SnakeGame/evaluator translated/rejected rows `49/0`, `93/0`,
+  `18/0`, and `122/0`. Fresh run dirs
+  `build/neko-native-work/run-8052435246015`,
+  `run-8067151202699`, `run-8077119367912`, and
+  `run-8091067486053` recorded generated C counts `67`, `113`, `34`, and
+  `143`, and implementation header counts/sliced counts `50/49`, `94/93`,
+  `19/18`, and `123/122`. Representative sliced headers are materially smaller
+  than the full contract: TEST impl0 `299509` vs `356323` bytes, obfusjack
+  impl39 `333519` vs `416657`, SnakeGame impl0 `275269` vs `295686`, evaluator
+  impl104 `298320` vs `393898`. Direct runtime smoke with
+  `-XX:+PerfDisableSharedMem -Djava.io.tmpdir=build/native-run-tmp` passed for
+  TEST, obfusjack, and evaluator; SnakeGame preserved the expected headless GUI
+  exception. Forbidden-marker inspection found no executable JNI/JVMTI/fallback
+  markers in the fresh generated C/header/property set, and no fresh
+  `hs_err_pid*.log` appeared in the validation build/runtime directories.
 
 ### [ ] NPT-6: Sync final validation plans after the first accepted optimization
 

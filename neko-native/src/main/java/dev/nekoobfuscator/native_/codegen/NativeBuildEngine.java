@@ -48,9 +48,15 @@ public final class NativeBuildEngine {
                 sourceFiles.add(sourcePath);
             }
             Path implementationHeader = null;
-            if (sourceSet.implementationHeader() != null) {
-                implementationHeader = tempDir.resolve(sourceSet.implementationHeader().fileName());
-                Files.writeString(implementationHeader, sourceSet.implementationHeader().source());
+            List<Path> implementationHeaders = new ArrayList<>();
+            for (CCodeGenerator.GeneratedSourceFile headerFile : sourceSet.allImplementationHeaders()) {
+                Path headerPath = tempDir.resolve(headerFile.fileName());
+                Files.writeString(headerPath, headerFile.source());
+                implementationHeaders.add(headerPath);
+                if (sourceSet.implementationHeader() != null
+                    && headerFile.fileName().equals(sourceSet.implementationHeader().fileName())) {
+                    implementationHeader = headerPath;
+                }
             }
             Properties manifest = new Properties();
             manifest.setProperty("generated.c.path", sourceFiles.get(0).toString());
@@ -62,6 +68,12 @@ public final class NativeBuildEngine {
             if (implementationHeader != null) {
                 manifest.setProperty("generated.impl.header.path", implementationHeader.toString());
             }
+            manifest.setProperty("generated.impl.header.count", Integer.toString(implementationHeaders.size()));
+            manifest.setProperty("generated.impl.header.paths", implementationHeaders.stream().map(Path::toString).collect(Collectors.joining(File.pathSeparator)));
+            for (int i = 0; i < implementationHeaders.size(); i++) {
+                manifest.setProperty("generated.impl.header." + i + ".path", implementationHeaders.get(i).toString());
+            }
+            manifest.setProperty("generated.impl.sliced.header.count", Integer.toString(sourceSet.implementationHeaders().size()));
             manifest.setProperty("generated.header.path", hdrFile.toString());
             manifest.setProperty("debug.build", Boolean.toString(System.getenv("NEKO_NATIVE_DEBUG") != null));
 

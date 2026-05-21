@@ -158,6 +158,9 @@ class CCodeGeneratorTest {
         );
         function.setMaxStack(0);
         function.setMaxLocals(1);
+        function.addStatement(new CStatement.RawC(
+            "neko_concat_accumulate_string(thread, env, NULL, NULL);"
+        ));
         function.addStatement(new CStatement.ReturnVoid());
 
         NativeMethodBinding binding = new NativeMethodBinding(
@@ -487,6 +490,22 @@ class CCodeGeneratorTest {
         generator.fieldOffsetSlotName("java/lang/String", "coder", "B", false);
         CCodeGenerator.GeneratedSourceSet sourceSet = generator.generateSourceSet(List.of(function), List.of(binding));
         String header = sourceSet.implementationHeader().source();
+        assertEquals(1, sourceSet.implementationHeaders().size());
+        assertEquals(2, sourceSet.allImplementationHeaders().size());
+        String slicedHeader = sourceSet.implementationHeaders().get(0).source();
+        String implementation = sourceSet.implementationSources().get(0).source();
+        assertTrue(implementation.contains("#include \"neko_native_impl_0_prelude.h\""), implementation);
+        assertFalse(implementation.contains("#include \"neko_native_impl_prelude.h\""), implementation);
+        assertTrue(slicedHeader.length() < header.length(), "sliced=" + slicedHeader.length() + " full=" + header.length());
+        assertTrue(slicedHeader.contains("NEKO_NATIVE_IMPL_PRELUDE_LOADED"), slicedHeader);
+        assertTrue(slicedHeader.contains("neko_hotspot_fast_require"), slicedHeader);
+        assertTrue(slicedHeader.contains("#define neko_concat_accumulate_string"), slicedHeader);
+        assertTrue(slicedHeader.contains("g_off_0;"), slicedHeader);
+        assertTrue(slicedHeader.contains("g_off_1;"), slicedHeader);
+        assertFalse(slicedHeader.contains("#define g_method_entry_ref_0 "), slicedHeader);
+        assertFalse(slicedHeader.contains("#define g_method_id_ref_0 "), slicedHeader);
+        assertFalse(slicedHeader.contains("#define g_field_ref_0 "), slicedHeader);
+        assertFalse(slicedHeader.contains("#define neko_icache_0_0_0 "), slicedHeader);
         String support = sourceSet.supportSource().source();
         String supportHelpers = sourceSet.supportSources().stream()
             .filter(source -> source.fileName().startsWith("neko_native_support_helpers_"))
