@@ -68,7 +68,6 @@ abstract class CffMaterialTables extends CffClassSetup {
         int g18RootLocal = classWordsLocal + 1;
         long initialState = g18InitialState(table);
         long rootDelta = JvmPassBytecode.mix(table.clinitMask(), 0x47313844454C5441L);
-        long expectedRoot = table.g18ExpectedRoot();
         init.add(table.initStart());
         JvmPassBytecode.pushInt(init, TOKEN_MATERIAL_CARRIER_SIZE);
         init.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
@@ -98,8 +97,8 @@ abstract class CffMaterialTables extends CffClassSetup {
         for (int i = 0; i < table.values().length; i++) {
             init.add(new VarInsnNode(Opcodes.ALOAD, classWordsLocal));
             JvmPassBytecode.pushInt(init, i);
-            JvmPassBytecode.pushInt(init, table.values()[i] ^ classKeyWordMask(expectedRoot, 0L, i));
-            emitClassKeyWordMask(init, g18RootLocal, table.classCodeDigestLocal(), i);
+            emitPatchableIntNoLdc(init);
+            emitClassKeyWordMask(init, g18RootLocal, i);
             init.add(new InsnNode(Opcodes.IXOR));
             init.add(new InsnNode(Opcodes.IASTORE));
         }
@@ -178,16 +177,6 @@ abstract class CffMaterialTables extends CffClassSetup {
         return x & 0x0000FFFFFFFFFFFFL;
     }
 
-    private int classKeyWordMask(long root, long digestPoison, int index) {
-        int x = (int) root ^ (int) (root >>> 32);
-        x ^= (int) digestPoison ^ (int) (digestPoison >>> 32);
-        x += nonZeroInt(JvmPassBytecode.mix(0x473138574F524431L, index));
-        x ^= x >>> 13;
-        x *= nonZeroInt(JvmPassBytecode.mix(0x4731384D554C3131L, index)) | 1;
-        x ^= x >>> 16;
-        return x;
-    }
-
     private void emitG18GlobalClassRootInit(
         InsnList init,
         int rootLocal,
@@ -224,20 +213,12 @@ abstract class CffMaterialTables extends CffClassSetup {
         init.add(new VarInsnNode(Opcodes.LSTORE, rootLocal));
     }
 
-    private void emitClassKeyWordMask(InsnList insns, int rootLocal, int digestLocal, int index) {
+    private void emitClassKeyWordMask(InsnList insns, int rootLocal, int index) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
         insns.add(new InsnNode(Opcodes.L2I));
         insns.add(new VarInsnNode(Opcodes.LLOAD, rootLocal));
         JvmPassBytecode.pushLong(insns, 0x0000FFFFFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
-        JvmPassBytecode.pushInt(insns, 32);
-        insns.add(new InsnNode(Opcodes.LUSHR));
-        insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, digestLocal));
-        insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, digestLocal));
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LUSHR));
         insns.add(new InsnNode(Opcodes.L2I));

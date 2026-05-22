@@ -100,7 +100,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         Path tamperedJar = work.resolve("cff-audit-shapes-obf-tampered.jar");
         tamperMainMethodCode(outputJar, tamperedJar);
         assertTamperedJarPoisonsProtectedFlow(tamperedJar);
-        assertClassCodeVerifierPoisonsWithoutMismatchThrow(outputJar);
+        assertG18ClassCodeRootPoisonsWithoutStandaloneVerifier(outputJar);
         assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
 
@@ -398,33 +398,46 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         );
     }
 
-    private static void assertClassCodeVerifierPoisonsWithoutMismatchThrow(Path jar)
+    private static void assertG18ClassCodeRootPoisonsWithoutStandaloneVerifier(Path jar)
         throws Exception {
         JarInput input = new JarInput(jar);
-        boolean sawVerifier = false;
+        boolean sawG18RootHelper = false;
         for (var clazz : input.classes()) {
             for (MethodNode method : clazz.asmNode().methods) {
-                if (!isClassCodeVerifier(method)) continue;
-                sawVerifier = true;
+                assertFalse(
+                    isStandaloneClassCodeVerifier(method),
+                    "class-code integrity must be rooted in the G18 helper, not a standalone verifier"
+                );
+                if (!isG18ClassCodeRootHelper(method)) continue;
+                sawG18RootHelper = true;
                 for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                     assertTrue(
                         insn.getOpcode() != Opcodes.ATHROW,
-                        "class-code verifier must poison key material instead of throwing"
+                        "G18 class-code root must poison key material instead of throwing"
                     );
                     if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.NEW) {
                         assertTrue(
                             !"java/lang/IllegalStateException".equals(type.desc),
-                            "class-code verifier must not construct a manual mismatch exception"
+                            "G18 class-code root must not construct a manual mismatch exception"
                         );
                     }
                 }
             }
         }
-        assertTrue(sawVerifier, "class-code verifier helper was not generated");
+        assertTrue(sawG18RootHelper, "G18 class-code root helper was not generated");
     }
 
-    private static boolean isClassCodeVerifier(MethodNode method) {
+    private static boolean isStandaloneClassCodeVerifier(MethodNode method) {
         if (!"(Ljava/lang/Class;JJ)J".equals(method.desc) || method.instructions == null) return false;
+        return methodContainsClassResourceRead(method);
+    }
+
+    private static boolean isG18ClassCodeRootHelper(MethodNode method) {
+        if (!"(IJJLjava/lang/Class;JJ)J".equals(method.desc) || method.instructions == null) return false;
+        return methodContainsClassResourceRead(method);
+    }
+
+    private static boolean methodContainsClassResourceRead(MethodNode method) {
         boolean sawClassResource = false;
         boolean sawReadAllBytes = false;
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {

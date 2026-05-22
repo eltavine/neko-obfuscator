@@ -323,12 +323,28 @@ abstract class CffSharedState {
             return index;
         }
 
-        long allocateExpectedRoot(int index, long initial, long delta, String owner, long requiredBloom) {
+        long allocateExpectedRoot(
+            int index,
+            long initial,
+            long delta,
+            String owner,
+            long requiredBloom,
+            long classCodeHash
+        ) {
             long globalOld = compileGlobalState[0];
             int ownerHash = owner.replace('/', '.').hashCode();
             int registrySize = ++compileRegistrySize[0];
             long loadedOld = compileLoadedBloom[0];
-            long root = g18OrderRoot(initial, loadedOld & requiredBloom, delta, rootMask, layoutFingerprint, ownerHash, index);
+            long root = g18OrderRoot(
+                initial,
+                loadedOld & requiredBloom,
+                delta,
+                rootMask,
+                layoutFingerprint,
+                ownerHash,
+                index,
+                classCodeHash
+            );
             compileGlobalState[0] =
                 globalOld ^
                 root ^
@@ -336,6 +352,7 @@ abstract class CffSharedState {
                 Integer.toUnsignedLong(index) ^
                 (long) ownerHash ^
                 layoutFingerprint ^
+                classCodeHash ^
                 globalMutationMask;
             compileLoadedBloom[0] = loadedOld | g18LoadBit(index, ownerHash);
             return root;
@@ -348,13 +365,15 @@ abstract class CffSharedState {
             long rootMask,
             long layoutFingerprint,
             int ownerHash,
-            int index
+            int index,
+            long classCodeHash
         ) {
             return g18Projection(
                 nodeOld ^
                 orderOld ^
                 delta ^
                 layoutFingerprint ^
+                classCodeHash ^
                 rootMask ^
                 (long) ownerHash ^
                 Integer.toUnsignedLong(index)
