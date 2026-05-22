@@ -344,6 +344,32 @@ the source plan that owns the changed path before it can be considered complete.
   comments only. Generated C shows the class-lookup paths using
   `neko_resolve_class_with_env` / `neko_resolve_class_mirror_with_env`, and the
   wrapper remains undeleted for the T4.11 sweep gate.
+
+### [x] NPT-4b: Stage 4 T4.2b method lookup wrapper call sites
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.2b by proving generated
+  helper and manifest method-lookup call sites no longer call
+  `neko_get_method_id` / `neko_get_static_method_id` and route through
+  `neko_resolve_method` instead.
+- Required evidence: source-emitter and generated-C grep for live
+  `neko_get_method_id(...)` / `neko_get_static_method_id(...)` callsites, plus
+  generated-C/source evidence that method lookup uses `neko_resolve_method`.
+- Validation command or runtime target: reuse the fresh T4.1 `R-build`,
+  `R-test`, `R-obfusjack`, `R-native-test`, and `R-inspect` artifacts because no
+  runtime source changed after T4.1; missing method resolution inherits T2.3
+  `R-negative`.
+- Completion criteria: live-callsite grep reports zero method-ID wrapper
+  callsites outside comments, generated C/source emitters show resolver calls,
+  and no wrapper deletion is attempted before T4.11.
+- Completion evidence 2026-05-22: no runtime code change was required. Fresh
+  T4.1 artifacts TEST `build/neko-native-work/run-46729377030886` and obfusjack
+  `build/neko-native-work/run-46734567148804` were produced by the passing
+  `NativeObfuscationPerfTest` gate. Live-callsite grep for
+  `neko_get_method_id[[:space:]]*\\(` and
+  `neko_get_static_method_id[[:space:]]*\\(` returned zero outside comments in
+  both generated artifacts and source emitters. Generated C/source emitters show
+  `neko_resolve_method(...)` for method resolution, and the wrappers remain
+  undeleted for the T4.11 sweep gate.
 - User-updated acceptance recorded 2026-05-20: Calc must match or beat the
   original JVM jar in the same run environment; obfusjack Seq must be <= 10 ms;
   every other parsed benchmark/test timing must match original or stay within
