@@ -181,6 +181,10 @@ public final class ObfuscationPipeline {
         logJvmCoverage(ctx);
         validateJvmCoverage(allClasses, ctx, ordered);
         obfuscateRuntimeApi(allClasses, hierarchy);
+        cleanupDirtyClasses(allClasses);
+        refreshHierarchy(allClasses, hierarchy);
+        runJvmOutputFinalizers(allClasses, hierarchy, ctx, ordered);
+        refreshHierarchy(allClasses, hierarchy);
 
         // Step 8: Write output JAR
         log.info("Writing output JAR: {}", outputJar);
@@ -388,6 +392,31 @@ public final class ObfuscationPipeline {
             }
         }
         return null;
+    }
+
+    private void runJvmOutputFinalizers(List<L1Class> classes, ClassHierarchy hierarchy,
+            PipelineContext ctx, List<TransformPass> ordered) {
+        for (TransformPass pass : ordered) {
+            if (!config.isTransformEnabled(pass.id())) continue;
+            try {
+                Method finalizer = pass.getClass().getMethod(
+                    "finalizeOutput",
+                    PipelineContext.class,
+                    List.class,
+                    ClassHierarchy.class
+                );
+                log.info("Running JVM output finalizer: {} [{}]", pass.name(), pass.id());
+                finalizer.invoke(pass, ctx, classes, hierarchy);
+            } catch (NoSuchMethodException ignored) {
+                // Most passes do not need an output-finalization stage.
+            } catch (ReflectiveOperationException e) {
+                Throwable cause = e.getCause() == null ? e : e.getCause();
+                throw new RuntimeException(
+                    "JVM output finalizer failed for pass " + pass.id(),
+                    cause
+                );
+            }
+        }
     }
 
     private boolean isAnyTransformEnabled(String... ids) {

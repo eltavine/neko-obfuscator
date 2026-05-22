@@ -9,6 +9,7 @@ import dev.nekoobfuscator.api.transform.TransformPass;
 import dev.nekoobfuscator.api.transform.TransformPhase;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
+import dev.nekoobfuscator.core.jar.ClassHierarchy;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -86,6 +87,10 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
     @Override
     public Set<String> dependsOn() {
         return Set.of(JvmKeyDispatchPass.ID);
+    }
+
+    public void finalizeOutput(PipelineContext pctx, List<L1Class> classes, ClassHierarchy hierarchy) {
+        finalizeClassCodeIntegrity(pctx, classes);
     }
 
     @Override

@@ -7,6 +7,8 @@ import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
@@ -46,6 +48,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 
@@ -91,6 +94,9 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         String obfuscated = runJar(outputJar);
         assertEquals(original, obfuscated);
         assertTrue(obfuscated.contains("CFF AUDIT OK"), obfuscated);
+        Path tamperedJar = work.resolve("cff-audit-shapes-obf-tampered.jar");
+        tamperMainMethodCode(outputJar, tamperedJar);
+        assertTamperedJarFailsClosed(tamperedJar);
         assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
 
@@ -173,6 +179,66 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         return findings;
+    }
+
+    private static void tamperMainMethodCode(Path inputJar, Path outputJar)
+        throws Exception {
+        boolean[] tampered = { false };
+        try (JarFile jar = new JarFile(inputJar.toFile());
+             JarOutputStream jos = new JarOutputStream(new FileOutputStream(outputJar.toFile()))) {
+            var entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                byte[] data;
+                try (var in = jar.getInputStream(entry)) {
+                    data = in.readAllBytes();
+                }
+                if (!tampered[0] && entry.getName().endsWith(".class")) {
+                    ClassReader reader = new ClassReader(data);
+                    ClassNode node = new ClassNode();
+                    reader.accept(node, ClassReader.EXPAND_FRAMES);
+                    MethodNode target = null;
+                    for (MethodNode method : node.methods) {
+                        if ("main".equals(method.name)
+                            && method.instructions != null
+                            && method.instructions.size() > 0) {
+                            target = method;
+                            break;
+                        }
+                    }
+                    if (target != null) {
+                        target.instructions.insert(new InsnNode(Opcodes.NOP));
+                        ClassWriter writer = new ClassWriter(0);
+                        node.accept(writer);
+                        data = writer.toByteArray();
+                        tampered[0] = true;
+                    }
+                }
+                JarEntry out = new JarEntry(entry.getName());
+                jos.putNextEntry(out);
+                jos.write(data);
+                jos.closeEntry();
+            }
+        }
+        assertTrue(tampered[0], "tamper fixture did not find a main method");
+    }
+
+    private static void assertTamperedJarFailsClosed(Path jar) throws Exception {
+        Process process = new ProcessBuilder(
+            "java",
+            "-XX:-UsePerfData",
+            "-jar",
+            jar.toString()
+        ).redirectErrorStream(true).start();
+        boolean exited = process.waitFor(30, TimeUnit.SECONDS);
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertTrue(exited, "tampered command timed out");
+        assertTrue(process.exitValue() != 0, "tampered jar unexpectedly succeeded:\n" + output);
+        assertTrue(
+            output.contains("ExceptionInInitializerError") ||
+                output.contains("IllegalStateException"),
+            "tampered jar did not fail through the integrity gate:\n" + output
+        );
     }
 
     private static void assertRuntimeTokenDecodingUsesClassKeyTables(Path jar)
