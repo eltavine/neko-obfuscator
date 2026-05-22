@@ -113,9 +113,31 @@ public final class JvmConstantObfuscationPass implements TransformPass {
 
         MethodNode mn = method.asmNode();
         List<NumericSite> sites = new ArrayList<>();
+        List<ArrayConstantSite> arraySites = new ArrayList<>();
+        Set<AbstractInsnNode> arrayConsumed = Collections.newSetFromMap(new IdentityHashMap<>());
         Set<AbstractInsnNode> loopInstructions = loopRegionInstructions(mn);
         int ordinal = 0;
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (!metadata.applicationInstructions().contains(insn)) continue;
+            ControlFlowFlatteningPass.CffInstructionState state =
+                metadata.instructionStates().get(insn);
+            if (state == null) {
+                throw new IllegalStateException(
+                    "constantObfuscation cannot bind CFF state for " + methodKey
+                );
+            }
+            if (!arrayConsumed.contains(insn)) {
+                ArrayConstantSite arraySite = primitiveArrayConstantSite(pctx, metadata, insn, state);
+                if (arraySite != null) {
+                    arraySite = arraySite.withSeed(siteSeed(pctx.masterSeed(), clazz, method, state, ordinal++));
+                    arraySites.add(arraySite);
+                    arrayConsumed.addAll(arraySite.consumed());
+                    continue;
+                }
+            }
+        }
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (arrayConsumed.contains(insn)) continue;
             if (!metadata.applicationInstructions().contains(insn)) continue;
             ControlFlowFlatteningPass.CffInstructionState state =
                 metadata.instructionStates().get(insn);
@@ -130,14 +152,24 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             sites.add(new NumericSite(insn, kind, state, siteSeed));
         }
 
-        if (sites.isEmpty()) return;
+        if (sites.isEmpty() && arraySites.isEmpty()) return;
 
         int baseLocal = mn.maxLocals++;
-        Map<Integer, NumericSite> firstSiteByBlock = new LinkedHashMap<>();
+        Map<Integer, FlowSite> firstSiteByBlock = new LinkedHashMap<>();
+        Map<AbstractInsnNode, FlowSite> flowSitesByInsn = new IdentityHashMap<>();
         for (NumericSite site : sites) {
-            firstSiteByBlock.putIfAbsent(site.state().blockIndex(), site);
+            flowSitesByInsn.put(site.insn(), new FlowSite(site.insn(), site.state()));
         }
-        for (NumericSite site : firstSiteByBlock.values()) {
+        for (ArrayConstantSite site : arraySites) {
+            flowSitesByInsn.put(site.lengthInsn(), new FlowSite(site.lengthInsn(), site.state()));
+        }
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            FlowSite site = flowSitesByInsn.get(insn);
+            if (site != null) {
+                firstSiteByBlock.putIfAbsent(site.state().blockIndex(), site);
+            }
+        }
+        for (FlowSite site : firstSiteByBlock.values()) {
             InsnList base = new InsnList();
             emitLiveConstantBase(base, metadata, site.state());
             base.add(new VarInsnNode(Opcodes.ISTORE, baseLocal));
@@ -148,6 +180,17 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         boolean compact = useCompactNumericDecode(mn, sites);
         String compactHelper = compact ? ensureIntDecodeHelper(pctx, clazz) : null;
         int transformed = 0;
+        int transformedArrays = 0;
+        for (ArrayConstantSite site : arraySites) {
+            InsnList replacement = new InsnList();
+            emitDecodedPrimitiveArray(replacement, site, metadata, baseLocal, compactHelper, clazz);
+            JvmKeyDispatchPass.markGenerated(pctx, replacement);
+            mn.instructions.insertBefore(site.lengthInsn(), replacement);
+            for (AbstractInsnNode consumed : site.consumed()) {
+                mn.instructions.remove(consumed);
+            }
+            transformedArrays++;
+        }
         for (NumericSite site : sites) {
             AbstractInsnNode insn = site.insn();
             if (insn instanceof IincInsnNode iinc) {
@@ -170,8 +213,8 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             transformed++;
         }
 
-        if (transformed > 0) {
-            mn.maxStack = Math.max(mn.maxStack, 12);
+        if (transformed > 0 || transformedArrays > 0) {
+            mn.maxStack = Math.max(mn.maxStack, 20);
             clazz.markDirty();
             pctx.invalidate(method);
             JvmObfuscationCoverage.get(ctx).full(
@@ -179,7 +222,9 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 clazz.name(),
                 method.name(),
                 method.descriptor(),
-                (compact ? "compact-" : "") + "cff-keyed-numeric-sites-" + transformed
+                (compact ? "compact-" : "") +
+                    "cff-keyed-numeric-sites-" + transformed +
+                    "-primitive-arrays-" + transformedArrays
             );
         }
     }
@@ -457,7 +502,10 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.AALOAD));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
         insns.add(new InsnNode(Opcodes.SWAP));
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
+        );
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x434F4E5354544149L, 0x435441494CL)));
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -601,6 +649,180 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private ArrayConstantSite primitiveArrayConstantSite(
+        PipelineContext pctx,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        AbstractInsnNode lengthInsn,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        if (numericKind(lengthInsn) != NumericKind.INT) return null;
+        int length = intConstant(lengthInsn);
+        if (length < 0) return null;
+        AbstractInsnNode arrayInsn = nextReal(lengthInsn.getNext());
+        if (!(arrayInsn instanceof IntInsnNode newArray) || newArray.getOpcode() != Opcodes.NEWARRAY) {
+            return null;
+        }
+        PrimitiveArrayKind kind = PrimitiveArrayKind.fromNewArrayOperand(newArray.operand);
+        if (kind == null || !isApplicationPatternNode(pctx, metadata, arrayInsn)) return null;
+
+        List<AbstractInsnNode> consumed = new ArrayList<>();
+        consumed.add(lengthInsn);
+        consumed.add(arrayInsn);
+        List<ArrayElement> elements = new ArrayList<>();
+        boolean[] seen = new boolean[length];
+        AbstractInsnNode cursor = nextReal(arrayInsn.getNext());
+        while (cursor != null && cursor.getOpcode() == Opcodes.DUP) {
+            if (!isApplicationPatternNode(pctx, metadata, cursor) || elements.size() >= length) return null;
+            AbstractInsnNode indexInsn = nextReal(cursor.getNext());
+            if (!isApplicationPatternNode(pctx, metadata, indexInsn) || numericKind(indexInsn) != NumericKind.INT) {
+                return null;
+            }
+            int index = intConstant(indexInsn);
+            if (index < 0 || index >= length || seen[index]) return null;
+            AbstractInsnNode valueInsn = nextReal(indexInsn.getNext());
+            if (!isApplicationPatternNode(pctx, metadata, valueInsn)) return null;
+            Long valueBits = arrayElementBits(kind, valueInsn);
+            if (valueBits == null) return null;
+            AbstractInsnNode storeInsn = nextReal(valueInsn.getNext());
+            if (
+                !isApplicationPatternNode(pctx, metadata, storeInsn) ||
+                storeInsn.getOpcode() != kind.storeOpcode()
+            ) {
+                return null;
+            }
+            seen[index] = true;
+            elements.add(new ArrayElement(index, valueBits));
+            consumed.add(cursor);
+            consumed.add(indexInsn);
+            consumed.add(valueInsn);
+            consumed.add(storeInsn);
+            cursor = nextReal(storeInsn.getNext());
+        }
+        if (elements.size() != length) return null;
+        return new ArrayConstantSite(lengthInsn, kind, length, elements, state, 0L, consumed);
+    }
+
+    private void emitDecodedPrimitiveArray(
+        InsnList insns,
+        ArrayConstantSite site,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        int baseLocal,
+        String compactHelper,
+        L1Class clazz
+    ) {
+        emitDecodedInt(
+            insns,
+            site.length(),
+            JvmPassBytecode.mix(site.siteSeed(), 0x4152524C454E4754L),
+            metadata,
+            site.state(),
+            baseLocal,
+            compactHelper,
+            clazz
+        );
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, site.kind().newArrayOperand()));
+        for (int ordinal = 0; ordinal < site.elements().size(); ordinal++) {
+            ArrayElement element = site.elements().get(ordinal);
+            long elementSeed = JvmPassBytecode.mix(
+                site.siteSeed() ^ 0x415252454C454D31L,
+                ((long) element.index() << 32) ^ ordinal ^ site.kind().newArrayOperand()
+            );
+            insns.add(new InsnNode(Opcodes.DUP));
+            emitDecodedInt(
+                insns,
+                element.index(),
+                JvmPassBytecode.mix(elementSeed, 0x4152524944583031L),
+                metadata,
+                site.state(),
+                baseLocal,
+                compactHelper,
+                clazz
+            );
+            emitDecodedArrayElement(
+                insns,
+                site.kind(),
+                element.valueBits(),
+                JvmPassBytecode.mix(elementSeed, 0x41525256414C3031L),
+                metadata,
+                site.state(),
+                baseLocal,
+                compactHelper,
+                clazz
+            );
+            insns.add(new InsnNode(site.kind().storeOpcode()));
+        }
+    }
+
+    private void emitDecodedArrayElement(
+        InsnList insns,
+        PrimitiveArrayKind kind,
+        long valueBits,
+        long seed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int baseLocal,
+        String compactHelper,
+        L1Class clazz
+    ) {
+        switch (kind.valueKind()) {
+            case INT, IINC -> emitDecodedInt(insns, (int) valueBits, seed, metadata, state, baseLocal, compactHelper, clazz);
+            case LONG -> emitDecodedLong(insns, valueBits, seed, metadata, state, baseLocal, compactHelper, clazz);
+            case FLOAT -> {
+                emitDecodedInt(insns, (int) valueBits, seed, metadata, state, baseLocal, compactHelper, clazz);
+                insns.add(new MethodInsnNode(
+                    Opcodes.INVOKESTATIC,
+                    "java/lang/Float",
+                    "intBitsToFloat",
+                    "(I)F",
+                    false
+                ));
+            }
+            case DOUBLE -> {
+                emitDecodedLong(insns, valueBits, seed, metadata, state, baseLocal, compactHelper, clazz);
+                insns.add(new MethodInsnNode(
+                    Opcodes.INVOKESTATIC,
+                    "java/lang/Double",
+                    "longBitsToDouble",
+                    "(J)D",
+                    false
+                ));
+            }
+        }
+    }
+
+    private Long arrayElementBits(PrimitiveArrayKind kind, AbstractInsnNode valueInsn) {
+        return switch (kind.valueKind()) {
+            case INT -> numericKind(valueInsn) == NumericKind.INT ? (long) intConstant(valueInsn) : null;
+            case LONG -> numericKind(valueInsn) == NumericKind.LONG ? longConstant(valueInsn) : null;
+            case FLOAT -> numericKind(valueInsn) == NumericKind.FLOAT
+                ? (long) Float.floatToRawIntBits(floatConstant(valueInsn))
+                : null;
+            case DOUBLE -> numericKind(valueInsn) == NumericKind.DOUBLE
+                ? Double.doubleToRawLongBits(doubleConstant(valueInsn))
+                : null;
+            case IINC -> null;
+        };
+    }
+
+    private boolean isApplicationPatternNode(
+        PipelineContext pctx,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        AbstractInsnNode insn
+    ) {
+        return insn != null &&
+            insn.getOpcode() >= 0 &&
+            metadata.applicationInstructions().contains(insn) &&
+            !JvmKeyDispatchPass.isGeneratedNode(pctx, insn);
+    }
+
+    private AbstractInsnNode nextReal(AbstractInsnNode insn) {
+        AbstractInsnNode cursor = insn;
+        while (cursor != null && cursor.getOpcode() < 0) {
+            cursor = cursor.getNext();
+        }
+        return cursor;
     }
 
     private Set<AbstractInsnNode> loopRegionInstructions(MethodNode mn) {
@@ -759,5 +981,66 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffInstructionState state,
         long siteSeed
     ) {}
+
+    private record FlowSite(
+        AbstractInsnNode insn,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {}
+
+    private record ArrayConstantSite(
+        AbstractInsnNode lengthInsn,
+        PrimitiveArrayKind kind,
+        int length,
+        List<ArrayElement> elements,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        long siteSeed,
+        List<AbstractInsnNode> consumed
+    ) {
+        ArrayConstantSite withSeed(long seed) {
+            return new ArrayConstantSite(lengthInsn, kind, length, elements, state, seed, consumed);
+        }
+    }
+
+    private record ArrayElement(int index, long valueBits) {}
+
+    private enum PrimitiveArrayKind {
+        BOOLEAN(Opcodes.T_BOOLEAN, Opcodes.BASTORE, NumericKind.INT),
+        BYTE(Opcodes.T_BYTE, Opcodes.BASTORE, NumericKind.INT),
+        CHAR(Opcodes.T_CHAR, Opcodes.CASTORE, NumericKind.INT),
+        SHORT(Opcodes.T_SHORT, Opcodes.SASTORE, NumericKind.INT),
+        INT(Opcodes.T_INT, Opcodes.IASTORE, NumericKind.INT),
+        LONG(Opcodes.T_LONG, Opcodes.LASTORE, NumericKind.LONG),
+        FLOAT(Opcodes.T_FLOAT, Opcodes.FASTORE, NumericKind.FLOAT),
+        DOUBLE(Opcodes.T_DOUBLE, Opcodes.DASTORE, NumericKind.DOUBLE);
+
+        private final int newArrayOperand;
+        private final int storeOpcode;
+        private final NumericKind valueKind;
+
+        PrimitiveArrayKind(int newArrayOperand, int storeOpcode, NumericKind valueKind) {
+            this.newArrayOperand = newArrayOperand;
+            this.storeOpcode = storeOpcode;
+            this.valueKind = valueKind;
+        }
+
+        int newArrayOperand() {
+            return newArrayOperand;
+        }
+
+        int storeOpcode() {
+            return storeOpcode;
+        }
+
+        NumericKind valueKind() {
+            return valueKind;
+        }
+
+        static PrimitiveArrayKind fromNewArrayOperand(int operand) {
+            for (PrimitiveArrayKind kind : values()) {
+                if (kind.newArrayOperand == operand) return kind;
+            }
+            return null;
+        }
+    }
 
 }

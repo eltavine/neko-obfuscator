@@ -144,7 +144,7 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
     ) {
         emitClassKeyWordsLoad(insns, table);
         emitKeyedTableIndex(insns, keyLocal, token, seed);
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitDecodedClassKeyWordFromConstantSeal(insns, CLASS_KEY_WORD_SEAL);
         emitKeyMixInt(insns, keyLocal, seed ^ 0x574F52444B455931L);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));

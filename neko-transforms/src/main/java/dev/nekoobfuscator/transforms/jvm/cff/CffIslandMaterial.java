@@ -144,7 +144,7 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         insns.add(new VarInsnNode(Opcodes.ILOAD, maskLocal));
         JvmPassBytecode.pushInt(insns, CLASS_KEY_TABLE_SIZE - 1);
         insns.add(new InsnNode(Opcodes.IAND));
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitDecodedClassKeyWordFromConstantSeal(insns, CLASS_KEY_WORD_SEAL);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(insns, 16);
@@ -947,7 +947,7 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         insns.add(new InsnNode(Opcodes.IADD));
         JvmPassBytecode.pushInt(insns, 63);
         insns.add(new InsnNode(Opcodes.IAND));
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitDecodedClassKeyWordFromConstantSeal(insns, CLASS_KEY_WORD_SEAL);
         insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
         insns.add(new InsnNode(Opcodes.IXOR));

@@ -8,7 +8,10 @@ import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 
@@ -57,6 +60,7 @@ public class JvmConstantObfuscationIntegrationTest {
         assertTrue(obfuscated.contains("CONSTANT SHAPES OK"), obfuscated);
         assertNumericConstantValuesMovedToClinit(outputJar);
         assertFlowKeyDecodeUsed(outputJar);
+        assertPrimitiveArrayPayloadsEncrypted(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -94,6 +98,7 @@ public class JvmConstantObfuscationIntegrationTest {
         boolean sawIntegerRotateDecode = false;
         for (var method : clazz.asmNode().methods) {
             if (method.instructions == null) continue;
+            boolean generatedHelper = method.name.startsWith("__neko_");
             for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                 if (insn instanceof MethodInsnNode call
                         && "java/lang/Float".equals(call.owner)
@@ -107,7 +112,8 @@ public class JvmConstantObfuscationIntegrationTest {
                 }
                 if (insn instanceof MethodInsnNode call
                         && "java/lang/Integer".equals(call.owner)
-                        && ("rotateLeft".equals(call.name) || "rotateRight".equals(call.name))) {
+                        && ("rotateLeft".equals(call.name) || "rotateRight".equals(call.name))
+                        && !generatedHelper) {
                     sawIntegerRotateDecode = true;
                 }
                 if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Number) {
@@ -119,6 +125,101 @@ public class JvmConstantObfuscationIntegrationTest {
         assertTrue(sawDoubleDecode, "double constants should decode from long bits");
         assertTrue(sawEncryptedNumericLdc, "numeric literals should be replaced by encrypted numeric material");
         assertFalse(sawIntegerRotateDecode, "constant decode must not use rotateLeft/rotateRight self-cancelling masks");
+    }
+
+    private void assertPrimitiveArrayPayloadsEncrypted(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("ConstantShapes");
+        for (var method : clazz.asmNode().methods) {
+            if (!"arrays".equals(method.name) || method.instructions == null) continue;
+            for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                Long plaintext = storeLiteralBits(insn.getOpcode(), previousReal(insn.getPrevious()));
+                assertFalse(
+                    plaintext != null && fixtureArrayPayload(insn.getOpcode(), plaintext),
+                    "primitive array store retained plaintext payload before opcode " + insn.getOpcode()
+                );
+            }
+        }
+    }
+
+    private boolean fixtureArrayPayload(int storeOpcode, long bits) {
+        return switch (storeOpcode) {
+            case Opcodes.BASTORE -> bits == -128L || bits == 0L || bits == 1L || bits == 127L;
+            case Opcodes.SASTORE -> bits == -30000L || bits == 12345L;
+            case Opcodes.CASTORE -> bits == 65L || bits == 0x1234L;
+            case Opcodes.IASTORE -> bits == -7L || bits == 0L || bits == 42L || bits == 123456789L;
+            case Opcodes.LASTORE -> bits == 0x1020304050607080L || bits == -5L || bits == 9L;
+            case Opcodes.FASTORE -> bits == (long) Float.floatToRawIntBits(-1.5f) ||
+                bits == (long) Float.floatToRawIntBits(0.25f) ||
+                bits == (long) Float.floatToRawIntBits(3.75f);
+            case Opcodes.DASTORE -> bits == Double.doubleToRawLongBits(-2.5d) ||
+                bits == Double.doubleToRawLongBits(6.5d);
+            default -> false;
+        };
+    }
+
+    private Long storeLiteralBits(int storeOpcode, AbstractInsnNode valueInsn) {
+        if (valueInsn == null) return null;
+        return switch (storeOpcode) {
+            case Opcodes.BASTORE, Opcodes.SASTORE, Opcodes.CASTORE, Opcodes.IASTORE -> intLiteral(valueInsn);
+            case Opcodes.LASTORE -> longLiteral(valueInsn);
+            case Opcodes.FASTORE -> floatLiteralBits(valueInsn);
+            case Opcodes.DASTORE -> doubleLiteralBits(valueInsn);
+            default -> null;
+        };
+    }
+
+    private Long intLiteral(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) {
+            return (long) (opcode - Opcodes.ICONST_0);
+        }
+        if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) {
+            return (long) ((IntInsnNode) insn).operand;
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer value) {
+            return value.longValue();
+        }
+        return null;
+    }
+
+    private Long longLiteral(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode == Opcodes.LCONST_0) return 0L;
+        if (opcode == Opcodes.LCONST_1) return 1L;
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Long value) {
+            return value;
+        }
+        return null;
+    }
+
+    private Long floatLiteralBits(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.FCONST_0 && opcode <= Opcodes.FCONST_2) {
+            return (long) Float.floatToRawIntBits((float) (opcode - Opcodes.FCONST_0));
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Float value) {
+            return (long) Float.floatToRawIntBits(value);
+        }
+        return null;
+    }
+
+    private Long doubleLiteralBits(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode == Opcodes.DCONST_0) return Double.doubleToRawLongBits(0.0d);
+        if (opcode == Opcodes.DCONST_1) return Double.doubleToRawLongBits(1.0d);
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Double value) {
+            return Double.doubleToRawLongBits(value);
+        }
+        return null;
+    }
+
+    private AbstractInsnNode previousReal(AbstractInsnNode insn) {
+        AbstractInsnNode cursor = insn;
+        while (cursor != null && cursor.getOpcode() < 0) {
+            cursor = cursor.getPrevious();
+        }
+        return cursor;
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {
@@ -164,7 +265,7 @@ public class JvmConstantObfuscationIntegrationTest {
                     ConstantShapes shapes = new ConstantShapes();
                     String out = shapes.all();
                     System.out.println(out);
-                    if (!out.equals("123486954:81985529216486894:11.0:14.0:-1234567:81985529216486895:-3.5:6.25")) {
+                    if (!out.equals("123486954:81985529216486894:11.0:14.0:-1234567:81985529216486895:-3.5:6.25:" + shapes.arrays())) {
                         throw new AssertionError(out);
                     }
                     System.out.println("CONSTANT SHAPES OK");
@@ -172,7 +273,30 @@ public class JvmConstantObfuscationIntegrationTest {
 
                 String all() {
                     return ints() + ":" + longs() + ":" + floats() + ":" + doubles()
-                        + ":" + STATIC_INT + ":" + STATIC_LONG + ":" + STATIC_FLOAT + ":" + STATIC_DOUBLE;
+                        + ":" + STATIC_INT + ":" + STATIC_LONG + ":" + STATIC_FLOAT + ":" + STATIC_DOUBLE
+                        + ":" + arrays();
+                }
+
+                long arrays() {
+                    long total = 0L;
+                    boolean[] flags = new boolean[] {true, false, true};
+                    byte[] bytes = new byte[] {(byte) 0x80, 0, 127};
+                    short[] shorts = new short[] {-30000, 12345};
+                    char[] chars = new char[] {'A', 0x1234};
+                    int[] ints = new int[] {-7, 0, 123456789, 42};
+                    long[] longs = new long[] {0x1020304050607080L, -5L, 9L};
+                    float[] floats = new float[] {-1.5f, 0.25f, 3.75f};
+                    double[] doubles = new double[] {-2.5d, 6.5d};
+                    int[] empty = new int[] {};
+                    for (boolean v : flags) total = total * 31L + (v ? 1L : 0L);
+                    for (byte v : bytes) total = total * 31L + v;
+                    for (short v : shorts) total = total * 31L + v;
+                    for (char v : chars) total = total * 31L + v;
+                    for (int v : ints) total = total * 31L + v;
+                    for (long v : longs) total = total * 31L + v;
+                    for (float v : floats) total = total * 31L + Float.floatToRawIntBits(v);
+                    for (double v : doubles) total = total * 31L + Double.doubleToRawLongBits(v);
+                    return total + empty.length;
                 }
 
                 int ints() {

@@ -100,6 +100,8 @@ abstract class CffMaterialTables extends CffClassSetup {
             emitPatchableIntNoLdc(init);
             emitClassKeyWordMask(init, g18RootLocal, i);
             init.add(new InsnNode(Opcodes.IXOR));
+            JvmPassBytecode.pushInt(init, CLASS_KEY_WORD_SEAL);
+            init.add(new InsnNode(Opcodes.IXOR));
             init.add(new InsnNode(Opcodes.IASTORE));
         }
         init.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
@@ -270,7 +272,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new InsnNode(Opcodes.IADD));
         JvmPassBytecode.pushInt(insns, CLASS_KEY_TABLE_SIZE - 1);
         insns.add(new InsnNode(Opcodes.IAND));
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitDecodedClassKeyWordFromConstantSeal(insns, CLASS_KEY_WORD_SEAL);
         insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -284,6 +286,12 @@ abstract class CffMaterialTables extends CffClassSetup {
         helper.maxStack = 8;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
+    }
+
+    protected void emitDecodedClassKeyWordFromConstantSeal(InsnList insns, int seal) {
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        JvmPassBytecode.pushInt(insns, seal);
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     protected void installEncryptedTokenMaterialHelper(

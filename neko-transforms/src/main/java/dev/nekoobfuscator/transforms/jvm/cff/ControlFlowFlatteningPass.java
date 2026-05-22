@@ -65,6 +65,16 @@ import org.slf4j.LoggerFactory;
  */
 public final class ControlFlowFlatteningPass extends CffTransitionOutliner implements TransformPass {
 
+    public static void emitDecodedSealedClassKeyWord(InsnList insns, int seal) {
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        JvmPassBytecode.pushInt(insns, seal);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    public static void emitDecodedSealedClassKeyWordFromCarrier(InsnList insns, int carrierLocal) {
+        emitDecodedSealedClassKeyWord(insns, CLASS_KEY_WORD_SEAL);
+    }
+
     public String id() {
         return ID;
     }

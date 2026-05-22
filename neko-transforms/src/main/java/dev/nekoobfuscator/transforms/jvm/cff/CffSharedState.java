@@ -76,6 +76,7 @@ abstract class CffSharedState {
     protected static final String STRING_CONSTANT_VALUES_LOWERED =
         "controlFlowFlattening.stringConstantValuesLowered";
     protected static final int CLASS_KEY_TABLE_SIZE = 64;
+    public static final int CLASS_KEY_WORD_SEAL = 0x4B1D5EED;
     protected static final int TOKEN_MATERIAL_TABLE_SIZE = 16_384;
     protected static final int TOKEN_MATERIAL_ROW_WORDS = 13;
     protected static final int TOKEN_MATERIAL_ROW_LONGS = (TOKEN_MATERIAL_ROW_WORDS + 1) / 2;
