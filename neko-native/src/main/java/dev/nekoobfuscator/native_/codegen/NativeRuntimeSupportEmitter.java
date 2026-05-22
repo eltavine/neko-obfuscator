@@ -608,6 +608,9 @@ static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
 static jboolean g_neko_method_type_descriptor_ready = JNI_FALSE;
 static void *g_neko_method_type_descriptor_method = NULL;
 static void *g_neko_method_type_descriptor_entry = NULL;
+static jboolean g_neko_method_type_parameter_array_ready = JNI_FALSE;
+static void *g_neko_method_type_parameter_array_method = NULL;
+static void *g_neko_method_type_parameter_array_entry = NULL;
 
 static void neko_ensure_method_type_descriptor_cache(JNIEnv *env) {
     void *mt_klass = NULL;
@@ -644,6 +647,41 @@ static void neko_ensure_method_type_descriptor_cache(JNIEnv *env) {
         abort();
     }
     g_neko_method_type_descriptor_ready = JNI_TRUE;
+}
+
+static void neko_ensure_method_type_parameter_array_cache(JNIEnv *env) {
+    void *mt_klass = NULL;
+    jclass mtClass;
+    void *method;
+    if (g_neko_method_type_parameter_array_ready) return;
+    if (env == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType.parameterArray cache requires JNIEnv*\\n");
+        abort();
+    }
+    mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, &mt_klass);
+    if (mtClass == NULL || mt_klass == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType class unavailable for parameterArray cache mirror=%p klass=%p\\n",
+            (void*)mtClass, mt_klass);
+        abort();
+    }
+    neko_ensure_class_initialized(env, mtClass, "java/lang/invoke/MethodType");
+    method = neko_resolve_method(mt_klass, "parameterArray", "()[Ljava/lang/Class;");
+    if (method == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType.parameterArray Method* unavailable\\n");
+        abort();
+    }
+    g_neko_method_type_parameter_array_method = method;
+    g_neko_method_type_parameter_array_entry = neko_bound_method_i_entry(method,
+        &g_neko_method_type_parameter_array_entry, "java/lang/invoke/MethodType",
+        "parameterArray", "()[Ljava/lang/Class;");
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_METHODTYPE_PARAMETER_ARRAY_ENTRY") != NULL) {
+        g_neko_method_type_parameter_array_entry = NULL;
+    }
+    if (g_neko_method_type_parameter_array_entry == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType.parameterArray entry unavailable\\n");
+        abort();
+    }
+    g_neko_method_type_parameter_array_ready = JNI_TRUE;
 }
 
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
@@ -690,9 +728,33 @@ static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
 
 static jobjectArray neko_bootstrap_parameter_array(JNIEnv *env, const char *bsm_desc) {
     jobject mt = neko_method_type_from_descriptor(env, bsm_desc);
-    jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
-    jmethodID mid = neko_resolve_jmethodID(env, mtClass, "parameterArray", "()[Ljava/lang/Class;");
-    return (jobjectArray)g_neko_jni_call_object_method_a_fn(env, mt, mid, NULL);
+    jvalue result;
+    void *thread;
+    if (env == NULL || bsm_desc == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType.parameterArray requires env=%p desc=%p\\n",
+            (void*)env, (const void*)bsm_desc);
+        abort();
+    }
+    if (mt == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType.parameterArray received null MethodType desc=%s\\n", bsm_desc);
+        abort();
+    }
+    neko_ensure_method_type_parameter_array_cache(env);
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType.parameterArray has no JavaThread\\n");
+        abort();
+    }
+    result = neko_njx_V_L_(thread, env,
+        g_neko_method_type_parameter_array_method,
+        g_neko_method_type_parameter_array_entry,
+        mt, NULL);
+    if (result.l == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] MethodType.parameterArray failed desc=%s\\n", bsm_desc);
+        abort();
+    }
+    return (jobjectArray)result.l;
 }
 
 static jobject neko_invoke_bootstrap(JNIEnv *env, const char *bsm_owner, const char *bsm_name, const char *bsm_desc, jobjectArray invoke_args) {

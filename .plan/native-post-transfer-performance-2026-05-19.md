@@ -455,6 +455,81 @@ the source plan that owns the changed path before it can be considered complete.
   `g_neko_jni_new_string_utf_fn(env, desc)` or
   `g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args)`.
 
+### [x] NPT-4e: Stage 4 T4.3b MethodType parameterArray direct call
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.3b by replacing
+  `neko_bootstrap_parameter_array`'s `MethodType.parameterArray()` invocation
+  with a cached Method*/i-entry call through the existing NJX call-stub
+  machinery.
+- Required evidence: fresh generated C currently shows
+  `neko_bootstrap_parameter_array` resolving `parameterArray` through
+  `neko_resolve_jmethodID(env, mtClass, "parameterArray", "()[Ljava/lang/Class;")`
+  and invoking it through `g_neko_jni_call_object_method_a_fn(env, mt, mid,
+  NULL)` in both TEST `build/neko-native-work/run-48428692005490` and obfusjack
+  `build/neko-native-work/run-48433464484047`.
+- Validation command or runtime target: `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, `R-inspect`, and `R-negative`; generated C must show
+  `neko_bootstrap_parameter_array` uses a cached Method*/entry and
+  `neko_njx_V_L_`, and contains no `neko_resolve_jmethodID(... "parameterArray"
+  ...)` or `g_neko_jni_call_object_method_a_fn(env, mt, mid, NULL)` in that
+  function.
+- Completion criteria: `MethodType.parameterArray()` executes through an
+  instance NJX call-stub with receiver `mt`, missing method/entry/thread
+  prerequisites abort, focused BSM/CONDY runtime exercises the path from a
+  freshly generated native artifact, TEST and obfusjack complete from fresh
+  artifacts, and no JNI/original-bytecode fallback is introduced.
+- Negative-proof addendum recorded before editing: add a generic diagnostic
+  gate that forces the parameterArray NJX entry cache to take the same
+  missing-entry hard-abort branch used when HotSpot cannot provide the required
+  entry. The gate must only prove fail-closed behavior and must not skip
+  classes, enter JNI fallback, or preserve original bytecode.
+- Runtime proof prerequisite recorded 2026-05-22: the focused BSM/CONDY
+  fixture generated `build/neko-native-work/run-48808079908376` with
+  `neko_native_impl_0.c:27` as `/* unsupported ldc constant */`, followed by
+  the next `String.equals` call at line 29 consuming a null receiver and
+  producing the observed bare Java `NullPointerException`. The freshly
+  generated `neko_bootstrap_parameter_array` body at
+  `neko_native_support_helpers_0.c:427-455` already contains the intended
+  cached `neko_njx_V_L_` call, but the unsupported ConstantDynamic LDC prevents
+  the runtime proof from reaching it. The generic prerequisite for this
+  substep is therefore to route top-level `LdcInsnNode ConstantDynamic` through
+  the existing `neko_resolve_constant_dynamic` native path instead of emitting
+  an unsupported no-op; this does not complete or alter the later T4.3c/T4.3d
+  de-JNI removals.
+- Completion evidence 2026-05-22: implemented the generic prerequisite by
+  lowering top-level `LdcInsnNode ConstantDynamic` through the existing
+  `neko_resolve_constant_dynamic` runtime path, then completed
+  `neko_bootstrap_parameter_array` with a cached `Method*`/i-entry and
+  `neko_njx_V_L_` receiver call. Focused validation passed:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home-native-coverage bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_methodTypeLdcUsesDescriptorNjxPath --rerun-tasks --no-parallel -Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/native-run-tmp`
+  (`BUILD SUCCESSFUL in 15s`). Fresh focused artifact
+  `build/neko-native-work/run-49054367165176` generated
+  `neko_native_impl_0.c:27` as a call to `neko_resolve_constant_dynamic(...)`
+  instead of `/* unsupported ldc constant */`, and
+  `neko_native_support_helpers_0.c:427-455` shows
+  `neko_bootstrap_parameter_array` using `neko_njx_V_L_` with
+  `g_neko_method_type_parameter_array_method` and
+  `g_neko_method_type_parameter_array_entry`. Runtime stdout was
+  `methodtype-ldc-ok`; the diagnostic negative run wrote
+  `[neko-bind] MethodType.parameterArray entry unavailable` to
+  `neko-test/build/test-native/methodtype-ldc-parameter-negative.stderr.log`
+  and exited nonzero, proving fail-closed behavior without JNI fallback or
+  original-bytecode fallback. Full performance validation passed:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home-native-coverage bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.NativeObfuscationPerfTest --rerun-tasks --no-parallel -Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/native-run-tmp`
+  (`BUILD SUCCESSFUL in 48s`), with fresh TEST artifact
+  `build/neko-native-work/run-49107782373059` (`translated=49 rejected=0`) and
+  obfusjack artifact `build/neko-native-work/run-49141506190971`
+  (`translated=93 rejected=0`). Medians were TEST Calc `2` ms
+  (`2/4/2/2/2`), obfusjack Platform `39` ms (`39/39/36/39/36`), Virtual
+  `32` ms (`32/33/30/35/30`), Seq `11` ms (`10/11/11/11/10`), Parallel `1`
+  ms, and VThreads `1` ms; all remain at or below the previous T4.3a medians
+  and below the recorded thresholds. Static inspection of the focused and full
+  generated artifacts found no
+  `neko_resolve_jmethodID(env, mtClass, "parameterArray", ...)` or
+  `g_neko_jni_call_object_method_a_fn(env, mt, mid, NULL)` in
+  `neko_bootstrap_parameter_array`; later T4.3c/T4.3d JNI uses remain visible
+  only in their still-open functions.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic

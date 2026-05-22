@@ -999,6 +999,11 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_METHODTYPE_DESCRIPTOR_ENTRY"), () -> source);
         assertTrue(source.contains("PUSH_O(neko_method_type_from_descriptor(env, \"(Ljava/lang/String;I)Ljava/lang/String;\"));"), () -> source);
         assertFalse(source.contains("neko_class_for_descriptor(env, \"(Ljava/lang/String;I)Ljava/lang/String;\")"), () -> source);
+        assertTrue(source.contains("static void *g_neko_method_type_parameter_array_method = NULL;"), () -> source);
+        assertTrue(source.contains("result = neko_njx_V_L_(thread, env,"), () -> source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_METHODTYPE_PARAMETER_ARRAY_ENTRY"), () -> source);
+        assertFalse(source.contains("neko_resolve_jmethodID(env, mtClass, \"parameterArray\", \"()[Ljava/lang/Class;\")"), () -> source);
+        assertFalse(source.contains("g_neko_jni_call_object_method_a_fn(env, mt, mid, NULL)"), () -> source);
         assertFalse(source.contains("g_neko_jni_new_string_utf_fn(env, desc)"), () -> source);
         assertFalse(source.contains("g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args)"), () -> source);
         assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);

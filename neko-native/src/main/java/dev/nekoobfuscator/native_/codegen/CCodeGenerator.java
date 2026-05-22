@@ -589,6 +589,8 @@ public final class CCodeGenerator {
         /* MethodType.fromMethodDescriptorString(String, ClassLoader) is
          * invoked from bootstrap metadata binding without JNI CallStatic*. */
         registerInvokeShape(true, 'L', new char[] { 'L', 'L' });
+        /* MethodType.parameterArray() is an instance no-arg object return. */
+        registerInvokeShape(false, 'L', new char[] {});
     }
 
     public String reserveInvokeCacheMeta(

@@ -497,6 +497,12 @@ public final class OpcodeTranslator {
             stmts.add(raw("PUSH_O(" + (type.getSort() == Type.METHOD
                 ? "neko_method_type_from_descriptor(env, \"" + CStringLiteral.escape(type.getDescriptor()) + "\")"
                 : cachedTypeClassExpression(type.getDescriptor())) + ");"));
+        } else if (ldc.cst instanceof ConstantDynamic constantDynamic) {
+            StringBuilder sb = new StringBuilder("{ ");
+            int[] tempCounter = new int[] { 0 };
+            String expr = constantDynamicExpression(sb, constantDynamic, tempCounter);
+            sb.append("PUSH_O(").append(expr).append("); }");
+            stmts.add(raw(sb.toString()));
         } else {
             stmts.add(raw("/* unsupported ldc constant */"));
         }
@@ -1481,11 +1487,14 @@ public final class OpcodeTranslator {
 
     private String constantDynamicExpression(StringBuilder sb, ConstantDynamic constantDynamic, int[] tempCounter) {
         String argsVar = "__condyArgs" + tempCounter[0]++;
+        String objClassVar = "__condyObjCls" + tempCounter[0]++;
+        sb.append("jclass ").append(objClassVar)
+            .append(" = neko_resolve_class_mirror_with_env(env, \"java/lang/Object\", NULL, NULL); ");
         // T3.20: inline JNI NewObjectArray (function-table index 172) instead
         // of calling the deleted opcode-side wrapper.
         sb.append("jobjectArray ").append(argsVar).append(" = ((jobjectArray (*)(JNIEnv*, jsize, jclass, jobject))(*((void***)(env)))[172])(env, ")
             .append(constantDynamic.getBootstrapMethodArgumentCount())
-            .append(", __objCls, NULL); ");
+            .append(", ").append(objClassVar).append(", NULL); ");
         Type[] bootstrapArgTypes = Type.getArgumentTypes(constantDynamic.getBootstrapMethod().getDesc());
         for (int i = 0; i < constantDynamic.getBootstrapMethodArgumentCount(); i++) {
             appendBootstrapArgAssignment(sb, argsVar, i, constantDynamic.getBootstrapMethodArgument(i), tempCounter, bootstrapArgTypes[i + 3]);

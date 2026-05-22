@@ -3,7 +3,9 @@ package dev.nekoobfuscator.test;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.objectweb.asm.ConstantDynamic;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -296,6 +298,19 @@ class NativeObfuscationIntegrationTest {
         String negativeCombined = negative.combinedOutput();
         assertTrue(negative.exitCode() != 0, () -> negativeCombined);
         assertTrue(negativeCombined.contains("MethodType.fromMethodDescriptorString entry unavailable"), () -> negativeCombined);
+
+        NativeObfuscationHelper.JarRunResult parameterNegative = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("methodtype-ldc-parameter-negative.stdout.log"),
+            workDir.resolve("methodtype-ldc-parameter-negative.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_NATIVE_DIAG_FAIL_METHODTYPE_PARAMETER_ARRAY_ENTRY", "1")
+        );
+        String parameterNegativeCombined = parameterNegative.combinedOutput();
+        assertTrue(parameterNegative.exitCode() != 0, () -> parameterNegativeCombined);
+        assertTrue(parameterNegativeCombined.contains("MethodType.parameterArray entry unavailable"), () -> parameterNegativeCombined);
     }
 
     @Test
@@ -658,6 +673,7 @@ class NativeObfuscationIntegrationTest {
     private static byte[] methodTypeLdcClassBytes() {
         String owner = "pkg/MethodTypeLdcRuntime";
         String descriptor = "(Ljava/lang/String;I)Ljava/lang/String;";
+        String bootstrapDesc = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/String;";
         ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
         cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
 
@@ -677,6 +693,14 @@ class NativeObfuscationIntegrationTest {
         main.visitLdcInsn(descriptor);
         main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
         main.visitJumpInsn(Opcodes.IFEQ, fail);
+        main.visitLdcInsn(new ConstantDynamic(
+            "dyn",
+            "Ljava/lang/String;",
+            new Handle(Opcodes.H_INVOKESTATIC, owner, "bootstrap", bootstrapDesc, false)
+        ));
+        main.visitLdcInsn("condy-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+        main.visitJumpInsn(Opcodes.IFEQ, fail);
         main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
         main.visitLdcInsn("methodtype-ldc-ok");
         main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
@@ -690,6 +714,13 @@ class NativeObfuscationIntegrationTest {
         main.visitInsn(Opcodes.RETURN);
         main.visitMaxs(0, 0);
         main.visitEnd();
+
+        var bootstrap = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "bootstrap", bootstrapDesc, null, null);
+        bootstrap.visitCode();
+        bootstrap.visitLdcInsn("condy-ok");
+        bootstrap.visitInsn(Opcodes.ARETURN);
+        bootstrap.visitMaxs(0, 0);
+        bootstrap.visitEnd();
 
         cw.visitEnd();
         return cw.toByteArray();
