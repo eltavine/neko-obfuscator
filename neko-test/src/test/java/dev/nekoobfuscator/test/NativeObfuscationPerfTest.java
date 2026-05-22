@@ -41,6 +41,9 @@ class NativeObfuscationPerfTest {
     private static final List<String> OBFUSJACK_REQUIRED_TIMINGS = List.of(
         "Platform", "Virtual", "Seq", "Parallel", "VThreads"
     );
+    private static final List<String> MILLIS_ROUNDED_ZERO_ALLOWED_TIMINGS = List.of(
+        "Parallel", "VThreads"
+    );
 
     @BeforeAll
     static void prepareFixtures() throws Exception {
@@ -301,7 +304,11 @@ class NativeObfuscationPerfTest {
         String combined
     ) {
         timingMillis.forEach((name, millis) -> {
-            assertTrue(millis > 0, () -> fixture + " baseline run " + runIndex + " non-positive `" + name + "` timing: " + millis + "\n" + combined);
+            if (MILLIS_ROUNDED_ZERO_ALLOWED_TIMINGS.contains(name)) {
+                assertTrue(millis >= 0, () -> fixture + " baseline run " + runIndex + " negative `" + name + "` timing: " + millis + "\n" + combined);
+            } else {
+                assertTrue(millis > 0, () -> fixture + " baseline run " + runIndex + " non-positive `" + name + "` timing: " + millis + "\n" + combined);
+            }
             Long ceiling = TIMING_SANITY_CEILINGS_MILLIS.get(name);
             if (ceiling != null) {
                 assertTrue(

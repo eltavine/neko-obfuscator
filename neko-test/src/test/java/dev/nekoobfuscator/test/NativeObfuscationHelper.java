@@ -147,6 +147,8 @@ final class NativeObfuscationHelper {
 
         List<String> command = new ArrayList<>();
         command.add("java");
+        command.add("-XX:-UsePerfData");
+        command.add("-Djava.io.tmpdir=" + nativeJavaTmpDir());
         command.addAll(jvmArgs);
         command.add("-jar");
         command.add(jar.toString());
@@ -312,6 +314,16 @@ final class NativeObfuscationHelper {
             Files.createDirectories(path);
         } catch (IOException e) {
             throw new IllegalStateException("Failed to create native test work dir: " + path, e);
+        }
+        return path;
+    }
+
+    private static Path nativeJavaTmpDir() {
+        Path path = nativeWorkDir().resolve("java-tmp");
+        try {
+            Files.createDirectories(path);
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to create native test Java tmp dir: " + path, e);
         }
         return path;
     }
