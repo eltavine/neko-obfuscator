@@ -2906,3 +2906,51 @@ Performance and GC gates:
   median is `43 ms` and meets `<=44 ms`; Seq median is `11 ms` and meets
   `<=14 ms`; Virtual median is `39 ms` and remains the next open gate.
   G1/Serial/Parallel TEST smokes reported Pool PASS and Calc `3/3/3 ms`.
+
+- [x] P54 Omit LambdaMetafactory Object return adapter casts.
+  Update native-stage LambdaMetafactory adapter generation so object or array
+  values adapted to `java/lang/Object` do not receive a redundant
+  `CHECKCAST java/lang/Object`. Keep all other casts intact, including casts to
+  specific object types, interface types, arrays, unboxing, boxing, void
+  adaptation, and all non-lambda bytecode. This is a generic assignability
+  cleanup in the generated lambda adapter, not a runtime fallback and not a
+  benchmark-specific transform.
+  Source evidence: fresh generated obfusjack C in
+  `build/neko-native-work/run-43586804685160/neko_native_impl_89.c` and
+  `neko_native_impl_91.c` shows generated `Callable.call()` adapters for
+  `Main$NekoLambda$17` and `Main$NekoLambda$19` call the translated task body,
+  then execute a checkcast block that binds `java/lang/Object` and calls
+  `neko_fast_is_instance_of` before returning. The corresponding generated
+  class bytecode shows the LambdaMetafactory adapter is returning `Object` from
+  a more specific reference return, and `NativeCompilationStage.adaptStackValue`
+  currently emits `CHECKCAST` for every object-to-object mismatch. A cast to
+  `java/lang/Object` cannot fail for any non-null reference and preserves null,
+  so it adds work without changing lambda return semantics. The obfusjack
+  Platform/Virtual task paths execute these generated `Callable.call()` methods
+  50,000 times per timed path.
+  Validation: focused Gradle validation with fresh native regeneration;
+  generated-C inspection proving `NekoLambda$17.call` and `NekoLambda$19.call`
+  no longer contain the post-task `java/lang/Object` checkcast block while
+  casts to narrower types remain emitted elsewhere; TEST x5; obfusjack x5
+  measuring Platform/Virtual/Seq/Parallel/VThreads; strict forbidden JNI/
+  fallback grep; G1/Serial/Parallel TEST smokes.
+  Completion criteria: LambdaMetafactory adapters still preserve JVM
+  assignability for all non-Object targets, lambda construction and invocation
+  remain correct, TEST and Seq stay within target, Virtual median moves toward
+  or meets `<=35 ms` without regressing Platform beyond `<=44 ms`, and no
+  runtime aborts or forbidden JNI/fallback markers appear.
+  Completion evidence: focused Gradle validation passed with fresh native
+  regeneration:
+  `:neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.OpcodeTranslatorUnitTest --tests dev.nekoobfuscator.test.NativeGeneratedCHotPathAuditTest --tests dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_rawStringGraphOptInRunsConcatShapes`.
+  Fresh generated obfusjack C in
+  `build/neko-native-work/run-43946550536660/neko_native_impl_89.c` and
+  `neko_native_impl_91.c` returns directly after the translated task body and
+  no longer emits the prior post-task `java/lang/Object`
+  `neko_fast_is_instance_of` checkcast block. Targeted forbidden JNI/fallback
+  grep over those changed generated methods returned no matches. Fresh TEST x5
+  reported Calc `3/3/2/3/2 ms`. Fresh obfusjack x5 reported Platform
+  `24/35/30/38/31 ms`, Virtual `28/35/44/36/29 ms`, Seq
+  `11/11/11/11/12 ms`, Parallel `1 ms`, and VThreads `1 ms`; medians are
+  Platform `31 ms`, Virtual `35 ms`, and Seq `11 ms`, meeting the recorded
+  thresholds. G1/Serial/Parallel TEST smokes reported Pool PASS and Calc
+  `3/3/3 ms`.

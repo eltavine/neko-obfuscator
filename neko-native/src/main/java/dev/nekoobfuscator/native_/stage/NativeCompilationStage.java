@@ -409,6 +409,9 @@ public final class NativeCompilationStage {
             return;
         }
         if (source.getSort() == Type.OBJECT && target.getSort() == Type.OBJECT) {
+            if ("java/lang/Object".equals(target.getInternalName())) {
+                return;
+            }
             out.add(new TypeInsnNode(Opcodes.CHECKCAST, target.getInternalName()));
         } else if (source.getSort() == Type.OBJECT && target.getSort() != Type.OBJECT && target.getSort() != Type.ARRAY) {
             emitUnbox(out, target);
