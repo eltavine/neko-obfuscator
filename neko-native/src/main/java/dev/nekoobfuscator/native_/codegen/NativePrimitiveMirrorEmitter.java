@@ -31,7 +31,7 @@ final class NativePrimitiveMirrorEmitter {
     static String renderPrimitiveMirrorSupport() {
         return """
 static void neko_primitive_mirror_table_init(JNIEnv *env) {
-    static const char * const wrapper_names[8] = {
+    static const char * const wrapper_names[9] = {
         "java/lang/Boolean",
         "java/lang/Byte",
         "java/lang/Character",
@@ -39,8 +39,10 @@ static void neko_primitive_mirror_table_init(JNIEnv *env) {
         "java/lang/Integer",
         "java/lang/Long",
         "java/lang/Float",
-        "java/lang/Double"
+        "java/lang/Double",
+        "java/lang/Void"
     };
+    const char *diag_missing_tag = getenv("NEKO_NATIVE_DIAG_FAIL_PRIMITIVE_MIRROR_TAG");
     int kind;
     if (g_neko_primitive_mirror_ready) return;
     if (env == NULL) {
@@ -55,11 +57,16 @@ static void neko_primitive_mirror_table_init(JNIEnv *env) {
         fprintf(stderr, "[neko-bind] T4.1 primitive mirror init requires native_resolution_ready\\n");
         abort();
     }
-    for (kind = 0; kind < 8; kind++) {
+    for (kind = 0; kind < 9; kind++) {
         const char *name = wrapper_names[kind];
         void *klass;
         neko_field_resolution_t type_field;
         klass = neko_resolve_class_with_env(env, name, NULL);
+        if (diag_missing_tag != NULL
+            && diag_missing_tag[0] == g_neko_primitive_mirror_table[kind].tag
+            && diag_missing_tag[1] == '\\0') {
+            klass = NULL;
+        }
         if (klass == NULL) {
             fprintf(stderr, "[neko-bind] T4.1 missing wrapper-class mirror for %s (kind=%d tag=%c)\\n",
                 name, kind, g_neko_primitive_mirror_table[kind].tag);
@@ -78,7 +85,7 @@ static void neko_primitive_mirror_table_init(JNIEnv *env) {
     g_neko_primitive_mirror_ready = JNI_TRUE;
     if (getenv("NEKO_PATCH_DEBUG") != NULL) {
         fprintf(stderr, "[neko-bind] T4.1 primitive mirror table populated:");
-        for (kind = 0; kind < 8; kind++) {
+        for (kind = 0; kind < 9; kind++) {
             fprintf(stderr, " %c=(klass=%p,off=%u)",
                 g_neko_primitive_mirror_table[kind].tag,
                 g_neko_primitive_mirror_table[kind].wrapper_klass,
@@ -89,7 +96,7 @@ static void neko_primitive_mirror_table_init(JNIEnv *env) {
 }
 
 NEKO_FAST_INLINE jclass neko_primitive_mirror_for_char(JNIEnv *env, char tag) {
-    int kind = neko_primitive_kind_from_descriptor_char(tag);
+    int kind = neko_primitive_mirror_kind_from_descriptor_char(tag);
     neko_primitive_mirror_entry_t *entry;
     void *thread;
     void *mirror_handle_addr;
@@ -97,7 +104,7 @@ NEKO_FAST_INLINE jclass neko_primitive_mirror_for_char(JNIEnv *env, char tag) {
     void *wrapper_class_oop;
     char *field_addr;
     void *type_oop;
-    if (kind < 0 || kind >= 8) {
+    if (kind < 0 || kind >= 9) {
         fprintf(stderr, "[neko-bind] T4.1 primitive mirror requested for non-primitive tag '%c'\\n", tag);
         abort();
     }

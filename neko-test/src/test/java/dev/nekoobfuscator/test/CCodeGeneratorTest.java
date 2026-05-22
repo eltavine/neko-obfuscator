@@ -982,6 +982,11 @@ class CCodeGeneratorTest {
         assertFalse(source.contains("static inline jobject neko_get_object_field"), () -> source);
         assertTrue(source.contains("neko_bind_string_slot(thread, env, &g_str_0, \"hello-bind\");"), () -> source);
         assertTrue(source.contains("neko_bind_primitive_class_slot(env,"), () -> source);
+        assertTrue(source.contains("localClass = neko_primitive_mirror_for_char(env, desc[0]);"), () -> source);
+        assertTrue(source.contains("\"java/lang/Void\""), () -> source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_PRIMITIVE_MIRROR_TAG"), () -> source);
+        assertTrue(source.contains("T4.1 missing wrapper-class mirror for %s"), () -> source);
+        assertFalse(source.contains("JVM_FindPrimitiveClass unavailable for LDC Class descriptor"), () -> source);
         assertTrue(source.contains("neko_call_stub_guarded(&__stub_args);"), () -> source);
         assertTrue(source.contains("addq  $16, %%rsp"), () -> source);
         assertFalse(source.contains("addq  $24, %%rsp"), () -> source);

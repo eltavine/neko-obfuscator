@@ -1143,22 +1143,16 @@ static const char *neko_primitive_descriptor_name(const char *desc) {
 }
 
 static void neko_bind_primitive_class_slot(JNIEnv *env, jclass *slot, const char *desc) {
-    const char *primitive_name;
     jclass localClass;
     jobject globalRef;
     if (env == NULL || slot == NULL || *slot != NULL) return;
-    primitive_name = neko_primitive_descriptor_name(desc);
-    if (primitive_name == NULL) {
+    if (desc == NULL || desc[0] == '\\0' || desc[1] != '\\0'
+        || neko_primitive_mirror_kind_from_descriptor_char(desc[0]) < 0) {
         fprintf(stderr, "[neko-bind] unsupported primitive class descriptor: %s\\n", desc == NULL ? "<null>" : desc);
         abort();
     }
-    if (g_neko_method_layout.sym_jvm_find_primitive_class == NULL) {
-        fprintf(stderr, "[neko-bind] JVM_FindPrimitiveClass unavailable for LDC Class descriptor %s\\n", desc);
-        abort();
-    }
-    localClass = ((neko_jvm_find_primitive_class_t)g_neko_method_layout.sym_jvm_find_primitive_class)(env, primitive_name);
-    if (localClass == NULL || neko_exception_check(env)) {
-        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+    localClass = neko_primitive_mirror_for_char(env, desc[0]);
+    if (localClass == NULL) {
         fprintf(stderr, "[neko-bind] primitive class resolution failed for descriptor %s\\n", desc);
         abort();
     }

@@ -275,6 +275,49 @@ the source plan that owns the changed path before it can be considered complete.
   diagnostics (`ZGC oop load masks unavailable addr=0x0 good=0x0`), and
   Parallel/Serial obfusjack direct runs did not provide a clean strict-gate
   completion under the 240s direct-run cap.
+
+### [x] NPT-4: Stage 4 T4.1 primitive Class mirror slots
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.1 for primitive
+  `Class` constants by routing both `neko_class_for_descriptor` and
+  LDC primitive class slot binding through the generated descriptor → mirror
+  table.
+- Required evidence: current generated C proving `neko_class_for_descriptor`
+  already uses `neko_primitive_mirror_for_char`, plus generated/source evidence
+  that `neko_bind_primitive_class_slot` still uses `JVM_FindPrimitiveClass` for
+  LDC primitive class descriptors.
+- Validation command or runtime target: `R-build`, `R-test`,
+  `R-obfusjack`, `R-native-test`, `R-inspect`, and `R-negative`; fresh
+  generated C must show no `JVM_FindPrimitiveClass unavailable for LDC Class
+  descriptor` path and no `FindClass` / `GetStaticFieldID` /
+  `GetStaticObjectField` primitive-Class fallback.
+- Completion criteria: primitive `Z/B/C/S/I/J/F/D/V` class slots bind through
+  the mirror table populated at OnLoad, primitive-array kind mapping remains
+  limited to legal array element primitive types, missing wrapper/TYPE/mirror
+  metadata aborts, TEST and obfusjack complete with fresh artifacts, and no JNI
+  or original-bytecode fallback is introduced.
+- Negative-proof addendum recorded before editing: add a generic diagnostic gate
+  that forces a selected primitive mirror-table wrapper lookup to take the same
+  hard-abort path as missing wrapper metadata. The gate is table/tag driven only;
+  it must not skip classes, preserve original bytecode, or add JNI fallback.
+- Completion evidence 2026-05-22: `neko_bind_primitive_class_slot` now routes
+  primitive class slots through `neko_primitive_mirror_for_char(env, desc[0])`.
+  The mirror table covers `Z/B/C/S/I/J/F/D/V` with `java/lang/Void.TYPE`, while
+  primitive-array kind mapping remains limited to the eight legal primitive
+  array element types. `CCodeGeneratorTest` passed. Fresh full perf validation
+  passed with
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home-native-coverage bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.NativeObfuscationPerfTest --rerun-tasks --no-parallel -Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/native-run-tmp`;
+  generated artifacts were TEST `build/neko-native-work/run-46729377030886` and
+  obfusjack `build/neko-native-work/run-46734567148804`. Perf medians were TEST
+  Calc `3` ms and obfusjack Platform `40` ms, Virtual `36` ms, Seq `11` ms,
+  Parallel/VThreads `1` ms. Generated-C inspection found
+  `localClass = neko_primitive_mirror_for_char(env, desc[0]);`, `case 'V'`,
+  `java/lang/Void`, and `NEKO_NATIVE_DIAG_FAIL_PRIMITIVE_MIRROR_TAG`; grep found
+  zero `JVM_FindPrimitiveClass unavailable for LDC Class descriptor` and zero
+  primitive-Class fallback table-index hits for `6/144/145`. `R-negative` with
+  `NEKO_NATIVE_DIAG_FAIL_PRIMITIVE_MIRROR_TAG=I` aborted both TEST-native and
+  obfusjack-native with exit `134` and log `T4.1 missing wrapper-class mirror
+  for java/lang/Integer (kind=4 tag=I)`, proving missing metadata fails closed.
 - User-updated acceptance recorded 2026-05-20: Calc must match or beat the
   original JVM jar in the same run environment; obfusjack Seq must be <= 10 ms;
   every other parsed benchmark/test timing must match original or stay within

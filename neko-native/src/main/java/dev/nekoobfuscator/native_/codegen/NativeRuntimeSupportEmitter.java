@@ -535,7 +535,7 @@ typedef struct {
     jboolean ready;             /* set after a successful per-entry init */
 } neko_primitive_mirror_entry_t;
 
-static neko_primitive_mirror_entry_t g_neko_primitive_mirror_table[8] = {
+static neko_primitive_mirror_entry_t g_neko_primitive_mirror_table[9] = {
     {NULL, 0u, 'Z', JNI_FALSE},
     {NULL, 0u, 'B', JNI_FALSE},
     {NULL, 0u, 'C', JNI_FALSE},
@@ -543,7 +543,8 @@ static neko_primitive_mirror_entry_t g_neko_primitive_mirror_table[8] = {
     {NULL, 0u, 'I', JNI_FALSE},
     {NULL, 0u, 'J', JNI_FALSE},
     {NULL, 0u, 'F', JNI_FALSE},
-    {NULL, 0u, 'D', JNI_FALSE}
+    {NULL, 0u, 'D', JNI_FALSE},
+    {NULL, 0u, 'V', JNI_FALSE}
 };
 static jboolean g_neko_primitive_mirror_ready = JNI_FALSE;
 
@@ -551,6 +552,7 @@ static jclass neko_class_for_descriptor(JNIEnv *env, const char *desc) {
     switch (desc[0]) {
         case 'Z': case 'B': case 'C': case 'S':
         case 'I': case 'J': case 'F': case 'D':
+        case 'V':
             return neko_primitive_mirror_for_char(env, desc[0]);
         case 'L': {
             const char *start = desc + 1;
@@ -686,6 +688,21 @@ static int neko_primitive_kind_from_descriptor_char(char leaf) {
         case 'J': return 5;
         case 'F': return 6;
         case 'D': return 7;
+        default: return -1;
+    }
+}
+
+static int neko_primitive_mirror_kind_from_descriptor_char(char leaf) {
+    switch (leaf) {
+        case 'Z': return 0;
+        case 'B': return 1;
+        case 'C': return 2;
+        case 'S': return 3;
+        case 'I': return 4;
+        case 'J': return 5;
+        case 'F': return 6;
+        case 'D': return 7;
+        case 'V': return 8;
         default: return -1;
     }
 }
