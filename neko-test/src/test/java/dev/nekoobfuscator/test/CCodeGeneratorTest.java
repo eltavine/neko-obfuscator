@@ -989,6 +989,17 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_PRIMITIVE_MIRROR_TAG"), () -> source);
         assertTrue(source.contains("T4.1 missing wrapper-class mirror for %s"), () -> source);
         assertFalse(source.contains("JVM_FindPrimitiveClass unavailable for LDC Class descriptor"), () -> source);
+        int shadowStart = source.indexOf("static jstring neko_shadow_utf_string(void *thread, JNIEnv *env, const char *text) {");
+        int shadowEnd = source.indexOf("static jclass neko_class_for_descriptor", shadowStart);
+        assertTrue(shadowStart >= 0 && shadowEnd > shadowStart, () -> source);
+        String shadowSection = source.substring(shadowStart, shadowEnd);
+        assertTrue(shadowSection.contains("neko_intern_string(thread, env, (const uint8_t*)text, strlen(text));"), () -> shadowSection);
+        assertTrue(shadowSection.contains("neko_handle_push(thread, string_oop);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("args[0].l = neko_shadow_dotted_string(thread, env, desc->owner);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("args[1].l = neko_shadow_utf_string(thread, env, desc->method);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("args[2].l = neko_shadow_utf_string(thread, env, desc->file);"), () -> shadowSection);
+        assertFalse(shadowSection.contains("g_neko_jni_new_string_utf_fn"), () -> shadowSection);
+        assertFalse(shadowSection.contains("NewStringUTF"), () -> shadowSection);
         assertTrue(source.contains("neko_call_stub_guarded(&__stub_args);"), () -> source);
         assertTrue(source.contains("addq  $16, %%rsp"), () -> source);
         assertFalse(source.contains("addq  $24, %%rsp"), () -> source);

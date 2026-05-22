@@ -454,12 +454,32 @@ static void neko_shadow_pop(void) {
     if (g_neko_shadow_depth > 0u) g_neko_shadow_depth--;
 }
 
-/* T3.20: shadow-stack StackTrace helpers retain their pre-existing JNI surface
- * but no longer reference the opcode-side wrappers (string UTF allocation,
- * NewObjectA, object-array allocation, object-array set) nor the typed
- * function-table macro; the indexing is expanded inline so
- * `Throwable.getStackTrace()` (Test 2.6 ReTrace) keeps working. */
-static jstring neko_shadow_dotted_string(JNIEnv *env, const char *internal_name) {
+/* T3.20: shadow-stack StackTrace helpers retain their pre-existing object and
+ * array JNI surface while the string materialization path is routed through the
+ * direct string interner used by LDC String support. */
+static jstring neko_shadow_utf_string(void *thread, JNIEnv *env, const char *text) {
+    void *string_oop;
+    jstring string_ref;
+    if (text == NULL) return NULL;
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] shadow stack string intern has no JavaThread\\n");
+        abort();
+    }
+    string_oop = neko_intern_string(thread, env, (const uint8_t*)text, strlen(text));
+    if (string_oop == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] shadow stack string intern failed text=%s\\n", text);
+        abort();
+    }
+    string_ref = (jstring)neko_handle_push(thread, string_oop);
+    if (string_ref == NULL) {
+        fprintf(stderr, "[neko-bind] shadow stack string handle push failed text=%s\\n", text);
+        abort();
+    }
+    return string_ref;
+}
+
+static jstring neko_shadow_dotted_string(void *thread, JNIEnv *env, const char *internal_name) {
     char buf[512];
     size_t i;
     if (internal_name == NULL) return NULL;
@@ -467,16 +487,21 @@ static jstring neko_shadow_dotted_string(JNIEnv *env, const char *internal_name)
         buf[i] = internal_name[i] == '/' ? '.' : internal_name[i];
     }
     buf[i] = '\\0';
-    return g_neko_jni_new_string_utf_fn(env, buf);
+    return neko_shadow_utf_string(thread, env, buf);
 }
 
 static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
+    void *thread = neko_jni_env_to_thread(env);
     jclass ste_cls = neko_resolve_class_mirror_with_env(env, "java/lang/StackTraceElement", NULL, NULL);
     jmethodID ste_ctor;
     jobjectArray trace;
     uint32_t depth = g_neko_shadow_depth;
     uint32_t count;
     uint32_t i;
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] shadow stack trace has no JavaThread\\n");
+        abort();
+    }
     if (ste_cls == NULL || neko_exception_check(env)) return NULL;
     ste_ctor = neko_resolve_jmethodID(env, ste_cls, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
     if (ste_ctor == NULL || neko_exception_check(env)) return NULL;
@@ -489,9 +514,9 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
         jvalue args[4];
         jobject element;
         if (desc == NULL) continue;
-        args[0].l = neko_shadow_dotted_string(env, desc->owner);
-        args[1].l = g_neko_jni_new_string_utf_fn(env, desc->method);
-        args[2].l = g_neko_jni_new_string_utf_fn(env, desc->file);
+        args[0].l = neko_shadow_dotted_string(thread, env, desc->owner);
+        args[1].l = neko_shadow_utf_string(thread, env, desc->method);
+        args[2].l = neko_shadow_utf_string(thread, env, desc->file);
         args[3].i = -1;
         if (neko_exception_check(env)) return trace;
         element = g_neko_jni_new_object_a_fn(env, ste_cls, ste_ctor, args);

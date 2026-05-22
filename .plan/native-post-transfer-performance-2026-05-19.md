@@ -786,6 +786,55 @@ the source plan that owns the changed path before it can be considered complete.
   `GetStaticMethodID`, or `CallStaticObjectMethodA` in
   `neko_lookup_for_jclass`.
 
+### [x] NPT-4j: Stage 4 T4.5a shadow stack jstring intern path
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.5a by replacing the
+  `Throwable.getStackTrace()` shadow-frame owner/method/file C-string to
+  jstring path with `neko_intern_string` plus stack-scoped handles. The change
+  is limited to string materialization in `neko_shadow_dotted_string` and its
+  immediate shadow-stack callers; StackTraceElement allocation, constructor
+  invocation, and object-array stores remain owned by T4.5b. The subtask must
+  not introduce JNI fallback, Java helper layers, skip-on-error, or original
+  bytecode fallback.
+- Required evidence: fresh generated C from TEST
+  `build/neko-native-work/run-52418773696489` and obfusjack
+  `build/neko-native-work/run-52423738487152` shows
+  `neko_shadow_dotted_string` returning
+  `g_neko_jni_new_string_utf_fn(env, buf)`, and `neko_shadow_stack_trace`
+  passing `desc->method` and `desc->file` through
+  `g_neko_jni_new_string_utf_fn(env, ...)`. Source evidence is
+  `NativeRuntimeSupportEmitter.java:462-494`. Existing direct string evidence
+  is `neko_intern_string(thread, env, (const uint8_t*)..., strlen(...))`
+  followed by `neko_handle_push(thread, oop)` in the MethodType descriptor path.
+- Validation command or runtime target: `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, and `R-inspect`; generated `neko_shadow_dotted_string` and
+  the shadow-frame string setup inside `neko_shadow_stack_trace` must contain no
+  `g_neko_jni_new_string_utf_fn`, `NewStringUTF`, or JNI function-table index
+  `167` path.
+- Completion criteria: shadow-frame owner, method, and file strings are interned
+  through `neko_intern_string`, null or missing-thread prerequisites fail
+  closed, focused generator/runtime coverage and the full native performance
+  gate pass from fresh artifacts, and static inspection proves only the
+  T4.5a-owned string conversion path changed while T4.5b-owned allocation and
+  constructor JNI paths remain explicit pending work.
+- Completion evidence 2026-05-22: focused generator/runtime validation passed
+  with the repo Gradle wrapper, including
+  `NativeObfuscationIntegrationTest.nativeObfuscation_dependencyCallerObservesTranslatedStackTrace`,
+  and produced fresh focused artifact
+  `build/neko-native-work/run-52860834972168`. Full
+  `NativeObfuscationPerfTest --no-parallel` passed from fresh artifacts TEST
+  `build/neko-native-work/run-52906013671894` and obfusjack
+  `build/neko-native-work/run-52910713919869`; medians were Calc `3` ms,
+  Platform `37` ms, Virtual `32` ms, Seq `11` ms, Parallel `1` ms, and
+  VThreads `1` ms. Static inspection of both accepted helper files found
+  `neko_shadow_utf_string`, `neko_intern_string(thread, env, ...)`,
+  `neko_handle_push(thread, string_oop)`, and owner/method/file shadow-frame
+  setup through the new helper, with no `g_neko_jni_new_string_utf_fn`,
+  `NewStringUTF`, or `[167]` path in the T4.5a string conversion section.
+  Remaining `NewObjectArray`, `NewObjectA`, and `SetObjectArrayElement`
+  wrappers in that section are the recorded T4.5b work. No fresh `hs_err` file
+  was produced.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic
