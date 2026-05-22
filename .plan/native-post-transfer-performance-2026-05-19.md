@@ -370,6 +370,31 @@ the source plan that owns the changed path before it can be considered complete.
   both generated artifacts and source emitters. Generated C/source emitters show
   `neko_resolve_method(...)` for method resolution, and the wrappers remain
   undeleted for the T4.11 sweep gate.
+
+### [x] NPT-4c: Stage 4 T4.2c static field lookup wrapper call sites
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.2c by proving generated
+  static-field lookup call sites no longer call `neko_get_static_field_id` and
+  route through `neko_resolve_field(..., JNI_TRUE)` instead.
+- Required evidence: source-emitter and generated-C grep for live
+  `neko_get_static_field_id(...)` callsites, plus generated-C/source evidence
+  that static field lookup uses `neko_resolve_field` with `is_static=true`.
+- Validation command or runtime target: reuse the fresh T4.1 `R-build`,
+  `R-test`, `R-obfusjack`, `R-native-test`, and `R-inspect` artifacts because no
+  runtime source changed after T4.1; missing field resolution inherits T2.4
+  `R-negative`.
+- Completion criteria: live-callsite grep reports zero static-field-ID wrapper
+  callsites outside comments, generated C/source emitters show resolver calls
+  with `JNI_TRUE`, and no wrapper deletion is attempted before T4.11.
+- Completion evidence 2026-05-22: no runtime code change was required. Fresh
+  T4.1 artifacts TEST `build/neko-native-work/run-46729377030886` and obfusjack
+  `build/neko-native-work/run-46734567148804` were produced by the passing
+  `NativeObfuscationPerfTest` gate. Live-callsite grep for
+  `neko_get_static_field_id[[:space:]]*\\(` returned zero outside comments in
+  both generated artifacts and source emitters. Generated C/source emitters show
+  `neko_resolve_field(..., JNI_TRUE)` for static field resolution, including the
+  primitive `TYPE` and `IMPL_LOOKUP` paths. T4.2 is complete as a call-site
+  replacement gate; wrapper deletion remains scoped to T4.11.
 - User-updated acceptance recorded 2026-05-20: Calc must match or beat the
   original JVM jar in the same run environment; obfusjack Seq must be <= 10 ms;
   every other parsed benchmark/test timing must match original or stay within
