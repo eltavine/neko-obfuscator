@@ -599,13 +599,66 @@ static jobject neko_lookup_for_class(JNIEnv *env, const char *owner) {
     return neko_lookup_for_jclass(env, ownerClass);
 }
 
+static jboolean g_neko_private_lookup_ready = JNI_FALSE;
+static void *g_neko_private_lookup_method = NULL;
+static void *g_neko_private_lookup_entry = NULL;
+
+static void neko_ensure_private_lookup_cache(JNIEnv *env) {
+    jclass mhClass;
+    void *mh_klass = NULL;
+    void *method;
+    if (g_neko_private_lookup_ready) return;
+    mhClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodHandles", NULL, &mh_klass);
+    if (mhClass == NULL || mh_klass == NULL) {
+        fprintf(stderr, "[neko-bind] MethodHandles class unavailable for privateLookupIn\\n");
+        abort();
+    }
+    method = neko_resolve_method(
+        mh_klass,
+        "privateLookupIn",
+        "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;");
+    if (method == NULL) {
+        fprintf(stderr, "[neko-bind] MethodHandles.privateLookupIn method unavailable\\n");
+        abort();
+    }
+    g_neko_private_lookup_method = method;
+    g_neko_private_lookup_entry = neko_bound_method_i_entry(method,
+        &g_neko_private_lookup_entry, "java/lang/invoke/MethodHandles",
+        "privateLookupIn",
+        "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;");
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_PRIVATE_LOOKUP_ENTRY") != NULL) {
+        g_neko_private_lookup_entry = NULL;
+    }
+    if (g_neko_private_lookup_entry == NULL) {
+        fprintf(stderr, "[neko-bind] MethodHandles.privateLookupIn entry unavailable\\n");
+        abort();
+    }
+    g_neko_private_lookup_ready = JNI_TRUE;
+}
+
 static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
-    jclass mhClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodHandles", NULL, NULL);
-    jmethodID mid = neko_resolve_jmethodID_with_kind(env, mhClass, "privateLookupIn", "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;", JNI_TRUE);
+    void *thread = neko_jni_env_to_thread(env);
+    jvalue result;
     jvalue args[2];
+    if (thread == NULL || ownerClass == NULL) {
+        fprintf(stderr, "[neko-bind] privateLookupIn prerequisites unavailable thread=%p owner=%p\\n",
+            thread, (void*)ownerClass);
+        abort();
+    }
+    neko_ensure_private_lookup_cache(env);
     args[0].l = ownerClass;
     args[1].l = neko_impl_lookup(env);
-    return g_neko_jni_call_static_object_method_a_fn(env, mhClass, mid, args);
+    result = neko_njx_S_L_LL(thread, env,
+        g_neko_private_lookup_method,
+        g_neko_private_lookup_entry,
+        NULL,
+        args);
+    if (neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] MethodHandles.privateLookupIn failed owner=%p\\n", (void*)ownerClass);
+        abort();
+    }
+    return result.l;
 }
 
 static jboolean g_neko_method_type_descriptor_ready = JNI_FALSE;

@@ -352,6 +352,20 @@ class NativeObfuscationIntegrationTest {
         assertTrue(implLookupNegative.exitCode() != 0, () -> implLookupNegativeCombined);
         assertTrue(implLookupNegativeCombined.contains("IMPL_LOOKUP cached slot unavailable"),
             () -> implLookupNegativeCombined);
+
+        NativeObfuscationHelper.JarRunResult privateLookupNegative = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("methodtype-ldc-private-lookup-negative.stdout.log"),
+            workDir.resolve("methodtype-ldc-private-lookup-negative.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_NATIVE_DIAG_FAIL_PRIVATE_LOOKUP_ENTRY", "1")
+        );
+        String privateLookupNegativeCombined = privateLookupNegative.combinedOutput();
+        assertTrue(privateLookupNegative.exitCode() != 0, () -> privateLookupNegativeCombined);
+        assertTrue(privateLookupNegativeCombined.contains("MethodHandles.privateLookupIn entry unavailable"),
+            () -> privateLookupNegativeCombined);
     }
 
     @Test

@@ -1037,6 +1037,16 @@ class CCodeGeneratorTest {
         assertTrue(implLookupSection.contains("g_neko_jni_new_global_ref_fn(env, localLookup);"), () -> implLookupSection);
         assertFalse(implLookupSection.contains("neko_resolve_field(klass, \"IMPL_LOOKUP\""), () -> implLookupSection);
         assertFalse(implLookupSection.contains("neko_fast_get_static_object_field("), () -> implLookupSection);
+        assertTrue(source.contains("static void *g_neko_private_lookup_method = NULL;"), () -> source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_PRIVATE_LOOKUP_ENTRY"), () -> source);
+        int privateLookupStart = source.indexOf("static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {");
+        int privateLookupEnd = source.indexOf("static jboolean g_neko_method_type_descriptor_ready", privateLookupStart);
+        assertTrue(privateLookupStart >= 0 && privateLookupEnd > privateLookupStart, () -> source);
+        String privateLookupSection = source.substring(privateLookupStart, privateLookupEnd);
+        assertTrue(privateLookupSection.contains("neko_ensure_private_lookup_cache(env);"), () -> privateLookupSection);
+        assertTrue(privateLookupSection.contains("result = neko_njx_S_L_LL(thread, env,"), () -> privateLookupSection);
+        assertFalse(privateLookupSection.contains("neko_resolve_jmethodID_with_kind(env, mhClass, \"privateLookupIn\""), () -> privateLookupSection);
+        assertFalse(privateLookupSection.contains("g_neko_jni_call_static_object_method_a_fn"), () -> privateLookupSection);
         assertFalse(source.contains("g_neko_jni_new_string_utf_fn(env, desc)"), () -> source);
         assertFalse(source.contains("g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args)"), () -> source);
         assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);

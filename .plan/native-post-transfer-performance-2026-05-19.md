@@ -731,6 +731,61 @@ the source plan that owns the changed path before it can be considered complete.
   `neko_fast_get_static_object_field`, `FindClass`, `GetStaticFieldID`, or
   `GetStaticObjectField` path. No fresh `hs_err` file was produced.
 
+### [x] NPT-4i: Stage 4 T4.4b privateLookupIn NJX path
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.4b by replacing
+  `neko_lookup_for_jclass`'s `MethodHandles.privateLookupIn(Class, Lookup)`
+  static JNI invocation with a cached `Method*`/i-entry and
+  `neko_njx_S_L_LL`. The owner-class argument must continue to route through
+  `neko_resolve_class_mirror_with_env` in `neko_lookup_for_class`, and
+  `IMPL_LOOKUP` must come from the T4.4a cached slot. The subtask must not
+  introduce Java helper layers, JNI fallback, skip-on-error, or original
+  bytecode fallback.
+- Required evidence: fresh generated C from TEST
+  `build/neko-native-work/run-52023000803100` and obfusjack
+  `build/neko-native-work/run-52028071557407` shows `neko_lookup_for_jclass`
+  still resolving `MethodHandles.privateLookupIn` through
+  `neko_resolve_jmethodID_with_kind(..., JNI_TRUE)` and invoking it through
+  `g_neko_jni_call_static_object_method_a_fn(env, mhClass, mid, args)`.
+  Source evidence is `NativeRuntimeSupportEmitter.java:602-608`.
+- Validation command or runtime target: `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, `R-inspect`, and `R-negative`; focused BSM/CONDY runtime
+  must execute caller-owner lookup through the new NJX path from a freshly
+  generated artifact; generated `neko_lookup_for_jclass` must contain no
+  `neko_resolve_jmethodID_with_kind(... "privateLookupIn" ...)`,
+  `g_neko_jni_call_static_object_method_a_fn`, `FindClass`,
+  `GetStaticMethodID`, or `CallStaticObjectMethodA` path.
+- Completion criteria: missing class/method/entry/thread prerequisites
+  hard-abort, successful runs call `privateLookupIn` through cached Method*/
+  i-entry and `neko_njx_S_L_LL`, focused BSM/CONDY, TEST, and obfusjack runtime
+  targets pass from fresh artifacts, and static inspection proves the old JNI
+  static invocation is removed only from `neko_lookup_for_jclass`.
+- Negative-proof addendum recorded before editing: add a generic diagnostic
+  gate that forces the required `privateLookupIn` NJX entry cache to take the
+  same hard-abort branch as a missing HotSpot entry. The gate must fail closed
+  without skipping classes, entering JNI fallback, or preserving original
+  bytecode.
+- Completion evidence 2026-05-22: focused generator/integration validation
+  passed with the repo Gradle wrapper after fixing the generic bind-time
+  `neko_resolve_method` call shape, and the fresh focused artifact
+  `build/neko-native-work/run-52418773696489` printed `methodtype-ldc-ok`.
+  `NEKO_NATIVE_DIAG_FAIL_PRIVATE_LOOKUP_ENTRY=1` hard-aborted with
+  `[neko-bind] MethodHandles.privateLookupIn entry unavailable`. Full
+  `NativeObfuscationPerfTest --no-parallel` passed from fresh artifacts TEST
+  `build/neko-native-work/run-52418773696489` and obfusjack
+  `build/neko-native-work/run-52423738487152`; the perf baseline artifacts were
+  TEST `build/neko-native-work/run-52427587494029` and obfusjack
+  `build/neko-native-work/run-52461986266540`, with baseline medians Calc `3`
+  ms, Platform `37` ms, Virtual `33` ms, Seq `12` ms, Parallel `1` ms, and
+  VThreads `1` ms. Static inspection of both accepted generated helper files
+  found `neko_ensure_private_lookup_cache`, cached
+  `g_neko_private_lookup_method`/`g_neko_private_lookup_entry`, and
+  `neko_njx_S_L_LL` in the lookup path, with no
+  `neko_resolve_jmethodID_with_kind(... "privateLookupIn" ...)`,
+  `g_neko_jni_call_static_object_method_a_fn`, `FindClass`,
+  `GetStaticMethodID`, or `CallStaticObjectMethodA` in
+  `neko_lookup_for_jclass`.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic
