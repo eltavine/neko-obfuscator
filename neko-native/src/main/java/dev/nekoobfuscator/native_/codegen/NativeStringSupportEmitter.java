@@ -31,6 +31,7 @@ static void *neko_intern_string_without_raw_heap(void *thread, JNIEnv *env, cons
     char *string_oop;
     jstring local_string;
     jstring interned;
+    neko_handle_save_t handle_window;
     jvalue alloc_arg;
     jvalue alloc_result;
     void *ctor_method;
@@ -70,6 +71,7 @@ static void *neko_intern_string_without_raw_heap(void *thread, JNIEnv *env, cons
         fprintf(stderr, "[neko-bind] string literal too large for raw-disabled intern len=%zu payload=%zu\\n", len, payload_bytes);
         abort();
     }
+    neko_handle_window_begin(thread, &handle_window);
     string_mirror = neko_resolve_class_mirror_with_env(env, "java/lang/String", NULL, &string_klass);
     if (string_mirror == NULL || string_klass == NULL) {
         fprintf(stderr, "[neko-bind] raw-disabled string intern String mirror unavailable len=%zu\\n", len);
@@ -151,8 +153,9 @@ static void *neko_intern_string_without_raw_heap(void *thread, JNIEnv *env, cons
         fprintf(stderr, "[neko-bind] JVM_InternString failed for raw-disabled string literal len=%zu\\n", len);
         abort();
     }
-    if (local_array != NULL) g_neko_jni_delete_local_ref_fn(env, local_array);
-    return neko_handle_oop((jobject)interned);
+    interned_oop = neko_prepare_return_oop(thread, interned, "intern_string_without_raw_heap");
+    neko_handle_window_end(&handle_window);
+    return interned_oop;
 }
 """;
     }

@@ -1017,6 +1017,12 @@ class CCodeGeneratorTest {
         int endWindowIndex = shadowSection.indexOf("neko_handle_window_end(&handle_window);", prepareTraceIndex);
         int pushReturnIndex = shadowSection.indexOf("trace_result = (jobjectArray)neko_handle_push(thread, trace_oop);", endWindowIndex);
         assertTrue(prepareTraceIndex >= 0 && prepareTraceIndex < endWindowIndex && endWindowIndex < pushReturnIndex, () -> shadowSection);
+        assertFalse(source.contains("g_neko_jni_delete_local_ref_fn(env,"), () -> source);
+        assertTrue(source.contains("array_raw = neko_prepare_return_oop(thread, array, \"slow_byte_array\");"), () -> source);
+        assertTrue(source.contains("array_oop = neko_prepare_return_oop(thread, array, \"slow_primitive_array\");"), () -> source);
+        assertTrue(source.contains("interned_oop = neko_prepare_return_oop(thread, interned, \"intern_string\");"), () -> source);
+        assertTrue(source.contains("interned_oop = neko_prepare_return_oop(thread, interned, \"intern_string_without_raw_heap\");"), () -> source);
+        assertTrue(source.contains("neko_handle_window_begin(thread, &icache_window);"), () -> source);
         assertFalse(shadowSection.contains("neko_resolve_jmethodID(env, ste_cls, \"<init>\""), () -> shadowSection);
         assertFalse(shadowSection.contains("g_neko_jni_new_object_array_fn"), () -> shadowSection);
         assertFalse(shadowSection.contains("g_neko_jni_new_object_a_fn"), () -> shadowSection);

@@ -1178,7 +1178,10 @@ static jvalue neko_icache_dispatch(
                  * JDK targets such as ExecutorService.shutdown(): decoding a
                  * JNI jmethodID as a native Method* cell can return without
                  * executing the concrete method body. */
-                jclass exactMirror = (jclass)neko_klass_java_mirror_handle(thread, receiverKlass);
+                neko_handle_save_t icache_window;
+                jclass exactMirror;
+                neko_handle_window_begin(thread, &icache_window);
+                exactMirror = (jclass)neko_klass_java_mirror_handle(thread, receiverKlass);
                 if (exactMirror == NULL) {
                     fprintf(stderr, "[neko-direct] receiver mirror unavailable for %s%s klass=%p\\n",
                         meta->name, meta->desc, receiverKlass);
@@ -1186,7 +1189,7 @@ static jvalue neko_icache_dispatch(
                 }
                 neko_link_class_methods(env, exactMirror, "<virtual>", meta->name, meta->desc);
                 void *exactMethod = neko_resolve_method(receiverKlass, meta->name, meta->desc);
-                g_neko_jni_delete_local_ref_fn(env, exactMirror);
+                neko_handle_window_end(&icache_window);
                 int __holder_len = 1;
                 const char *__holder_name = neko_method_holder_name_utf8(exactMethod, &__holder_len);
                 NEKO_DIRECT_LOG("icache miss resolved %s%s exactMethod=%p holder=%.*s receiverKlass=%p receiver=%p",

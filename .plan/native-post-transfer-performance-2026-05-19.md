@@ -955,6 +955,62 @@ the source plan that owns the changed path before it can be considered complete.
   top-level `hs_err` file was produced; the newest existing one remained
   `hs_err_pid3.log` from 2026-05-22 04:11.
 
+### [x] T4.6b: Convert remaining local-ref deletes to handle windows
+
+- Scope: remove every remaining runtime call site that invokes the captured
+  `DeleteLocalRef` pointer as `g_neko_jni_delete_local_ref_fn(env, ...)`,
+  replacing each with the generic T4.6a handle-window primitive or with a raw
+  oop return path when the helper already unwraps the local reference. This
+  substep does not delete the captured pointer declaration or bootstrap capture;
+  wrapper sweep deletion remains T4.11 after all callers are gone.
+- Required evidence: source and generated-C grep showing no
+  `g_neko_jni_delete_local_ref_fn(env, ...)` call sites remain; generated C must
+  show the converted helper windows around the local-producing operations; any
+  returned reference that crosses a window must be converted to a raw oop with
+  `neko_prepare_return_oop` before restore and re-pushed only after restore.
+- Validation command or runtime target: focused generator/runtime tests with
+  repository `./gradlew`, then `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, `R-inspect`, and the performance gate. `R-negative` is the
+  grep/build fail-closed proof that any residual local-ref delete call site
+  aborts the subtask before T4.11 deletion.
+- Completion criteria: regenerated TEST and obfusjack artifacts run green,
+  generated C has no `g_neko_jni_delete_local_ref_fn(env,` calls, the
+  `neko_icache_dispatch` PIC-miss path uses a handle window with no performance
+  regression against the current T4.6a accepted medians, and no JNI/JVMTI or
+  original-bytecode fallback is introduced.
+- Evidence recorded before editing 2026-05-22: source grep after T4.6a found
+  remaining local-ref delete callers in `NativeBindSupportEmitter`
+  (`neko_ensure_class_initialized`, slow byte-array allocation, TLAB scratch
+  refill, slow primitive-array allocation, string intern cleanup, and declared
+  method materialization), `NativeStringSupportEmitter`
+  (`neko_intern_string_without_raw_heap` local byte-array cleanup),
+  `NativeHotSpotFastAccessEmitter` (`neko_icache_dispatch` PIC-miss
+  `exactMirror` cleanup), and `ManifestEmitter` (`owner_cls` / `anchor_cls`
+  cleanup). Fresh accepted artifacts TEST
+  `build/neko-native-work/run-54888323119993` and obfusjack
+  `build/neko-native-work/run-54893502305395` generated matching
+  `g_neko_jni_delete_local_ref_fn(env, ...)` calls in support helpers,
+  icache support, and manifest C; obfusjack expands the manifest owner cleanup
+  into many generated calls from one source emitter site.
+- Completion evidence 2026-05-22: focused `CCodeGeneratorTest` passed after
+  the final source edit, and full `NativeObfuscationPerfTest --no-parallel`
+  passed from fresh accepted artifacts TEST
+  `build/neko-native-work/run-55551256714109` and obfusjack
+  `build/neko-native-work/run-55555910623507`. Medians were Calc `3` ms,
+  Platform `36` ms, Virtual `29` ms, Seq `11` ms, Parallel `1` ms, and
+  VThreads `1` ms, which remains within the T4.6a accepted gate. Static
+  inspection of those two accepted artifacts found zero
+  `g_neko_jni_delete_local_ref_fn(env, ...)` call sites. It found the converted
+  handle windows in `neko_ensure_class_initialized`, slow byte-array allocation,
+  slow primitive-array allocation, `neko_intern_string`,
+  `neko_intern_string_without_raw_heap`, `neko_link_class_methods`,
+  `neko_icache_dispatch`, and manifest owner/anchor discovery. The only
+  remaining `g_neko_jni_delete_local_ref_fn` references are declarations and
+  the bootstrap capture of JNI table index `[23]`, reserved for T4.11 sweep
+  deletion after all T4.x caller removals are complete. No fresh top-level
+  `hs_err` file was produced; the newest existing one remained
+  `hs_err_pid3.log` from 2026-05-22 04:11.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic

@@ -164,6 +164,8 @@ static void *neko_resolve_class(const char *utf8) {
 }
 
 static void neko_ensure_class_initialized(JNIEnv *env, jclass cls, const char *owner) {
+    void *thread;
+    neko_handle_save_t handle_window;
     jclass initialized;
     if (env == NULL || cls == NULL || owner == NULL) {
         fprintf(stderr, "[neko-bind] class initialization missing input: %s cls=%p\\n",
@@ -175,6 +177,12 @@ static void neko_ensure_class_initialized(JNIEnv *env, jclass cls, const char *o
         fprintf(stderr, "[neko-bind] class initialization symbol unavailable: %s\\n", owner);
         abort();
     }
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] class initialization has no JavaThread: %s\\n", owner);
+        abort();
+    }
+    neko_handle_window_begin(thread, &handle_window);
     initialized = ((neko_jvm_find_class_from_class_t)g_neko_method_layout.sym_jvm_find_class_from_class)(
         env, owner, JNI_TRUE, cls);
     if (initialized == NULL || neko_exception_check(env)) {
@@ -182,7 +190,7 @@ static void neko_ensure_class_initialized(JNIEnv *env, jclass cls, const char *o
         fprintf(stderr, "[neko-bind] class initialization failed: %s\\n", owner);
         abort();
     }
-    g_neko_jni_delete_local_ref_fn(env, initialized);
+    neko_handle_window_end(&handle_window);
 }
 
 __attribute__((visibility("hidden"))) void neko_ensure_class_initialized_once(JNIEnv *env, jclass cls, const char *owner, volatile jboolean *slot) {
@@ -675,6 +683,10 @@ static void neko_fill_string_bytes(uint8_t *dst, const uint8_t *utf, size_t len,
 }
 
 static char *neko_alloc_jbyte_array_oop_slow(JNIEnv *env, jint len, jarray *local_ref_out) {
+    void *thread;
+    void *array_raw;
+    jarray returned_ref;
+    neko_handle_save_t handle_window;
     jclass byte_class;
     jarray array;
     char *array_oop;
@@ -688,6 +700,12 @@ static char *neko_alloc_jbyte_array_oop_slow(JNIEnv *env, jint len, jarray *loca
         fprintf(stderr, "[neko-bind] JVM byte[] allocation symbols unavailable\\n");
         abort();
     }
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] slow byte[] allocation has no JavaThread len=%d\\n", (int)len);
+        abort();
+    }
+    neko_handle_window_begin(thread, &handle_window);
     byte_class = ((neko_jvm_find_primitive_class_t)g_neko_method_layout.sym_jvm_find_primitive_class)(env, "byte");
     if (byte_class == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
@@ -695,26 +713,32 @@ static char *neko_alloc_jbyte_array_oop_slow(JNIEnv *env, jint len, jarray *loca
         abort();
     }
     array = ((neko_jvm_new_array_t)g_neko_method_layout.sym_jvm_new_array)(env, byte_class, len);
-    g_neko_jni_delete_local_ref_fn(env, byte_class);
     if (array == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] JVM_NewArray(byte) failed len=%d\\n", (int)len);
         abort();
     }
-    array_oop = (char*)neko_handle_oop((jobject)array);
+    array_raw = neko_prepare_return_oop(thread, array, "slow_byte_array");
+    array_oop = (char*)array_raw;
     if (array_oop == NULL) {
         fprintf(stderr, "[neko-bind] JVM_NewArray(byte) returned an unresolved handle len=%d\\n", (int)len);
         abort();
     }
-    if (local_ref_out != NULL) *local_ref_out = array;
+    neko_handle_window_end(&handle_window);
+    if (local_ref_out != NULL) {
+        returned_ref = (jarray)neko_handle_push(thread, array_raw);
+        if (returned_ref == NULL) {
+            fprintf(stderr, "[neko-bind] slow byte[] return handle push failed len=%d\\n", (int)len);
+            abort();
+        }
+        *local_ref_out = returned_ref;
+    }
     return array_oop;
 }
 
 static void neko_refill_tlab_with_slow_byte_array(JNIEnv *env, jint min_payload_len) {
-    jarray scratch = NULL;
     if (min_payload_len < 0) min_payload_len = 0;
-    (void)neko_alloc_jbyte_array_oop_slow(env, min_payload_len, &scratch);
-    if (scratch != NULL) g_neko_jni_delete_local_ref_fn(env, scratch);
+    (void)neko_alloc_jbyte_array_oop_slow(env, min_payload_len, NULL);
 }
 
 static const char *neko_primitive_name_for_kind(int kind) {
@@ -732,6 +756,10 @@ static const char *neko_primitive_name_for_kind(int kind) {
 }
 
 static jarray neko_alloc_primitive_array_slow(JNIEnv *env, jint len, int kind) {
+    void *thread;
+    void *array_oop;
+    jarray result;
+    neko_handle_save_t handle_window;
     const char *primitive_name = neko_primitive_name_for_kind(kind);
     jclass primitive_class;
     jarray array;
@@ -744,6 +772,12 @@ static jarray neko_alloc_primitive_array_slow(JNIEnv *env, jint len, int kind) {
         fprintf(stderr, "[neko-bind] JVM primitive array allocation symbols unavailable kind=%d\\n", kind);
         abort();
     }
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] slow primitive array allocation has no JavaThread len=%d kind=%d\\n", (int)len, kind);
+        abort();
+    }
+    neko_handle_window_begin(thread, &handle_window);
     primitive_class = ((neko_jvm_find_primitive_class_t)g_neko_method_layout.sym_jvm_find_primitive_class)(env, primitive_name);
     if (primitive_class == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
@@ -751,17 +785,23 @@ static jarray neko_alloc_primitive_array_slow(JNIEnv *env, jint len, int kind) {
         abort();
     }
     array = ((neko_jvm_new_array_t)g_neko_method_layout.sym_jvm_new_array)(env, primitive_class, len);
-    g_neko_jni_delete_local_ref_fn(env, primitive_class);
     if (array == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] JVM_NewArray(%s) failed len=%d\\n", primitive_name, (int)len);
         abort();
     }
-    if (neko_handle_oop((jobject)array) == NULL) {
+    array_oop = neko_prepare_return_oop(thread, array, "slow_primitive_array");
+    if (array_oop == NULL) {
         fprintf(stderr, "[neko-bind] JVM_NewArray(%s) returned an unresolved handle len=%d\\n", primitive_name, (int)len);
         abort();
     }
-    return array;
+    neko_handle_window_end(&handle_window);
+    result = (jarray)neko_handle_push(thread, array_oop);
+    if (result == NULL) {
+        fprintf(stderr, "[neko-bind] slow primitive array return handle push failed len=%d kind=%d\\n", (int)len, kind);
+        abort();
+    }
+    return result;
 }
 """).append("""
 static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf, size_t len) {
@@ -774,6 +814,8 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
     jarray local_array;
     jstring local_string;
     jstring interned;
+    void *interned_oop;
+    neko_handle_save_t handle_window;
     size_t payload_bytes;
     size_t array_bytes;
     size_t string_bytes;
@@ -816,6 +858,7 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
         fprintf(stderr, "[neko-bind] string literal too large to intern\\n");
         abort();
     }
+    neko_handle_window_begin(thread, &handle_window);
     array_bytes = (size_t)g_hotspot.primitive_array_base_offsets[NEKO_PRIM_B] + payload_bytes;
     local_array = NULL;
     array_oop = (char*)neko_fast_tlab_alloc(thread, array_bytes);
@@ -854,8 +897,9 @@ static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf
         fprintf(stderr, "[neko-bind] JVM_InternString failed for string literal\\n");
         abort();
     }
-    if (local_array != NULL) g_neko_jni_delete_local_ref_fn(env, local_array);
-    return neko_handle_oop((jobject)interned);
+    interned_oop = neko_prepare_return_oop(thread, interned, "intern_string");
+    neko_handle_window_end(&handle_window);
+    return interned_oop;
 }
 
 static void *neko_resolve_declared_method(void *instance_klass, const char *name_utf8, const char *sig_utf8) {
@@ -1192,11 +1236,22 @@ typedef jint (*neko_jvm_get_class_methods_count_t)(JNIEnv*, jclass);
 typedef jobjectArray (*neko_jvm_get_class_declared_members_t)(JNIEnv*, jclass, jboolean);
 
 static void neko_link_class_methods(JNIEnv *env, jclass cls, const char *owner, const char *name, const char *desc) {
+    void *thread;
+    neko_handle_save_t handle_window;
     jobjectArray members = NULL;
     if (env == NULL || cls == NULL) return;
     if (g_neko_method_layout.sym_jvm_get_class_methods_count != NULL) {
         (void)((neko_jvm_get_class_methods_count_t)g_neko_method_layout.sym_jvm_get_class_methods_count)(env, cls);
     }
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] method materialization has no JavaThread: %s.%s%s\\n",
+            owner == NULL ? "<null>" : owner,
+            name == NULL ? "<null>" : name,
+            desc == NULL ? "<null>" : desc);
+        abort();
+    }
+    neko_handle_window_begin(thread, &handle_window);
     if (name != NULL && strcmp(name, "<init>") == 0) {
         if (g_neko_method_layout.sym_jvm_get_class_declared_constructors == NULL) {
             fprintf(stderr, "[neko-bind] constructor materialization symbol unavailable: %s.%s%s\\n",
@@ -1224,7 +1279,7 @@ static void neko_link_class_methods(JNIEnv *env, jclass cls, const char *owner, 
             desc == NULL ? "<null>" : desc);
         abort();
     }
-    g_neko_jni_delete_local_ref_fn(env, members);
+    neko_handle_window_end(&handle_window);
 }
 
 static void neko_bind_method_entry_slots(JNIEnv *env, jmethodID midSlot, jclass cls, const char *owner, const char *name, const char *desc, void **methodPtr, void **compiledEntry, void **interpretedEntry, void **holder) {

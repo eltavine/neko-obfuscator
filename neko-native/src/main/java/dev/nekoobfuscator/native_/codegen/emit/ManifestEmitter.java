@@ -285,9 +285,18 @@ public final class ManifestEmitter {
         sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
         sb.append("static jboolean neko_manifest_discover_and_patch(JNIEnv *env) {\n");
+        sb.append("    void *thread;\n");
+        sb.append("    neko_handle_save_t manifest_window;\n");
+        sb.append("    neko_handle_save_t owner_window;\n");
         sb.append("    jclass owner_cls;\n");
         sb.append("    jclass anchor_cls = NULL;\n");
         sb.append("    if (env == NULL || g_neko_manifest_method_count == 0u) return JNI_TRUE;\n");
+        sb.append("    thread = neko_jni_env_to_thread(env);\n");
+        sb.append("    if (thread == NULL) {\n");
+        sb.append("        fprintf(stderr, \"[neko-bind] T4.6b manifest discovery has no JavaThread\\n\");\n");
+        sb.append("        abort();\n");
+        sb.append("    }\n");
+        sb.append("    neko_handle_window_begin(thread, &manifest_window);\n");
         sb.append("    /* T4.2a discovery model: replace JNI FindClass (which uses the calling\n");
         sb.append("     * thread's classloader to trigger class loading) with a two-pass approach\n");
         sb.append("     * over libjvm-internal symbols.\n");
@@ -315,6 +324,7 @@ public final class ManifestEmitter {
         sb.append("        abort();\n");
         sb.append("    }\n");
         for (Map.Entry<String, List<Integer>> e : byOwner.entrySet()) {
+            sb.append("    neko_handle_window_begin(thread, &owner_window);\n");
             sb.append("    owner_cls = neko_resolve_class_mirror_with_env(env, \"").append(CStringLiteral.escape(e.getKey())).append("\", anchor_cls, NULL);\n");
             sb.append("    if (owner_cls == NULL || neko_exception_check(env)) {\n");
             sb.append("        if (neko_exception_check(env)) neko_exception_clear_direct(env);\n");
@@ -328,10 +338,10 @@ public final class ManifestEmitter {
                 sb.append("        if (!neko_manifest_resolve_one(env, ").append(idx).append("u, owner_cls))\n");
                 sb.append("            neko_manifest_abort_patch_failure(&g_neko_manifest_methods[").append(idx).append("u], \"JNI_OnLoad\");\n");
             }
-            sb.append("        g_neko_jni_delete_local_ref_fn(env, owner_cls);\n");
             sb.append("    }\n");
+            sb.append("    neko_handle_window_end(&owner_window);\n");
         }
-        sb.append("    if (anchor_cls != NULL) g_neko_jni_delete_local_ref_fn(env, anchor_cls);\n");
+        sb.append("    neko_handle_window_end(&manifest_window);\n");
         sb.append("    return JNI_TRUE;\n");
         sb.append("}\n\n");
         return sb.toString();
