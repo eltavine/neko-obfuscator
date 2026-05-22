@@ -57,6 +57,9 @@ static inline __attribute__((always_inline)) void neko_exception_clear_direct(JN
  * infer an implicit int-returning prototype on first use. */
 static inline void* neko_handle_oop(jobject handle);
 static inline void* neko_handle_push(void *thread, void *raw_oop);
+static inline void* neko_prepare_return_oop(void *thread, jobject handle, const char *site);
+static inline void neko_handle_window_begin(void *thread, neko_handle_save_t *out);
+static inline void neko_handle_window_end(neko_handle_save_t *saved);
 static jint neko_fast_array_length(jarray arr);
 static jobject neko_fast_aaload(void *thread, JNIEnv *env, jobjectArray arr, jint idx);
 static void neko_fast_aastore(void *thread, JNIEnv *env, jobjectArray arr, jint idx, jobject val);
@@ -539,8 +542,11 @@ static void neko_ensure_shadow_stack_trace_cache(JNIEnv *env, jclass ste_cls, vo
 static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
     void *thread = neko_jni_env_to_thread(env);
     void *ste_klass = NULL;
-    jclass ste_cls = neko_resolve_class_mirror_with_env(env, "java/lang/StackTraceElement", NULL, &ste_klass);
+    jclass ste_cls;
     jobjectArray trace;
+    void *trace_oop;
+    jobjectArray trace_result;
+    neko_handle_save_t handle_window;
     uint32_t depth = g_neko_shadow_depth;
     uint32_t count;
     uint32_t i;
@@ -548,6 +554,8 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
         fprintf(stderr, "[neko-bind] shadow stack trace has no JavaThread\\n");
         abort();
     }
+    neko_handle_window_begin(thread, &handle_window);
+    ste_cls = neko_resolve_class_mirror_with_env(env, "java/lang/StackTraceElement", NULL, &ste_klass);
     if (ste_cls == NULL || ste_klass == NULL || neko_exception_check(env)) {
         if (neko_exception_check(env)) neko_exception_clear_direct(env);
         fprintf(stderr, "[neko-bind] StackTraceElement class unavailable for shadow stack\\n");
@@ -599,7 +607,14 @@ static jobjectArray neko_shadow_stack_trace(JNIEnv *env) {
             abort();
         }
     }
-    return trace;
+    trace_oop = neko_prepare_return_oop(thread, trace, "shadow_stack_trace");
+    neko_handle_window_end(&handle_window);
+    trace_result = (jobjectArray)neko_handle_push(thread, trace_oop);
+    if (trace_result == NULL) {
+        fprintf(stderr, "[neko-bind] StackTraceElement array return handle push failed\\n");
+        abort();
+    }
+    return trace_result;
 }
 
 /* T3.20: dead helpers (`neko_dotted_class_name`, `neko_load_class_noinit`,

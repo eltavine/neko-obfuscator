@@ -905,6 +905,56 @@ the source plan that owns the changed path before it can be considered complete.
   shadow frames for its translated `Throwable.getStackTrace()` path. No fresh
   `hs_err` file was produced.
 
+### [x] T4.6a: Generic stack-scoped handle window primitive
+
+- Scope: complete the first generic handle-window checkpoint by making the
+  existing `neko_handle_window_begin` / `neko_handle_window_end` primitive
+  callable from earlier runtime-support helpers and converting one helper that
+  creates transient local handles. This substep must not delete every
+  `neko_delete_local_ref` call site; that is reserved for T4.6b.
+- Required evidence: source and generated-C proof that the primitive is
+  declared before `NativeRuntimeSupportEmitter` use, that at least one converted
+  helper calls `neko_handle_window_begin` / `neko_handle_window_end`, and that
+  the converted helper preserves any returned reference by converting it to a
+  raw oop before window restore and pushing one new return handle afterwards.
+- Validation command or runtime target: focused generator/runtime tests with
+  repository `./gradlew`, then `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, and `R-inspect` through the performance gate.
+- Completion criteria: a fresh generated TEST artifact exercises the converted
+  helper successfully, generated `neko_shadow_stack_trace` contains the
+  stack-scoped handle window and no JNI local-delete replacement, generated C
+  contains no new JNI/JVMTI/original-bytecode fallback path, and performance
+  medians remain within the recorded gates.
+- Evidence recorded before editing 2026-05-22: `JniHandlesShimEmitter` already
+  emits `neko_handle_window_begin` / `neko_handle_window_end`, but
+  `CCodeGenerator` emits `NativeRuntimeSupportEmitter` before the shim, and
+  only `neko_handle_oop` / `neko_handle_push` are forward-declared there.
+  `neko_shadow_stack_trace` is the smallest generic converted helper candidate:
+  after T4.5b it allocates a `StackTraceElement[]`, pushes transient string and
+  element handles, calls the cached `StackTraceElement.<init>` entry through
+  NJX, and returns the trace array. The return handle must survive the window by
+  using the existing `neko_prepare_return_oop(thread, trace, "shadow_stack_trace")`
+  before restoring the window, followed by one `neko_handle_push` for the return.
+- Completion evidence 2026-05-22: focused generator/runtime validation passed
+  with `CCodeGeneratorTest` and
+  `NativeObfuscationIntegrationTest.nativeObfuscation_dependencyCallerObservesTranslatedStackTrace`;
+  the positive runtime printed `dependency-stacktrace-ok`, and the existing
+  shadow-stack negative runs still hard-aborted with
+  `StackTraceElement array direct allocation unavailable` and
+  `StackTraceElement.<init> entry unavailable`. Full
+  `NativeObfuscationPerfTest --no-parallel` passed from fresh artifacts TEST
+  `build/neko-native-work/run-54888323119993` and obfusjack
+  `build/neko-native-work/run-54893502305395`; medians were Calc `3` ms,
+  Platform `33` ms, Virtual `33` ms, Seq `11` ms, Parallel `1` ms, and
+  VThreads `1` ms. Static inspection found `neko_shadow_stack_trace` using
+  `neko_handle_window_begin(thread, &handle_window)`,
+  `neko_prepare_return_oop(thread, trace, "shadow_stack_trace")`,
+  `neko_handle_window_end(&handle_window)`, and a final return
+  `neko_handle_push(thread, trace_oop)`; the old StackTraceElement constructor
+  and array JNI call wrappers remained absent from the helper body. No fresh
+  top-level `hs_err` file was produced; the newest existing one remained
+  `hs_err_pid3.log` from 2026-05-22 04:11.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic

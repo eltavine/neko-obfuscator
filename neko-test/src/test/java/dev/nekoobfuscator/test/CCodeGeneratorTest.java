@@ -1009,6 +1009,14 @@ class CCodeGeneratorTest {
         assertTrue(shadowSection.contains("trace = neko_fast_new_object_array(thread, env, (jint)count, g_neko_shadow_ste_array_klass_bits, NULL);"), () -> shadowSection);
         assertTrue(shadowSection.contains("element = neko_fast_alloc_object(thread, env, ste_cls);"), () -> shadowSection);
         assertTrue(shadowSection.contains("neko_fast_aastore(thread, env, trace, (jint)i, element);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("neko_handle_window_begin(thread, &handle_window);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("trace_oop = neko_prepare_return_oop(thread, trace, \"shadow_stack_trace\");"), () -> shadowSection);
+        assertTrue(shadowSection.contains("neko_handle_window_end(&handle_window);"), () -> shadowSection);
+        assertTrue(shadowSection.contains("trace_result = (jobjectArray)neko_handle_push(thread, trace_oop);"), () -> shadowSection);
+        int prepareTraceIndex = shadowSection.indexOf("trace_oop = neko_prepare_return_oop(thread, trace, \"shadow_stack_trace\");");
+        int endWindowIndex = shadowSection.indexOf("neko_handle_window_end(&handle_window);", prepareTraceIndex);
+        int pushReturnIndex = shadowSection.indexOf("trace_result = (jobjectArray)neko_handle_push(thread, trace_oop);", endWindowIndex);
+        assertTrue(prepareTraceIndex >= 0 && prepareTraceIndex < endWindowIndex && endWindowIndex < pushReturnIndex, () -> shadowSection);
         assertFalse(shadowSection.contains("neko_resolve_jmethodID(env, ste_cls, \"<init>\""), () -> shadowSection);
         assertFalse(shadowSection.contains("g_neko_jni_new_object_array_fn"), () -> shadowSection);
         assertFalse(shadowSection.contains("g_neko_jni_new_object_a_fn"), () -> shadowSection);
