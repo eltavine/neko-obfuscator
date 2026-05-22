@@ -760,6 +760,7 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
             KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED,
             runtimeSourceMode
         );
+        boolean deferTicket = keyTransferDefersTicket(sourceInsn, runtimeSourceMode);
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
@@ -770,7 +771,10 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
             table.objectFieldName(),
             "[Ljava/lang/Object;"
         ));
-        JvmPassBytecode.pushInt(insns, highCursor);
+        JvmPassBytecode.pushInt(
+            insns,
+            deferTicket ? highCursor | KEY_TRANSFER_CURSOR_TICKET_DEFER_FLAG : highCursor
+        );
         JvmPassBytecode.pushInt(insns, lowCursor);
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
@@ -779,6 +783,53 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
             KEY_TRANSFER_MATERIAL_HELPER_DESC,
             table.keyTransferMaterialHelperInterfaceOwner()
         ));
+    }
+
+    protected void installG18EntryTicketConsume(
+        PipelineContext pctx,
+        L1Class clazz,
+        MethodNode mn,
+        LabelNode protectedStart,
+        int keyLocal,
+        long methodSeed
+    ) {
+        String actualKey = JvmKeyDispatchPass.coverageKey(clazz.name(), mn.name, mn.desc);
+        if (!JvmKeyDispatchPass.isActualKeyedEntry(pctx, actualKey)) {
+            return;
+        }
+        CffClassKeyTable table = activeKeyTable;
+        if (table == null) {
+            throw new IllegalStateException("CFF G18 ticket consume requires a class key table");
+        }
+        InsnList insns = new InsnList();
+        JvmPassBytecode.pushInt(
+            insns,
+            JvmKeyDispatchPass.isReusableKeyedEntry(pctx, actualKey)
+                ? G18_TICKET_OBSERVE_MODE
+                : G18_TICKET_CONSUME_MODE
+        );
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new LdcInsnNode(Type.getObjectType(clazz.name())));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            table.g18GlobalState().owner(),
+            table.g18GlobalState().helperName(),
+            G18_GLOBAL_HELPER_DESC,
+            table.g18GlobalState().interfaceOwner()
+        ));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+        JvmKeyDispatchPass.markGenerated(pctx, insns);
+        AbstractInsnNode first = firstReal(mn);
+        if (first == null) {
+            throw new IllegalStateException("CFF G18 ticket consume requires a method prologue");
+        }
+        mn.instructions.insertBefore(first, insns);
+        mn.maxStack = Math.max(mn.maxStack, 12);
     }
 
     protected long keyTransferSourceSeed(AbstractInsnNode insn) {
@@ -959,6 +1010,14 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
             }
         }
         return mode;
+    }
+
+    protected boolean keyTransferDefersTicket(AbstractInsnNode insn, int runtimeSourceMode) {
+        if ((runtimeSourceMode & KEY_TRANSFER_RUNTIME_SOURCE_THREAD) != 0) {
+            return true;
+        }
+        AbstractInsnNode context = keyTransferSourceContext(insn);
+        return context instanceof InvokeDynamicInsnNode indy && isLambdaMetafactory(indy);
     }
 
     protected int registerKeyTransferMaterialWord(

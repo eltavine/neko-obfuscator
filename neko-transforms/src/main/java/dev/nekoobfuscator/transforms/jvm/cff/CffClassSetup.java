@@ -690,7 +690,7 @@ abstract class CffClassSetup extends CffSharedState {
         LabelNode carrierReady = new LabelNode();
         insns.add(new JumpInsnNode(Opcodes.IFNONNULL, carrierReady));
         insns.add(new InsnNode(Opcodes.POP));
-        JvmPassBytecode.pushInt(insns, 5);
+        JvmPassBytecode.pushInt(insns, 7);
         insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
@@ -773,6 +773,30 @@ abstract class CffClassSetup extends CffSharedState {
         ));
         insns.add(new InsnNode(Opcodes.AASTORE));
         insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/lang/ThreadLocal"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/ThreadLocal",
+            "<init>",
+            "()V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "<init>",
+            "()V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
         insns.add(new FieldInsnNode(
             Opcodes.PUTSTATIC,
             host.name(),
@@ -782,6 +806,20 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
         insns.add(carrierReady);
         insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
+        LabelNode classRootMode = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFGE, classRootMode));
+        emitG18TicketMode(
+            insns,
+            indexLocal,
+            initialLocal,
+            deltaLocal,
+            carrierLocal,
+            nodesLocal,
+            nodeCellLocal,
+            rootLocal
+        );
+        insns.add(classRootMode);
         insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
         LabelNode ownerNull = new LabelNode();
         LabelNode ownerHashReady = new LabelNode();
@@ -1077,6 +1115,250 @@ abstract class CffClassSetup extends CffSharedState {
         helper.maxStack = 18;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         host.asmNode().methods.add(helper);
+    }
+
+    private void emitG18TicketMode(
+        InsnList insns,
+        int modeLocal,
+        int valueLocal,
+        int seedLocal,
+        int carrierLocal,
+        int ticketListLocal,
+        int ticketObjectLocal,
+        int ticketLocal
+    ) {
+        LabelNode consumeMode = new LabelNode();
+        LabelNode destructiveConsumeMode = new LabelNode();
+        LabelNode issueMode = new LabelNode();
+        LabelNode issueGlobal = new LabelNode();
+        LabelNode observeGlobalNull = new LabelNode();
+        LabelNode observeGlobal = new LabelNode();
+        LabelNode observeThreadMiss = new LabelNode();
+        LabelNode consumeGlobalNull = new LabelNode();
+        LabelNode consumeGlobal = new LabelNode();
+        LabelNode consumeThreadMiss = new LabelNode();
+        LabelNode consumeThreadOk = new LabelNode();
+        LabelNode consumeOk = new LabelNode();
+
+        emitG18TicketValue(insns, seedLocal, ticketLocal);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(insns, G18_TICKET_ISSUE_MODE);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, issueMode));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(insns, G18_TICKET_DEFER_MODE);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, consumeMode));
+
+        insns.add(issueMode);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, ticketListLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ticketListLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "set",
+            "(Ljava/lang/Object;)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(insns, G18_TICKET_DEFER_MODE);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, issueGlobal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        insns.add(issueGlobal);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
+            false
+        ));
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            "java/lang/Boolean",
+            "TRUE",
+            "Ljava/lang/Boolean;"
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+
+        insns.add(consumeMode);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, ticketObjectLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(insns, G18_TICKET_OBSERVE_MODE);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, destructiveConsumeMode));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "get",
+            "()Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, observeGlobalNull));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Number"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Number",
+            "longValue",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new InsnNode(Opcodes.LCMP));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, observeThreadMiss));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, consumeOk));
+        insns.add(observeThreadMiss);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, observeGlobal));
+        insns.add(observeGlobalNull);
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(observeGlobal);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ticketObjectLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "containsKey",
+            "(Ljava/lang/Object;)Z",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, consumeOk));
+        emitG18TicketPoison(insns, valueLocal, seedLocal);
+        insns.add(new InsnNode(Opcodes.LRETURN));
+
+        insns.add(destructiveConsumeMode);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "get",
+            "()Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, consumeGlobalNull));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Number"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Number",
+            "longValue",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new InsnNode(Opcodes.LCMP));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, consumeThreadMiss));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, consumeThreadOk));
+        insns.add(consumeThreadMiss);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, consumeGlobal));
+        insns.add(consumeThreadOk);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+        insns.add(new InsnNode(Opcodes.ACONST_NULL));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "set",
+            "(Ljava/lang/Object;)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ticketObjectLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "remove",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, consumeOk));
+        insns.add(consumeGlobalNull);
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(consumeGlobal);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ticketObjectLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "remove",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, consumeOk));
+        emitG18TicketPoison(insns, valueLocal, seedLocal);
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        insns.add(consumeOk);
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+    }
+
+    private void emitG18TicketPoison(InsnList insns, int valueLocal, int seedLocal) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0x4731385449434B31L);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitG18Projection(insns);
+        insns.add(new InsnNode(Opcodes.LCONST_1));
+        insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private void emitG18TicketValue(InsnList insns, int seedLocal, int ticketLocal) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        JvmPassBytecode.pushLong(insns, 0x4731385449434B32L);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitG18Projection(insns);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, ticketLocal));
     }
 
     private void emitG18ClassCodeHash(
@@ -1577,14 +1859,13 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new VarInsnNode(Opcodes.ILOAD, ownerHashLocal));
         if (ownerRotate != 0) {
+            insns.add(new InsnNode(Opcodes.DUP));
             JvmPassBytecode.pushInt(insns, ownerRotate);
-            insns.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                "java/lang/Integer",
-                "rotateLeft",
-                "(II)I",
-                false
-            ));
+            insns.add(new InsnNode(Opcodes.ISHL));
+            insns.add(new InsnNode(Opcodes.SWAP));
+            JvmPassBytecode.pushInt(insns, 32 - ownerRotate);
+            insns.add(new InsnNode(Opcodes.IUSHR));
+            insns.add(new InsnNode(Opcodes.IOR));
         }
         insns.add(new InsnNode(Opcodes.IADD));
         JvmPassBytecode.pushInt(insns, 63);

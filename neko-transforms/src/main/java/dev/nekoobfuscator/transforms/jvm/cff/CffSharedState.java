@@ -122,6 +122,10 @@ abstract class CffSharedState {
         "(ILjava/util/stream/Stream;)Ljava/lang/Integer;";
     protected static final String G18_GLOBAL_HELPER_DESC =
         "(IJJLjava/lang/Class;JJ)J";
+    protected static final int G18_TICKET_ISSUE_MODE = -1;
+    protected static final int G18_TICKET_CONSUME_MODE = -2;
+    protected static final int G18_TICKET_OBSERVE_MODE = -3;
+    protected static final int G18_TICKET_DEFER_MODE = -4;
     protected static final long KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED =
         0x4B58464552484931L;
     protected static final long KEY_TRANSFER_MATERIAL_LOW_METHOD_SEED =
@@ -131,6 +135,8 @@ abstract class CffSharedState {
     protected static final int KEY_TRANSFER_RUNTIME_SOURCE_STACK = 2;
     protected static final int KEY_TRANSFER_RUNTIME_SOURCE_BUCKETS = 4;
     protected static final int KEY_TRANSFER_CURSOR_MODE_SHIFT = 24;
+    protected static final int KEY_TRANSFER_CURSOR_TICKET_DEFER_FLAG = 0x80000000;
+    protected static final int KEY_TRANSFER_CURSOR_MODE_MASK = 0x7FFFFFFF;
     protected static final int KEY_TRANSFER_CURSOR_INDEX_MASK =
         (1 << KEY_TRANSFER_CURSOR_MODE_SHIFT) - 1;
     protected static final int CFF_ISLAND_RUNTIME_SOURCE_NONE = 0;

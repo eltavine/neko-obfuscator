@@ -48,13 +48,19 @@ unrelated native worktree changes.
   plaintext fixture payload stores. Fresh validation passed with the focused
   command above.
 
-- [ ] Scope: Port G18 ticket binding.
+- [x] Scope: Port G18 ticket binding.
   Required evidence: source diff shows G18 ticket issue/consume/observe/defer
   modes are available from the global helper and used by CFF method entry and
   key-transfer paths.
   Validation: focused CFF algebraic audit and strong-entry-seed regression tests.
   Completion criteria: ticket mismatches poison live key material instead of
   directly throwing, and normal transformed entry/key-transfer paths still run.
+  Completion evidence: G18 negative-index ticket modes now issue, defer, observe,
+  and consume tickets through the global helper carrier; key-transfer material
+  helpers issue/defer tickets, and actual keyed entries consume or observe them.
+  The generated G18 load-bit path no longer calls `Integer.rotateLeft`. Fresh
+  validation passed with
+  `./gradlew -PbuildDir=build/validation-keytable-main-merge :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --rerun-tasks`.
 
 - [ ] Scope: Reconcile class-byte/Unsafe binding.
   Required evidence: source diff shows `main` keeps a single G18 global helper

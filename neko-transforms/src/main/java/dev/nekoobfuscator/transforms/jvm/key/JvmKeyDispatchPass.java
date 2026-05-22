@@ -60,6 +60,8 @@ public final class JvmKeyDispatchPass implements TransformPass {
     private static final String KEYED_DESC_BY_METHOD = "keyDispatch.keyedDescByMethod";
     private static final String KEY_INDEX_BY_METHOD = "keyDispatch.keyIndexByMethod";
     private static final String REFLECTIVE_KEYED_ENTRIES = "keyDispatch.reflectiveKeyedEntries";
+    private static final String ACTUAL_KEYED_ENTRIES = "keyDispatch.actualKeyedEntries";
+    private static final String REUSABLE_KEYED_ENTRIES = "keyDispatch.reusableKeyedEntries";
     private static final String INDY_SAM_TARGETS = "keyDispatch.indySamTargets";
 
     @Override
@@ -110,6 +112,10 @@ public final class JvmKeyDispatchPass implements TransformPass {
         if (keyedDescriptor) {
             int keyIndex = keyIndexMap(ctx).getOrDefault(originalMethodKey, Type.getArgumentTypes(originalDesc).length);
             incomingKeyLocal = addLongParameter(clazz, mn, keyIndex);
+            actualKeyedEntries(ctx).add(coverageKey(clazz.name(), mn.name, mn.desc));
+            if (lambdaKeyIndexes(pctx).containsKey(originalMethodKey)) {
+                reusableKeyedEntries(ctx).add(coverageKey(clazz.name(), mn.name, mn.desc));
+            }
         }
 
         String methodKey = coverageKey(clazz, method);
@@ -373,6 +379,16 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return entries != null && entries.contains(methodKey);
     }
 
+    public static boolean isActualKeyedEntry(TransformContext ctx, String methodKey) {
+        Set<String> entries = ctx.getPassData(ACTUAL_KEYED_ENTRIES);
+        return entries != null && entries.contains(methodKey);
+    }
+
+    public static boolean isReusableKeyedEntry(TransformContext ctx, String methodKey) {
+        Set<String> entries = ctx.getPassData(REUSABLE_KEYED_ENTRIES);
+        return entries != null && entries.contains(methodKey);
+    }
+
     public static void migrateReflectiveKeyedEntry(TransformContext ctx, String oldKey, String newKey) {
         Set<String> entries = ctx.getPassData(REFLECTIVE_KEYED_ENTRIES);
         if (entries != null && entries.remove(oldKey)) {
@@ -382,6 +398,26 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
     private static void publishControlFlowLocal(TransformContext ctx, String methodKey, int keyLocal) {
         localMap(ctx, CFF_LOCAL_BY_METHOD).put(methodKey, keyLocal);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Set<String> actualKeyedEntries(TransformContext ctx) {
+        Set<String> entries = ctx.getPassData(ACTUAL_KEYED_ENTRIES);
+        if (entries == null) {
+            entries = new java.util.LinkedHashSet<>();
+            ctx.putPassData(ACTUAL_KEYED_ENTRIES, entries);
+        }
+        return entries;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Set<String> reusableKeyedEntries(TransformContext ctx) {
+        Set<String> entries = ctx.getPassData(REUSABLE_KEYED_ENTRIES);
+        if (entries == null) {
+            entries = new java.util.LinkedHashSet<>();
+            ctx.putPassData(REUSABLE_KEYED_ENTRIES, entries);
+        }
+        return entries;
     }
 
     public static Set<AbstractInsnNode> generatedNodes(TransformContext ctx) {

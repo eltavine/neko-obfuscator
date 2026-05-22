@@ -1144,9 +1144,21 @@ abstract class CffMaterialTables extends CffClassSetup {
         int stackLengthLocal = 14;
         int lowBaseCursorLocal = 15;
         int lowModeLocal = 16;
+        int ticketLocal = 17;
+        int ticketDeferLocal = 19;
         InsnList insns = helper.instructions;
         LabelNode splitRuntimeSource = new LabelNode();
         LabelNode materialDecoded = new LabelNode();
+        LabelNode threadLocalTicket = new LabelNode();
+        LabelNode ticketModeReady = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_TICKET_DEFER_FLAG);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, ticketDeferLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_MODE_MASK);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, highCursorLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
         JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
         insns.add(new InsnNode(Opcodes.IAND));
@@ -1284,8 +1296,32 @@ abstract class CffMaterialTables extends CffClassSetup {
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, ticketLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, ticketDeferLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, threadLocalTicket));
+        JvmPassBytecode.pushInt(insns, G18_TICKET_DEFER_MODE);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, ticketModeReady));
+        insns.add(threadLocalTicket);
+        JvmPassBytecode.pushInt(insns, G18_TICKET_ISSUE_MODE);
+        insns.add(ticketModeReady);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new LdcInsnNode(Type.getObjectType(clazz.name())));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        CffG18GlobalState g18GlobalState = pctx.getPassData(G18_GLOBAL_STATE);
+        if (g18GlobalState == null) {
+            throw new IllegalStateException("CFF key-transfer ticket helper requires G18 global state");
+        }
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            g18GlobalState.owner(),
+            g18GlobalState.helperName(),
+            G18_GLOBAL_HELPER_DESC,
+            g18GlobalState.interfaceOwner()
+        ));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 17;
+        helper.maxLocals = 20;
         helper.maxStack = 24;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
