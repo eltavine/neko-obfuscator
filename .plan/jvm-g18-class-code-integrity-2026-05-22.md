@@ -52,7 +52,7 @@ class initializer, and key table fields untouched.
   dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest
   --rerun-tasks`.
 
-### [-] JG18-2: Cover packed `Object[]` keyed entries
+### [x] JG18-2: Cover packed `Object[]` keyed entries
 
 - Scope: preserve actual keyed-entry metadata when method-parameter obfuscation
   rewrites descriptors to packed `Object[]` carriers.
@@ -62,8 +62,19 @@ class initializer, and key table fields untouched.
   methods and direct replay fixture.
 - Completion criteria: direct replay of a packed protected entry without the
   valid caller-side key path fails.
+- Evidence 2026-05-22: added a focused packed-parameter regression that enables
+  `methodParameterObfuscation` together with key dispatch and CFF, verifies the
+  original packed obfuscated jar still runs, mutates the first non-helper
+  `([Ljava/lang/Object;)` application method body, and verifies the tampered jar
+  fails closed through the class-code integrity gate. Fixed the runtime scanner
+  field-attribute skip state and the patchable long low-word mask so packed
+  artifacts use the same runtime digest as final serialized class bytes.
+  Validation passed with
+  `./gradlew -PbuildDir=build/validation-g18 :neko-test:test --tests
+  dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest
+  --rerun-tasks`.
 
-### [ ] JG18-3: Re-obfuscate and adversarially inspect the five jars
+### [-] JG18-3: Re-obfuscate and adversarially inspect the five jars
 
 - Scope: regenerate the five requested JVM full-obf jars and hand the resulting
   `ctf-obf.jar` to an independent analysis agent.

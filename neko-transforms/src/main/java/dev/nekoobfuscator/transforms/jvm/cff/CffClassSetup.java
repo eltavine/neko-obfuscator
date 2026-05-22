@@ -967,6 +967,8 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.ICONST_M1));
         insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
         return new LongBytePatch(bytes);
@@ -1354,7 +1356,7 @@ abstract class CffClassSetup extends CffSharedState {
         emitReadU2(insns, clazz, u2Name, dataLocal, pLocal);
         insns.add(new VarInsnNode(Opcodes.ISTORE, countLocal));
         emitIincWide(insns, pLocal, 2);
-        emitSkipMembers(insns, clazz, u2Name, u4Name, dataLocal, pLocal, countLocal, iLocal, attrIndexLocal, lenLocal);
+        emitSkipMembers(insns, clazz, u2Name, u4Name, dataLocal, pLocal, countLocal, iLocal, attrIndexLocal, lenLocal, nameIndexLocal);
 
         emitReadU2(insns, clazz, u2Name, dataLocal, pLocal);
         insns.add(new VarInsnNode(Opcodes.ISTORE, countLocal));
@@ -1549,7 +1551,8 @@ abstract class CffClassSetup extends CffSharedState {
         int countLocal,
         int iLocal,
         int attrIndexLocal,
-        int lenLocal
+        int attrCountLocal,
+        int attrLenLocal
     ) {
         JvmPassBytecode.pushInt(insns, 0);
         insns.add(new VarInsnNode(Opcodes.ISTORE, iLocal));
@@ -1563,19 +1566,19 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, membersDone));
         emitIincWide(insns, pLocal, 6);
         emitReadU2(insns, clazz, u2Name, dataLocal, pLocal);
-        insns.add(new VarInsnNode(Opcodes.ISTORE, attrIndexLocal));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, attrCountLocal));
         emitIincWide(insns, pLocal, 2);
         JvmPassBytecode.pushInt(insns, 0);
-        insns.add(new VarInsnNode(Opcodes.ISTORE, lenLocal));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, attrIndexLocal));
         insns.add(attrLoop);
-        insns.add(new VarInsnNode(Opcodes.ILOAD, lenLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, attrIndexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, attrCountLocal));
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, attrDone));
         emitReadU4AtOffset(insns, clazz, u4Name, dataLocal, pLocal, 2);
-        insns.add(new VarInsnNode(Opcodes.ISTORE, attrIndexLocal));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, attrLenLocal));
         emitIincWide(insns, pLocal, 6);
-        emitAddLocal(insns, pLocal, attrIndexLocal);
-        insns.add(new IincInsnNode(lenLocal, 1));
+        emitAddLocal(insns, pLocal, attrLenLocal);
+        insns.add(new IincInsnNode(attrIndexLocal, 1));
         insns.add(new JumpInsnNode(Opcodes.GOTO, attrLoop));
         insns.add(attrDone);
         insns.add(new IincInsnNode(iLocal, 1));

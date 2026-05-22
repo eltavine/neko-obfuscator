@@ -116,6 +116,33 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         );
     }
 
+    @Test
+    void packedObjectArrayMethodTamperFailsClassCodeIntegrity()
+        throws Exception {
+        Path projectRoot = Path.of(
+            System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
+        );
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cff-packed-integrity"));
+        Path source = work.resolve("CffAuditShapes.java");
+        Files.writeString(source, sourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("cff-audit-shapes.jar");
+        writeJar(inputJar, classes, "CffAuditShapes");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("cff-audit-shapes-obf.jar");
+        runPackedObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+        assertEquals(original, obfuscated);
+
+        Path tamperedJar = work.resolve("cff-audit-shapes-obf-packed-tampered.jar");
+        tamperFirstPackedApplicationMethod(outputJar, tamperedJar);
+        assertTamperedJarFailsClosed(tamperedJar);
+    }
+
     private static MethodNode syntheticLeakingMethod() {
         MethodNode method = new MethodNode(
             Opcodes.ACC_STATIC,
@@ -221,6 +248,47 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         assertTrue(tampered[0], "tamper fixture did not find a main method");
+    }
+
+    private static void tamperFirstPackedApplicationMethod(Path inputJar, Path outputJar)
+        throws Exception {
+        boolean[] tampered = { false };
+        try (JarFile jar = new JarFile(inputJar.toFile());
+             JarOutputStream jos = new JarOutputStream(new FileOutputStream(outputJar.toFile()))) {
+            var entries = jar.entries();
+            while (entries.hasMoreElements()) {
+                JarEntry entry = entries.nextElement();
+                byte[] data;
+                try (var in = jar.getInputStream(entry)) {
+                    data = in.readAllBytes();
+                }
+                if (!tampered[0] && entry.getName().endsWith(".class")) {
+                    ClassReader reader = new ClassReader(data);
+                    ClassNode node = new ClassNode();
+                    reader.accept(node, ClassReader.EXPAND_FRAMES);
+                    MethodNode target = null;
+                    for (MethodNode method : node.methods) {
+                        if (method.name.startsWith("__neko_")) continue;
+                        if (!method.desc.startsWith("([Ljava/lang/Object;)")) continue;
+                        if (method.instructions == null || method.instructions.size() == 0) continue;
+                        target = method;
+                        break;
+                    }
+                    if (target != null) {
+                        target.instructions.insert(new InsnNode(Opcodes.NOP));
+                        ClassWriter writer = new ClassWriter(0);
+                        node.accept(writer);
+                        data = writer.toByteArray();
+                        tampered[0] = true;
+                    }
+                }
+                JarEntry out = new JarEntry(entry.getName());
+                jos.putNextEntry(out);
+                jos.write(data);
+                jos.closeEntry();
+            }
+        }
+        assertTrue(tampered[0], "tamper fixture did not find a packed Object[] application method");
     }
 
     private static void assertTamperedJarFailsClosed(Path jar) throws Exception {
@@ -592,11 +660,22 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
+        runObfuscation(input, output, false);
+    }
+
+    private void runPackedObfuscation(Path input, Path output) throws Exception {
+        runObfuscation(input, output, true);
+    }
+
+    private void runObfuscation(Path input, Path output, boolean packedParameters) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
         config.setOutputJar(output);
         Map<String, TransformConfig> transforms = new LinkedHashMap<>();
         transforms.put("keyDispatch", new TransformConfig(true, 1.0));
+        if (packedParameters) {
+            transforms.put("methodParameterObfuscation", new TransformConfig(true, 1.0));
+        }
         transforms.put("controlFlowFlattening", new TransformConfig(true, 1.0));
         config.setTransforms(transforms);
         config.keyConfig().setMasterSeed(0x5EEDCFFAL);
