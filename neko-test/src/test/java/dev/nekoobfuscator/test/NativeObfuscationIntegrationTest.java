@@ -7,6 +7,7 @@ import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
 
@@ -249,6 +250,52 @@ class NativeObfuscationIntegrationTest {
         assertEquals(0, result.exitCode(), () -> combined);
         NativeObfuscationHelper.assertNoFatalNativeCrash(result);
         assertTrue(combined.contains("object-array-ok"), () -> combined);
+    }
+
+    @Test
+    @Timeout(value = 2, unit = TimeUnit.MINUTES)
+    void nativeObfuscation_methodTypeLdcUsesDescriptorNjxPath() throws Exception {
+        Path workDir = NativeObfuscationHelper.nativeWorkDir();
+        Path input = workDir.resolve("methodtype-ldc.jar");
+        Path output = workDir.resolve("methodtype-ldc-native.jar");
+        writeMethodTypeLdcJar(input);
+
+        NativeObfuscationHelper.ObfuscationRunResult obfuscation = NativeObfuscationHelper.obfuscateJar(
+            input,
+            output,
+            NativeObfuscationHelper.configsDir().resolve("native-test.yml"),
+            Duration.ofMinutes(2)
+        );
+        String obfuscationLog = obfuscation.combinedOutput();
+        assertTrue(obfuscationLog.contains("Native stage: translated="), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("Native compilation produced no libraries"), () -> obfuscationLog);
+        assertFalse(obfuscationLog.contains("translated=0"), () -> obfuscationLog);
+
+        NativeObfuscationHelper.JarRunResult ok = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("methodtype-ldc-native.stdout.log"),
+            workDir.resolve("methodtype-ldc-native.stderr.log"),
+            Duration.ofSeconds(30)
+        );
+        String okCombined = ok.combinedOutput();
+        assertEquals(0, ok.exitCode(), () -> okCombined);
+        NativeObfuscationHelper.assertNoFatalNativeCrash(ok);
+        assertTrue(okCombined.contains("methodtype-ldc-ok"), () -> okCombined);
+
+        NativeObfuscationHelper.JarRunResult negative = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("methodtype-ldc-negative.stdout.log"),
+            workDir.resolve("methodtype-ldc-negative.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_NATIVE_DIAG_FAIL_METHODTYPE_DESCRIPTOR_ENTRY", "1")
+        );
+        String negativeCombined = negative.combinedOutput();
+        assertTrue(negative.exitCode() != 0, () -> negativeCombined);
+        assertTrue(negativeCombined.contains("MethodType.fromMethodDescriptorString entry unavailable"), () -> negativeCombined);
     }
 
     @Test
@@ -514,6 +561,19 @@ class NativeObfuscationIntegrationTest {
         }
     }
 
+    private static void writeMethodTypeLdcJar(Path jar) throws Exception {
+        Files.createDirectories(jar.getParent());
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        manifest.getMainAttributes().put(Attributes.Name.MAIN_CLASS, "pkg.MethodTypeLdcRuntime");
+
+        try (JarOutputStream out = new JarOutputStream(Files.newOutputStream(jar), manifest)) {
+            out.putNextEntry(new JarEntry("pkg/MethodTypeLdcRuntime.class"));
+            out.write(methodTypeLdcClassBytes());
+            out.closeEntry();
+        }
+    }
+
     private static void writeImplicitExceptionsJar(Path jar) throws Exception {
         Files.createDirectories(jar.getParent());
         Manifest manifest = new Manifest();
@@ -590,6 +650,46 @@ class NativeObfuscationIntegrationTest {
         leaf.visitInsn(Opcodes.ARETURN);
         leaf.visitMaxs(0, 0);
         leaf.visitEnd();
+
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
+    private static byte[] methodTypeLdcClassBytes() {
+        String owner = "pkg/MethodTypeLdcRuntime";
+        String descriptor = "(Ljava/lang/String;I)Ljava/lang/String;";
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+
+        var init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        init.visitCode();
+        init.visitVarInsn(Opcodes.ALOAD, 0);
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        init.visitInsn(Opcodes.RETURN);
+        init.visitMaxs(0, 0);
+        init.visitEnd();
+
+        var main = cw.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null);
+        Label fail = new Label();
+        main.visitCode();
+        main.visitLdcInsn(Type.getMethodType(descriptor));
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/invoke/MethodType", "toMethodDescriptorString", "()Ljava/lang/String;", false);
+        main.visitLdcInsn(descriptor);
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+        main.visitJumpInsn(Opcodes.IFEQ, fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("methodtype-ldc-ok");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitLabel(fail);
+        main.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        main.visitLdcInsn("methodtype-ldc-bad");
+        main.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false);
+        main.visitInsn(Opcodes.ICONST_1);
+        main.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "exit", "(I)V", false);
+        main.visitInsn(Opcodes.RETURN);
+        main.visitMaxs(0, 0);
+        main.visitEnd();
 
         cw.visitEnd();
         return cw.toByteArray();

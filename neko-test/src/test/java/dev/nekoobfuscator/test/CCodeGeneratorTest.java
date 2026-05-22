@@ -950,6 +950,8 @@ class CCodeGeneratorTest {
         demo.instructions.add(new InsnNode(Opcodes.POP));
         demo.instructions.add(new LdcInsnNode(Type.INT_TYPE));
         demo.instructions.add(new InsnNode(Opcodes.POP));
+        demo.instructions.add(new LdcInsnNode(Type.getMethodType("(Ljava/lang/String;I)Ljava/lang/String;")));
+        demo.instructions.add(new InsnNode(Opcodes.POP));
         demo.instructions.add(new LdcInsnNode("hello-bind"));
         demo.instructions.add(new InsnNode(Opcodes.ARETURN));
         demo.maxStack = 1;
@@ -990,6 +992,15 @@ class CCodeGeneratorTest {
         assertTrue(source.contains("neko_call_stub_guarded(&__stub_args);"), () -> source);
         assertTrue(source.contains("addq  $16, %%rsp"), () -> source);
         assertFalse(source.contains("addq  $24, %%rsp"), () -> source);
+        assertTrue(source.contains("static void *g_neko_method_type_descriptor_method = NULL;"), () -> source);
+        assertTrue(source.contains("mtClass = neko_resolve_class_mirror_with_env(env, \"java/lang/invoke/MethodType\", NULL, &mt_klass);"), () -> source);
+        assertTrue(source.contains("neko_intern_string(thread, env, (const uint8_t*)desc, strlen(desc));"), () -> source);
+        assertTrue(source.contains("result = neko_njx_S_L_LL(thread, env,"), () -> source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_METHODTYPE_DESCRIPTOR_ENTRY"), () -> source);
+        assertTrue(source.contains("PUSH_O(neko_method_type_from_descriptor(env, \"(Ljava/lang/String;I)Ljava/lang/String;\"));"), () -> source);
+        assertFalse(source.contains("neko_class_for_descriptor(env, \"(Ljava/lang/String;I)Ljava/lang/String;\")"), () -> source);
+        assertFalse(source.contains("g_neko_jni_new_string_utf_fn(env, desc)"), () -> source);
+        assertFalse(source.contains("g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args)"), () -> source);
         assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);
         assertTrue(source.contains("neko_ensure_class_initialized_once(env, cls,"), () -> source);
         assertTrue(source.contains("typedef struct neko_static_field_ref"), () -> source);

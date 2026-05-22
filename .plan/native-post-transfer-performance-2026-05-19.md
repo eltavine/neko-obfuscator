@@ -395,11 +395,65 @@ the source plan that owns the changed path before it can be considered complete.
   `neko_resolve_field(..., JNI_TRUE)` for static field resolution, including the
   primitive `TYPE` and `IMPL_LOOKUP` paths. T4.2 is complete as a call-site
   replacement gate; wrapper deletion remains scoped to T4.11.
+
+### [x] NPT-4d: Stage 4 T4.3a MethodType descriptor direct call
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.3a by replacing
+  `neko_method_type_from_descriptor`'s descriptor-string allocation and
+  `MethodType.fromMethodDescriptorString(String, ClassLoader)` invocation with
+  the existing interned-string path plus HotSpot call_stub/NJX dispatch.
+- Required evidence: fresh generated C currently shows
+  `g_neko_jni_new_string_utf_fn(env, desc)` and
+  `g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args)` inside
+  `neko_method_type_from_descriptor`; source shows the same path in
+  `NativeRuntimeSupportEmitter`.
+- Validation command or runtime target: `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, and `R-inspect`; generated C must show
+  `neko_method_type_from_descriptor` uses `neko_intern_string` and
+  `neko_njx_S_L_LL`, and contains no `g_neko_jni_new_string_utf_fn` or
+  `g_neko_jni_call_static_object_method_a_fn` in that function.
+- Completion criteria: descriptor jstring is produced through
+  `neko_intern_string`, the static MethodType call uses a cached Method* and
+  entry with `neko_njx_S_L_LL`, missing method/entry/thread/symbol prerequisites
+  abort, TEST and obfusjack complete from fresh artifacts, and no JNI/original
+  bytecode fallback is introduced.
+- Negative-proof addendum recorded before editing: add a generic diagnostic
+  gate that forces the MethodType descriptor NJX entry cache to take the same
+  missing-entry hard-abort branch used when HotSpot cannot provide the required
+  entry. The gate must not skip classes, enter JNI fallback, or preserve
+  original bytecode; it may only prove the fail-closed path for the required
+  MethodType descriptor call.
 - User-updated acceptance recorded 2026-05-20: Calc must match or beat the
   original JVM jar in the same run environment; obfusjack Seq must be <= 10 ms;
   every other parsed benchmark/test timing must match original or stay within
   1.5x slowdown. Older absolute threshold rows are superseded for ongoing
   performance work.
+- Completion evidence 2026-05-22: implemented generic LDC MethodType routing
+  in `OpcodeTranslator.translateLdc`, added the `neko_njx_S_L_LL` shape, and
+  replaced `neko_method_type_from_descriptor` with a cached Method*/i-entry
+  call-stub path. The descriptor `jstring` now comes from
+  `neko_intern_string(thread, env, (const uint8_t*)desc, strlen(desc));`, and
+  the MethodType class resolver publishes `Klass*` through
+  `neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL,
+  &mt_klass)`. Focused validation passed:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home-native-coverage bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CCodeGeneratorTest --tests dev.nekoobfuscator.test.NativeObfuscationIntegrationTest.nativeObfuscation_methodTypeLdcUsesDescriptorNjxPath --rerun-tasks --no-parallel -Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/native-run-tmp`.
+  The focused fixture generated
+  `build/neko-native-work/run-48407471768465`; generated
+  `neko_native_impl_0.c` contains
+  `PUSH_O(neko_method_type_from_descriptor(env, "(Ljava/lang/String;I)Ljava/lang/String;"));`,
+  the normal runtime printed `methodtype-ldc-ok`, and `R-negative` with
+  `NEKO_NATIVE_DIAG_FAIL_METHODTYPE_DESCRIPTOR_ENTRY=1` aborted with
+  `MethodType.fromMethodDescriptorString entry unavailable`. Fresh full
+  `NativeObfuscationPerfTest --no-parallel` passed after the final source edit
+  (`BUILD SUCCESSFUL in 46s`), producing TEST
+  `build/neko-native-work/run-48428692005490` and obfusjack
+  `build/neko-native-work/run-48433464484047`; medians were TEST Calc `3` ms
+  and obfusjack Platform `40` ms, Virtual `34` ms, Seq `12` ms,
+  Parallel/VThreads `1` ms. Generated-C inspection found the new
+  `neko_method_type_from_descriptor` body uses `neko_intern_string` and
+  `neko_njx_S_L_LL`, and found zero hits for
+  `g_neko_jni_new_string_utf_fn(env, desc)` or
+  `g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args)`.
 
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 

@@ -605,13 +605,87 @@ static jobject neko_lookup_for_jclass(JNIEnv *env, jclass ownerClass) {
     return g_neko_jni_call_static_object_method_a_fn(env, mhClass, mid, args);
 }
 
+static jboolean g_neko_method_type_descriptor_ready = JNI_FALSE;
+static void *g_neko_method_type_descriptor_method = NULL;
+static void *g_neko_method_type_descriptor_entry = NULL;
+
+static void neko_ensure_method_type_descriptor_cache(JNIEnv *env) {
+    void *mt_klass = NULL;
+    jclass mtClass;
+    void *method;
+    if (g_neko_method_type_descriptor_ready) return;
+    if (env == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType descriptor cache requires JNIEnv*\\n");
+        abort();
+    }
+    mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, &mt_klass);
+    if (mtClass == NULL || mt_klass == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType class unavailable for descriptor cache mirror=%p klass=%p\\n",
+            (void*)mtClass, mt_klass);
+        abort();
+    }
+    neko_ensure_class_initialized(env, mtClass, "java/lang/invoke/MethodType");
+    method = neko_resolve_method(mt_klass, "fromMethodDescriptorString",
+        "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;");
+    if (method == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType.fromMethodDescriptorString Method* unavailable\\n");
+        abort();
+    }
+    g_neko_method_type_descriptor_method = method;
+    g_neko_method_type_descriptor_entry = neko_bound_method_i_entry(method,
+        &g_neko_method_type_descriptor_entry, "java/lang/invoke/MethodType",
+        "fromMethodDescriptorString",
+        "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;");
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_METHODTYPE_DESCRIPTOR_ENTRY") != NULL) {
+        g_neko_method_type_descriptor_entry = NULL;
+    }
+    if (g_neko_method_type_descriptor_entry == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType.fromMethodDescriptorString entry unavailable\\n");
+        abort();
+    }
+    g_neko_method_type_descriptor_ready = JNI_TRUE;
+}
+
 static jobject neko_method_type_from_descriptor(JNIEnv *env, const char *desc) {
-    jclass mtClass = neko_resolve_class_mirror_with_env(env, "java/lang/invoke/MethodType", NULL, NULL);
-    jmethodID mid = neko_resolve_jmethodID_with_kind(env, mtClass, "fromMethodDescriptorString", "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;", JNI_TRUE);
     jvalue args[2];
-    args[0].l = g_neko_jni_new_string_utf_fn(env, desc);
+    jvalue result;
+    void *thread;
+    void *desc_oop;
+    jobject desc_ref;
+    if (env == NULL || desc == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType descriptor invocation requires env=%p desc=%p\\n",
+            (void*)env, (const void*)desc);
+        abort();
+    }
+    neko_ensure_method_type_descriptor_cache(env);
+    thread = neko_jni_env_to_thread(env);
+    if (thread == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType descriptor invocation has no JavaThread\\n");
+        abort();
+    }
+    desc_oop = neko_intern_string(thread, env, (const uint8_t*)desc, strlen(desc));
+    if (desc_oop == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] MethodType descriptor string intern failed desc=%s\\n", desc);
+        abort();
+    }
+    desc_ref = (jobject)neko_handle_push(thread, desc_oop);
+    if (desc_ref == NULL) {
+        fprintf(stderr, "[neko-bind] MethodType descriptor handle push failed desc=%s\\n", desc);
+        abort();
+    }
+    args[0].l = desc_ref;
     args[1].l = NULL;
-    return g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args);
+    result = neko_njx_S_L_LL(thread, env,
+        g_neko_method_type_descriptor_method,
+        g_neko_method_type_descriptor_entry,
+        NULL, args);
+    if (result.l == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] MethodType.fromMethodDescriptorString failed desc=%s\\n", desc);
+        abort();
+    }
+    return result.l;
 }
 
 static jobjectArray neko_bootstrap_parameter_array(JNIEnv *env, const char *bsm_desc) {

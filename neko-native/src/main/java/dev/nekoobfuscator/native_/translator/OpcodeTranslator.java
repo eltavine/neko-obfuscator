@@ -494,7 +494,9 @@ public final class OpcodeTranslator {
         } else if (ldc.cst instanceof String s) {
             stmts.add(raw("PUSH_O(" + cachedStringExpression(s) + ");"));
         } else if (ldc.cst instanceof Type type) {
-            stmts.add(raw("PUSH_O(" + cachedTypeClassExpression(type.getDescriptor()) + ");"));
+            stmts.add(raw("PUSH_O(" + (type.getSort() == Type.METHOD
+                ? "neko_method_type_from_descriptor(env, \"" + CStringLiteral.escape(type.getDescriptor()) + "\")"
+                : cachedTypeClassExpression(type.getDescriptor())) + ");"));
         } else {
             stmts.add(raw("/* unsupported ldc constant */"));
         }

@@ -586,6 +586,9 @@ public final class CCodeGenerator {
          * java.lang.String(byte[],byte) through NJX so ZGC/Shenandoah field
          * stores stay inside HotSpot's normal barriers. */
         registerInvokeShape(false, 'V', new char[] { 'L', 'I' });
+        /* MethodType.fromMethodDescriptorString(String, ClassLoader) is
+         * invoked from bootstrap metadata binding without JNI CallStatic*. */
+        registerInvokeShape(true, 'L', new char[] { 'L', 'L' });
     }
 
     public String reserveInvokeCacheMeta(
@@ -803,6 +806,16 @@ public final class CCodeGenerator {
         sb.append("static void *neko_object_handle_klass(jobject obj);\n");
         sb.append(
             "static void *neko_resolve_method(void *instance_klass, const char *name_utf8, const char *sig_utf8);\n"
+        );
+        sb.append(
+            "static void *neko_bound_method_i_entry(void *methodPtr, void **entrySlot, const char *owner, const char *name, const char *desc);\n"
+        );
+        sb.append(
+            "static void neko_ensure_class_initialized(JNIEnv *env, jclass cls, const char *owner);\n"
+        );
+        sb.append("static inline void *neko_jni_env_to_thread(JNIEnv *env);\n");
+        sb.append(
+            "static void *neko_intern_string(void *thread, JNIEnv *env, const uint8_t *modutf, size_t len);\n"
         );
         sb.append(
             "static void *neko_resolve_declared_covariant_ref_method(void *instance_klass, const char *name_utf8, const char *sig_utf8);\n"
