@@ -1105,6 +1105,65 @@ the source plan that owns the changed path before it can be considered complete.
   `hs_err` file was produced; the newest existing one remained
   `hs_err_pid3.log` from 2026-05-22 04:11.
 
+### [x] T4.8b: Remove IMPL_LOOKUP global object cache
+
+- Scope: continue T4.8 by removing the persistent
+  `g_neko_impl_lookup_global` object handle and its `NewGlobalRef` call from
+  `neko_impl_lookup`. This substep is limited to the
+  `MethodHandles$Lookup.IMPL_LOOKUP` receiver path used by MethodType,
+  MethodHandle, and ConstantDynamic bootstrap helpers. It must not change class
+  globals, string globals, manifest owner storage, Unsafe receiver caching, or
+  any class-loader lifetime behavior.
+- Required evidence: source and generated C must show `neko_impl_lookup`
+  obtains `IMPL_LOOKUP` by calling `neko_read_impl_lookup_direct(env)` and
+  returning the resulting local handle. `neko_read_impl_lookup_direct` must
+  still resolve the static field through `neko_resolve_field(..., JNI_TRUE)`
+  and read it via `neko_fast_get_static_object_field`, which materializes a
+  scoped local handle from the static-field oop. The public
+  `neko_impl_lookup` body must contain no `g_neko_impl_lookup_global`, no
+  `g_neko_jni_new_global_ref_fn`, no `NewGlobalRef`, and no JNI table indexes
+  `[21]`, `[144]`, or `[145]`.
+- Validation command or runtime target: focused `CCodeGeneratorTest` and
+  `NativeObfuscationIntegrationTest.nativeObfuscation_methodTypeLdcUsesDescriptorNjxPath`,
+  then `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, and
+  the performance gate.
+- Completion criteria: fresh TEST and obfusjack native artifacts run green;
+  the MethodType/ConstantDynamic integration negative gate still fails closed
+  when `NEKO_NATIVE_DIAG_FAIL_IMPL_LOOKUP_SLOT=1`; static inspection confirms
+  the IMPL_LOOKUP path has no global-ref allocation; no JNI/JVMTI, fallback,
+  original-bytecode path, or cached raw oop is introduced.
+- Evidence recorded before editing 2026-05-22: source grep found the only
+  non-test `g_neko_impl_lookup_global` declaration/use in
+  `NativeMethodResolutionEmitter.neko_impl_lookup`. The current
+  `neko_read_impl_lookup_direct` path already resolves
+  `MethodHandles$Lookup.IMPL_LOOKUP` with `neko_resolve_field(..., JNI_TRUE)`
+  and returns `neko_fast_get_static_object_field(...)`; that helper reads the
+  static oop and calls `neko_direct_oop_to_handle_origin`, so the replacement
+  handle is scoped to the active local handle machinery instead of being a
+  persistent global reference. Existing accepted T4.8a artifacts TEST
+  `build/neko-native-work/run-56652351573369` and obfusjack
+  `build/neko-native-work/run-56657546304182` passed the runtime/performance
+  gate before this substep.
+- Completion evidence 2026-05-22: focused `CCodeGeneratorTest` passed, and
+  `NativeObfuscationIntegrationTest.nativeObfuscation_methodTypeLdcUsesDescriptorNjxPath`
+  passed with normal output `methodtype-ldc-ok` and the
+  `NEKO_NATIVE_DIAG_FAIL_IMPL_LOOKUP_SLOT=1` negative run hard-aborting with
+  `[neko-bind] IMPL_LOOKUP direct local handle unavailable`. Full
+  `NativeObfuscationPerfTest --no-parallel` passed from fresh accepted
+  artifacts TEST `build/neko-native-work/run-57155823898002` and obfusjack
+  `build/neko-native-work/run-57161091124931`; `native-performance-baseline.json`
+  captured at `2026-05-22T04:15:52.818855778Z` reports medians Calc `3` ms,
+  Platform `33` ms, Virtual `32` ms, Seq `11` ms, Parallel `1` ms, and
+  VThreads `1` ms. Static inspection of those artifacts found
+  `neko_impl_lookup` returning `localLookup` from
+  `neko_read_impl_lookup_direct(env)`, with the direct reader retaining
+  `neko_resolve_field(klass, "IMPL_LOOKUP", ..., JNI_TRUE)` and
+  `neko_fast_get_static_object_field(...)`. It found no
+  `g_neko_impl_lookup_global`, no
+  `g_neko_jni_new_global_ref_fn(env, localLookup)`, and no `NewGlobalRef` in
+  the IMPL_LOOKUP body. No fresh top-level `hs_err` file was produced; the
+  newest existing one remained `hs_err_pid3.log` from 2026-05-22 04:11.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic

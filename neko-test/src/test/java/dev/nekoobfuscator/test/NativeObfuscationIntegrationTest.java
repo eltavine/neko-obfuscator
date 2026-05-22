@@ -350,7 +350,7 @@ class NativeObfuscationIntegrationTest {
         );
         String implLookupNegativeCombined = implLookupNegative.combinedOutput();
         assertTrue(implLookupNegative.exitCode() != 0, () -> implLookupNegativeCombined);
-        assertTrue(implLookupNegativeCombined.contains("IMPL_LOOKUP cached slot unavailable"),
+        assertTrue(implLookupNegativeCombined.contains("IMPL_LOOKUP direct local handle unavailable"),
             () -> implLookupNegativeCombined);
 
         NativeObfuscationHelper.JarRunResult privateLookupNegative = NativeObfuscationHelper.runJar(
