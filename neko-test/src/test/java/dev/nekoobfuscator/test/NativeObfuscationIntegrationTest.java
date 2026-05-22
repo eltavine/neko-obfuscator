@@ -338,6 +338,20 @@ class NativeObfuscationIntegrationTest {
         assertTrue(condyArrayNegative.exitCode() != 0, () -> condyArrayNegativeCombined);
         assertTrue(condyArrayNegativeCombined.contains("ConstantDynamic object-array direct allocation unavailable"),
             () -> condyArrayNegativeCombined);
+
+        NativeObfuscationHelper.JarRunResult implLookupNegative = NativeObfuscationHelper.runJar(
+            output,
+            List.of("-XX:+PerfDisableSharedMem"),
+            List.of(),
+            workDir.resolve("methodtype-ldc-impl-lookup-negative.stdout.log"),
+            workDir.resolve("methodtype-ldc-impl-lookup-negative.stderr.log"),
+            Duration.ofSeconds(30),
+            Map.of("NEKO_NATIVE_DIAG_FAIL_IMPL_LOOKUP_SLOT", "1")
+        );
+        String implLookupNegativeCombined = implLookupNegative.combinedOutput();
+        assertTrue(implLookupNegative.exitCode() != 0, () -> implLookupNegativeCombined);
+        assertTrue(implLookupNegativeCombined.contains("IMPL_LOOKUP cached slot unavailable"),
+            () -> implLookupNegativeCombined);
     }
 
     @Test

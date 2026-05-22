@@ -1026,6 +1026,17 @@ class CCodeGeneratorTest {
         assertFalse(condySection.contains("g_neko_jni_new_object_array_fn"), () -> condySection);
         assertFalse(condySection.contains("g_neko_jni_get_object_array_element_fn"), () -> condySection);
         assertFalse(condySection.contains("g_neko_jni_set_object_array_element_fn"), () -> condySection);
+        assertTrue(source.contains("static jobject g_neko_impl_lookup_global = NULL;"), () -> source);
+        assertTrue(source.contains("NEKO_NATIVE_DIAG_FAIL_IMPL_LOOKUP_SLOT"), () -> source);
+        int implLookupStart = source.indexOf("static jobject neko_impl_lookup(JNIEnv *env) {");
+        int implLookupEnd = source.indexOf("/* Method*-returning variant", implLookupStart);
+        assertTrue(implLookupStart >= 0 && implLookupEnd > implLookupStart, () -> source);
+        String implLookupSection = source.substring(implLookupStart, implLookupEnd);
+        assertTrue(implLookupSection.contains("if (g_neko_impl_lookup_global != NULL) return g_neko_impl_lookup_global;"), () -> implLookupSection);
+        assertTrue(implLookupSection.contains("localLookup = neko_read_impl_lookup_direct(env);"), () -> implLookupSection);
+        assertTrue(implLookupSection.contains("g_neko_jni_new_global_ref_fn(env, localLookup);"), () -> implLookupSection);
+        assertFalse(implLookupSection.contains("neko_resolve_field(klass, \"IMPL_LOOKUP\""), () -> implLookupSection);
+        assertFalse(implLookupSection.contains("neko_fast_get_static_object_field("), () -> implLookupSection);
         assertFalse(source.contains("g_neko_jni_new_string_utf_fn(env, desc)"), () -> source);
         assertFalse(source.contains("g_neko_jni_call_static_object_method_a_fn(env, mtClass, mid, args)"), () -> source);
         assertTrue(source.contains("static volatile jboolean g_cls_initialized_"), () -> source);

@@ -675,6 +675,62 @@ the source plan that owns the changed path before it can be considered complete.
   and materially alter obfusjack generation; the next performance recovery row
   remains open for the overall target.
 
+### [x] NPT-4h: Stage 4 T4.4a IMPL_LOOKUP cached slot
+
+- Scope: complete `native-gentle-flamingo-todo.md` T4.4a by turning
+  `neko_impl_lookup` from a per-call class/field/static-base read into a
+  one-shot bind-time cache. The first successful read may use the existing
+  T4.2 direct class/field/static-object machinery and the existing bind-time
+  global-ref capture surface; subsequent calls must return the cached jobject
+  slot directly. The subtask must not introduce Java helper layers, JNI field
+  access fallback, skip-on-error, or original-bytecode fallback.
+- Required evidence: fresh generated C from TEST
+  `build/neko-native-work/run-51575914263949` and obfusjack
+  `build/neko-native-work/run-51580899179255` shows `neko_impl_lookup` still
+  resolving `java/lang/invoke/MethodHandles$Lookup`, calling
+  `neko_resolve_field(klass, "IMPL_LOOKUP",
+  "Ljava/lang/invoke/MethodHandles$Lookup;", JNI_TRUE)`, and returning
+  `neko_fast_get_static_object_field(...)` on every call. Source evidence is
+  `NativeMethodResolutionEmitter.java:338-369`. The forbidden JNI table
+  indices `[6]`, `[144]`, and `[145]` are already absent from this function
+  after T4.2; T4.4a removes the repeated direct metadata/read work from the
+  hot helper path.
+- Validation command or runtime target: `R-build`, `R-test`, `R-obfusjack`,
+  `R-native-test`, `R-inspect`, and `R-negative`; focused BSM/CONDY runtime
+  must reach `neko_lookup_for_class` and obtain `IMPL_LOOKUP` through the
+  cached slot from a freshly generated artifact; generated `neko_impl_lookup`
+  must contain a cached slot read and no per-call `neko_resolve_field(...,
+  "IMPL_LOOKUP", ...)` or `neko_fast_get_static_object_field(...)` in its final
+  public body.
+- Completion criteria: a missing slot at first read hard-aborts, successful
+  first read creates and stores a global jobject in the static cache, repeated
+  reads return that cache without resolving the class/field again, focused
+  BSM/CONDY, TEST, and obfusjack runtime targets pass from fresh artifacts, and
+  static inspection proves the generated `neko_impl_lookup` body has zero
+  `[6]`, `[144]`, and `[145]` indexing plus no repeated direct field-read path.
+- Negative-proof addendum recorded before editing: add a generic diagnostic
+  gate that forces the first cached-slot read to take the same hard-abort branch
+  as a missing cached `IMPL_LOOKUP` slot. The gate must fail closed without
+  skipping classes, entering JNI field fallback, or preserving original
+  bytecode.
+- Completion evidence 2026-05-22: focused generator/integration validation
+  passed with the repo Gradle wrapper and fresh focused artifact
+  `build/neko-native-work/run-52023000803100`. Normal runtime printed
+  `methodtype-ldc-ok`; `NEKO_NATIVE_DIAG_FAIL_IMPL_LOOKUP_SLOT=1` hard-aborted
+  with `[neko-bind] IMPL_LOOKUP cached slot unavailable`, while the earlier
+  MethodType, bootstrap, and ConstantDynamic negative gates still hard-aborted
+  on their own required entries. Full `NativeObfuscationPerfTest --no-parallel`
+  passed from fresh artifacts TEST `build/neko-native-work/run-52023000803100`
+  and obfusjack `build/neko-native-work/run-52028071557407`; baseline medians
+  were Calc `2` ms, Platform `40` ms, Virtual `33` ms, Seq `11` ms, Parallel
+  `1` ms, VThreads `1` ms. Static inspection of both artifacts found the
+  public `neko_impl_lookup` body reading `g_neko_impl_lookup_global`, using the
+  diagnostic gate, calling `neko_read_impl_lookup_direct(env)` only for first
+  bind, creating the cached global through `g_neko_jni_new_global_ref_fn`, and
+  containing no `neko_resolve_field(... "IMPL_LOOKUP" ...)`,
+  `neko_fast_get_static_object_field`, `FindClass`, `GetStaticFieldID`, or
+  `GetStaticObjectField` path. No fresh `hs_err` file was produced.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic

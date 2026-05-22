@@ -331,11 +331,12 @@ static jmethodID neko_resolve_jmethodID(JNIEnv *env, jclass cls, const char *nam
     return neko_resolve_jmethodID_with_kind(env, cls, name, sig, JNI_FALSE);
 }
 
+static jobject g_neko_impl_lookup_global = NULL;
+
 /* T4.2c — IMPL_LOOKUP read via libjvm-internal static-field machinery.
  * Replaces the previous neko_get_static_field_id (function-table 144) +
- * GetStaticObjectField (function-table 145) pair. T4.4a will further wrap
- * this in a one-shot bind-time cache via JNIHandles::make_global. */
-static jobject neko_impl_lookup(JNIEnv *env) {
+ * GetStaticObjectField (function-table 145) pair. */
+static jobject neko_read_impl_lookup_direct(JNIEnv *env) {
     jclass lookupClass;
     void *klass;
     neko_field_resolution_t field;
@@ -365,6 +366,29 @@ static jobject neko_impl_lookup(JNIEnv *env) {
         abort();
     }
     return neko_fast_get_static_object_field(thread, env, lookupClass, NULL, lookupClass, (jlong)field.offset);
+}
+
+static jobject neko_impl_lookup(JNIEnv *env) {
+    jobject localLookup;
+    jobject globalLookup;
+    if (g_neko_impl_lookup_global != NULL) return g_neko_impl_lookup_global;
+    if (getenv("NEKO_NATIVE_DIAG_FAIL_IMPL_LOOKUP_SLOT") != NULL) {
+        fprintf(stderr, "[neko-bind] IMPL_LOOKUP cached slot unavailable\\n");
+        abort();
+    }
+    localLookup = neko_read_impl_lookup_direct(env);
+    if (localLookup == NULL) {
+        fprintf(stderr, "[neko-bind] IMPL_LOOKUP direct read returned null\\n");
+        abort();
+    }
+    globalLookup = g_neko_jni_new_global_ref_fn(env, localLookup);
+    if (globalLookup == NULL || neko_exception_check(env)) {
+        if (neko_exception_check(env)) neko_exception_clear_direct(env);
+        fprintf(stderr, "[neko-bind] IMPL_LOOKUP global cache creation failed\\n");
+        abort();
+    }
+    g_neko_impl_lookup_global = globalLookup;
+    return g_neko_impl_lookup_global;
 }
 
 /* Method*-returning variant for paths that don't need a JNI jmethodID at
