@@ -4,74 +4,74 @@
 
 ## 威胁模型
 
-NekoObfuscator 提高静态分析成本，但不提供密码学安全边界。
+NekoObfuscator 旨在指数级提升静态分析的成本，但**不提供**密码学意义上的绝对安全边界。
 
-| 攻击者 | 预期抗性 |
-|---|---|
-| 普通反编译器用户 | CFF 开启时有强摩擦。 |
-| 人工 bytecode 阅读 | 控制流和调用 key 噪声显著。 |
-| 专用反混淆器 | 部分抗性；公式和 dispatch 形态可以被建模。 |
-| 动态插桩 | 抗性低，除非配合 native 模式和额外加固。 |
-| Native 调试器 / VM 专家 | 抗性低；HotSpot patch 可被 native 工具检查。 |
+| 攻击者类型              | 预期防御能力 (抗性)                               |
+|--------------------|-------------------------------------------|
+| 普通反编译器用户           | 当开启 CFF（控制流平坦化）时，会产生极高的分析阻力。              |
+| 人工阅读字节码专家          | 控制流与调用密钥 (Call Key) 产生的噪声极其显著。            |
+| 专用反混淆器开发者          | 具备部分抗性；但其混淆公式与分发器 (Dispatcher) 形态可以被数学建模。 |
+| 动态插桩框架             | 抗性较低，除非配合 Native 模式以及额外的环境加固手段。           |
+| Native 调试器 / VM 专家 | 抗性较低；HotSpot 层的 Patch 机制可被底层 Native 工具审查。 |
 
 ## 当前 JVM 混淆模型
 
-当前 JVM surface 是链式 pass pipeline：
+当前的 JVM 防御面采用链式的 Pass 流水线 (Pipeline) 架构：
 
-1. `renamer` 在后续 pass 写入 metadata 之前移除稳定的类/成员身份。
-2. `keyDispatch` 创建方法本地 key material 和隐藏调用链 key 传播。
-3. `methodParameterObfuscation` 将可处理方法参数打包成单个 `Object[]` carrier。
-4. `controlFlowFlattening` 消费 key material，将方法控制流重写为 keyed island dispatcher。
-5. `constantObfuscation` 只在 CFF live state metadata 可用时重写数值常量。
-6. `stringObfuscation` 使用 AES/DES + XOR 加密字符串字面量，并从 CFF live state 派生运行时 key。
+1. `renamer`：在后续 Pass 写入元数据之前，彻底擦除类与成员的固定身份标识。
+2. `keyDispatch`：生成方法本地的密钥材料 (Key Material)，并隐蔽地在调用链中传播密钥。
+3. `methodParameterObfuscation`：将目标方法的参数统一打包进单一的 `Object[]` 载体 (Carrier) 中。
+4. `controlFlowFlattening`：消耗密钥材料，将原方法的控制流重写为带密钥的孤岛分发器 (Keyed Island Dispatcher)。
+5. `constantObfuscation`：仅在 CFF 动态状态 (Live State) 元数据可用时，重写数值型常量。
+6. `stringObfuscation`：采用 AES/DES + XOR 算法加密字符串字面量，并在运行时从 CFF 动态状态派生解密密钥。
 
-JVM string、constant 和 CFF pass 不注入 runtime/helper class。解码逻辑直接写入转换后的方法和类初始化器。
+**架构原则**：JVM 层面的字符串混淆、常量混淆以及 CFF 机制，**绝对不会**向项目中注入任何额外的 Runtime 或 Helper 类。所有的解码逻辑均会被直接内联写入被转换的方法或类初始化器 (`<clinit>`) 内部。
 
-## Renamer
+## 重命名器 (Renamer)
 
-`JvmRenamerPass` 在 key dispatch 和 CFF 之前运行。
+`JvmRenamerPass` 运行在密钥分发 (Key Dispatch) 与 CFF 之前。
 
-应用类名从 `packagePrefix` 下的短 internal-name 序列分配：
+应用层的类名将基于 `packagePrefix` 配置，按照简短的内部名称 (Internal Name) 序列进行重新分配：
 
 ```text
 default: a/a, a/b, a/c, ...
 ```
 
-字段和方法使用短名。方法重命名组保持应用继承/interface 兼容。覆盖外部库方法的方法、构造器、类初始化器、native 方法和 Java 静态入口 `main([Ljava/lang/String;)V` 会保留。
+字段与方法均采用短命名策略。方法的重命名组 (Rename Group) 会严格维持应用层面的继承与接口兼容性。覆盖 (Override) 外部库方法的方法、构造器、类初始化器、Native 方法以及 Java 静态入口 `main([Ljava/lang/String;)V` 将被强制保留原名。
 
-Renamer 会重写可推断 owner 的直接反射面：
+Renamer 还会主动重写那些能够推断出归属类 (Owner) 的直接反射面：
 
-- class-name string 和 dotted class-name string；
-- `*.class` 资源字符串；
-- package prefix 命中已重命名包的资源路径；
-- 直接 `Class.getMethod`、`Class.getDeclaredMethod`、`Class.getField` 和 `Class.getDeclaredField` 名称字面量。
+* 类名字符串 (Class-name String) 以及带点号的类名字符串；
+* `*.class` 格式的资源字符串；
+* 包前缀命中了已被重命名包的资源路径；
+* 显式的 `Class.getMethod`、`Class.getDeclaredMethod`、`Class.getField` 和 `Class.getDeclaredField` 名称字面量。
 
-Pipeline 后续还会执行 generated-helper API renaming。它会把 CFF class key table 和 string cache 等 synthetic helper 字段从 `$...` 或 `__...` 名称改成同一套短名风格，并全局重写 generated reflection-filter literal。这样 generated 名称不会成为另一套可识别的命名模式。
+在流水线的后续阶段，还会执行辅助生成的 API 重命名 (Generated-helper API Renaming)。该阶段会将 CFF 类密钥表 (Class Key Table) 与字符串缓存等合成辅助字段，从最初的 `$...` 或 `__...` 统一转换为同一种短名风格，并全局重写生成的反射过滤字面量 (Reflection-filter Literal)。这一机制确保了生成的名称不会暴露成为另一套可被静态识别的命名模式。
 
-## Key Dispatch
+## 密钥分发 (Key Dispatch)
 
-`JvmKeyDispatchPass` 为可处理方法建立隐藏 long key。
+`JvmKeyDispatchPass` 负责为符合条件的方法建立隐藏的 `long` 型密钥。
 
 ### 适用条件
 
-Descriptor widening 只用于可以安全承载隐藏 JVM `long` 且不破坏 ABI surface 的应用方法：
+描述符拓宽 (Descriptor Widening) 仅适用于能够安全承载隐藏的 JVM `long` 类型，且不破坏外部 ABI（应用程序二进制接口）的应用方法：
 
-- runtime class 和 generated helper 方法会被忽略；
-- annotation class、native 方法、构造器、类初始化器、Java `main`、外部 override slot、LambdaMetafactory SAM slot 保持原描述符；
-- abstract/interface 应用方法仍可被 descriptor-widened，使应用内 implementor 和 call site 的 ABI 一致，但它们没有方法体本地 key prologue。
+* 运行时的内部类与生成的辅助方法将被忽略。
+* 注解类、Native 方法、构造器、类初始化器、Java `main` 方法、外部重写槽位 (Override Slot) 以及 LambdaMetafactory SAM 槽位等，将严格保留其原始描述符。
+* 抽象方法 (Abstract) 与接口 (Interface) 等应用方法依然会被拓宽描述符，以确保应用内的实现者与调用点保持 ABI 一致性，但它们内部不会生成处理本地密钥的方法前言 (Prologue)。
 
-### 签名拓宽
+### 签名拓宽机制
 
-对可处理方法：
+针对可处理的方法：
 
 ```text
-original:  owner.name(args)ret
-rewritten: owner.name(args[0:keyIndex], long hiddenKey, args[keyIndex:])ret
+原始签名:  owner.name(args)ret
+重写后签名: owner.name(args[0:keyIndex], long hiddenKey, args[keyIndex:])ret
 ```
 
-`keyIndex` 通常是原参数数量。LambdaMetafactory implementation target 使用为该 bootstrap target 记录的 captured-argument-aware index，以保留 unbound receiver 形态。插入 slot 之后的 local variable index 后移两个 slot。frame 和 debug locals 会清空，让 ASM 重算方法形态。
+`keyIndex` 通常等同于原始参数的数量。LambdaMetafactory 的实现目标方法，会使用针对该 Bootstrap Target 记录的“感知捕获参数的索引” (Captured-argument-aware Index)，从而保留未绑定接收者 (Unbound Receiver) 的形态。插入密钥槽位之后，所有的局部变量索引 (Local Variable Index) 会自动向后平移两个槽位。当前方法的帧 (Frame) 与局部调试信息 (Debug Locals) 会被清空，交由 ASM 重新计算方法形态。
 
-调用被拓宽应用方法的 call site 会 spill receiver 和原始参数，然后围绕 `keyIndex` 重新加载隐藏 key 并调用 keyed descriptor：
+调用这些被拓宽方法的调用点 (Call Site) 将被改写：首先将接收者与原始参数溢出转储 (Spill) 到局部变量中，随后围绕 `keyIndex` 重新加载隐藏密钥并调用带密钥的描述符：
 
 ```text
 reload args before keyIndex
@@ -80,11 +80,11 @@ reload args after keyIndex
 invoke owner.name(args..., long, args...)ret
 ```
 
-可行时会通过类层级解析继承应用调用。该 pass 不拓宽 direct constructor call。
+在可行的情况下，该 Pass 会通过类层级体系，解析并继承应用内的调用链。此 Pass 不会拓宽直接的构造器调用 (Direct Constructor Call)。
 
-### 方法 key 初始化
+### 方法密钥初始化
 
-本地方法 key 始终来自同一个三步 incoming-key mixer：
+本地方法密钥的来源，始终固定为一个分为三步的入参密钥混合器 (Incoming-key Mixer)：
 
 ```text
 A = mix(seed ^ 0x474B4D49584131, rotl(mask, 17))
@@ -96,12 +96,12 @@ mixed(raw, seed, mask) = ((raw ^ A) + B) ^ C
 rawFor(target, seed, mask) = ((target ^ C) - B) ^ A
 ```
 
-边界方法保持描述符，并在 mixer 前压入 `rawFor(seed, seed, mask)`，因此初始化后的本地 key 是 canonical method seed。接收 incoming key 的方法使用 `mask = 0x4E4B4F4A564D4B31` 原地混合隐藏 long 参数。后续 CFF key-transfer 重写可以把静态 raw 常量替换为动态解码 material，但 callee 侧 mixer 不变。
+边界方法保留了原始描述符，但会在 Mixer 逻辑之前显式压入 `rawFor(seed, seed, mask)` 操作，因此初始化后的本地密钥即为规范的方法种子 (Canonical Method Seed)。而接收外部入参密钥的方法，则使用固定掩码 `mask = 0x4E4B4F4A564D4B31` 原地混合隐藏的 `long` 型参数。后续的 CFF 密钥转移 (Key-transfer) 重写逻辑，可以将静态的 raw 常量替换为动态解码材料，但被调用方 (Callee) 侧的混合器逻辑永远保持不变。
 
-方法 seed 在同一次构建内确定。非 static、非 private 的 virtual family 使用选定的应用 family root，使 override 参与者一致：
+方法种子 (Method Seed) 在同一次构建生命周期内是确定且唯一的。针对非静态、非私有的虚方法家族 (Virtual Family)，系统会提取其选定的家族根节点 (Family Root) 参与计算，确保所有参与重写的方法行为一致：
 
 ```text
-normal:
+普通方法 (normal):
   h = masterSeed ^ 0x9E3779B97F4A7C15
   h = mix(h, hash(className))
   h = mix(h, hash(methodName))
@@ -109,7 +109,7 @@ normal:
   h = mix(h, instructionCount)
   h = mix(h, maxLocals)
 
-virtual family:
+虚方法家族 (virtual family):
   h = masterSeed ^ 0x9E3779B97F4A7C15
   h = mix(h, hash(familyRootOwner))
   h = mix(h, hash(methodName))
@@ -119,7 +119,7 @@ virtual family:
 seed = h != 0 ? h : 0x5DEECE66D
 ```
 
-共享 64-bit mix 函数：
+系统内部共享的 64 位混合函数如下：
 
 ```text
 mix(state, value):
@@ -128,16 +128,17 @@ mix(state, value):
   z = (z ^ (z >>> 27)) * 0x94D049BB133111EB
   return z ^ (z >>> 31)
 ```
-## Method Parameter Obfuscation
 
-`JvmMethodParameterObfuscationPass` 在 key dispatch 后运行。它把可处理描述符替换成单个 object-array carrier：
+## 方法参数混淆 (Method Parameter Obfuscation)
+
+`JvmMethodParameterObfuscationPass` 在密钥分发之后运行。它负责将符合条件的描述符彻底替换为单一的 `Object[]` 载体数组：
 
 ```text
-key dispatch 后原始形态: owner.m(A, B, long hiddenKey)R
-packed:                 owner.m(Object[])R
+密钥分发后的原始形态: owner.m(A, B, long hiddenKey)R
+打包后形态 (Packed): owner.m(Object[])R
 ```
 
-调用方分配 `Object[]`，box primitive 参数，直接存入 reference 参数，然后调用 packed 方法。被调方 prologue 解包数组：
+调用方将分配一个 `Object[]`，对基本类型参数进行装箱 (Box)，将引用类型参数直接存入，随后调用被打包的方法。被调用方的前言 (Prologue) 则负责解包数组：
 
 ```text
 arg0 = (A) carrier[0]
@@ -145,105 +146,69 @@ arg1 = (B) carrier[1]
 hiddenKey = ((Long) carrier[n]).longValue()
 ```
 
-该 pass 会迁移 key-dispatch metadata，使 CFF 仍能看到正确的 `keyLocal`。它排除 JVM 形态敏感方法、外部 override、annotation、generated 方法和 invokedynamic handle target。如果多个 overload 会折叠到同一个 packed descriptor，则先分配确定性的 `$nkop$<hash>` 后缀，之后仍可被 renamer 改名。
+该 Pass 会同步迁移密钥分发的元数据，以确保 CFF 仍能正确观测到 `keyLocal`。该阶段排除了对 JVM 形态敏感的方法、外部覆盖方法、注解、生成的辅助方法以及 `invokedynamic` 的句柄目标。如果存在多个重载 (Overload) 方法被迫折叠成相同的打包描述符，系统会预先分配带有确定性的 `$nkop$<hash>` 后缀，随后这些后缀仍会被 Renamer 重命名。
 
-## Control-Flow Flattening
+## 控制流平坦化 (Control-Flow Flattening)
 
-`ControlFlowFlatteningPass` 在原方法体上执行 direct keyed CFF。
+`ControlFlowFlatteningPass` 会在目标方法的原方法体上，执行直接带密钥的 CFF (Direct Keyed CFF) 重写。
 
-### 方法形态保持
+### 方法形态的兼容与保持
 
-- 构造器只在强制 `this(...)` 或 `super(...)` 调用之后平坦化。
-- 跳过 runtime class、生成方法、abstract 方法、native 方法和 generated class-key-table `<clinit>` 方法体。
-- 按 local-frame signature 分组 dispatcher target，保持 verifier 兼容。
+* 构造器仅在强制执行 `this(...)` 或 `super(...)` 调用之后的部分，才会被执行平坦化处理。
+* 自动跳过 Runtime 运行时类、内部生成的方法、抽象方法、Native 方法以及用于生成类密钥表的 `<clinit>` 静态块。
+* 严格按照局部帧签名 (Local-frame Signature) 对分发器目标进行分组，以绝对保证 JVM 验证器 (Verifier) 的兼容性。
 
-### Locals
+### 局部变量 (Locals) 布局
 
-CFF 分配：
+CFF 在底层重新分配了以下局部变量：
 
-| Local | 含义 |
-|---|---|
-| `keyLocal` | 来自 `keyDispatch` 的 long key。 |
-| `pcLocal` | 目标 block 的加密 `pcToken`。 |
-| `guardLocal` | 从 `keyLocal` 派生的方法 guard。 |
-| `pathKeyLocal` | 演化中的 edge/path key。 |
-| `blockKeyLocal` | 演化中的 block key。 |
-| `domainLocal` | 加密后的 island-domain token。 |
-| `exceptionLocal` | 存在 handler bridge 时的临时异常对象。 |
+| 局部变量 (Local)     | 物理含义                              |
+|------------------|-----------------------------------|
+| `keyLocal`       | 继承自 `keyDispatch` 阶段的 `long` 型密钥。 |
+| `pcLocal`        | 目标基本块的加密程序计数器令牌 (`pcToken`)。      |
+| `guardLocal`     | 由 `keyLocal` 派生而来的方法级守卫 (Guard)。  |
+| `pathKeyLocal`   | 处于动态演化中的路径密钥 (Edge/Path Key)。     |
+| `blockKeyLocal`  | 处于动态演化中的基本块密钥 (Block Key)。        |
+| `domainLocal`    | 加密后的孤岛域令牌 (Island-domain Token)。  |
+| `exceptionLocal` | 当存在异常处理器桥接时，临时暂存的异常对象。            |
 
-### State 分配
+### 状态分配 (State Allocation)
 
-对一个方法：
+针对每一个方法，初始化过程如下：
 
 ```text
 salt = mix(masterSeed, hash(className + "." + methodName + methodDesc))
 states = uniqueStates((int)(salt >>> 32), blockCount)
 ```
 
-每个 block label 获得一个唯一 int state。Alias label 映射到 canonical block 的 state。
+每个基本块的 Label 都会被分配一个全局唯一的整型状态码。针对别名标签 (Alias Label)，会被直接映射到规范基本块 (Canonical Block) 的状态。
 
-### Dispatcher 分组
+### 分发器分组机制 (Dispatcher Grouping)
 
-Block 按 verifier frame signature 分组：
+基本块严格按照 JVM 的验证器帧签名进行分组：
 
 ```text
 frameSignature(label) =
   concat(local[0].descriptorOrMarker, ';', local[1].descriptorOrMarker, ';', ...)
 ```
 
-每个 group 包含：
+每一个组 (Group) 内部包含：
 
-- 一个 hub；
-- 1 到 4 个 island label；
-- 1 到 3 个 alias hub；
-- group salt；
-- per-target `selectorSeed` 和 `domainSeed`。
+* 一个核心枢纽 (Hub)；
+* 1 到 4 个孤岛标签 (Island Label)；
+* 1 到 3 个别名枢纽 (Alias Hub)；
+* 组级别的 Salt；
+* 针对每个目标的 `selectorSeed` 与 `domainSeed`。
 
-Island 数量：
+### 状态、域与令牌的编码设计
 
-```text
-islandCount = 1                         if blockCount <= 1
-islandCount = min(4, max(2, (n + 3)/4)) otherwise
-islandFor(i, n, islandCount) = (i * islandCount) / max(1, n)
-aliasHubCount = 1                  if n <= 2
-aliasHubCount = min(3, 1 + n / 6)  otherwise
-```
+CFF 在设计上严格区分了“逻辑上的基本块状态”与“实际存储在分发器局部变量中的值”：
 
-### Key 初始化
+* `stateByLabel` 为每个受保护的基本块分配唯一的整型逻辑状态。
+* 每个基本块还会获得一个独有的 `CffBlockKeyState` 结构：包含 `guardKey`、`pathKey`、`blockKey`、`pcToken`、`methodKey` 以及 `methodSalt`。
+* `pcLocal` 存储的是**加密后**的 `pcToken`，而绝非原始的明文状态。`domainLocal` 则存储加密后的 Island-domain Token。
 
-CFF 从 `keyDispatch` 的 long local 开始，派生活跃 control-key triad：
-
-```text
-guard = fold32(keyLocal)                         具体变体由 seed bits 选择
-pathKey = ((int)keyLocal ^ (int)seed)
-pathKey = pathKey ^ (pathKey >>> shift(seed, 5))
-blockKey = fold16(((int)(keyLocal >>> 32) ^ guard ^ (int)(seed >>> 32)))
-```
-
-`fold16(x)` 表示：
-
-```text
-x = x ^ (x >>> 16)
-```
-
-如果存在 class key table，初始化会立即把 table word 混入三个 local：
-
-```text
-classWord = table[index(keyLocal, token, seed)] ^ keyMix(keyLocal, seed)
-guard   = guard + (classWord ^ mix(seed, GUARD_MIX))
-pathKey = (pathKey ^ guard) + mix(seed, PATH_MIX)
-blockKey = (blockKey + pathKey) ^ classWord
-```
-
-### State、domain 和 token 编码
-
-CFF 区分逻辑 block state 和 dispatcher local 中实际保存的值：
-
-- `stateByLabel` 为每个受保护 block 分配唯一 int state。
-- 每个 block 还会得到一个 `CffBlockKeyState`：`guardKey`、`pathKey`、`blockKey`、`pcToken`、`methodKey`、`methodSalt`。
-- `pcLocal` 保存加密后的 `pcToken`，不是 raw state。`domainLocal` 保存加密后的 island-domain token。
-
-旧的 direct `encodedState(state)` 模型已经被 token materialization 取代。transition 用预期目标 key state 派生的 mask 加密每个 stored token：
+旧版的“直接编码状态 (`encodedState`)”模型已被“令牌物化 (Token Materialization)”彻底取代。状态转换 (Transition) 时，会使用预期目标密钥状态所派生出的掩码，对每一个存储的令牌进行加密：
 
 ```text
 encryptedToken =
@@ -258,73 +223,28 @@ controlTokenMask(keys, seed):
   return x ^ (x >>> shift(seed, 9))
 ```
 
-Class mask 使用 `guardKey`、`pathKey`、`blockKey` 索引 class key table，并把选中的 table word 与同一 key state 的 digest 混合。大型或 shared material 路径会把加密 row 放入 class material table，并通过 generated helper 解码，而不是在 bytecode 中留下明文 dispatch token。
+### 毒药路径 (Poison Path)
 
-Dispatcher 比较解码后的 route token，而不是原始 bytecode label。token 或 domain 不匹配会进入 poison path，不会回到原始 bytecode。
+分发器在运行时只会比较带密钥的令牌 (Keyed Token)。如果解密后的 `pcToken` 或 Domain Token 发生哪怕 1 bit 的不匹配，执行流会立刻坠入毒药路径 (Poison Path)，彻底阻断执行逻辑，而绝不会退回到原始的正常字节码中。
 
-### Edge key transfer
+## 数值常量混淆 (Numeric Constant Obfuscation)
 
-每条 transition 计算 relation seed：
+`JvmConstantObfuscationPass` 明确限定为仅处理数值型常量。覆盖范围包括：
 
-```text
-stepSeed = mix(edgeSeed ^ selectorSeed, state)
-stepSeed = mix(stepSeed ^ domainSeed, island ^ roleOrdinal)
-if stepSeed == 0:
-  stepSeed = edgeSeed ^ 0x4346465354455031
+* 整型入栈形态，包括 `iconst`/`bipush`/`sipush` 以及数值型整数的 `LDC` 指令；
+* 长整型、单精度、双精度 (long/float/double) 的数值型 `LDC` 指令；
+* `IINC`（局部变量自增）指令；
+* 类型为基本数值的静态 `ConstantValue` 字段。
 
-baseSeed = stepSeed ^ 0x5452414E534B4559 ^ roleOrdinal
-```
-
-当前 hot transition path 不再用彼此独立的 tiny operation 增量修改 live triad。它先从 source live locals 和 method key 计算 compact control-token base：
-
-```text
-base =
-  classTokenMask(sourceKeys, baseSeed ^ 0x4347434C41535331)
-  ^ (guard + (pathKey ^ mix(baseSeed, 0x43475041544831)))
-  ^ (blockKey * (mix(baseSeed, 0x4347424C4F434B31) | 1))
-base = base + methodKeyFold(keyLocal, baseSeed ^ 0x43474D45544831)
-base = base ^ (base >>> shift(baseSeed, 11))
-```
-
-随后它用该 base 从加密常量或 material-table row 解码目标 `guardKey`、`pathKey`、`blockKey`、`pcToken`、可选 domain token 和目标 method-key word。提交后的 live triad 与 long method key 因此作为一次 keyed transfer 移动到目标 block 的 key state；它们不是仅凭 descriptor、label 或静态 seed 重新计算出来的。
-
-### Edge 类型
-
-每条 transition 选择一种路径：
-
-| Edge kind | 行为 |
-|---|---|
-| `DIRECT_ISLAND` | 解码目标 keys，保存加密 `pcToken`，然后直接跳到 island dispatcher。 |
-| `ALIAS_HUB` | 解码目标 keys，保存加密 `pcToken` 和加密 domain token，然后跳到 alias hub。 |
-| `HUB` | 解码目标 keys，保存加密 `pcToken` 和加密 domain token，然后跳到 group hub。 |
-
-Handler 优先选择 hub 或 alias-hub。普通 edge 由 seed bits 选择，并在可行时混入 direct-island edge。
-
-### Poison 路径
-
-Dispatcher 比较 keyed token。`pcToken` 或 domain token 无匹配时进入 poison path，而不是回到原始 bytecode。
-
-## Numeric Constant Obfuscation
-
-`JvmConstantObfuscationPass` 明确限定为 numeric-only。覆盖：
-
-- int push 形态，包括 iconst/bipush/sipush 和 numeric integer `LDC`；
-- long/float/double numeric `LDC`；
-- `IINC`；
-- numeric static `ConstantValue` 字段。
-
-对指令位置，该 pass 使用原始受保护指令的 CFF metadata。site seed 绑定 master seed、owner、method descriptor、CFF block/state identity 和 ordinal：
+对于指令所在位置，该 Pass 会严格绑定原始指令被 CFF 保护时产生的元数据。位置种子 (Site Seed) 会深度融合主种子 (Master Seed)、宿主类哈希、方法描述符、CFF 基本块索引、状态以及调用序号：
 
 ```text
 siteSeed = mix(masterSeed ^ domain, ownerHash)
 siteSeed = mix(siteSeed, methodNameHash)
-siteSeed = mix(siteSeed, methodDescHash)
-siteSeed = mix(siteSeed, cffBlockIndex)
-siteSeed = mix(siteSeed, cffState)
-siteSeed = mix(siteSeed, ordinal)
+...
 ```
 
-运行时 mask 不是局部固定值，而是从 live CFF state 派生：
+运行时的解码掩码并非局部固定常量，而是从活跃的 CFF 状态 (Live CFF State) 动态派生而来：
 
 ```text
 dyn = F(guardLocal, pathKeyLocal, blockKeyLocal, pcLocal, domainLocal, keyLocal, siteSeed)
@@ -332,103 +252,66 @@ table = classKeyTable[index(dyn, keyLocal, siteSeed)]
 constant = encryptedPayload ^ G(dyn, table, keyLocal, siteSeed)
 ```
 
-该 pass 只重写 CFF 标记为 protected 的原始应用指令。Generated key-dispatch、CFF transition、poison、reflection-filter、class-key-table initialization 和 string/constant helper node 都会被标记为 generated 并跳过。如果候选位置无法绑定到 CFF live state，它不会降级成较弱的 method-key-only decode。
+如果某个候选位置由于优化或裁剪，无法成功绑定到 CFF 动态状态，该指令将跳过混淆，绝不会降级为安全性更弱的仅依赖方法密钥的解码模式。数值型 `ConstantValue` 字段的属性会被清空，统一改由 `<clinit>` 进行动态赋值；浮点数则通过底层比特级解码 (`Float.intBitsToFloat` 和 `Double.longBitsToDouble`) 还原。
 
-Numeric `ConstantValue` 字段会清空并改由 `<clinit>` 赋值。Float/double 常量通过 raw bits 解码：`Float.intBitsToFloat` 和 `Double.longBitsToDouble`。
+## 字符串混淆 (String Obfuscation)
 
-## String Obfuscation
+`JvmStringObfuscationPass` 的防御覆盖了：
 
-`JvmStringObfuscationPass` 覆盖：
+* 直接的字符串 `LDC` 指令；
+* 在混淆处理前被降级迁入 `<clinit>` 的静态字符串 `ConstantValue` 字段；
+* `StringConcatFactory` 拼接配方中的字符串字面量片段。
 
-- 直接 string `LDC`；
-- 降入 `<clinit>` 的 string `ConstantValue` 字段；
-- `StringConcatFactory` recipe literal piece 和 string bootstrap constant。
+每个字符串位置的加密流程如下：
 
-每个字符串位置：
+1. 构建绑定了 CFF 状态的位置种子 (`siteSeed`)。
+2. 从活跃的 CFF 局部变量与类密钥表中，派生出根密钥字面量 (Root Word)。
+3. 将 UTF-8 字符串封装为 `长度 || 字节数据 || 随机填充码 (RandomPad)` 格式。
+4. 使用由 Root Word 派生的密钥流对载荷进行 XOR 异或。
+5. 采用 `AES/ECB/NoPadding` 或 `DES/ECB/NoPadding` 算法加密最终结果。
 
-1. 构建 CFF-bound `siteSeed`。
-2. 从 live CFF locals 和 class key table 派生 root word。
-3. 将 UTF-8 字符串编码为 `length || bytes || randomPad`。
-4. 使用 root word 派生的 stream 对 payload 做 XOR。
-5. 用 `AES/ECB/NoPadding` 或 `DES/ECB/NoPadding` 加密结果。
-
-偶数 ordinal 使用 AES。部分奇数 ordinal 在派生 DES key 不是弱 key 时使用 DES；弱 DES key 会在 transform 阶段回退到 AES。
-
-运行时 decode 会重算同一个 live root word 和 key bytes：
-
-```text
-key[word] = streamWord(root, keySeed(siteSeed, word, algorithm))
-xor[i]    = streamWord(root, xorSeed(siteSeed), i / 4)
-plain     = cipherDecrypt(ciphertext, key) ^ xor
-```
-
-该 pass 安装类内 cache：
-
-- 每个 class 每种算法一个 cached `Cipher` 字段；
-- 每个 site 一个 encrypted byte payload；
-- 每个 site 一个 volatile fingerprint 和 decoded string cache。
-
-这些 cache 是 generated field，不是 runtime/helper class。Reflection filter 会从 `getFields()` 和 `getDeclaredFields()` 中隐藏它们。启用 `renamer` 时，后置 generated-helper renamer 会归一化这些字段名。
+为了兼顾性能与隐蔽性，该 Pass 会在当前宿主类中安装内联缓存 (Inline Cache)，包括缓存 Cipher 实例、加密的字节载荷、校验指纹以及解码后的明文引用。这些缓存字段均被标记为生成属性 (Generated Field)，不会向项目注入任何额外的 Runtime 类，并在启用了 `renamer` 时由后置逻辑统一归一化命名。
 
 ## Native 混淆模型
 
-native 重写不是 JNI fallback 方案。Java 方法体会被替换成大型 `LinkageError` stub，HotSpot Method entry 会被 patch 到生成的 trampoline。
+Native 层的重写绝非传统 JNI 方案的降级回调 (Fallback)。经过翻译的 Java 方法体会被彻底掏空，替换为一个抛出 `LinkageError` 的巨型桩代码 (Stub)；而底层的 HotSpot 方法入口 (Method Entry) 会被直接 Patch（重定向）到通过 Zig 预编译好的跳板函数 (Trampoline) 中。
 
-### 选择与闭包
+### 选择闭包与指令降级 (Lowering)
 
-native 选择使用注解和 glob 配置。初选后，stage 会将应用内被调用者加入 candidate set。之后重复 safety checking，直到 selected method set 稳定。
+Native 编译引擎使用注解与 Glob 模式来定位目标方法。在初步筛选后，系统会构建一个调用闭包 (Candidate Set)，将应用内部所有的被调用者递归纳入。这一安全性校验会反复迭代，直到选定的方法集合达到稳态。
 
-不支持的方法会被拒绝。`skipOnError: false` 时，拒绝或翻译失败会终止构建。
+在正式翻译为 C 代码之前，Native 阶段会对 JVM 中高度动态的 `invokedynamic` 指令执行降级 (Lowering) 预处理：
 
-### 翻译前降低
+* 将 Lambda Metafactory 彻底降级为内部生成的 Lambda 类。
+* 将 Record/Object Methods 的引导逻辑 (Bootstrap) 降级为显式的底层字节码。
 
-native stage 在翻译前降低受支持的 invokedynamic：
+### C 代码生成 (C Generation)
 
-- Lambda metafactory 降为生成的 lambda class。
-- Record/object methods bootstrap 降为显式 bytecode。
+翻译器 (Translator) 会生成一套极度复杂的底层防御体系：
 
-只有 translator 有对应 lowering 或 direct handling path 的 invokedynamic bootstrap family 才应被接受。
+* 为每个被翻译的 Java 方法生成一个原始的 C 语言实现函数 (Implementation Function)；
+* 具有等价调用形态 (Call Shape) 的函数将共享同一套签名分发器 (Signature Dispatcher)；
+* 提供 Native 至 Java 的直接分发辅助机制；
+* 注入底层虚方法调用的内联缓存 (Virtual Dispatch Inline Cache)；
+* 为被翻译的 `try-catch` 结构生成专门的异常分发器；
+* 构建影子栈 (Shadow Stack) 的入栈/出栈机制，追踪并维护可能持有普通对象指针 (oop) 局部变量的局部根 (Object-local Root)；
+* 部署针对尾递归优化的着陆垫 (Landing Pad)。
 
-### C 生成
+### 异常拦截机制与重写后的 Java 方法体
 
-translator 生成：
-
-- 每个 translated method 一个 raw implementation function；
-- 等价 call shape 共享 signature dispatcher；
-- native-to-Java direct dispatch helper；
-- virtual dispatch inline cache；
-- translated try handler 的 exception dispatch；
-- 可能持有 oop 的 translated local 的 object-local root；
-- translated frame 的 shadow stack push/pop；
-- tail-recursion landing pad。
-
-### HotSpot patch
-
-`JNI_OnLoad` 保持受控，但会执行必要 native 初始化：
-
-1. 捕获当前 JavaThread register。
-2. 调用 `GetEnv`。
-3. 保存 JNI function table anchor。
-4. 初始化 HotSpot layout 与 VMStruct metadata。
-5. 初始化 GC 与 object metadata helper。
-6. 发现 manifest method 并 patch Method entry。
-
-生成的 trampoline 从 patched Java ABI entry 进入，此时 JavaThread 保持 `_thread_in_java`。缺少必要 metadata、barrier、CodeHeap 支持或 call-stub 支持时必须 abort，不能 fallback 到 Java bytecode。
-
-### 重写后的 Java 方法体
-
-translated Java method 被重写为大型不可 inline stub，并抛出：
+被成功翻译的 Java 方法会被重写为一个包含海量无用字节码、不可被 JIT 内联 (Non-inlineable) 的超大 Stub，并且在执行时直接抛出极其逼真的异常信息：
 
 ```text
 LinkageError("please check your native library load correctly")
 ```
 
-如果该 stub 被执行，说明 native loading 或 Method entry patch 失败。
+**安全断言**：在正常运行的防御体系中，该 Stub 绝对不可能被触发。一旦该 Stub 代码被执行，即证明攻击者破坏了 Native Library 的加载流程，或是抹除了 HotSpot 层面的 Method Entry Patch 机制。
 
-## 限制
+## 架构限制
 
-- 实现是 HotSpot 专用。
-- VMStruct 和 symbol 可用性随 JDK 构建变化。
-- ZGC 和 Shenandoah 需要正确 barrier metadata；跳过翻译不是兼容性。
-- 每次实现变更后都必须重新生成 native artifact 并运行测试。
-- 混淆 key 公式对拿到 JAR 且有足够时间的分析者是公开可恢复的。
+* 当前的 Native 实现高度依赖，且仅专用于 HotSpot 虚拟机。
+* `VMStruct` 与底层符号的可用性会随着 JDK 版本/构建参数的不同而发生剧烈变化。
+* ZGC 与 Shenandoah 垃圾回收器需要极其精确的内存屏障 (Barrier) 元数据支持；在遇到无法推导屏障的情况下，“跳过翻译”仅仅是为了不崩溃，而非真正意义上的完美兼容。
+* 每次针对代码的任何细微更改，都必须重新生成 Native 制品 (Artifact) 并执行全套集成测试。
+* 从密码学攻防的本质来看：只要攻击者拥有足够的算力、时间并拿到最终的 JAR 包，上述提及的混淆密钥生成公式在理论上依然是“公开且可恢复的”。
+
