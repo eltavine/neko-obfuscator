@@ -78,7 +78,38 @@ unrelated native worktree changes.
   feed the G18 root/global/node update path. Fresh focused CFF validation passed
   with the ticket checkpoint command above.
 
-- [ ] Scope: Final focused validation and five-jar smoke.
+- [x] Scope: Reconcile G18 ticket consume coverage with issued transfer paths.
+  Required evidence: generated jars showed normal execution poisoned by ticket
+  consumption on entries that had no matching issued ticket; source diff must
+  show consume installation is gated by ticket-issued target material rather
+  than every keyed descriptor.
+  Validation: focused CFF/key tests and five-jar smoke.
+  Completion criteria: legitimate transformed call paths still bind through G18
+  tickets, while non-ticketed ABI/direct entry paths are not poisoned merely for
+  being keyed descriptors.
+  Completion evidence: ticket consumption is now installed only for actual
+  keyed entries whose target seed was recorded when CFF key-transfer material
+  issued a G18 ticket. Fresh focused Gradle validation passed, and fresh
+  five-jar smoke no longer shows G18 initializer poisoning on legitimate entry
+  paths.
+
+- [x] Scope: Reconcile sealed class-key-word consumers across string and
+  invokedynamic material paths.
+  Required evidence: five-jar smoke showed corrupted invokedynamic payload
+  strings after class-key-word sealing; source diff must show only actual
+  class-key-word array reads decode the seal, while selector arrays and mutable
+  material/key cells remain raw.
+  Validation: focused JVM transform tests and five-jar smoke.
+  Completion criteria: sealed class-key words remain protected, invokedynamic
+  resolver payload decryption uses decoded words, and non-class-key arrays are
+  not decoded as sealed class-key material.
+  Completion evidence: string/invokedynamic class-key-word consumers now decode
+  the shared seal, while selector arrays and mutable string key cells remain raw.
+  Fresh `test21-obf.jar` bytecode inspection confirmed the invokedynamic flow
+  helper decodes sealed class-key words before use, and `test21-obf.jar`
+  completed its runtime smoke.
+
+- [x] Scope: Final focused validation and five-jar smoke.
   Required evidence: fresh focused Gradle runs and fresh full-JVM obfuscated jars
   under `/mnt/d/Code/Reverse/NekoOBF/`.
   Validation: compile, focused JVM tests, and runtime smoke for the five test
@@ -86,3 +117,11 @@ unrelated native worktree changes.
   Completion criteria: `test21` passes, no new G18/keytable initializer failure
   appears, and existing unrelated `test` sec/perf issues are not treated as this
   merge's success criteria.
+  Completion evidence: focused Gradle validation passed with
+  `:neko-transforms:compileJava`, `JvmConstantObfuscationIntegrationTest`,
+  `ControlFlowFlatteningAlgebraicAuditTest`, and
+  `CffStrongEntrySeedRegressionTest`. Rebuilt the default CLI distribution,
+  regenerated all five jars into `/mnt/d/Code/Reverse/NekoOBF/`, and smoke ran:
+  evaluator passed, test21 passed, test reached the known Sec/Calc behavior, and
+  ctf/snake progressed to the expected headless X11 GUI error instead of
+  keytable or payload-parser initializer corruption.

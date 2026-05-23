@@ -2686,7 +2686,10 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.AALOAD));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
         insns.add(new VarInsnNode(Opcodes.ILOAD, idxLocal));
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
+        );
         emitSeededInt(insns, siteSeedLocal, 0x494E445456414CL);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IADD));

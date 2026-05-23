@@ -605,7 +605,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, 1);
         insns.add(new InsnNode(Opcodes.ISUB));
         insns.add(new InsnNode(Opcodes.IAND));
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
+        );
         insns.add(new VarInsnNode(Opcodes.ILOAD, predicateLocal));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));
@@ -3275,7 +3278,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.AALOAD));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
         insns.add(new InsnNode(Opcodes.SWAP));
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
+        );
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x535454414256414CL)));
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -3391,7 +3397,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.AALOAD));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
         insns.add(new InsnNode(Opcodes.SWAP));
-        insns.add(new InsnNode(Opcodes.IALOAD));
+        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
+        );
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x53544D54545631L)));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IADD));

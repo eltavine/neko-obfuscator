@@ -2006,7 +2006,9 @@ abstract class CffSharedState {
     protected abstract long incomingRawForCanonical(long targetSeed);
     protected abstract void emitMaterializedDynamicBoundDecodedLong(
         InsnList insns,
+        PipelineContext pctx,
         long value,
+        long targetSeed,
         CffBlockKeyState expectedKeys,
         int keyLocal,
         int guardLocal,
