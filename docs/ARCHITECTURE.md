@@ -22,7 +22,7 @@ neko-cli
 | `neko-api` | Configuration model, annotations, transform contracts. |
 | `neko-config` | YAML parsing and validation. |
 | `neko-core` | JAR input/output, class hierarchy, pass scheduling, cleanup, runtime injection, mapping output. |
-| `neko-transforms` | Current JVM obfuscation passes: `renamer`, `keyDispatch`, `methodParameterObfuscation`, `controlFlowFlattening`, `constantObfuscation`, and `stringObfuscation`. |
+| `neko-transforms` | Current JVM obfuscation passes: `renamer`, `keyDispatch`, `methodParameterObfuscation`, `controlFlowFlattening`, `runtimeVariableObfuscation`, `constantObfuscation`, and `stringObfuscation`. |
 | `neko-native` | Method selection, safety checking, invokedynamic lowering, JVM-to-C translation, C emission, native build, HotSpot method patching. |
 | `neko-runtime` | Minimal runtime classes injected into output JARs. Currently `NekoNativeLoader`. |
 | `neko-test` | JUnit integration and native tests. |
@@ -67,11 +67,12 @@ renamer
 keyDispatch
 methodParameterObfuscation
 controlFlowFlattening
+runtimeVariableObfuscation
 constantObfuscation
 stringObfuscation
 ```
 
-The scheduler still honors phase and dependency metadata. `methodParameterObfuscation` depends on `keyDispatch`; `controlFlowFlattening` depends on `keyDispatch`; `constantObfuscation` and `stringObfuscation` depend on `controlFlowFlattening`.
+The scheduler still honors phase and dependency metadata. `methodParameterObfuscation` depends on `keyDispatch`; `controlFlowFlattening` depends on `keyDispatch`; `runtimeVariableObfuscation` depends on `controlFlowFlattening` and `validationSinkHardening`; `constantObfuscation` and `stringObfuscation` depend on `controlFlowFlattening`.
 
 ### `renamer`
 
@@ -108,6 +109,15 @@ The pass publishes the local key slot under `controlFlowFlattening.flowKeyLocalB
 - Exception handlers receive bridges into the same keyed dispatcher model.
 
 CFF also installs one synthetic class key table field per class that has protected application code. Reflection calls to `Class.getFields()` and `Class.getDeclaredFields()` are filtered so generated table fields are hidden, including cross-class reflection sites that inspect a different protected class.
+
+### `runtimeVariableObfuscation`
+
+`JvmRuntimeVariableObfuscationPass` runs after CFF has published live-state metadata:
+
+- Primitive locals written by protected application stores are moved into encrypted shadow slots. Store masks are derived from live CFF locals, method key material, and the class key table.
+- Original primitive local slots are poisoned after each protected store, while later protected loads project the value transiently from the encrypted shadow.
+- Reference locals written by protected application stores are moved into verifier-valid shadow slots and the original slot is nulled.
+- Safe zero/equality branches over protected int-like locals can compare encoded shadow and mask locals directly instead of restoring a plaintext accumulator local.
 
 ### `methodParameterObfuscation`
 

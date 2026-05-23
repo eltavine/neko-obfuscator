@@ -15,6 +15,7 @@ transforms:
   keyDispatch: { enabled: true }
   methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  runtimeVariableObfuscation: { enabled: true }
   constantObfuscation: { enabled: true, intensity: 1.0 }
   stringObfuscation: { enabled: true, intensity: 1.0 }
 
@@ -87,6 +88,7 @@ transforms:
 | `keyDispatch`                | `PRE_TRANSFORM` | 注入并传递隐藏的方法密钥 (Method Key)。                                                                    | `{ enabled: true }`                    |
 | `methodParameterObfuscation` | `PRE_TRANSFORM` | 在密钥分发完成后，将目标方法的参数统一打包进一个 `Object[]` 载体 (Carrier) 中。                                           | `{ enabled: true }`                    |
 | `controlFlowFlattening`      | `TRANSFORM`     | 将目标方法重写为带密钥的孤岛分发器 (Keyed Island Dispatcher)，并发布 CFF 动态元数据 (CFF Metadata)。                     | `{ enabled: true, intensity: 1.0 }`    |
+| `runtimeVariableObfuscation` | `TRANSFORM`     | 将受保护局部变量迁移到由 CFF 动态密钥驱动的 shadow slot，并在写入后污染原始 local slot。                                      | `{ enabled: true }`                    |
 | `constantObfuscation`        | `TRANSFORM`     | 利用 CFF 的动态状态 (CFF Live State) 与类密钥表 (Class Key Table) 重写数值常量。                                 | `{ enabled: true, intensity: 1.0 }`    |
 | `stringObfuscation`          | `TRANSFORM`     | 利用 CFF 动态状态 (CFF Live State)、AES/DES 算法、异或 (XOR) 操作以及类级别的缓存，加密字符串字面量与拼接配方 (Concat Recipe) 常量。 | `{ enabled: true, intensity: 1.0 }`    |
 
@@ -112,6 +114,7 @@ renamer
 keyDispatch
 methodParameterObfuscation -> keyDispatch
 controlFlowFlattening      -> keyDispatch
+runtimeVariableObfuscation -> controlFlowFlattening
 constantObfuscation        -> controlFlowFlattening
 stringObfuscation          -> controlFlowFlattening
 ```

@@ -22,6 +22,7 @@ The current CLI registers the rebuilt JVM obfuscation pipeline:
 - `keyDispatch`: in-place hidden long-key dispatch for application methods.
 - `methodParameterObfuscation`: replaces eligible method parameter lists with one `Object[]` carrier after key dispatch.
 - `controlFlowFlattening`: direct keyed island dispatchers over the original method body.
+- `runtimeVariableObfuscation`: CFF-live keyed shadow storage for protected local variables.
 - `invokeDynamic`: CFF-state keyed invokedynamic indirection for method and field references.
 - `constantObfuscation`: CFF-state keyed numeric constant decoding.
 - `stringObfuscation`: CFF-state keyed AES/DES plus XOR string literal decoding with per-class cipher caches.
@@ -111,6 +112,7 @@ transforms:
   keyDispatch: { enabled: true }
   methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  runtimeVariableObfuscation: { enabled: true }
   invokeDynamic: { enabled: true, intensity: 1.0 }
   constantObfuscation: { enabled: true, intensity: 1.0 }
   stringObfuscation: { enabled: true, intensity: 1.0 }
@@ -133,6 +135,7 @@ transforms:
   keyDispatch: { enabled: true }
   methodParameterObfuscation: { enabled: true }
   controlFlowFlattening: { enabled: true, intensity: 1.0 }
+  runtimeVariableObfuscation: { enabled: true }
   invokeDynamic: { enabled: true, intensity: 1.0 }
   constantObfuscation: { enabled: true, intensity: 1.0 }
   stringObfuscation: { enabled: true, intensity: 1.0 }

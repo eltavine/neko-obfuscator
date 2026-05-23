@@ -916,7 +916,7 @@ public final class ObfuscationPipeline {
         }
         Set<String> bytecodePasses = new LinkedHashSet<>(List.of(
             "renamer", "controlFlowFlattening", "constantObfuscation", "opaquePredicates", "numberEncryption", "stringEncryption",
-            "invokeDynamic", "outliner", "exceptionObfuscation", "exceptionReturn",
+            "runtimeVariableObfuscation", "invokeDynamic", "outliner", "exceptionObfuscation", "exceptionReturn",
             "stackObfuscation", "advancedJvm"));
         bytecodePasses.retainAll(enabled);
         List<String> missing = new ArrayList<>();

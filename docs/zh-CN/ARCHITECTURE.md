@@ -21,7 +21,7 @@ neko-cli
 | `neko-api`        | 提供配置模型、注解以及 Transform 契约接口。                                                                                                              |
 | `neko-config`     | 负责 YAML 配置文件的解析与校验。                                                                                                                      |
 | `neko-core`       | 处理 JAR I/O、类层级分析、Pass 调度、无用代码清理、运行时注入以及混淆映射 (Mapping) 的输出。                                                                               |
-| `neko-transforms` | 包含当前的 JVM Pass：`renamer`、`keyDispatch`、`methodParameterObfuscation`、`controlFlowFlattening`、`constantObfuscation` 和 `stringObfuscation`。 |
+| `neko-transforms` | 包含当前的 JVM Pass：`renamer`、`keyDispatch`、`methodParameterObfuscation`、`controlFlowFlattening`、`runtimeVariableObfuscation`、`constantObfuscation` 和 `stringObfuscation`。 |
 | `neko-native`     | 负责方法选择、安全检查、invokedynamic 指令降级、JVM 到 C 的代码翻译、C 代码生成、Native 构建以及 HotSpot 方法修补 (Method Patch)。。                                            |
 | `neko-runtime`    | 注入到输出 JAR 中的最小化运行时类；当前仅包含 `NekoNativeLoader`。                                                                                            |
 | `neko-test`       | 提供 JUnit 集成测试与 Native 测试支持。                                                                                                              |
@@ -65,11 +65,12 @@ renamer
 keyDispatch
 methodParameterObfuscation
 controlFlowFlattening
+runtimeVariableObfuscation
 constantObfuscation
 stringObfuscation
 ```
 
-调度器会严格遵守元数据中的阶段 (Phase) 与依赖声明：`methodParameterObfuscation` 和 `controlFlowFlattening` 均依赖于 `keyDispatch`；而 `constantObfuscation` 和 `stringObfuscation` 则依赖于 `controlFlowFlattening`。
+调度器会严格遵守元数据中的阶段 (Phase) 与依赖声明：`methodParameterObfuscation` 和 `controlFlowFlattening` 均依赖于 `keyDispatch`；`runtimeVariableObfuscation` 依赖于 `controlFlowFlattening` 和 `validationSinkHardening`；而 `constantObfuscation` 和 `stringObfuscation` 则依赖于 `controlFlowFlattening`。
 
 ### `renamer`（重命名器）
 
@@ -106,6 +107,15 @@ stringObfuscation
 * 异常处理器 (Exception Handler) 会通过桥接代码 (Bridge) 无缝接入同一套带密钥的分发器模型 (Keyed Dispatcher) 中。
 
 此外，CFF 还会为每个包含受保护代码的类安装一个合成的类密钥表字段 (Class Key Table Field)。针对 `Class.getFields()` 和 `Class.getDeclaredFields()` 的反射调用会被拦截和过滤，确保生成的表字段在运行时不可见；此机制同样涵盖了跨类检查另一受保护类的反射调用点。
+
+### `runtimeVariableObfuscation`（运行时变量混淆）
+
+`JvmRuntimeVariableObfuscationPass` 在 CFF 发布 live-state metadata 后运行：
+
+- 受保护的应用层 primitive local 写入会移动到加密 shadow slot；store mask 来自 live CFF locals、method key material 与 class key table。
+- 原始 primitive local slot 会在每次受保护 store 后被污染；后续受保护 load 只会在操作数栈上临时从 encrypted shadow 投影真实值。
+- 受保护的应用层 reference local 写入会移动到 verifier-valid shadow slot，原始 slot 会被置空。
+- 安全的 int-like local zero/equality 分支可以直接比较 encoded shadow 与 mask local，而不需要恢复 plaintext accumulator local。
 
 ### `methodParameterObfuscation`（方法参数混淆）
 
