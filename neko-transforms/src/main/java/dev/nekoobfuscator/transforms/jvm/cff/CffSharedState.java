@@ -67,12 +67,12 @@ abstract class CffSharedState {
         "controlFlowFlattening.classKeyTables";
     protected static final String CLASS_KEY_TABLES_PREPARED =
         "controlFlowFlattening.classKeyTablesPrepared";
-    protected static final String G18_ORDER_METADATA =
-        "controlFlowFlattening.g18OrderMetadata";
+    protected static final String CLASS_INTEGRITY_ORDER_METADATA =
+        "controlFlowFlattening.classIntegrityOrderMetadata";
     protected static final String SHARED_CLASS_HELPERS =
         "controlFlowFlattening.sharedClassHelpers";
-    protected static final String G18_GLOBAL_STATE =
-        "controlFlowFlattening.g18GlobalState";
+    protected static final String CLASS_INTEGRITY_STATE =
+        "controlFlowFlattening.classIntegrityState";
     protected static final String STRING_CONSTANT_VALUES_LOWERED =
         "controlFlowFlattening.stringConstantValuesLowered";
     protected static final int CLASS_KEY_TABLE_SIZE = 64;
@@ -120,12 +120,12 @@ abstract class CffSharedState {
         "([Ljava/lang/String;)[I";
     protected static final String CFF_STACK_MIX_HELPER_DESC =
         "(ILjava/util/stream/Stream;)Ljava/lang/Integer;";
-    protected static final String G18_GLOBAL_HELPER_DESC =
+    protected static final String CLASS_INTEGRITY_HELPER_DESC =
         "(IJJLjava/lang/Class;JJ)J";
-    protected static final int G18_TICKET_ISSUE_MODE = -1;
-    protected static final int G18_TICKET_CONSUME_MODE = -2;
-    protected static final int G18_TICKET_OBSERVE_MODE = -3;
-    protected static final int G18_TICKET_DEFER_MODE = -4;
+    protected static final int CLASS_INTEGRITY_TICKET_ISSUE_MODE = -1;
+    protected static final int CLASS_INTEGRITY_TICKET_CONSUME_MODE = -2;
+    protected static final int CLASS_INTEGRITY_TICKET_OBSERVE_MODE = -3;
+    protected static final int CLASS_INTEGRITY_TICKET_DEFER_MODE = -4;
     protected static final long KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED =
         0x4B58464552484931L;
     protected static final long KEY_TRANSFER_MATERIAL_LOW_METHOD_SEED =
@@ -302,7 +302,7 @@ abstract class CffSharedState {
 
     record ReflectiveTarget(String owner, String name) {}
 
-    record CffG18GlobalState(
+    record CffClassIntegrityState(
         String owner,
         String globalFieldName,
         String nodeFieldName,
@@ -324,7 +324,7 @@ abstract class CffSharedState {
             int index = nextClassIndex[0]++;
             if (index >= capacity) {
                 throw new IllegalStateException(
-                    "Global g18 class index " + index + " exceeds capacity " + capacity
+                    "Class-integrity class index " + index + " exceeds capacity " + capacity
                 );
             }
             return index;
@@ -342,7 +342,7 @@ abstract class CffSharedState {
             int ownerHash = owner.replace('/', '.').hashCode();
             int registrySize = ++compileRegistrySize[0];
             long loadedOld = compileLoadedBloom[0];
-            long root = g18OrderRoot(
+            long root = classIntegrityOrderRoot(
                 initial,
                 loadedOld & requiredBloom,
                 delta,
@@ -361,11 +361,11 @@ abstract class CffSharedState {
                 layoutFingerprint ^
                 classCodeHash ^
                 globalMutationMask;
-            compileLoadedBloom[0] = loadedOld | g18LoadBit(index, ownerHash);
+            compileLoadedBloom[0] = loadedOld | classIntegrityLoadBit(index, ownerHash);
             return root;
         }
 
-        static long g18OrderRoot(
+        static long classIntegrityOrderRoot(
             long nodeOld,
             long orderOld,
             long delta,
@@ -375,7 +375,7 @@ abstract class CffSharedState {
             int index,
             long classCodeHash
         ) {
-            return g18Projection(
+            return classIntegrityProjection(
                 nodeOld ^
                 orderOld ^
                 delta ^
@@ -387,7 +387,7 @@ abstract class CffSharedState {
             );
         }
 
-        static long g18Projection(long value) {
+        static long classIntegrityProjection(long value) {
             long x = value;
             x ^= x >>> 33;
             x *= 0xff51afd7ed558ccdL;
@@ -397,7 +397,7 @@ abstract class CffSharedState {
             return x & 0x0000FFFFFFFFFFFFL;
         }
 
-        static long g18LoadBit(int index, int ownerHash) {
+        static long classIntegrityLoadBit(int index, int ownerHash) {
             int a = index * 31 + ownerHash;
             int b = index * 17 + Integer.rotateLeft(ownerHash, 11);
             int c = index * 43 + Integer.rotateLeft(ownerHash, 19);
@@ -462,10 +462,10 @@ abstract class CffSharedState {
         LabelNode initEnd,
         boolean generatedClinit,
         boolean interfaceOwner,
-        CffG18GlobalState g18GlobalState,
-        int g18ClassIndex,
-        long g18RequiredOrderBloom,
-        long g18ExpectedRoot,
+        CffClassIntegrityState classIntegrityState,
+        int classIntegrityClassIndex,
+        long classIntegrityRequiredOrderBloom,
+        long classIntegrityExpectedRoot,
         int classCodeDigestLocal
     ) {
         int token(int value, long siteSeed) {

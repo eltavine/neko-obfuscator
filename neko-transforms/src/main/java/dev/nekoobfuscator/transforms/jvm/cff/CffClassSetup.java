@@ -309,9 +309,9 @@ abstract class CffClassSetup extends CffSharedState {
         if (Boolean.TRUE.equals(pctx.getPassData(CLASS_KEY_TABLES_PREPARED))) {
             return;
         }
-        CffG18OrderMetadata orderMetadata = g18OrderMetadata(pctx);
+        CffClassIntegrityOrderMetadata orderMetadata = classIntegrityOrderMetadata(pctx);
         if (!orderMetadata.ordered().isEmpty()) {
-            L1Class host = selectG18GlobalHost(pctx, orderMetadata.ordered().get(0));
+            L1Class host = selectClassIntegrityHost(pctx, orderMetadata.ordered().get(0));
             if (host != null && hasApplicationCode(pctx, host)) {
                 ensureClassKeyTable(pctx, host);
             }
@@ -322,8 +322,8 @@ abstract class CffClassSetup extends CffSharedState {
         pctx.putPassData(CLASS_KEY_TABLES_PREPARED, Boolean.TRUE);
     }
 
-    private CffG18OrderMetadata g18OrderMetadata(PipelineContext pctx) {
-        CffG18OrderMetadata existing = pctx.getPassData(G18_ORDER_METADATA);
+    private CffClassIntegrityOrderMetadata classIntegrityOrderMetadata(PipelineContext pctx) {
+        CffClassIntegrityOrderMetadata existing = pctx.getPassData(CLASS_INTEGRITY_ORDER_METADATA);
         if (existing != null) return existing;
         TreeMap<String, L1Class> candidates = new TreeMap<>();
         for (L1Class clazz : pctx.classMap().values()) {
@@ -335,7 +335,7 @@ abstract class CffClassSetup extends CffSharedState {
         for (String name : candidates.keySet()) {
             dependencies.put(name, new LinkedHashSet<>());
         }
-        Map<String, Integer> activeUseCounts = g18ActiveUseCounts(pctx, candidates);
+        Map<String, Integer> activeUseCounts = classIntegrityActiveUseCounts(pctx, candidates);
         for (L1Class clazz : candidates.values()) {
             String owner = clazz.name();
             String superName = clazz.asmNode().superName;
@@ -355,10 +355,10 @@ abstract class CffClassSetup extends CffSharedState {
         Set<String> visiting = new HashSet<>();
         Set<String> done = new HashSet<>();
         for (String name : candidates.keySet()) {
-            appendCanonicalG18Class(name, candidates, dependencies, visiting, done, ordered);
+            appendCanonicalClassIntegrityClass(name, candidates, dependencies, visiting, done, ordered);
         }
         if (!ordered.isEmpty()) {
-            L1Class host = selectG18GlobalHost(pctx, ordered.get(0));
+            L1Class host = selectClassIntegrityHost(pctx, ordered.get(0));
             if (host != null && candidates.containsKey(host.name())) {
                 ordered.removeIf(candidate -> candidate.name().equals(host.name()));
                 ordered.add(0, host);
@@ -368,19 +368,19 @@ abstract class CffClassSetup extends CffSharedState {
         for (int i = 0; i < ordered.size(); i++) {
             indexes.put(ordered.get(i).name(), i);
         }
-        Map<String, CffG18OrderClass> classes = new LinkedHashMap<>();
+        Map<String, CffClassIntegrityOrderClass> classes = new LinkedHashMap<>();
         for (String name : candidates.keySet()) {
             long requiredBloom = 0L;
             for (String dependency : dependencies.getOrDefault(name, Set.of())) {
                 Integer dependencyIndex = indexes.get(dependency);
                 if (dependencyIndex != null) {
-                    requiredBloom |= CffG18GlobalState.g18LoadBit(dependencyIndex, dependency.replace('/', '.').hashCode());
+                    requiredBloom |= CffClassIntegrityState.classIntegrityLoadBit(dependencyIndex, dependency.replace('/', '.').hashCode());
                 }
             }
-            classes.put(name, new CffG18OrderClass(requiredBloom));
+            classes.put(name, new CffClassIntegrityOrderClass(requiredBloom));
         }
-        CffG18OrderMetadata created = new CffG18OrderMetadata(ordered, classes);
-        pctx.putPassData(G18_ORDER_METADATA, created);
+        CffClassIntegrityOrderMetadata created = new CffClassIntegrityOrderMetadata(ordered, classes);
+        pctx.putPassData(CLASS_INTEGRITY_ORDER_METADATA, created);
         return created;
     }
 
@@ -393,22 +393,22 @@ abstract class CffClassSetup extends CffSharedState {
     ) {
         for (MethodNode method : caller.asmNode().methods) {
             if (method.instructions == null || TransformGuards.isGeneratedMethod(method)) continue;
-            Set<LabelNode> boundaryLabels = g18BoundaryLabels(method);
+            Set<LabelNode> boundaryLabels = classIntegrityBoundaryLabels(method);
             String previousActiveUse = null;
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-                if (isG18StraightLineBoundary(insn, boundaryLabels)) {
+                if (isClassIntegrityStraightLineBoundary(insn, boundaryLabels)) {
                     previousActiveUse = null;
                     continue;
                 }
-                String referenced = g18ReferencedActiveUse(pctx, candidates, caller.name(), insn);
+                String referenced = classIntegrityReferencedActiveUse(pctx, candidates, caller.name(), insn);
                 if (referenced == null) {
                     continue;
                 }
                 if (
                     previousActiveUse != null &&
                     !previousActiveUse.equals(referenced) &&
-                    isG18ConcreteOrderClass(candidates, previousActiveUse) &&
-                    isG18ConcreteOrderClass(candidates, referenced) &&
+                    isClassIntegrityConcreteOrderClass(candidates, previousActiveUse) &&
+                    isClassIntegrityConcreteOrderClass(candidates, referenced) &&
                     activeUseCounts.getOrDefault(referenced, 0) == 1
                 ) {
                     dependencies.get(referenced).add(previousActiveUse);
@@ -418,13 +418,13 @@ abstract class CffClassSetup extends CffSharedState {
         }
     }
 
-    private Map<String, Integer> g18ActiveUseCounts(PipelineContext pctx, Map<String, L1Class> candidates) {
+    private Map<String, Integer> classIntegrityActiveUseCounts(PipelineContext pctx, Map<String, L1Class> candidates) {
         Map<String, Integer> counts = new HashMap<>();
         for (L1Class caller : candidates.values()) {
             for (MethodNode method : caller.asmNode().methods) {
                 if (method.instructions == null || TransformGuards.isGeneratedMethod(method)) continue;
                 for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
-                    String referenced = g18ReferencedActiveUse(pctx, candidates, caller.name(), insn);
+                    String referenced = classIntegrityReferencedActiveUse(pctx, candidates, caller.name(), insn);
                     if (referenced != null) {
                         counts.merge(referenced, 1, Integer::sum);
                     }
@@ -434,7 +434,7 @@ abstract class CffClassSetup extends CffSharedState {
         return counts;
     }
 
-    private String g18ReferencedActiveUse(
+    private String classIntegrityReferencedActiveUse(
         PipelineContext pctx,
         Map<String, L1Class> candidates,
         String callerName,
@@ -460,12 +460,12 @@ abstract class CffClassSetup extends CffSharedState {
         return referenced;
     }
 
-    private boolean isG18ConcreteOrderClass(Map<String, L1Class> candidates, String name) {
+    private boolean isClassIntegrityConcreteOrderClass(Map<String, L1Class> candidates, String name) {
         L1Class clazz = candidates.get(name);
         return clazz != null && !clazz.isInterface() && !clazz.isAnnotation();
     }
 
-    private Set<LabelNode> g18BoundaryLabels(MethodNode method) {
+    private Set<LabelNode> classIntegrityBoundaryLabels(MethodNode method) {
         Set<LabelNode> labels = Collections.newSetFromMap(new IdentityHashMap<>());
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof JumpInsnNode jump) {
@@ -488,7 +488,7 @@ abstract class CffClassSetup extends CffSharedState {
         return labels;
     }
 
-    private boolean isG18StraightLineBoundary(AbstractInsnNode insn, Set<LabelNode> boundaryLabels) {
+    private boolean isClassIntegrityStraightLineBoundary(AbstractInsnNode insn, Set<LabelNode> boundaryLabels) {
         if (
             insn instanceof LabelNode label && boundaryLabels.contains(label) ||
             insn instanceof JumpInsnNode ||
@@ -501,11 +501,11 @@ abstract class CffClassSetup extends CffSharedState {
         return opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN || opcode == Opcodes.ATHROW;
     }
 
-    private record CffG18OrderMetadata(List<L1Class> ordered, Map<String, CffG18OrderClass> classes) {}
+    private record CffClassIntegrityOrderMetadata(List<L1Class> ordered, Map<String, CffClassIntegrityOrderClass> classes) {}
 
-    private record CffG18OrderClass(long requiredBloom) {}
+    private record CffClassIntegrityOrderClass(long requiredBloom) {}
 
-    private void appendCanonicalG18Class(
+    private void appendCanonicalClassIntegrityClass(
         String name,
         Map<String, L1Class> candidates,
         Map<String, Set<String>> dependencies,
@@ -516,7 +516,7 @@ abstract class CffClassSetup extends CffSharedState {
         if (done.contains(name)) return;
         if (!visiting.add(name)) return;
         for (String dependency : dependencies.getOrDefault(name, Set.of())) {
-            appendCanonicalG18Class(dependency, candidates, dependencies, visiting, done, ordered);
+            appendCanonicalClassIntegrityClass(dependency, candidates, dependencies, visiting, done, ordered);
         }
         visiting.remove(name);
         if (done.add(name)) {
@@ -525,10 +525,10 @@ abstract class CffClassSetup extends CffSharedState {
     }
 
     @SuppressWarnings("unchecked")
-    protected CffG18GlobalState ensureG18GlobalState(PipelineContext pctx, L1Class requestingClass, long seed) {
-        CffG18GlobalState existing = pctx.getPassData(G18_GLOBAL_STATE);
+    protected CffClassIntegrityState ensureClassIntegrityState(PipelineContext pctx, L1Class requestingClass, long seed) {
+        CffClassIntegrityState existing = pctx.getPassData(CLASS_INTEGRITY_STATE);
         if (existing != null) return existing;
-        L1Class host = selectG18GlobalHost(pctx, requestingClass);
+        L1Class host = selectClassIntegrityHost(pctx, requestingClass);
         if ((host.asmNode().access & Opcodes.ACC_PUBLIC) == 0) {
             host.asmNode().access =
                 (host.asmNode().access & ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED)) |
@@ -546,17 +546,17 @@ abstract class CffClassSetup extends CffSharedState {
         String ownerRegistryFieldName = globalFieldName;
         String helperName = uniqueMethodName(
             host,
-            "__neko_g18$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x47313848454C504CL), 36),
-            G18_GLOBAL_HELPER_DESC
+            "__neko_class_integrity$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x47313848454C504CL), 36),
+            CLASS_INTEGRITY_HELPER_DESC
         );
         String codeSuffix = Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x473138434F444531L), 36);
-        String u1Name = uniqueMethodName(host, "__neko_g18_u1$" + codeSuffix, "([BI)I");
-        String u2Name = uniqueMethodName(host, "__neko_g18_u2$" + codeSuffix, "([BI)I");
-        String u4Name = uniqueMethodName(host, "__neko_g18_u4$" + codeSuffix, "([BI)I");
-        String codeName = uniqueMethodName(host, "__neko_g18_code$" + codeSuffix, "([BII)Z");
-        String clinitName = uniqueMethodName(host, "__neko_g18_clinit$" + codeSuffix, "([BII)Z");
-        String mixName = uniqueMethodName(host, "__neko_g18_mix$" + codeSuffix, "([BIIJ)J");
-        String scanName = uniqueMethodName(host, "__neko_g18_scan$" + codeSuffix, "([BJ)J");
+        String u1Name = uniqueMethodName(host, "__neko_class_integrity_u1$" + codeSuffix, "([BI)I");
+        String u2Name = uniqueMethodName(host, "__neko_class_integrity_u2$" + codeSuffix, "([BI)I");
+        String u4Name = uniqueMethodName(host, "__neko_class_integrity_u4$" + codeSuffix, "([BI)I");
+        String codeName = uniqueMethodName(host, "__neko_class_integrity_code$" + codeSuffix, "([BII)Z");
+        String clinitName = uniqueMethodName(host, "__neko_class_integrity_clinit$" + codeSuffix, "([BII)Z");
+        String mixName = uniqueMethodName(host, "__neko_class_integrity_mix$" + codeSuffix, "([BIIJ)J");
+        String scanName = uniqueMethodName(host, "__neko_class_integrity_scan$" + codeSuffix, "([BJ)J");
         int helperAccess = Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         installU1Helper(pctx, host, helperAccess, u1Name);
         installU2Helper(pctx, host, helperAccess, u1Name, u2Name);
@@ -570,10 +570,10 @@ abstract class CffClassSetup extends CffSharedState {
         long globalInitial = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x47313847494E4954L));
         long globalMutationMask = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x473138474D555441L));
         long nodeMutationMask = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x4731384E4D555441L));
-        long layoutFingerprint = g18UnsafeLayoutFingerprint(rootMask ^ globalMutationMask ^ nodeMutationMask);
+        long layoutFingerprint = classIntegrityUnsafeLayoutFingerprint(rootMask ^ globalMutationMask ^ nodeMutationMask);
         int fieldAccess = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         host.asmNode().fields.add(new FieldNode(fieldAccess, globalFieldName, "Ljava/lang/Object;", null, null));
-        installG18GlobalHelper(
+        installClassIntegrityHelper(
             pctx,
             host,
             globalFieldName,
@@ -587,7 +587,7 @@ abstract class CffClassSetup extends CffSharedState {
             nodeMutationMask,
             scanName
         );
-        CffG18GlobalState created = new CffG18GlobalState(
+        CffClassIntegrityState created = new CffClassIntegrityState(
             host.name(),
             globalFieldName,
             nodeFieldName,
@@ -605,12 +605,12 @@ abstract class CffClassSetup extends CffSharedState {
             new int[1],
             new long[1]
         );
-        pctx.putPassData(G18_GLOBAL_STATE, created);
+        pctx.putPassData(CLASS_INTEGRITY_STATE, created);
         host.markDirty();
         return created;
     }
 
-    private L1Class selectG18GlobalHost(PipelineContext pctx, L1Class defaultClass) {
+    private L1Class selectClassIntegrityHost(PipelineContext pctx, L1Class defaultClass) {
         L1Class publicBest = null;
         L1Class anyBest = null;
         for (L1Class candidate : pctx.classMap().values()) {
@@ -627,7 +627,7 @@ abstract class CffClassSetup extends CffSharedState {
         return anyBest != null ? anyBest : defaultClass;
     }
 
-    private void installG18GlobalHelper(
+    private void installClassIntegrityHelper(
         PipelineContext pctx,
         L1Class host,
         String globalFieldName,
@@ -644,7 +644,7 @@ abstract class CffClassSetup extends CffSharedState {
         MethodNode helper = new MethodNode(
             Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNCHRONIZED | Opcodes.ACC_SYNTHETIC,
             helperName,
-            G18_GLOBAL_HELPER_DESC,
+            CLASS_INTEGRITY_HELPER_DESC,
             null,
             null
         );
@@ -746,7 +746,7 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new InsnNode(Opcodes.AASTORE));
-        emitG18AcquireUnsafe(
+        emitClassIntegrityAcquireUnsafe(
             insns,
             unsafeClassLocal,
             unsafeFieldLocal,
@@ -754,7 +754,7 @@ abstract class CffClassSetup extends CffSharedState {
         );
         insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
         JvmPassBytecode.pushInt(insns, 4);
-        emitG18UnsafeBaseLayoutFingerprint(
+        emitClassIntegrityUnsafeBaseLayoutFingerprint(
             insns,
             unsafeLocal,
             layoutDeltaLocal,
@@ -809,7 +809,7 @@ abstract class CffClassSetup extends CffSharedState {
         LabelNode classRootMode = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
         insns.add(new JumpInsnNode(Opcodes.IFGE, classRootMode));
-        emitG18TicketMode(
+        emitClassIntegrityTicketMode(
             insns,
             indexLocal,
             initialLocal,
@@ -876,7 +876,7 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new VarInsnNode(Opcodes.LSTORE, layoutDeltaLocal));
-        emitG18ClassCodeHash(
+        emitClassIntegrityClassCodeHash(
             insns,
             host,
             classCodeScanName,
@@ -1021,7 +1021,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
-        emitG18Projection(insns);
+        emitClassIntegrityProjection(insns);
         insns.add(new VarInsnNode(Opcodes.LSTORE, rootLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, globalCellLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, globalOldLocal));
@@ -1074,13 +1074,13 @@ abstract class CffClassSetup extends CffSharedState {
         ));
         insns.add(new VarInsnNode(Opcodes.ALOAD, orderCellLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, orderOldLocal));
-        emitG18LoadBit(insns, indexLocal, ownerHashLocal, 31, 0);
+        emitClassIntegrityLoadBit(insns, indexLocal, ownerHashLocal, 31, 0);
         insns.add(new InsnNode(Opcodes.LOR));
-        emitG18LoadBit(insns, indexLocal, ownerHashLocal, 17, 11);
+        emitClassIntegrityLoadBit(insns, indexLocal, ownerHashLocal, 17, 11);
         insns.add(new InsnNode(Opcodes.LOR));
-        emitG18LoadBit(insns, indexLocal, ownerHashLocal, 43, 19);
+        emitClassIntegrityLoadBit(insns, indexLocal, ownerHashLocal, 43, 19);
         insns.add(new InsnNode(Opcodes.LOR));
-        emitG18LoadBit(insns, indexLocal, ownerHashLocal, 59, 5);
+        emitClassIntegrityLoadBit(insns, indexLocal, ownerHashLocal, 59, 5);
         insns.add(new InsnNode(Opcodes.LOR));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,
@@ -1104,7 +1104,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LLOAD, classCodeHashLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
-        emitG18Projection(insns);
+        emitClassIntegrityProjection(insns);
         JvmPassBytecode.pushLong(insns, 0xFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         JvmPassBytecode.pushInt(insns, 48);
@@ -1117,7 +1117,7 @@ abstract class CffClassSetup extends CffSharedState {
         host.asmNode().methods.add(helper);
     }
 
-    private void emitG18TicketMode(
+    private void emitClassIntegrityTicketMode(
         InsnList insns,
         int modeLocal,
         int valueLocal,
@@ -1140,12 +1140,12 @@ abstract class CffClassSetup extends CffSharedState {
         LabelNode consumeThreadOk = new LabelNode();
         LabelNode consumeOk = new LabelNode();
 
-        emitG18TicketValue(insns, seedLocal, ticketLocal);
+        emitClassIntegrityTicketValue(insns, seedLocal, ticketLocal);
         insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
-        JvmPassBytecode.pushInt(insns, G18_TICKET_ISSUE_MODE);
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_ISSUE_MODE);
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, issueMode));
         insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
-        JvmPassBytecode.pushInt(insns, G18_TICKET_DEFER_MODE);
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_DEFER_MODE);
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, consumeMode));
 
         insns.add(issueMode);
@@ -1171,7 +1171,7 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
-        JvmPassBytecode.pushInt(insns, G18_TICKET_DEFER_MODE);
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_DEFER_MODE);
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, issueGlobal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
         insns.add(new InsnNode(Opcodes.LRETURN));
@@ -1216,7 +1216,7 @@ abstract class CffClassSetup extends CffSharedState {
         ));
         insns.add(new VarInsnNode(Opcodes.ASTORE, ticketObjectLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
-        JvmPassBytecode.pushInt(insns, G18_TICKET_OBSERVE_MODE);
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_OBSERVE_MODE);
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, destructiveConsumeMode));
         insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
         JvmPassBytecode.pushInt(insns, 5);
@@ -1261,7 +1261,7 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new JumpInsnNode(Opcodes.IFNE, consumeOk));
-        emitG18TicketPoison(insns, valueLocal, seedLocal);
+        emitClassIntegrityTicketPoison(insns, valueLocal, seedLocal);
         insns.add(new InsnNode(Opcodes.LRETURN));
 
         insns.add(destructiveConsumeMode);
@@ -1335,33 +1335,33 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new JumpInsnNode(Opcodes.IFNONNULL, consumeOk));
-        emitG18TicketPoison(insns, valueLocal, seedLocal);
+        emitClassIntegrityTicketPoison(insns, valueLocal, seedLocal);
         insns.add(new InsnNode(Opcodes.LRETURN));
         insns.add(consumeOk);
         insns.add(new InsnNode(Opcodes.LCONST_0));
         insns.add(new InsnNode(Opcodes.LRETURN));
     }
 
-    private void emitG18TicketPoison(InsnList insns, int valueLocal, int seedLocal) {
+    private void emitClassIntegrityTicketPoison(InsnList insns, int valueLocal, int seedLocal) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, 0x4731385449434B31L);
         insns.add(new InsnNode(Opcodes.LXOR));
-        emitG18Projection(insns);
+        emitClassIntegrityProjection(insns);
         insns.add(new InsnNode(Opcodes.LCONST_1));
         insns.add(new InsnNode(Opcodes.LOR));
     }
 
-    private void emitG18TicketValue(InsnList insns, int seedLocal, int ticketLocal) {
+    private void emitClassIntegrityTicketValue(InsnList insns, int seedLocal, int ticketLocal) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
         JvmPassBytecode.pushLong(insns, 0x4731385449434B32L);
         insns.add(new InsnNode(Opcodes.LXOR));
-        emitG18Projection(insns);
+        emitClassIntegrityProjection(insns);
         insns.add(new VarInsnNode(Opcodes.LSTORE, ticketLocal));
     }
 
-    private void emitG18ClassCodeHash(
+    private void emitClassIntegrityClassCodeHash(
         InsnList insns,
         L1Class host,
         String classCodeScanName,
@@ -1431,7 +1431,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new JumpInsnNode(Opcodes.IFNONNULL, streamReady));
         insns.add(missingOwner);
         insns.add(new VarInsnNode(Opcodes.LLOAD, expectedLocal));
-        emitG18ClassCodeSeed(insns, initialLocal, deltaLocal, rootMask);
+        emitClassIntegrityClassCodeSeed(insns, initialLocal, deltaLocal, rootMask);
         insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, 0x4346464D49535331L);
         insns.add(new InsnNode(Opcodes.LXOR));
@@ -1456,7 +1456,7 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new VarInsnNode(Opcodes.ALOAD, bytesLocal));
-        emitG18ClassCodeSeed(insns, initialLocal, deltaLocal, rootMask);
+        emitClassIntegrityClassCodeSeed(insns, initialLocal, deltaLocal, rootMask);
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             host.name(),
@@ -1468,7 +1468,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(done);
     }
 
-    private void emitG18ClassCodeSeed(
+    private void emitClassIntegrityClassCodeSeed(
         InsnList insns,
         int initialLocal,
         int deltaLocal,
@@ -1483,7 +1483,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LXOR));
     }
 
-    private void emitG18AcquireUnsafe(
+    private void emitClassIntegrityAcquireUnsafe(
         InsnList insns,
         int unsafeClassLocal,
         int unsafeFieldLocal,
@@ -1530,7 +1530,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ASTORE, unsafeLocal));
     }
 
-    private void emitG18UnsafeBaseLayoutFingerprint(
+    private void emitClassIntegrityUnsafeBaseLayoutFingerprint(
         InsnList insns,
         int unsafeLocal,
         int hashLocal,
@@ -1542,16 +1542,16 @@ abstract class CffClassSetup extends CffSharedState {
     ) {
         JvmPassBytecode.pushLong(insns, nonZeroLong(seed ^ 0x5531384C41594F31L));
         insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
-        emitG18UnsafeIntSignal(insns, unsafeLocal, "addressSize", "()I", hashLocal, 0x5531384144445231L);
-        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[Ljava/lang/Object;"), true, hashLocal);
-        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[Ljava/lang/Object;"), false, hashLocal);
-        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[B"), true, hashLocal);
-        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[B"), false, hashLocal);
-        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[I"), true, hashLocal);
-        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[I"), false, hashLocal);
-        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[J"), true, hashLocal);
-        emitG18UnsafeArraySignal(insns, unsafeLocal, Type.getType("[J"), false, hashLocal);
-        emitG18UnsafeArrayValueProbe(insns, unsafeLocal, hashLocal, seed);
+        emitClassIntegrityUnsafeIntSignal(insns, unsafeLocal, "addressSize", "()I", hashLocal, 0x5531384144445231L);
+        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[Ljava/lang/Object;"), true, hashLocal);
+        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[Ljava/lang/Object;"), false, hashLocal);
+        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[B"), true, hashLocal);
+        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[B"), false, hashLocal);
+        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[I"), true, hashLocal);
+        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[I"), false, hashLocal);
+        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[J"), true, hashLocal);
+        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[J"), false, hashLocal);
+        emitClassIntegrityUnsafeArrayValueProbe(insns, unsafeLocal, hashLocal, seed);
 
         insns.add(new LdcInsnNode(Type.getType("Ljava/lang/Class;")));
         insns.add(new MethodInsnNode(
@@ -1604,7 +1604,7 @@ abstract class CffClassSetup extends CffSharedState {
             "(Ljava/lang/reflect/Field;)J",
             false
         ));
-        emitG18MixLongSignal(insns, hashLocal, 0x553138464F464631L);
+        emitClassIntegrityMixLongSignal(insns, hashLocal, 0x553138464F464631L);
         insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,
@@ -1620,7 +1620,7 @@ abstract class CffClassSetup extends CffSharedState {
             "()I",
             false
         ));
-        emitG18MixIntSignal(insns, hashLocal, 0x553138464E414D31L);
+        emitClassIntegrityMixIntSignal(insns, hashLocal, 0x553138464E414D31L);
         insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,
@@ -1643,7 +1643,7 @@ abstract class CffClassSetup extends CffSharedState {
             "()I",
             false
         ));
-        emitG18MixIntSignal(insns, hashLocal, 0x5531384654595031L);
+        emitClassIntegrityMixIntSignal(insns, hashLocal, 0x5531384654595031L);
         insns.add(next);
         insns.add(new IincInsnNode(fieldIndexLocal, 1));
         insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
@@ -1651,7 +1651,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
     }
 
-    private void emitG18UnsafeArrayValueProbe(
+    private void emitClassIntegrityUnsafeArrayValueProbe(
         InsnList insns,
         int unsafeLocal,
         int hashLocal,
@@ -1681,7 +1681,7 @@ abstract class CffClassSetup extends CffSharedState {
             "(Ljava/lang/Object;J)I",
             false
         ));
-        emitG18MixIntSignal(insns, hashLocal, seed ^ 0x5531384956414C31L);
+        emitClassIntegrityMixIntSignal(insns, hashLocal, seed ^ 0x5531384956414C31L);
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
         insns.add(new InsnNode(Opcodes.ICONST_1));
@@ -1707,10 +1707,10 @@ abstract class CffClassSetup extends CffSharedState {
             "(Ljava/lang/Object;J)J",
             false
         ));
-        emitG18MixLongSignal(insns, hashLocal, seed ^ 0x5531384C56414C31L);
+        emitClassIntegrityMixLongSignal(insns, hashLocal, seed ^ 0x5531384C56414C31L);
     }
 
-    private void emitG18UnsafeIntSignal(
+    private void emitClassIntegrityUnsafeIntSignal(
         InsnList insns,
         int unsafeLocal,
         String name,
@@ -1726,10 +1726,10 @@ abstract class CffClassSetup extends CffSharedState {
             desc,
             false
         ));
-        emitG18MixIntSignal(insns, hashLocal, salt);
+        emitClassIntegrityMixIntSignal(insns, hashLocal, salt);
     }
 
-    private void emitG18UnsafeArraySignal(
+    private void emitClassIntegrityUnsafeArraySignal(
         InsnList insns,
         int unsafeLocal,
         Type arrayType,
@@ -1745,61 +1745,61 @@ abstract class CffClassSetup extends CffSharedState {
             "(Ljava/lang/Class;)I",
             false
         ));
-        emitG18MixIntSignal(
+        emitClassIntegrityMixIntSignal(
             insns,
             hashLocal,
             baseOffset ? 0x5531384142415331L : 0x5531384153434C31L
         );
     }
 
-    private void emitG18MixIntSignal(InsnList insns, int hashLocal, long salt) {
+    private void emitClassIntegrityMixIntSignal(InsnList insns, int hashLocal, long salt) {
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, nonZeroLong(salt));
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
-        emitG18Projection(insns);
+        emitClassIntegrityProjection(insns);
         insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
     }
 
-    private void emitG18MixLongSignal(InsnList insns, int hashLocal, long salt) {
+    private void emitClassIntegrityMixLongSignal(InsnList insns, int hashLocal, long salt) {
         JvmPassBytecode.pushLong(insns, nonZeroLong(salt));
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
-        emitG18Projection(insns);
+        emitClassIntegrityProjection(insns);
         insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
     }
 
-    private long g18UnsafeLayoutFingerprint(long seed) {
+    private long classIntegrityUnsafeLayoutFingerprint(long seed) {
         try {
             Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
             java.lang.reflect.Field unsafeField = unsafeClass.getDeclaredField("theUnsafe");
             unsafeField.setAccessible(true);
             Object unsafe = unsafeField.get(null);
             long hash = nonZeroLong(seed ^ 0x5531384C41594F31L);
-            hash = g18MixIntSignal(
+            hash = classIntegrityMixIntSignal(
                 hash,
                 ((Number) unsafeClass.getMethod("addressSize").invoke(unsafe)).intValue(),
                 0x5531384144445231L
             );
-            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, Object[].class, true, hash);
-            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, Object[].class, false, hash);
-            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, byte[].class, true, hash);
-            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, byte[].class, false, hash);
-            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, int[].class, true, hash);
-            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, int[].class, false, hash);
-            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, long[].class, true, hash);
-            hash = g18MixUnsafeArraySignal(unsafeClass, unsafe, long[].class, false, hash);
-            hash = g18MixUnsafeArrayValueProbe(unsafeClass, unsafe, hash, seed);
+            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, Object[].class, true, hash);
+            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, Object[].class, false, hash);
+            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, byte[].class, true, hash);
+            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, byte[].class, false, hash);
+            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, int[].class, true, hash);
+            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, int[].class, false, hash);
+            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, long[].class, true, hash);
+            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, long[].class, false, hash);
+            hash = classIntegrityMixUnsafeArrayValueProbe(unsafeClass, unsafe, hash, seed);
             java.lang.reflect.Method objectFieldOffset =
                 unsafeClass.getMethod("objectFieldOffset", java.lang.reflect.Field.class);
             for (java.lang.reflect.Field field : Class.class.getDeclaredFields()) {
                 if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
                 long offset = ((Number) objectFieldOffset.invoke(unsafe, field)).longValue();
-                hash = g18MixLongSignal(hash, offset, 0x553138464F464631L);
-                hash = g18MixIntSignal(hash, field.getName().hashCode(), 0x553138464E414D31L);
-                hash = g18MixIntSignal(hash, field.getType().getName().hashCode(), 0x5531384654595031L);
+                hash = classIntegrityMixLongSignal(hash, offset, 0x553138464F464631L);
+                hash = classIntegrityMixIntSignal(hash, field.getName().hashCode(), 0x553138464E414D31L);
+                hash = classIntegrityMixIntSignal(hash, field.getType().getName().hashCode(), 0x5531384654595031L);
             }
             return hash;
         } catch (ReflectiveOperationException | RuntimeException e) {
@@ -1807,7 +1807,7 @@ abstract class CffClassSetup extends CffSharedState {
         }
     }
 
-    private long g18MixUnsafeArraySignal(
+    private long classIntegrityMixUnsafeArraySignal(
         Class<?> unsafeClass,
         Object unsafe,
         Class<?> arrayClass,
@@ -1816,10 +1816,10 @@ abstract class CffClassSetup extends CffSharedState {
     ) throws ReflectiveOperationException {
         String name = baseOffset ? "arrayBaseOffset" : "arrayIndexScale";
         int value = ((Number) unsafeClass.getMethod(name, Class.class).invoke(unsafe, arrayClass)).intValue();
-        return g18MixIntSignal(hash, value, baseOffset ? 0x5531384142415331L : 0x5531384153434C31L);
+        return classIntegrityMixIntSignal(hash, value, baseOffset ? 0x5531384142415331L : 0x5531384153434C31L);
     }
 
-    private long g18MixUnsafeArrayValueProbe(
+    private long classIntegrityMixUnsafeArrayValueProbe(
         Class<?> unsafeClass,
         Object unsafe,
         long hash,
@@ -1830,29 +1830,29 @@ abstract class CffClassSetup extends CffSharedState {
         java.lang.reflect.Method getLong = unsafeClass.getMethod("getLong", Object.class, long.class);
         int[] ints = { nonZeroInt((int) (seed ^ 0x5531384950524231L)) };
         long intBase = ((Number) arrayBaseOffset.invoke(unsafe, int[].class)).longValue();
-        hash = g18MixIntSignal(
+        hash = classIntegrityMixIntSignal(
             hash,
             ((Number) getInt.invoke(unsafe, ints, intBase)).intValue(),
             seed ^ 0x5531384956414C31L
         );
         long[] longs = { nonZeroLong(seed ^ 0x5531384C50524231L) };
         long longBase = ((Number) arrayBaseOffset.invoke(unsafe, long[].class)).longValue();
-        return g18MixLongSignal(
+        return classIntegrityMixLongSignal(
             hash,
             ((Number) getLong.invoke(unsafe, longs, longBase)).longValue(),
             seed ^ 0x5531384C56414C31L
         );
     }
 
-    private long g18MixIntSignal(long hash, int value, long salt) {
-        return CffG18GlobalState.g18Projection(((long) value) ^ nonZeroLong(salt) ^ hash);
+    private long classIntegrityMixIntSignal(long hash, int value, long salt) {
+        return CffClassIntegrityState.classIntegrityProjection(((long) value) ^ nonZeroLong(salt) ^ hash);
     }
 
-    private long g18MixLongSignal(long hash, long value, long salt) {
-        return CffG18GlobalState.g18Projection(value ^ nonZeroLong(salt) ^ hash);
+    private long classIntegrityMixLongSignal(long hash, long value, long salt) {
+        return CffClassIntegrityState.classIntegrityProjection(value ^ nonZeroLong(salt) ^ hash);
     }
 
-    private void emitG18LoadBit(InsnList insns, int indexLocal, int ownerHashLocal, int indexMultiplier, int ownerRotate) {
+    private void emitClassIntegrityLoadBit(InsnList insns, int indexLocal, int ownerHashLocal, int indexMultiplier, int ownerRotate) {
         insns.add(new InsnNode(Opcodes.LCONST_1));
         insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
         JvmPassBytecode.pushInt(insns, indexMultiplier);
@@ -1873,7 +1873,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LSHL));
     }
 
-    private void emitG18Projection(InsnList insns) {
+    private void emitClassIntegrityProjection(InsnList insns) {
         insns.add(new InsnNode(Opcodes.DUP2));
         JvmPassBytecode.pushInt(insns, 33);
         insns.add(new InsnNode(Opcodes.LUSHR));
@@ -1894,7 +1894,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LAND));
     }
 
-    protected long g18InitialState(String owner, int clinitMask, int[] objectValues, int[] values) {
+    protected long classIntegrityInitialState(String owner, int clinitMask, int[] objectValues, int[] values) {
         long state = (((long) clinitMask) << 32) ^ Integer.toUnsignedLong(owner.hashCode());
         state = JvmPassBytecode.mix(state, objectValues[0]);
         state = JvmPassBytecode.mix(state, values[values.length - 1]);
@@ -1958,19 +1958,19 @@ abstract class CffClassSetup extends CffSharedState {
             "__neko_cff_dsp$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x44535048454C5031L), 36),
             "(IIIIIII)I"
         );
-        CffG18GlobalState g18GlobalState = ensureG18GlobalState(pctx, clazz, seed);
-        int g18ClassIndex = g18GlobalState.allocateClassIndex();
-        CffG18OrderClass orderClass = g18OrderMetadata(pctx).classes().getOrDefault(
+        CffClassIntegrityState classIntegrityState = ensureClassIntegrityState(pctx, clazz, seed);
+        int classIntegrityClassIndex = classIntegrityState.allocateClassIndex();
+        CffClassIntegrityOrderClass orderClass = classIntegrityOrderMetadata(pctx).classes().getOrDefault(
             clazz.name(),
-            new CffG18OrderClass(0L)
+            new CffClassIntegrityOrderClass(0L)
         );
-        if (clazz.name().equals(g18GlobalState.owner())) {
-            orderClass = new CffG18OrderClass(0L);
+        if (clazz.name().equals(classIntegrityState.owner())) {
+            orderClass = new CffClassIntegrityOrderClass(0L);
         }
-        long initialState = g18InitialState(clazz.name(), nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L)), objectTable, table);
+        long initialState = classIntegrityInitialState(clazz.name(), nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L)), objectTable, table);
         long rootDelta = JvmPassBytecode.mix(nonZeroInt(JvmPassBytecode.mix(seed, 0x434C494E49544B31L)), 0x47313844454C5441L);
-        long g18ExpectedRoot = g18GlobalState.allocateExpectedRoot(
-            g18ClassIndex,
+        long classIntegrityExpectedRoot = classIntegrityState.allocateExpectedRoot(
+            classIntegrityClassIndex,
             initialState,
             rootDelta,
             clazz.name(),
@@ -2048,10 +2048,10 @@ abstract class CffClassSetup extends CffSharedState {
             new LabelNode(),
             generatedClinit,
             clazz.isInterface(),
-            g18GlobalState,
-            g18ClassIndex,
+            classIntegrityState,
+            classIntegrityClassIndex,
             orderClass.requiredBloom(),
-            g18ExpectedRoot,
+            classIntegrityExpectedRoot,
             -1
         );
         installClassKeyTableInit(pctx, clazz, data);
@@ -2070,29 +2070,29 @@ abstract class CffClassSetup extends CffSharedState {
             pctx.putPassData(CLASS_CODE_INTEGRITY_FINALIZED, Boolean.TRUE);
             return;
         }
-        restoreG18HelperNames(pctx, classes);
+        restoreClassIntegrityHelperNames(pctx, classes);
         restoreCffCarrierFieldNames(pctx, classes);
-        int installed = finalizeG18ClassCodeMaterial(pctx, tables, hierarchy);
+        int installed = finalizeClassIntegrityCodeMaterial(pctx, tables, hierarchy);
         restoreCffCarrierFieldNames(pctx, classes);
         pctx.putPassData(CLASS_CODE_INTEGRITY_FINALIZED, Boolean.TRUE);
         if (installed > 0) {
-            log.info("Finalized G18 class-code key material: classes={}", installed);
+            log.info("Finalized class-integrity class-code key material: classes={}", installed);
         }
     }
 
-    private int finalizeG18ClassCodeMaterial(
+    private int finalizeClassIntegrityCodeMaterial(
         PipelineContext pctx,
         Map<String, CffClassKeyTable> tables,
         ClassHierarchy hierarchy
     ) {
         int patched = 0;
-        CffG18GlobalState state = pctx.getPassData(G18_GLOBAL_STATE);
+        CffClassIntegrityState state = pctx.getPassData(CLASS_INTEGRITY_STATE);
         if (state == null) return 0;
         long loadedOld = 0L;
         for (CffClassKeyTable table : tables.values()) {
             L1Class clazz = table.clazz();
             if (!hasApplicationCode(pctx, clazz)) continue;
-            long initialState = g18InitialState(
+            long initialState = classIntegrityInitialState(
                 table.owner(),
                 table.clinitMask(),
                 table.objectValues(),
@@ -2101,28 +2101,28 @@ abstract class CffClassSetup extends CffSharedState {
             long rootDelta = JvmPassBytecode.mix(table.clinitMask(), 0x47313844454C5441L);
             long expectedHash = classCodeHash(
                 writeClassBytes(hierarchy, clazz),
-                g18ClassCodeSeed(initialState, rootDelta, state.rootMask())
+                classIntegrityClassCodeSeed(initialState, rootDelta, state.rootMask())
             );
             int ownerHash = table.owner().replace('/', '.').hashCode();
-            long expectedRoot = CffG18GlobalState.g18OrderRoot(
+            long expectedRoot = CffClassIntegrityState.classIntegrityOrderRoot(
                 initialState,
-                loadedOld & table.g18RequiredOrderBloom(),
+                loadedOld & table.classIntegrityRequiredOrderBloom(),
                 rootDelta,
                 state.rootMask(),
                 state.layoutFingerprint(),
                 ownerHash,
-                table.g18ClassIndex(),
+                table.classIntegrityClassIndex(),
                 expectedHash
             );
-            patchG18ClassCodeExpected(clazz, table, expectedHash);
-            patchG18ClassKeyWords(clazz, table, expectedRoot);
-            loadedOld |= CffG18GlobalState.g18LoadBit(table.g18ClassIndex(), ownerHash);
+            patchClassIntegrityCodeExpected(clazz, table, expectedHash);
+            patchClassIntegrityKeyWords(clazz, table, expectedRoot);
+            loadedOld |= CffClassIntegrityState.classIntegrityLoadBit(table.classIntegrityClassIndex(), ownerHash);
             patched++;
         }
         return patched;
     }
 
-    private void restoreG18HelperNames(PipelineContext pctx, List<L1Class> classes) {
+    private void restoreClassIntegrityHelperNames(PipelineContext pctx, List<L1Class> classes) {
         Map<String, Set<String>> required = new LinkedHashMap<>();
         for (L1Class clazz : classes) {
             for (MethodNode method : clazz.asmNode().methods) {
@@ -2315,7 +2315,7 @@ abstract class CffClassSetup extends CffSharedState {
         clazz.markDirty();
         byte[] classBytes = writeClassBytes(hierarchy, clazz);
         expectedPatch.set(classCodeHash(classBytes, seed));
-        patchG18ClassCodeExpected(clazz, table, classCodeHash(classBytes, g18ClassCodeSeed(table)));
+        patchClassIntegrityCodeExpected(clazz, table, classCodeHash(classBytes, classIntegrityClassCodeSeed(table)));
     }
 
     private String finalizerHelperName(L1Class clazz, String suffix, long salt, String desc) {
@@ -2371,56 +2371,56 @@ abstract class CffClassSetup extends CffSharedState {
         }
     }
 
-    protected long g18ClassCodeSeed(long initialState, long rootDelta, long rootMask) {
+    protected long classIntegrityClassCodeSeed(long initialState, long rootDelta, long rootMask) {
         return initialState ^ rootDelta ^ rootMask ^ 0x473138434F444531L;
     }
 
-    protected long g18ClassCodeSeed(CffClassKeyTable table) {
-        long initialState = g18InitialState(
+    protected long classIntegrityClassCodeSeed(CffClassKeyTable table) {
+        long initialState = classIntegrityInitialState(
             table.owner(),
             table.clinitMask(),
             table.objectValues(),
             table.values()
         );
         long rootDelta = JvmPassBytecode.mix(table.clinitMask(), 0x47313844454C5441L);
-        return g18ClassCodeSeed(initialState, rootDelta, table.g18GlobalState().rootMask());
+        return classIntegrityClassCodeSeed(initialState, rootDelta, table.classIntegrityState().rootMask());
     }
 
-    private void patchG18ClassCodeExpected(L1Class clazz, CffClassKeyTable table, long expected) {
+    private void patchClassIntegrityCodeExpected(L1Class clazz, CffClassKeyTable table, long expected) {
         MethodNode clinit = findClassInit(clazz);
         if (clinit == null || clinit.instructions == null) {
             throw new IllegalStateException("Missing class key initializer for " + clazz.name());
         }
         for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (!(insn instanceof MethodInsnNode call)) continue;
-            if (!table.g18GlobalState().owner().equals(call.owner)) continue;
-            if (!G18_GLOBAL_HELPER_DESC.equals(call.desc)) continue;
+            if (!table.classIntegrityState().owner().equals(call.owner)) continue;
+            if (!CLASS_INTEGRITY_HELPER_DESC.equals(call.desc)) continue;
             patchPreviousPatchableLong(call, expected);
             clazz.markDirty();
             return;
         }
-        throw new IllegalStateException("Missing G18 global helper call for " + clazz.name());
+        throw new IllegalStateException("Missing class-integrity helper call for " + clazz.name());
     }
 
-    private void patchG18ClassKeyWords(L1Class clazz, CffClassKeyTable table, long expectedRoot) {
+    private void patchClassIntegrityKeyWords(L1Class clazz, CffClassKeyTable table, long expectedRoot) {
         MethodNode clinit = findClassInit(clazz);
         if (clinit == null || clinit.instructions == null) {
             throw new IllegalStateException("Missing class key initializer for " + clazz.name());
         }
-        MethodInsnNode g18Call = null;
+        MethodInsnNode classIntegrityCall = null;
         for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (!(insn instanceof MethodInsnNode call)) continue;
-            if (!table.g18GlobalState().owner().equals(call.owner)) continue;
-            if (!G18_GLOBAL_HELPER_DESC.equals(call.desc)) continue;
-            g18Call = call;
+            if (!table.classIntegrityState().owner().equals(call.owner)) continue;
+            if (!CLASS_INTEGRITY_HELPER_DESC.equals(call.desc)) continue;
+            classIntegrityCall = call;
             break;
         }
-        if (g18Call == null) {
-            throw new IllegalStateException("Missing G18 global helper call for " + clazz.name());
+        if (classIntegrityCall == null) {
+            throw new IllegalStateException("Missing class-integrity helper call for " + clazz.name());
         }
         int patched = 0;
         for (
-            AbstractInsnNode insn = g18Call.getNext();
+            AbstractInsnNode insn = classIntegrityCall.getNext();
             insn != null && patched < table.values().length;
             insn = insn.getNext()
         ) {
@@ -2443,7 +2443,7 @@ abstract class CffClassSetup extends CffSharedState {
             bytes[index--] = (IntInsnNode) insn;
         }
         if (index >= 0) {
-            throw new IllegalStateException("Missing live G18 class-code patch bytes");
+            throw new IllegalStateException("Missing live class-integrity class-code patch bytes");
         }
         new LongBytePatch(bytes).set(expected);
     }
@@ -2456,7 +2456,7 @@ abstract class CffClassSetup extends CffSharedState {
             bytes[index--] = (IntInsnNode) insn;
         }
         if (index >= 0) {
-            throw new IllegalStateException("Missing live G18 class key patch bytes");
+            throw new IllegalStateException("Missing live class-integrity class key patch bytes");
         }
         for (int i = 0; i < bytes.length; i++) {
             int shift = (bytes.length - 1 - i) * 8;

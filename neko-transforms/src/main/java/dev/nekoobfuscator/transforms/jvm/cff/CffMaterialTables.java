@@ -65,8 +65,8 @@ abstract class CffMaterialTables extends CffClassSetup {
         InsnList init = new InsnList();
         int arrayLocal = table.initCarrierLocal();
         int classWordsLocal = arrayLocal + 1;
-        int g18RootLocal = classWordsLocal + 1;
-        long initialState = g18InitialState(table);
+        int classIntegrityRootLocal = classWordsLocal + 1;
+        long initialState = classIntegrityInitialState(table);
         long rootDelta = JvmPassBytecode.mix(table.clinitMask(), 0x47313844454C5441L);
         init.add(table.initStart());
         JvmPassBytecode.pushInt(init, TOKEN_MATERIAL_CARRIER_SIZE);
@@ -90,7 +90,7 @@ abstract class CffMaterialTables extends CffClassSetup {
             ));
             init.add(new InsnNode(Opcodes.AASTORE));
         }
-        emitG18GlobalClassRootInit(init, g18RootLocal, table, initialState, rootDelta);
+        emitClassIntegrityRootInit(init, classIntegrityRootLocal, table, initialState, rootDelta);
         JvmPassBytecode.pushInt(init, table.values().length);
         init.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
         init.add(new VarInsnNode(Opcodes.ASTORE, classWordsLocal));
@@ -98,7 +98,7 @@ abstract class CffMaterialTables extends CffClassSetup {
             init.add(new VarInsnNode(Opcodes.ALOAD, classWordsLocal));
             JvmPassBytecode.pushInt(init, i);
             emitPatchableIntNoLdc(init);
-            emitClassKeyWordMask(init, g18RootLocal, i);
+            emitClassKeyWordMask(init, classIntegrityRootLocal, i);
             init.add(new InsnNode(Opcodes.IXOR));
             JvmPassBytecode.pushInt(init, CLASS_KEY_WORD_SEAL);
             init.add(new InsnNode(Opcodes.IXOR));
@@ -161,15 +161,15 @@ abstract class CffMaterialTables extends CffClassSetup {
         } else {
             clinit.instructions.insertBefore(first, init);
         }
-        clinit.maxLocals = Math.max(clinit.maxLocals, g18RootLocal + 2);
+        clinit.maxLocals = Math.max(clinit.maxLocals, classIntegrityRootLocal + 2);
         clinit.maxStack = Math.max(clinit.maxStack, 10);
     }
 
-    private long g18InitialState(CffClassKeyTable table) {
-        return g18InitialState(table.owner(), table.clinitMask(), table.objectValues(), table.values());
+    private long classIntegrityInitialState(CffClassKeyTable table) {
+        return classIntegrityInitialState(table.owner(), table.clinitMask(), table.objectValues(), table.values());
     }
 
-    private long g18ClassRoot(long state) {
+    private long classIntegrityClassRoot(long state) {
         long x = state;
         x ^= x >>> 33;
         x *= 0xff51afd7ed558ccdL;
@@ -179,14 +179,14 @@ abstract class CffMaterialTables extends CffClassSetup {
         return x & 0x0000FFFFFFFFFFFFL;
     }
 
-    private void emitG18GlobalClassRootInit(
+    private void emitClassIntegrityRootInit(
         InsnList init,
         int rootLocal,
         CffClassKeyTable table,
         long initialState,
         long rootDelta
     ) {
-        JvmPassBytecode.pushInt(init, table.g18ClassIndex());
+        JvmPassBytecode.pushInt(init, table.classIntegrityClassIndex());
         JvmPassBytecode.pushLong(init, initialState);
         JvmPassBytecode.pushLong(init, rootDelta);
         init.add(new MethodInsnNode(
@@ -203,14 +203,14 @@ abstract class CffMaterialTables extends CffClassSetup {
             "()Ljava/lang/Class;",
             false
         ));
-        JvmPassBytecode.pushLong(init, table.g18RequiredOrderBloom());
+        JvmPassBytecode.pushLong(init, table.classIntegrityRequiredOrderBloom());
         emitPatchableLongNoLdc(init);
         init.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
-            table.g18GlobalState().owner(),
-            table.g18GlobalState().helperName(),
-            G18_GLOBAL_HELPER_DESC,
-            table.g18GlobalState().interfaceOwner()
+            table.classIntegrityState().owner(),
+            table.classIntegrityState().helperName(),
+            CLASS_INTEGRITY_HELPER_DESC,
+            table.classIntegrityState().interfaceOwner()
         ));
         init.add(new VarInsnNode(Opcodes.LSTORE, rootLocal));
     }
@@ -1299,26 +1299,26 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new VarInsnNode(Opcodes.LSTORE, ticketLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, ticketDeferLocal));
         insns.add(new JumpInsnNode(Opcodes.IFEQ, threadLocalTicket));
-        JvmPassBytecode.pushInt(insns, G18_TICKET_DEFER_MODE);
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_DEFER_MODE);
         insns.add(new JumpInsnNode(Opcodes.GOTO, ticketModeReady));
         insns.add(threadLocalTicket);
-        JvmPassBytecode.pushInt(insns, G18_TICKET_ISSUE_MODE);
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_ISSUE_MODE);
         insns.add(ticketModeReady);
         insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
         insns.add(new LdcInsnNode(Type.getObjectType(clazz.name())));
         insns.add(new InsnNode(Opcodes.LCONST_0));
         insns.add(new InsnNode(Opcodes.LCONST_0));
-        CffG18GlobalState g18GlobalState = pctx.getPassData(G18_GLOBAL_STATE);
-        if (g18GlobalState == null) {
-            throw new IllegalStateException("CFF key-transfer ticket helper requires G18 global state");
+        CffClassIntegrityState classIntegrityState = pctx.getPassData(CLASS_INTEGRITY_STATE);
+        if (classIntegrityState == null) {
+            throw new IllegalStateException("CFF key-transfer ticket helper requires class-integrity state");
         }
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
-            g18GlobalState.owner(),
-            g18GlobalState.helperName(),
-            G18_GLOBAL_HELPER_DESC,
-            g18GlobalState.interfaceOwner()
+            classIntegrityState.owner(),
+            classIntegrityState.helperName(),
+            CLASS_INTEGRITY_HELPER_DESC,
+            classIntegrityState.interfaceOwner()
         ));
         insns.add(new InsnNode(Opcodes.LRETURN));
         helper.maxLocals = 20;

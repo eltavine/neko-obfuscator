@@ -155,7 +155,7 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             keyLocal
         );
         if (protectedStart == null) return;
-        installG18EntryTicketConsume(pctx, clazz, mn, protectedStart, keyLocal, methodSeed);
+        installClassIntegrityEntryTicketConsume(pctx, clazz, mn, protectedStart, keyLocal, methodSeed);
 
         Set<LabelNode> injectedReflectionLeaders = rewriteInjectedMemberReflection(pctx, mn);
         List<ProtectedTryCatch> protectedTryCatches =

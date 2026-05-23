@@ -55,7 +55,7 @@ import org.slf4j.LoggerFactory;
 
 
 abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
-    private static final String G18_TICKETED_ENTRY_SEEDS = "controlFlowFlattening.g18TicketedEntrySeeds";
+    private static final String CLASS_INTEGRITY_TICKETED_ENTRY_SEEDS = "controlFlowFlattening.classIntegrityTicketedEntrySeeds";
 
 
     protected void installEntryKeyState(
@@ -756,7 +756,7 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         if (table == null) {
             throw new IllegalStateException("CFF key-transfer material helper requires a class key table");
         }
-        g18TicketedEntrySeeds(pctx).add(targetSeed);
+        classIntegrityTicketedEntrySeeds(pctx).add(targetSeed);
         long sourceSeed = keyTransferSourceSeed(sourceInsn);
         int runtimeSourceMode = keyTransferRuntimeSourceMode(sourceInsn);
         int highCursor = registerKeyTransferMaterialWord(
@@ -800,7 +800,7 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         ));
     }
 
-    protected void installG18EntryTicketConsume(
+    protected void installClassIntegrityEntryTicketConsume(
         PipelineContext pctx,
         L1Class clazz,
         MethodNode mn,
@@ -812,19 +812,19 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         if (!JvmKeyDispatchPass.isActualKeyedEntry(pctx, actualKey)) {
             return;
         }
-        if (!g18TicketedEntrySeeds(pctx).contains(methodSeed)) {
+        if (!classIntegrityTicketedEntrySeeds(pctx).contains(methodSeed)) {
             return;
         }
         CffClassKeyTable table = activeKeyTable;
         if (table == null) {
-            throw new IllegalStateException("CFF G18 ticket consume requires a class key table");
+            throw new IllegalStateException("CFF class-integrity ticket consume requires a class key table");
         }
         InsnList insns = new InsnList();
         JvmPassBytecode.pushInt(
             insns,
             JvmKeyDispatchPass.isReusableKeyedEntry(pctx, actualKey)
-                ? G18_TICKET_OBSERVE_MODE
-                : G18_TICKET_CONSUME_MODE
+                ? CLASS_INTEGRITY_TICKET_OBSERVE_MODE
+                : CLASS_INTEGRITY_TICKET_CONSUME_MODE
         );
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
@@ -833,10 +833,10 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         insns.add(new InsnNode(Opcodes.LCONST_0));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
-            table.g18GlobalState().owner(),
-            table.g18GlobalState().helperName(),
-            G18_GLOBAL_HELPER_DESC,
-            table.g18GlobalState().interfaceOwner()
+            table.classIntegrityState().owner(),
+            table.classIntegrityState().helperName(),
+            CLASS_INTEGRITY_HELPER_DESC,
+            table.classIntegrityState().interfaceOwner()
         ));
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
@@ -844,18 +844,18 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         JvmKeyDispatchPass.markGenerated(pctx, insns);
         AbstractInsnNode first = firstReal(mn);
         if (first == null) {
-            throw new IllegalStateException("CFF G18 ticket consume requires a method prologue");
+            throw new IllegalStateException("CFF class-integrity ticket consume requires a method prologue");
         }
         mn.instructions.insertBefore(first, insns);
         mn.maxStack = Math.max(mn.maxStack, 12);
     }
 
     @SuppressWarnings("unchecked")
-    protected Set<Long> g18TicketedEntrySeeds(PipelineContext pctx) {
-        Set<Long> seeds = pctx.getPassData(G18_TICKETED_ENTRY_SEEDS);
+    protected Set<Long> classIntegrityTicketedEntrySeeds(PipelineContext pctx) {
+        Set<Long> seeds = pctx.getPassData(CLASS_INTEGRITY_TICKETED_ENTRY_SEEDS);
         if (seeds == null) {
             seeds = new java.util.LinkedHashSet<>();
-            pctx.putPassData(G18_TICKETED_ENTRY_SEEDS, seeds);
+            pctx.putPassData(CLASS_INTEGRITY_TICKETED_ENTRY_SEEDS, seeds);
         }
         return seeds;
     }
