@@ -281,32 +281,31 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     ) {
         switch (shadow.kind) {
             case INT -> {
-                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.var));
+                insns.add(new InsnNode(Opcodes.DUP));
                 emitMaskInt(insns, metadata, state, shadow);
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.maskLocal));
-                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.var));
                 insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
                 insns.add(new InsnNode(Opcodes.IXOR));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
+                insns.add(new InsnNode(Opcodes.POP));
                 insns.add(new InsnNode(Opcodes.ICONST_0));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.var));
             }
             case LONG -> {
-                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.var));
+                insns.add(new InsnNode(Opcodes.DUP2));
                 emitMaskLong(insns, metadata, state, shadow);
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.maskLocal));
-                insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.var));
                 insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.maskLocal));
                 insns.add(new InsnNode(Opcodes.LXOR));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
+                insns.add(new InsnNode(Opcodes.POP2));
                 insns.add(new InsnNode(Opcodes.LCONST_0));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.var));
             }
             case FLOAT -> {
-                insns.add(new VarInsnNode(Opcodes.FSTORE, shadow.var));
+                insns.add(new InsnNode(Opcodes.DUP));
                 emitMaskInt(insns, metadata, state, shadow);
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.maskLocal));
-                insns.add(new VarInsnNode(Opcodes.FLOAD, shadow.var));
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Float",
@@ -317,14 +316,14 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
                 insns.add(new InsnNode(Opcodes.IXOR));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
+                insns.add(new InsnNode(Opcodes.POP));
                 insns.add(new InsnNode(Opcodes.FCONST_0));
                 insns.add(new VarInsnNode(Opcodes.FSTORE, shadow.var));
             }
             case DOUBLE -> {
-                insns.add(new VarInsnNode(Opcodes.DSTORE, shadow.var));
+                insns.add(new InsnNode(Opcodes.DUP2));
                 emitMaskLong(insns, metadata, state, shadow);
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.maskLocal));
-                insns.add(new VarInsnNode(Opcodes.DLOAD, shadow.var));
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Double",
@@ -335,6 +334,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.maskLocal));
                 insns.add(new InsnNode(Opcodes.LXOR));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
+                insns.add(new InsnNode(Opcodes.POP2));
                 insns.add(new InsnNode(Opcodes.DCONST_0));
                 insns.add(new VarInsnNode(Opcodes.DSTORE, shadow.var));
             }
