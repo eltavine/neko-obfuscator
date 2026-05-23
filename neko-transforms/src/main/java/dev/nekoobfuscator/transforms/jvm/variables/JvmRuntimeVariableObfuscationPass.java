@@ -19,22 +19,40 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IincInsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
+import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.MultiANewArrayInsnNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
+import org.objectweb.asm.tree.TryCatchBlockNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.analysis.Analyzer;
+import org.objectweb.asm.tree.analysis.AnalyzerException;
+import org.objectweb.asm.tree.analysis.BasicInterpreter;
+import org.objectweb.asm.tree.analysis.BasicValue;
+import org.objectweb.asm.tree.analysis.Frame;
+import org.objectweb.asm.tree.analysis.SourceInterpreter;
+import org.objectweb.asm.tree.analysis.SourceValue;
 
 /**
  * Keeps protected application locals out of their original plaintext slots.
  *
  * <p>The pass runs after CFF and derives store-site masks from live CFF state.
  * Primitive values are kept in encrypted shadow locals, while reference values
- * are moved to verifier-valid shadow locals and the original slot is nulled.</p>
+ * are held in a per-call frame addressed by encrypted integer handles.</p>
  */
 public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     public static final String ID = "runtimeVariableObfuscation";
@@ -43,6 +61,8 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     private static final int MASK_B = 0x1B873593;
     private static final int MASK_C = 0x85EBCA6B;
     private static final int MASK_D = 0xC2B2AE35;
+    private static final String RUNTIME_MASK_HELPER_DESC = "(IJ)I";
+    private static final String REF_HANDLE_HELPER_DESC = "(III)I";
 
     @Override
     public String id() {
@@ -88,14 +108,23 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         if (metadata == null || metadata.classKeyTable() == null) return;
 
         MethodNode mn = method.asmNode();
+        Map<AbstractInsnNode, String> refLoadCasts = analyzeReferenceLoadCasts(clazz.name(), mn);
         Map<LocalKey, LocalShadow> shadows = planShadows(mn, metadata);
         if (shadows.isEmpty()) return;
+        int directReferenceCasts = insertDirectReferenceLoadCasts(mn, metadata, refLoadCasts, shadows)
+            + insertDirectReferenceProducerCasts(mn);
+        RuntimeMaskHelper maskHelper = ensureRuntimeMaskHelper(pctx, clazz, metadata);
+        RuntimeRefHandleHelper refHandleHelper = containsReferenceShadow(shadows)
+            ? ensureReferenceHandleHelper(pctx, clazz)
+            : null;
 
         allocateShadows(mn, shadows, metadata);
-        int initialized = initializeShadowDefaults(pctx, mn, shadows);
+        ReferenceFrameLocals referenceFrame = allocateReferenceFrameLocals(mn, shadows);
+        int initialized = initializeShadowDefaults(pctx, mn, metadata, maskHelper, refHandleHelper, shadows);
         int encodedBranches = rewriteEncodedZeroBranches(pctx, mn, metadata, shadows);
-        int rewritten = rewriteLocalInstructions(pctx, mn, metadata, shadows);
-        if (initialized + encodedBranches + rewritten == 0) return;
+        int rewritten = rewriteLocalInstructions(pctx, mn, metadata, shadows, refLoadCasts, referenceFrame);
+        int framedRefs = installReferenceFrame(pctx, mn, metadata, referenceFrame);
+        if (initialized + encodedBranches + rewritten + framedRefs + directReferenceCasts == 0) return;
 
         mn.localVariables = null;
         mn.visibleLocalVariableAnnotations = null;
@@ -110,8 +139,67 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             method.descriptor(),
             "cff-keyed-local-shadows-init-" + initialized +
                 "-branches-" + encodedBranches +
-                "-sites-" + rewritten
+                "-sites-" + rewritten +
+                "-refFrames-" + framedRefs +
+                "-directRefCasts-" + directReferenceCasts
         );
+    }
+
+    private int insertDirectReferenceLoadCasts(
+        MethodNode mn,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        Map<AbstractInsnNode, String> refLoadCasts,
+        Map<LocalKey, LocalShadow> shadows
+    ) {
+        int inserted = 0;
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (!(insn instanceof VarInsnNode var) || var.getOpcode() != Opcodes.ALOAD) continue;
+            String cast = refLoadCasts.get(insn);
+            if (cast == null) {
+                cast = linearReferenceConsumerCast(insn, mn);
+            }
+            if (cast == null) continue;
+            if (metadata.applicationInstructions().contains(insn)
+                    && shadows.containsKey(new LocalKey(var.var, LocalKind.REF))) continue;
+            if (hasImmediateCheckcast(insn, cast)) continue;
+            if (isUninitializedThisLoad(mn, var)) continue;
+            mn.instructions.insert(insn, new TypeInsnNode(Opcodes.CHECKCAST, cast));
+            inserted++;
+        }
+        return inserted;
+    }
+
+    private int insertDirectReferenceProducerCasts(MethodNode mn) {
+        int inserted = 0;
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (insn.getOpcode() != Opcodes.AALOAD) continue;
+            String cast = linearReferenceConsumerCast(insn, mn);
+            if (cast == null) continue;
+            if (hasImmediateCheckcast(insn, cast)) continue;
+            mn.instructions.insert(insn, new TypeInsnNode(Opcodes.CHECKCAST, cast));
+            inserted++;
+        }
+        return inserted;
+    }
+
+    private boolean hasImmediateCheckcast(AbstractInsnNode load, String cast) {
+        AbstractInsnNode next = nextReal(load.getNext());
+        return next instanceof TypeInsnNode type
+            && type.getOpcode() == Opcodes.CHECKCAST
+            && cast.equals(type.desc);
+    }
+
+    private boolean isUninitializedThisLoad(MethodNode method, VarInsnNode load) {
+        if (!"<init>".equals(method.name) || load.var != 0) return false;
+        for (AbstractInsnNode insn = nextReal(method.instructions.getFirst()); insn != null; insn = nextReal(insn.getNext())) {
+            if (insn == load) return true;
+            if (insn instanceof MethodInsnNode call
+                    && call.getOpcode() == Opcodes.INVOKESPECIAL
+                    && "<init>".equals(call.name)) {
+                return false;
+            }
+        }
+        return false;
     }
 
     private Map<LocalKey, LocalShadow> planShadows(
@@ -137,25 +225,127 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffMethodMetadata metadata
     ) {
         int next = mn.maxLocals;
+        int referenceFrameSlots = 0;
+        Map<Integer, List<LocalKey>> originalSlotUse = originalSlotUse(shadows);
+        int argumentLimit = argumentLocalLimit(mn);
         List<Map.Entry<LocalKey, LocalShadow>> ordered = new ArrayList<>(shadows.entrySet());
         ordered.sort(Comparator
             .comparingInt((Map.Entry<LocalKey, LocalShadow> e) -> e.getKey().var())
             .thenComparing(e -> e.getKey().kind().ordinal()));
         for (Map.Entry<LocalKey, LocalShadow> entry : ordered) {
             LocalShadow shadow = entry.getValue();
-            shadow.shadowLocal = next;
-            next += shadow.kind.shadowSize();
-            if (shadow.kind.primitive()) {
-                shadow.maskLocal = next;
-                next += shadow.kind.maskSize();
+            if (canReuseOriginalSlotForShadow(shadow, originalSlotUse, argumentLimit, metadata)) {
+                shadow.shadowLocal = shadow.var;
+                shadow.reusedOriginalShadow = true;
+            } else {
+                shadow.shadowLocal = next;
+                next += shadow.kind.shadowSize();
+            }
+            if (shadow.kind.hasMask()) {
+                if (canReuseOriginalSlotForMask(shadow, originalSlotUse, argumentLimit, metadata)) {
+                    shadow.maskLocal = shadow.var;
+                    shadow.reusedOriginalMask = true;
+                } else {
+                    shadow.maskLocal = next;
+                    next += shadow.kind.maskSize();
+                }
+            }
+            if (shadow.kind == LocalKind.REF) {
+                shadow.frameSlot = referenceFrameSlots++;
+            }
+        }
+        int referenceHandleBucketMask = referenceHandleBucketCount(referenceFrameSlots) - 1;
+        for (LocalShadow shadow : shadows.values()) {
+            if (shadow.kind == LocalKind.REF) {
+                shadow.referenceHandleBucketMask = referenceHandleBucketMask;
             }
         }
         mn.maxLocals = Math.max(mn.maxLocals, next);
     }
 
+    private Map<Integer, List<LocalKey>> originalSlotUse(Map<LocalKey, LocalShadow> shadows) {
+        Map<Integer, List<LocalKey>> use = new LinkedHashMap<>();
+        for (LocalKey key : shadows.keySet()) {
+            for (int i = 0; i < key.kind().shadowSize(); i++) {
+                use.computeIfAbsent(key.var() + i, ignored -> new ArrayList<>()).add(key);
+            }
+        }
+        return use;
+    }
+
+    private boolean canReuseOriginalSlotForMask(
+        LocalShadow shadow,
+        Map<Integer, List<LocalKey>> originalSlotUse,
+        int argumentLimit,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
+    ) {
+        if (shadow.kind == LocalKind.FLOAT || shadow.kind == LocalKind.DOUBLE) return false;
+        if (shadow.reusedOriginalShadow) return false;
+        if (shadow.var < argumentLimit) return false;
+        for (int i = 0; i < shadow.kind.maskSize(); i++) {
+            int local = shadow.var + i;
+            if (isReservedLocal(local, metadata)) return false;
+            List<LocalKey> users = originalSlotUse.get(local);
+            if (users == null || users.isEmpty()) return false;
+            for (LocalKey user : users) {
+                if (user.var() != shadow.var) return false;
+                if (user.kind().maskSize() != shadow.kind.maskSize()) return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean canReuseOriginalSlotForShadow(
+        LocalShadow shadow,
+        Map<Integer, List<LocalKey>> originalSlotUse,
+        int argumentLimit,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
+    ) {
+        if (shadow.kind == LocalKind.REF) return false;
+        if (shadow.kind == LocalKind.FLOAT || shadow.kind == LocalKind.DOUBLE) return false;
+        if (shadow.var < argumentLimit) return false;
+        for (int i = 0; i < shadow.kind.shadowSize(); i++) {
+            int local = shadow.var + i;
+            if (isReservedLocal(local, metadata)) return false;
+            List<LocalKey> users = originalSlotUse.get(local);
+            if (users == null || users.isEmpty()) return false;
+            for (LocalKey user : users) {
+                if (user.var() != shadow.var) return false;
+                if (user.kind().shadowSize() != shadow.kind.shadowSize()) return false;
+            }
+        }
+        return true;
+    }
+
+    private int argumentLocalLimit(MethodNode mn) {
+        int limit = (mn.access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        for (Type arg : Type.getArgumentTypes(mn.desc)) {
+            limit += arg.getSize();
+        }
+        return limit;
+    }
+
+    private int referenceHandleBucketCount(int references) {
+        int bucketCount = 1;
+        while (bucketCount < Math.max(1, references * 2)) {
+            bucketCount <<= 1;
+        }
+        return bucketCount;
+    }
+
+    private boolean containsReferenceShadow(Map<LocalKey, LocalShadow> shadows) {
+        for (LocalShadow shadow : shadows.values()) {
+            if (shadow.kind == LocalKind.REF) return true;
+        }
+        return false;
+    }
+
     private int initializeShadowDefaults(
         PipelineContext pctx,
         MethodNode mn,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
+        RuntimeRefHandleHelper refHandleHelper,
         Map<LocalKey, LocalShadow> shadows
     ) {
         int changed = 0;
@@ -163,13 +353,27 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             .sorted(Comparator.comparingInt(LocalShadow::var))
             .toList();
         InsnList init = new InsnList();
+        InsnList maskInit = new InsnList();
         for (LocalShadow shadow : ordered) {
             emitDefaultShadow(init, shadow);
+            if (shadow.reusedOriginalMask || shadow.reusedOriginalShadow) {
+                emitInitialShadow(maskInit, metadata, maskHelper, refHandleHelper, shadow);
+            } else {
+                emitInitialShadow(maskInit, metadata, maskHelper, refHandleHelper, shadow);
+                emitOriginalPoison(maskInit, shadow);
+            }
             changed++;
         }
         if (changed > 0) {
             JvmKeyDispatchPass.markGenerated(pctx, init);
+            JvmKeyDispatchPass.markGenerated(pctx, maskInit);
             mn.instructions.insert(init);
+            AbstractInsnNode maskPoint = firstApplicationInstruction(mn, metadata);
+            if (maskPoint == null) {
+                mn.instructions.insert(maskInit);
+            } else {
+                mn.instructions.insertBefore(maskPoint, maskInit);
+            }
         }
         return changed;
     }
@@ -209,7 +413,9 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         PipelineContext pctx,
         MethodNode mn,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        Map<LocalKey, LocalShadow> shadows
+        Map<LocalKey, LocalShadow> shadows,
+        Map<AbstractInsnNode, String> refLoadCasts,
+        ReferenceFrameLocals referenceFrame
     ) {
         int changed = 0;
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
@@ -223,9 +429,9 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 if (shadow == null || shadow.shadowLocal < 0) continue;
                 InsnList replacement = new InsnList();
                 if (isLoadOpcode(var.getOpcode())) {
-                    emitLoadFromShadow(replacement, shadow);
+                    emitLoadFromShadow(replacement, metadata, shadow, refLoadCasts.get(insn), referenceFrame);
                 } else if (isStoreOpcode(var.getOpcode())) {
-                    emitStoreShadowFromStack(replacement, shadow, metadata, state);
+                    emitStoreShadowFromStack(replacement, shadow, referenceFrame);
                 } else {
                     continue;
                 }
@@ -242,7 +448,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 replacement.add(new InsnNode(Opcodes.IXOR));
                 JvmPassBytecode.pushInt(replacement, iinc.incr);
                 replacement.add(new InsnNode(Opcodes.IADD));
-                emitStoreShadowFromStack(replacement, shadow, metadata, state);
+                emitStoreShadowFromStack(replacement, shadow, referenceFrame);
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
                 mn.instructions.insertBefore(insn, replacement);
                 mn.instructions.remove(insn);
@@ -252,23 +458,91 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         return changed;
     }
 
-    private void emitDefaultShadow(InsnList insns, LocalShadow shadow) {
+    private void emitInitialShadow(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
+        RuntimeRefHandleHelper refHandleHelper,
+        LocalShadow shadow
+    ) {
         switch (shadow.kind) {
             case INT, FLOAT -> {
-                insns.add(new InsnNode(Opcodes.ICONST_0));
-                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.ICONST_0));
+                emitStableMaskInt(insns, metadata, maskHelper, shadow);
+                insns.add(new InsnNode(Opcodes.DUP));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.maskLocal));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
+            }
+            case LONG, DOUBLE -> {
+                emitStableMaskLong(insns, metadata, maskHelper, shadow);
+                insns.add(new InsnNode(Opcodes.DUP2));
+                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.maskLocal));
+                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
+            }
+            case REF -> {
+                emitStableMaskInt(insns, metadata, maskHelper, shadow);
+                JvmPassBytecode.pushInt(insns, shadow.frameSlot);
+                JvmPassBytecode.pushInt(insns, shadow.referenceHandleBucketMask);
+                insns.add(new MethodInsnNode(
+                    Opcodes.INVOKESTATIC,
+                    refHandleHelper.owner(),
+                    refHandleHelper.name(),
+                    REF_HANDLE_HELPER_DESC,
+                    refHandleHelper.interfaceOwner()
+                ));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
+            }
+        }
+    }
+
+    private void emitDefaultShadow(InsnList insns, LocalShadow shadow) {
+        if (shadow.kind == LocalKind.REF) {
+            insns.add(new InsnNode(Opcodes.ICONST_0));
+            insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
+            return;
+        }
+        emitDefaultShadowValue(insns, shadow.kind, shadow.shadowLocal);
+        if (!shadow.kind.hasMask()) return;
+        emitDefaultShadowValue(insns, shadow.kind, shadow.maskLocal);
+    }
+
+    private void emitDefaultShadowValue(InsnList insns, LocalKind kind, int local) {
+        switch (kind) {
+            case INT, FLOAT -> {
+                insns.add(new InsnNode(Opcodes.ICONST_0));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, local));
             }
             case LONG, DOUBLE -> {
                 insns.add(new InsnNode(Opcodes.LCONST_0));
-                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.LCONST_0));
-                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.maskLocal));
+                insns.add(new VarInsnNode(Opcodes.LSTORE, local));
             }
             case REF -> {
                 insns.add(new InsnNode(Opcodes.ACONST_NULL));
-                insns.add(new VarInsnNode(Opcodes.ASTORE, shadow.shadowLocal));
+                insns.add(new VarInsnNode(Opcodes.ASTORE, local));
+            }
+        }
+    }
+
+    private void emitOriginalPoison(InsnList insns, LocalShadow shadow) {
+        switch (shadow.kind) {
+            case INT -> {
+                insns.add(new InsnNode(Opcodes.ICONST_0));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.var));
+            }
+            case LONG -> {
+                insns.add(new InsnNode(Opcodes.LCONST_0));
+                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.var));
+            }
+            case FLOAT -> {
+                insns.add(new InsnNode(Opcodes.FCONST_0));
+                insns.add(new VarInsnNode(Opcodes.FSTORE, shadow.var));
+            }
+            case DOUBLE -> {
+                insns.add(new InsnNode(Opcodes.DCONST_0));
+                insns.add(new VarInsnNode(Opcodes.DSTORE, shadow.var));
+            }
+            case REF -> {
+                insns.add(new InsnNode(Opcodes.ACONST_NULL));
+                insns.add(new VarInsnNode(Opcodes.ASTORE, shadow.var));
             }
         }
     }
@@ -276,36 +550,20 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     private void emitStoreShadowFromStack(
         InsnList insns,
         LocalShadow shadow,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state
+        ReferenceFrameLocals referenceFrame
     ) {
         switch (shadow.kind) {
             case INT -> {
-                insns.add(new InsnNode(Opcodes.DUP));
-                emitMaskInt(insns, metadata, state, shadow);
-                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.maskLocal));
                 insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
                 insns.add(new InsnNode(Opcodes.IXOR));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.POP));
-                insns.add(new InsnNode(Opcodes.ICONST_0));
-                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.var));
             }
             case LONG -> {
-                insns.add(new InsnNode(Opcodes.DUP2));
-                emitMaskLong(insns, metadata, state, shadow);
-                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.maskLocal));
                 insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.maskLocal));
                 insns.add(new InsnNode(Opcodes.LXOR));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.POP2));
-                insns.add(new InsnNode(Opcodes.LCONST_0));
-                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.var));
             }
             case FLOAT -> {
-                insns.add(new InsnNode(Opcodes.DUP));
-                emitMaskInt(insns, metadata, state, shadow);
-                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.maskLocal));
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Float",
@@ -316,14 +574,8 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
                 insns.add(new InsnNode(Opcodes.IXOR));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.POP));
-                insns.add(new InsnNode(Opcodes.FCONST_0));
-                insns.add(new VarInsnNode(Opcodes.FSTORE, shadow.var));
             }
             case DOUBLE -> {
-                insns.add(new InsnNode(Opcodes.DUP2));
-                emitMaskLong(insns, metadata, state, shadow);
-                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.maskLocal));
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Double",
@@ -334,19 +586,24 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.maskLocal));
                 insns.add(new InsnNode(Opcodes.LXOR));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.POP2));
-                insns.add(new InsnNode(Opcodes.DCONST_0));
-                insns.add(new VarInsnNode(Opcodes.DSTORE, shadow.var));
             }
             case REF -> {
-                insns.add(new VarInsnNode(Opcodes.ASTORE, shadow.shadowLocal));
-                insns.add(new InsnNode(Opcodes.ACONST_NULL));
-                insns.add(new VarInsnNode(Opcodes.ASTORE, shadow.var));
+                emitReferenceFrame(insns, referenceFrame);
+                insns.add(new InsnNode(Opcodes.SWAP));
+                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
+                insns.add(new InsnNode(Opcodes.SWAP));
+                insns.add(new InsnNode(Opcodes.AASTORE));
             }
         }
     }
 
-    private void emitLoadFromShadow(InsnList insns, LocalShadow shadow) {
+    private void emitLoadFromShadow(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        LocalShadow shadow,
+        String refCast,
+        ReferenceFrameLocals referenceFrame
+    ) {
         switch (shadow.kind) {
             case INT -> {
                 insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
@@ -382,116 +639,906 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                     false
                 ));
             }
-            case REF -> insns.add(new VarInsnNode(Opcodes.ALOAD, shadow.shadowLocal));
+            case REF -> {
+                emitReferenceFrame(insns, referenceFrame);
+                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
+                insns.add(new InsnNode(Opcodes.AALOAD));
+                if (refCast != null) {
+                    insns.add(new TypeInsnNode(Opcodes.CHECKCAST, refCast));
+                }
+            }
         }
     }
 
-    private void emitMaskLong(
+    private ReferenceFrameLocals allocateReferenceFrameLocals(MethodNode mn, Map<LocalKey, LocalShadow> shadows) {
+        int references = 0;
+        for (LocalShadow shadow : shadows.values()) {
+            if (shadow.kind == LocalKind.REF) {
+                references++;
+            }
+        }
+        if (references == 0) return null;
+
+        int threadLocalLocal = mn.maxLocals++;
+        int frameLocal = mn.maxLocals++;
+        int throwableLocal = mn.maxLocals++;
+        int frameSize = referenceHandleBucketCount(references) + 1;
+        return new ReferenceFrameLocals(threadLocalLocal, frameLocal, throwableLocal, frameSize);
+    }
+
+    private int installReferenceFrame(
+        PipelineContext pctx,
+        MethodNode mn,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ReferenceFrameLocals referenceFrame
+    ) {
+        if (referenceFrame == null) return 0;
+        LabelNode start = new LabelNode();
+        LabelNode end = new LabelNode();
+        LabelNode handler = new LabelNode();
+
+        InsnList entry = new InsnList();
+        emitReferenceThreadLocal(entry, metadata);
+        entry.add(new VarInsnNode(Opcodes.ASTORE, referenceFrame.threadLocalLocal()));
+        JvmPassBytecode.pushInt(entry, referenceFrame.frameSize());
+        entry.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        entry.add(new VarInsnNode(Opcodes.ASTORE, referenceFrame.frameLocal()));
+        entry.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.frameLocal()));
+        entry.add(new InsnNode(Opcodes.ICONST_0));
+        entry.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.threadLocalLocal()));
+        entry.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "get",
+            "()Ljava/lang/Object;",
+            false
+        ));
+        entry.add(new InsnNode(Opcodes.AASTORE));
+        entry.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.threadLocalLocal()));
+        entry.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.frameLocal()));
+        entry.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "set",
+            "(Ljava/lang/Object;)V",
+            false
+        ));
+        entry.add(start);
+        JvmKeyDispatchPass.markGenerated(pctx, entry);
+
+        AbstractInsnNode entryPoint = methodEntryPoint(mn);
+        if (entryPoint == null) {
+            mn.instructions.insert(entry);
+        } else {
+            mn.instructions.insertBefore(entryPoint, entry);
+        }
+
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            int opcode = insn.getOpcode();
+            if (opcode < Opcodes.IRETURN || opcode > Opcodes.RETURN) continue;
+            InsnList cleanup = new InsnList();
+            emitReturnCleanup(cleanup, opcode, referenceFrame.threadLocalLocal(), referenceFrame.frameLocal(), mn);
+            JvmKeyDispatchPass.markGenerated(pctx, cleanup);
+            mn.instructions.insertBefore(insn, cleanup);
+        }
+
+        InsnList exceptional = new InsnList();
+        exceptional.add(end);
+        exceptional.add(handler);
+        exceptional.add(new VarInsnNode(Opcodes.ASTORE, referenceFrame.throwableLocal()));
+        emitRestoreReferenceFrame(exceptional, referenceFrame.threadLocalLocal(), referenceFrame.frameLocal());
+        exceptional.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.throwableLocal()));
+        exceptional.add(new InsnNode(Opcodes.ATHROW));
+        JvmKeyDispatchPass.markGenerated(pctx, exceptional);
+        mn.instructions.add(exceptional);
+        mn.tryCatchBlocks.add(new TryCatchBlockNode(start, end, handler, "java/lang/Throwable"));
+        mn.maxStack = Math.max(mn.maxStack, 24);
+        return referenceFrame.frameSize() - 1;
+    }
+
+    private AbstractInsnNode methodEntryPoint(MethodNode mn) {
+        AbstractInsnNode first = nextReal(mn.instructions.getFirst());
+        if (!"<init>".equals(mn.name)) return first;
+        for (AbstractInsnNode insn = first; insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call &&
+                call.getOpcode() == Opcodes.INVOKESPECIAL &&
+                "<init>".equals(call.name)) {
+                return nextReal(call.getNext());
+            }
+        }
+        return first;
+    }
+
+    private AbstractInsnNode firstApplicationInstruction(
+        MethodNode mn,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
+    ) {
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (metadata.applicationInstructions().contains(insn)) return insn;
+        }
+        return methodEntryPoint(mn);
+    }
+
+    private AbstractInsnNode nextReal(AbstractInsnNode insn) {
+        for (AbstractInsnNode cursor = insn; cursor != null; cursor = cursor.getNext()) {
+            if (cursor.getOpcode() >= 0) return cursor;
+        }
+        return null;
+    }
+
+    private void emitReferenceFrame(InsnList insns, ReferenceFrameLocals referenceFrame) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.frameLocal()));
+    }
+
+    private void emitReturnCleanup(
+        InsnList insns,
+        int opcode,
+        int threadLocalLocal,
+        int frameLocal,
+        MethodNode mn
+    ) {
+        int retLocal = -1;
+        switch (opcode) {
+            case Opcodes.IRETURN -> {
+                retLocal = mn.maxLocals++;
+                insns.add(new VarInsnNode(Opcodes.ISTORE, retLocal));
+            }
+            case Opcodes.LRETURN -> {
+                retLocal = mn.maxLocals;
+                mn.maxLocals += 2;
+                insns.add(new VarInsnNode(Opcodes.LSTORE, retLocal));
+            }
+            case Opcodes.FRETURN -> {
+                retLocal = mn.maxLocals++;
+                insns.add(new VarInsnNode(Opcodes.FSTORE, retLocal));
+            }
+            case Opcodes.DRETURN -> {
+                retLocal = mn.maxLocals;
+                mn.maxLocals += 2;
+                insns.add(new VarInsnNode(Opcodes.DSTORE, retLocal));
+            }
+            case Opcodes.ARETURN -> {
+                retLocal = mn.maxLocals++;
+                insns.add(new VarInsnNode(Opcodes.ASTORE, retLocal));
+            }
+            default -> {
+            }
+        }
+        emitRestoreReferenceFrame(insns, threadLocalLocal, frameLocal);
+        switch (opcode) {
+            case Opcodes.IRETURN -> insns.add(new VarInsnNode(Opcodes.ILOAD, retLocal));
+            case Opcodes.LRETURN -> insns.add(new VarInsnNode(Opcodes.LLOAD, retLocal));
+            case Opcodes.FRETURN -> insns.add(new VarInsnNode(Opcodes.FLOAD, retLocal));
+            case Opcodes.DRETURN -> insns.add(new VarInsnNode(Opcodes.DLOAD, retLocal));
+            case Opcodes.ARETURN -> insns.add(new VarInsnNode(Opcodes.ALOAD, retLocal));
+            default -> {
+            }
+        }
+    }
+
+    private void emitRestoreReferenceFrame(InsnList insns, int threadLocalLocal, int frameLocal) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, threadLocalLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, frameLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "set",
+            "(Ljava/lang/Object;)V",
+            false
+        ));
+    }
+
+    private void emitCurrentReferenceFrame(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
+    ) {
+        emitReferenceThreadLocal(insns, metadata);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "get",
+            "()Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+    }
+
+    private void emitReferenceThreadLocal(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
+    ) {
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            metadata.classKeyTable().owner(),
+            metadata.classKeyTable().objectFieldName(),
+            "[Ljava/lang/Object;"
+        ));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.RUNTIME_VARIABLE_FRAME_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+    }
+
+    private void emitStableMaskLong(
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state,
+        RuntimeMaskHelper maskHelper,
         LocalShadow shadow
     ) {
-        emitMaskInt(insns, metadata, state, shadow.withDomain(0x48494748));
+        emitStableMaskInt(insns, metadata, maskHelper, shadow.withDomain(0x48494748));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LSHL));
-        emitMaskInt(insns, metadata, state, shadow.withDomain(0x4C4F574B));
+        emitStableMaskInt(insns, metadata, maskHelper, shadow.withDomain(0x4C4F574B));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
     }
 
-    private void emitMaskInt(
+    private void emitStableMaskInt(
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state,
+        RuntimeMaskHelper maskHelper,
         LocalShadow shadow
     ) {
         long seed = JvmPassBytecode.mix(
-            metadata.methodSeed() ^ state.selectorSeed() ^ 0x52564F4D41534B31L,
-            ((long) shadow.var << 32) ^ shadow.kind.ordinal() ^ shadow.domain
+            metadata.methodSeed() ^ 0x52564F4D41534B31L,
+            ((long) shadow.var << 32) ^ maskKindDomain(shadow) ^ shadow.domain
         );
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x47554152444D31L)));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, shift(seed, 5));
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
-        insns.add(new InsnNode(Opcodes.IADD));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x424C4F434B4D31L)));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x4D554C4D41534B31L)) | 1);
-        insns.add(new InsnNode(Opcodes.IMUL));
-        emitMethodKeyFold(insns, metadata, state);
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pcLocal()));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x50434D41534B3031L)));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, state.state());
-        insns.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x53544154454D31L)));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(insns, metadata.classKeyTable().values().length - 1);
-        insns.add(new InsnNode(Opcodes.IAND));
-        insns.add(new org.objectweb.asm.tree.FieldInsnNode(
+        JvmPassBytecode.pushInt(
+            insns,
+            (int) seed ^ Integer.rotateLeft((int) (seed >>> 32), 11)
+        );
+        insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            maskHelper.owner(),
+            maskHelper.name(),
+            RUNTIME_MASK_HELPER_DESC,
+            maskHelper.interfaceOwner()
+        ));
+    }
+
+    private RuntimeMaskHelper ensureRuntimeMaskHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
+    ) {
+        String base = "__neko_rv_mask$" + Integer.toUnsignedString(
+            (int) JvmPassBytecode.mix(
+                metadata.classKeyTable().objectFieldName().hashCode(),
+                metadata.classKeyTable().intHelperName().hashCode() ^ 0x52564D41534B48L
+            ),
+            36
+        );
+        String name = base;
+        int suffix = 0;
+        while (true) {
+            MethodNode existing = findMethod(clazz, name, RUNTIME_MASK_HELPER_DESC);
+            if (existing != null) {
+                return new RuntimeMaskHelper(clazz.name(), name, clazz.isInterface());
+            }
+            if (findMethodByName(clazz, name) == null) break;
+            name = base + "$" + (++suffix);
+        }
+
+        ControlFlowFlatteningPass.CffClassKeyTable table = metadata.classKeyTable();
+        MethodNode helper = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            name,
+            RUNTIME_MASK_HELPER_DESC,
+            null,
+            null
+        );
+        int seedLocal = 0;
+        int keyLocal = 1;
+        InsnList insns = helper.instructions;
+        insns.add(new FieldInsnNode(
             Opcodes.GETSTATIC,
-            metadata.classKeyTable().owner(),
-            metadata.classKeyTable().objectFieldName(),
+            table.owner(),
+            table.objectFieldName(),
             "[Ljava/lang/Object;"
         ));
         JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SLOT);
         insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "[I"));
-        insns.add(new InsnNode(Opcodes.SWAP));
-        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
-            insns,
-            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
-        );
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5441424D41534B31L)));
-        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        emitRuntimeMaskSeedMix(insns, seedLocal, 0x47554152);
+        emitRuntimeMaskSeedMix(insns, seedLocal, 0x50415448);
+        emitRuntimeMaskSeedMix(insns, seedLocal, 0x424C4F43);
+        emitRuntimeMaskSeedMix(insns, seedLocal, 0x444F4D58);
+        emitRuntimeMaskSeedMix(insns, seedLocal, 0x50434641);
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        emitRuntimeMaskSeedMix(insns, seedLocal, 0x44494745);
         insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, shift(seed, 17));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            table.intHelperOwner(),
+            table.intHelperName(),
+            "([IIIIIII)I",
+            table.intHelperInterfaceOwner()
+        ));
+        emitRuntimeMaskSeedMix(insns, seedLocal, 0x4D554C54);
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitRuntimeMaskSeedMix(insns, seedLocal, 0x584F524D);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 3;
+        helper.maxStack = 12;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+        return new RuntimeMaskHelper(clazz.name(), name, clazz.isInterface());
+    }
+
+    private RuntimeRefHandleHelper ensureReferenceHandleHelper(
+        PipelineContext pctx,
+        L1Class clazz
+    ) {
+        String base = "__neko_rv_ref_handle$" + Integer.toUnsignedString(
+            (int) JvmPassBytecode.mix(clazz.name().hashCode(), 0x525648414E444C31L),
+            36
+        );
+        String name = base;
+        int suffix = 0;
+        while (true) {
+            MethodNode existing = findMethod(clazz, name, REF_HANDLE_HELPER_DESC);
+            if (existing != null) {
+                return new RuntimeRefHandleHelper(clazz.name(), name, clazz.isInterface());
+            }
+            if (findMethodByName(clazz, name) == null) break;
+            name = base + "$" + (++suffix);
+        }
+
+        MethodNode helper = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            name,
+            REF_HANDLE_HELPER_DESC,
+            null,
+            null
+        );
+        int maskLocal = 0;
+        int frameSlotLocal = 1;
+        int bucketMaskLocal = 2;
+        InsnList insns = helper.instructions;
+        insns.add(new VarInsnNode(Opcodes.ILOAD, frameSlotLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, maskLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, maskLocal));
+        JvmPassBytecode.pushInt(insns, 16);
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IADD));
-        JvmPassBytecode.pushInt(insns, MASK_A ^ (int) seed);
-        insns.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(insns, (MASK_B ^ (int) (seed >>> 32)) | 1);
-        insns.add(new InsnNode(Opcodes.IMUL));
-        JvmPassBytecode.pushInt(insns, MASK_C + state.blockIndex());
+        insns.add(new VarInsnNode(Opcodes.ILOAD, bucketMaskLocal));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
         insns.add(new InsnNode(Opcodes.IADD));
-        JvmPassBytecode.pushInt(insns, MASK_D ^ shadow.var);
+        insns.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 3;
+        helper.maxStack = 4;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+        return new RuntimeRefHandleHelper(clazz.name(), name, clazz.isInterface());
+    }
+
+    private void emitRuntimeMaskSeedMix(
+        InsnList insns,
+        int seedLocal,
+        int salt
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, seedLocal));
+        JvmPassBytecode.pushInt(insns, salt);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, seedLocal));
+        JvmPassBytecode.pushInt(insns, 13 + (salt & 15));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, seedLocal));
+        JvmPassBytecode.pushInt(insns, 19 - (salt & 15));
+        insns.add(new InsnNode(Opcodes.ISHL));
+        insns.add(new InsnNode(Opcodes.IOR));
+        JvmPassBytecode.pushInt(insns, (MASK_B ^ salt) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, MASK_D ^ Integer.rotateLeft(salt, 11));
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
-    private void emitMethodKeyFold(
-        InsnList insns,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state
-    ) {
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
-        insns.add(new InsnNode(Opcodes.IADD));
-        JvmPassBytecode.pushInt(insns, (int) state.methodSalt());
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
-        insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new InsnNode(Opcodes.IXOR));
+    private int maskKindDomain(LocalShadow shadow) {
+        if (shadow.reusedOriginalMask) {
+            return shadow.kind.maskSize() == 2 ? 0x324D534B : 0x314D534B;
+        }
+        return shadow.kind.ordinal();
+    }
+
+    private MethodNode findMethod(L1Class clazz, String name, String desc) {
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (name.equals(method.name) && desc.equals(method.desc)) return method;
+        }
+        return null;
+    }
+
+    private MethodNode findMethodByName(L1Class clazz, String name) {
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (name.equals(method.name)) return method;
+        }
+        return null;
     }
 
     private AbstractInsnNode previousReal(AbstractInsnNode insn) {
         for (AbstractInsnNode cursor = insn; cursor != null; cursor = cursor.getPrevious()) {
             if (cursor.getOpcode() >= 0) return cursor;
+        }
+        return null;
+    }
+
+    private Map<AbstractInsnNode, String> analyzeReferenceLoadCasts(String owner, MethodNode mn) {
+        Map<AbstractInsnNode, String> casts = new java.util.IdentityHashMap<>();
+        try {
+            Analyzer<BasicValue> analyzer = new Analyzer<>(new RuntimeVariableTypeInterpreter());
+            Frame<BasicValue>[] frames = analyzer.analyze(owner, mn);
+            AbstractInsnNode[] insns = mn.instructions.toArray();
+            for (int i = 0; i < insns.length; i++) {
+                AbstractInsnNode insn = insns[i];
+                if (!(insn instanceof VarInsnNode var) || var.getOpcode() != Opcodes.ALOAD) continue;
+                Frame<BasicValue> frame = frames[i];
+                if (frame == null || var.var >= frame.getLocals()) continue;
+                BasicValue value = frame.getLocal(var.var);
+                if (value == null) continue;
+                String cast = referenceCast(value.getType());
+                if (cast != null) casts.put(insn, cast);
+            }
+        } catch (AnalyzerException | RuntimeException ignored) {
+            casts.clear();
+        }
+        try {
+            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
+            Frame<SourceValue>[] frames = analyzer.analyze(owner, mn);
+            AbstractInsnNode[] insns = mn.instructions.toArray();
+            for (int i = 0; i < insns.length; i++) {
+                AbstractInsnNode insn = insns[i];
+                Frame<SourceValue> frame = frames[i];
+                if (frame == null) continue;
+                if (insn instanceof MethodInsnNode call) {
+                    bindMethodConsumerCasts(casts, frame, call);
+                } else if (insn instanceof InvokeDynamicInsnNode indy) {
+                    bindDynamicConsumerCasts(casts, frame, indy);
+                } else if (insn instanceof FieldInsnNode field) {
+                    bindFieldConsumerCasts(casts, frame, field);
+                } else {
+                    bindArrayConsumerCasts(casts, frame, insn);
+                }
+            }
+        } catch (AnalyzerException | RuntimeException ignored) {
+        }
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                String cast = directReferenceConsumerCast(insn, mn);
+                if (cast == null) {
+                    cast = linearReferenceConsumerCast(insn, mn);
+                }
+                if (cast != null) casts.put(insn, cast);
+            }
+        }
+        return casts;
+    }
+
+    private String directReferenceConsumerCast(AbstractInsnNode load, MethodNode mn) {
+        AbstractInsnNode next = nextReal(load.getNext());
+        if (next instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+            return null;
+        }
+        if (next instanceof MethodInsnNode call) {
+            Type[] args = Type.getArgumentTypes(call.desc);
+            if (args.length > 0) {
+                return referenceCast(args[args.length - 1]);
+            }
+            return call.getOpcode() == Opcodes.INVOKESTATIC ? null : call.owner;
+        }
+        if (next instanceof InvokeDynamicInsnNode indy) {
+            Type[] args = Type.getArgumentTypes(indy.desc);
+            return args.length == 0 ? null : referenceCast(args[args.length - 1]);
+        }
+        if (next instanceof FieldInsnNode field) {
+            return switch (field.getOpcode()) {
+                case Opcodes.GETFIELD -> field.owner;
+                case Opcodes.PUTFIELD -> referenceCast(Type.getType(field.desc));
+                default -> null;
+            };
+        }
+        String arrayCast = arrayLoadCast(next == null ? -1 : next.getOpcode());
+        if (arrayCast != null) {
+            return arrayCast;
+        }
+        if (next != null && next.getOpcode() == Opcodes.ARRAYLENGTH) {
+            return "[Ljava/lang/Object;";
+        }
+        if (next != null && next.getOpcode() == Opcodes.ARETURN) {
+            return referenceCast(Type.getReturnType(mn.desc));
+        }
+        return null;
+    }
+
+    private String linearReferenceConsumerCast(AbstractInsnNode load, MethodNode mn) {
+        List<Boolean> stack = new ArrayList<>();
+        stack.add(Boolean.TRUE);
+        int steps = 0;
+        for (AbstractInsnNode insn = nextReal(load.getNext()); insn != null && steps++ < 128; insn = nextReal(insn.getNext())) {
+            if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST && topTracked(stack)) {
+                return null;
+            }
+            String methodCast = linearMethodConsumerCast(stack, insn);
+            if (methodCast != NO_CAST_SENTINEL) {
+                return methodCast;
+            }
+            String fieldCast = linearFieldConsumerCast(stack, insn);
+            if (fieldCast != NO_CAST_SENTINEL) {
+                return fieldCast;
+            }
+            String arrayCast = linearArrayConsumerCast(stack, insn);
+            if (arrayCast != NO_CAST_SENTINEL) {
+                return arrayCast;
+            }
+            String terminalCast = linearTerminalConsumerCast(stack, insn, mn);
+            if (terminalCast != NO_CAST_SENTINEL) {
+                return terminalCast;
+            }
+            if (!applyLinearStackEffect(stack, insn)) {
+                return null;
+            }
+            if (!stack.contains(Boolean.TRUE) || stack.size() > 64) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static final String NO_CAST_SENTINEL = "\u0000";
+
+    private String linearMethodConsumerCast(List<Boolean> stack, AbstractInsnNode insn) {
+        if (insn instanceof MethodInsnNode call) {
+            List<String> operands = new ArrayList<>();
+            if (call.getOpcode() != Opcodes.INVOKESTATIC) {
+                operands.add(call.owner);
+            }
+            for (Type arg : Type.getArgumentTypes(call.desc)) {
+                operands.add(referenceCast(arg));
+            }
+            int tracked = trackedConsumedIndex(stack, operands.size());
+            if (tracked >= 0) {
+                String cast = operands.get(tracked);
+                return cast == null || "java/lang/Object".equals(cast) ? null : cast;
+            }
+        } else if (insn instanceof InvokeDynamicInsnNode indy) {
+            Type[] args = Type.getArgumentTypes(indy.desc);
+            List<String> operands = new ArrayList<>();
+            for (Type arg : args) {
+                operands.add(referenceCast(arg));
+            }
+            int tracked = trackedConsumedIndex(stack, operands.size());
+            if (tracked >= 0) {
+                String cast = operands.get(tracked);
+                return cast == null || "java/lang/Object".equals(cast) ? null : cast;
+            }
+        }
+        return NO_CAST_SENTINEL;
+    }
+
+    private String linearFieldConsumerCast(List<Boolean> stack, AbstractInsnNode insn) {
+        if (!(insn instanceof FieldInsnNode field)) return NO_CAST_SENTINEL;
+        int opcode = field.getOpcode();
+        if (opcode == Opcodes.GETFIELD && trackedConsumedIndex(stack, 1) == 0) {
+            return field.owner;
+        }
+        if (opcode == Opcodes.PUTFIELD) {
+            int tracked = trackedConsumedIndex(stack, 2);
+            if (tracked == 0) return field.owner;
+            if (tracked == 1) {
+                String cast = referenceCast(Type.getType(field.desc));
+                return cast == null || "java/lang/Object".equals(cast) ? null : cast;
+            }
+        }
+        if (opcode == Opcodes.PUTSTATIC && trackedConsumedIndex(stack, 1) == 0) {
+            String cast = referenceCast(Type.getType(field.desc));
+            return cast == null || "java/lang/Object".equals(cast) ? null : cast;
+        }
+        return NO_CAST_SENTINEL;
+    }
+
+    private String linearArrayConsumerCast(List<Boolean> stack, AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        String loadCast = arrayLoadCast(opcode);
+        if (loadCast != null && trackedConsumedIndex(stack, 2) == 0) {
+            return loadCast;
+        }
+        String storeCast = arrayStoreCast(opcode);
+        if (storeCast != null && trackedConsumedIndex(stack, 3) == 0) {
+            return storeCast;
+        }
+        if (opcode == Opcodes.ARRAYLENGTH && trackedConsumedIndex(stack, 1) == 0) {
+            return "[Ljava/lang/Object;";
+        }
+        return NO_CAST_SENTINEL;
+    }
+
+    private String linearTerminalConsumerCast(List<Boolean> stack, AbstractInsnNode insn, MethodNode mn) {
+        int opcode = insn.getOpcode();
+        if (opcode == Opcodes.ARETURN && trackedConsumedIndex(stack, 1) == 0) {
+            String cast = referenceCast(Type.getReturnType(mn.desc));
+            return cast == null || "java/lang/Object".equals(cast) ? null : cast;
+        }
+        if ((opcode == Opcodes.MONITORENTER || opcode == Opcodes.MONITOREXIT || opcode == Opcodes.ATHROW)
+                && trackedConsumedIndex(stack, 1) == 0) {
+            return null;
+        }
+        return NO_CAST_SENTINEL;
+    }
+
+    private int trackedConsumedIndex(List<Boolean> stack, int consumed) {
+        if (consumed <= 0 || stack.size() < consumed) return -1;
+        int start = stack.size() - consumed;
+        for (int i = 0; i < consumed; i++) {
+            if (Boolean.TRUE.equals(stack.get(start + i))) return i;
+        }
+        return -1;
+    }
+
+    private boolean topTracked(List<Boolean> stack) {
+        return !stack.isEmpty() && Boolean.TRUE.equals(stack.get(stack.size() - 1));
+    }
+
+    private boolean applyLinearStackEffect(List<Boolean> stack, AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode < 0) return true;
+        if (insn instanceof MethodInsnNode call) {
+            int consumed = Type.getArgumentTypes(call.desc).length
+                + (call.getOpcode() == Opcodes.INVOKESTATIC ? 0 : 1);
+            return popPush(stack, consumed, Type.getReturnType(call.desc).getSort() == Type.VOID ? 0 : 1);
+        }
+        if (insn instanceof InvokeDynamicInsnNode indy) {
+            return popPush(stack, Type.getArgumentTypes(indy.desc).length,
+                Type.getReturnType(indy.desc).getSort() == Type.VOID ? 0 : 1);
+        }
+        if (insn instanceof FieldInsnNode field) {
+            return switch (field.getOpcode()) {
+                case Opcodes.GETSTATIC -> popPush(stack, 0, 1);
+                case Opcodes.PUTSTATIC -> popPush(stack, 1, 0);
+                case Opcodes.GETFIELD -> popPush(stack, 1, 1);
+                case Opcodes.PUTFIELD -> popPush(stack, 2, 0);
+                default -> false;
+            };
+        }
+        if (insn instanceof VarInsnNode var) {
+            return switch (var.getOpcode()) {
+                case Opcodes.ILOAD, Opcodes.FLOAD, Opcodes.ALOAD, Opcodes.LLOAD, Opcodes.DLOAD -> popPush(stack, 0, 1);
+                case Opcodes.ISTORE, Opcodes.FSTORE, Opcodes.ASTORE, Opcodes.LSTORE, Opcodes.DSTORE -> popPush(stack, 1, 0);
+                default -> false;
+            };
+        }
+        if (insn instanceof LdcInsnNode || insn instanceof IntInsnNode) {
+            return popPush(stack, 0, 1);
+        }
+        if (insn instanceof TypeInsnNode type) {
+            return switch (type.getOpcode()) {
+                case Opcodes.NEW -> popPush(stack, 0, 1);
+                case Opcodes.ANEWARRAY, Opcodes.CHECKCAST, Opcodes.INSTANCEOF -> popPush(stack, 1, 1);
+                default -> false;
+            };
+        }
+        if (insn instanceof MultiANewArrayInsnNode multi) {
+            return popPush(stack, multi.dims, 1);
+        }
+        if (insn instanceof JumpInsnNode || insn instanceof TableSwitchInsnNode || insn instanceof LookupSwitchInsnNode) {
+            return false;
+        }
+        return switch (opcode) {
+            case Opcodes.ACONST_NULL,
+                Opcodes.ICONST_M1, Opcodes.ICONST_0, Opcodes.ICONST_1, Opcodes.ICONST_2, Opcodes.ICONST_3,
+                Opcodes.ICONST_4, Opcodes.ICONST_5, Opcodes.LCONST_0, Opcodes.LCONST_1,
+                Opcodes.FCONST_0, Opcodes.FCONST_1, Opcodes.FCONST_2, Opcodes.DCONST_0, Opcodes.DCONST_1 ->
+                popPush(stack, 0, 1);
+            case Opcodes.IALOAD, Opcodes.LALOAD, Opcodes.FALOAD, Opcodes.DALOAD, Opcodes.AALOAD,
+                Opcodes.BALOAD, Opcodes.CALOAD, Opcodes.SALOAD -> popPush(stack, 2, 1);
+            case Opcodes.IASTORE, Opcodes.LASTORE, Opcodes.FASTORE, Opcodes.DASTORE, Opcodes.AASTORE,
+                Opcodes.BASTORE, Opcodes.CASTORE, Opcodes.SASTORE -> popPush(stack, 3, 0);
+            case Opcodes.POP -> popPush(stack, 1, 0);
+            case Opcodes.POP2 -> popPush(stack, 1, 0);
+            case Opcodes.DUP -> duplicateTop(stack);
+            case Opcodes.SWAP -> swapTop(stack);
+            case Opcodes.IADD, Opcodes.LADD, Opcodes.FADD, Opcodes.DADD,
+                Opcodes.ISUB, Opcodes.LSUB, Opcodes.FSUB, Opcodes.DSUB,
+                Opcodes.IMUL, Opcodes.LMUL, Opcodes.FMUL, Opcodes.DMUL,
+                Opcodes.IDIV, Opcodes.LDIV, Opcodes.FDIV, Opcodes.DDIV,
+                Opcodes.IREM, Opcodes.LREM, Opcodes.FREM, Opcodes.DREM,
+                Opcodes.ISHL, Opcodes.LSHL, Opcodes.ISHR, Opcodes.LSHR,
+                Opcodes.IUSHR, Opcodes.LUSHR, Opcodes.IAND, Opcodes.LAND,
+                Opcodes.IOR, Opcodes.LOR, Opcodes.IXOR, Opcodes.LXOR,
+                Opcodes.LCMP, Opcodes.FCMPL, Opcodes.FCMPG, Opcodes.DCMPL, Opcodes.DCMPG ->
+                popPush(stack, 2, 1);
+            case Opcodes.INEG, Opcodes.LNEG, Opcodes.FNEG, Opcodes.DNEG,
+                Opcodes.I2L, Opcodes.I2F, Opcodes.I2D, Opcodes.L2I, Opcodes.L2F, Opcodes.L2D,
+                Opcodes.F2I, Opcodes.F2L, Opcodes.F2D, Opcodes.D2I, Opcodes.D2L, Opcodes.D2F,
+                Opcodes.I2B, Opcodes.I2C, Opcodes.I2S, Opcodes.ARRAYLENGTH ->
+                popPush(stack, 1, 1);
+            case Opcodes.IRETURN, Opcodes.LRETURN, Opcodes.FRETURN, Opcodes.DRETURN,
+                Opcodes.ARETURN, Opcodes.ATHROW, Opcodes.MONITORENTER, Opcodes.MONITOREXIT ->
+                popPush(stack, 1, 0);
+            case Opcodes.RETURN, Opcodes.NOP -> true;
+            default -> false;
+        };
+    }
+
+    private boolean popPush(List<Boolean> stack, int consumed, int pushed) {
+        if (stack.size() < consumed) return false;
+        for (int i = 0; i < consumed; i++) {
+            stack.remove(stack.size() - 1);
+        }
+        for (int i = 0; i < pushed; i++) {
+            stack.add(Boolean.FALSE);
+        }
+        return true;
+    }
+
+    private boolean duplicateTop(List<Boolean> stack) {
+        if (stack.isEmpty()) return false;
+        stack.add(stack.get(stack.size() - 1));
+        return true;
+    }
+
+    private boolean swapTop(List<Boolean> stack) {
+        if (stack.size() < 2) return false;
+        int top = stack.size() - 1;
+        Boolean value = stack.get(top);
+        stack.set(top, stack.get(top - 1));
+        stack.set(top - 1, value);
+        return true;
+    }
+
+    private void bindMethodConsumerCasts(
+        Map<AbstractInsnNode, String> casts,
+        Frame<SourceValue> frame,
+        MethodInsnNode call
+    ) {
+        Type[] args = Type.getArgumentTypes(call.desc);
+        int stack = frame.getStackSize();
+        for (int i = args.length - 1; i >= 0; i--) {
+            Type arg = args[i];
+            stack--;
+            String cast = referenceCast(arg);
+            if (cast != null && stack >= 0 && stack < frame.getStackSize()) {
+                bindSourceCast(casts, frame.getStack(stack), cast);
+            }
+        }
+        if (call.getOpcode() != Opcodes.INVOKESTATIC && stack > 0) {
+            bindSourceCast(casts, frame.getStack(stack - 1), call.owner);
+        }
+    }
+
+    private void bindDynamicConsumerCasts(
+        Map<AbstractInsnNode, String> casts,
+        Frame<SourceValue> frame,
+        InvokeDynamicInsnNode indy
+    ) {
+        Type[] args = Type.getArgumentTypes(indy.desc);
+        int stack = frame.getStackSize();
+        for (int i = args.length - 1; i >= 0; i--) {
+            Type arg = args[i];
+            stack--;
+            String cast = referenceCast(arg);
+            if (cast != null && stack >= 0 && stack < frame.getStackSize()) {
+                bindSourceCast(casts, frame.getStack(stack), cast);
+            }
+        }
+    }
+
+    private void bindFieldConsumerCasts(
+        Map<AbstractInsnNode, String> casts,
+        Frame<SourceValue> frame,
+        FieldInsnNode field
+    ) {
+        int stack = frame.getStackSize();
+        switch (field.getOpcode()) {
+            case Opcodes.GETFIELD -> {
+                if (stack > 0) {
+                    bindSourceCast(casts, frame.getStack(stack - 1), field.owner);
+                }
+            }
+            case Opcodes.PUTFIELD -> {
+                if (stack > 1) {
+                    bindSourceCast(casts, frame.getStack(stack - 2), field.owner);
+                    bindSourceCast(casts, frame.getStack(stack - 1), referenceCast(Type.getType(field.desc)));
+                }
+            }
+            case Opcodes.PUTSTATIC -> {
+                if (stack > 0) {
+                    bindSourceCast(casts, frame.getStack(stack - 1), referenceCast(Type.getType(field.desc)));
+                }
+            }
+            default -> {
+            }
+        }
+    }
+
+    private void bindArrayConsumerCasts(
+        Map<AbstractInsnNode, String> casts,
+        Frame<SourceValue> frame,
+        AbstractInsnNode insn
+    ) {
+        int opcode = insn.getOpcode();
+        String loadCast = arrayLoadCast(opcode);
+        int stack = frame.getStackSize();
+        if (loadCast != null) {
+            if (stack >= 2) {
+                bindSourceCast(casts, frame.getStack(stack - 2), loadCast);
+            }
+            return;
+        }
+        String storeCast = arrayStoreCast(opcode);
+        if (storeCast != null) {
+            if (stack >= 3) {
+                bindSourceCast(casts, frame.getStack(stack - 3), storeCast);
+            }
+            return;
+        }
+        if (opcode == Opcodes.ARRAYLENGTH && stack >= 1) {
+            bindSourceCast(casts, frame.getStack(stack - 1), "[Ljava/lang/Object;");
+        }
+    }
+
+    private String arrayLoadCast(int opcode) {
+        return switch (opcode) {
+            case Opcodes.IALOAD -> "[I";
+            case Opcodes.LALOAD -> "[J";
+            case Opcodes.FALOAD -> "[F";
+            case Opcodes.DALOAD -> "[D";
+            case Opcodes.AALOAD -> "[Ljava/lang/Object;";
+            case Opcodes.BALOAD -> "[B";
+            case Opcodes.CALOAD -> "[C";
+            case Opcodes.SALOAD -> "[S";
+            default -> null;
+        };
+    }
+
+    private String arrayStoreCast(int opcode) {
+        return switch (opcode) {
+            case Opcodes.IASTORE -> "[I";
+            case Opcodes.LASTORE -> "[J";
+            case Opcodes.FASTORE -> "[F";
+            case Opcodes.DASTORE -> "[D";
+            case Opcodes.AASTORE -> "[Ljava/lang/Object;";
+            case Opcodes.BASTORE -> "[B";
+            case Opcodes.CASTORE -> "[C";
+            case Opcodes.SASTORE -> "[S";
+            default -> null;
+        };
+    }
+
+    private void bindSourceCast(Map<AbstractInsnNode, String> casts, SourceValue value, String cast) {
+        if (value == null || cast == null) return;
+        for (AbstractInsnNode source : value.insns) {
+            if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                casts.put(source, cast);
+            }
+        }
+    }
+
+    private String referenceCast(Type type) {
+        if (type == null) return null;
+        if (type.getSort() == Type.OBJECT) {
+            String name = type.getInternalName();
+            return "java/lang/Object".equals(name) ? null : name;
+        }
+        if (type.getSort() == Type.ARRAY) {
+            return type.getDescriptor();
         }
         return null;
     }
@@ -520,6 +1567,17 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         };
     }
 
+    private LocalKind kindForLoadOpcode(int opcode) {
+        return switch (opcode) {
+            case Opcodes.ILOAD -> LocalKind.INT;
+            case Opcodes.LLOAD -> LocalKind.LONG;
+            case Opcodes.FLOAD -> LocalKind.FLOAT;
+            case Opcodes.DLOAD -> LocalKind.DOUBLE;
+            case Opcodes.ALOAD -> LocalKind.REF;
+            default -> null;
+        };
+    }
+
     private boolean isLoadOpcode(int opcode) {
         return opcode == Opcodes.ILOAD
             || opcode == Opcodes.LLOAD
@@ -534,10 +1592,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             || opcode == Opcodes.FSTORE
             || opcode == Opcodes.DSTORE
             || opcode == Opcodes.ASTORE;
-    }
-
-    private int shift(long seed, int base) {
-        return 1 + (int) ((seed >>> base) & 30L);
     }
 
     private int nonZeroInt(long value) {
@@ -573,9 +1627,114 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         boolean primitive() {
             return primitive;
         }
+
+        boolean hasMask() {
+            return primitive;
+        }
     }
 
     private record LocalKey(int var, LocalKind kind) {}
+
+    private record ReferenceFrameLocals(int threadLocalLocal, int frameLocal, int throwableLocal, int frameSize) {}
+
+    private record RuntimeMaskHelper(String owner, String name, boolean interfaceOwner) {}
+
+    private record RuntimeRefHandleHelper(String owner, String name, boolean interfaceOwner) {}
+
+    private static final class RuntimeVariableTypeInterpreter extends BasicInterpreter {
+        RuntimeVariableTypeInterpreter() {
+            super(Opcodes.ASM9);
+        }
+
+        @Override
+        public BasicValue newValue(Type type) {
+            if (type == null) return BasicValue.UNINITIALIZED_VALUE;
+            return switch (type.getSort()) {
+                case Type.VOID -> null;
+                case Type.BOOLEAN,
+                    Type.CHAR,
+                    Type.BYTE,
+                    Type.SHORT,
+                    Type.INT -> BasicValue.INT_VALUE;
+                case Type.FLOAT -> BasicValue.FLOAT_VALUE;
+                case Type.LONG -> BasicValue.LONG_VALUE;
+                case Type.DOUBLE -> BasicValue.DOUBLE_VALUE;
+                case Type.ARRAY, Type.OBJECT -> new BasicValue(type);
+                default -> BasicValue.UNINITIALIZED_VALUE;
+            };
+        }
+
+        @Override
+        public BasicValue newOperation(AbstractInsnNode insn) throws AnalyzerException {
+            int opcode = insn.getOpcode();
+            if (opcode == Opcodes.NEW) {
+                return newValue(Type.getObjectType(((TypeInsnNode) insn).desc));
+            }
+            if (opcode == Opcodes.GETSTATIC) {
+                return newValue(Type.getType(((FieldInsnNode) insn).desc));
+            }
+            if (opcode == Opcodes.LDC && insn instanceof LdcInsnNode ldc) {
+                Object cst = ldc.cst;
+                if (cst instanceof String) {
+                    return newValue(Type.getType(String.class));
+                }
+                if (cst instanceof Type type) {
+                    int sort = type.getSort();
+                    if (sort == Type.OBJECT || sort == Type.ARRAY || sort == Type.METHOD) {
+                        return BasicValue.REFERENCE_VALUE;
+                    }
+                }
+            }
+            return super.newOperation(insn);
+        }
+
+        @Override
+        public BasicValue unaryOperation(AbstractInsnNode insn, BasicValue value) throws AnalyzerException {
+            int opcode = insn.getOpcode();
+            if (opcode == Opcodes.CHECKCAST) {
+                String desc = ((TypeInsnNode) insn).desc;
+                return newValue(desc.startsWith("[") ? Type.getType(desc) : Type.getObjectType(desc));
+            }
+            if (opcode == Opcodes.ANEWARRAY) {
+                String desc = ((TypeInsnNode) insn).desc;
+                Type element = desc.startsWith("[") ? Type.getType(desc) : Type.getObjectType(desc);
+                return newValue(Type.getType("[" + element.getDescriptor()));
+            }
+            if (opcode == Opcodes.GETFIELD) {
+                return newValue(Type.getType(((FieldInsnNode) insn).desc));
+            }
+            return super.unaryOperation(insn, value);
+        }
+
+        @Override
+        public BasicValue naryOperation(
+            AbstractInsnNode insn,
+            List<? extends BasicValue> values
+        ) throws AnalyzerException {
+            if (insn instanceof MultiANewArrayInsnNode multi) {
+                return newValue(Type.getType(multi.desc));
+            }
+            if (insn instanceof MethodInsnNode method) {
+                return newValue(Type.getReturnType(method.desc));
+            }
+            return super.naryOperation(insn, values);
+        }
+
+        @Override
+        public BasicValue merge(BasicValue left, BasicValue right) {
+            if (left.equals(right)) return left;
+            Type leftType = left.getType();
+            Type rightType = right.getType();
+            if (isReference(leftType) && isReference(rightType)) {
+                return BasicValue.REFERENCE_VALUE;
+            }
+            return super.merge(left, right);
+        }
+
+        private boolean isReference(Type type) {
+            return type != null && (type.getSort() == Type.OBJECT || type.getSort() == Type.ARRAY);
+        }
+    }
 
     private static final class LocalShadow {
         private final int var;
@@ -583,6 +1742,10 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         private final int domain;
         private int shadowLocal = -1;
         private int maskLocal = -1;
+        private int frameSlot = -1;
+        private int referenceHandleBucketMask;
+        private boolean reusedOriginalShadow;
+        private boolean reusedOriginalMask;
 
         LocalShadow(int var, LocalKind kind) {
             this(var, kind, 0);
@@ -598,6 +1761,10 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             LocalShadow copy = new LocalShadow(var, kind, domain);
             copy.shadowLocal = shadowLocal;
             copy.maskLocal = maskLocal;
+            copy.frameSlot = frameSlot;
+            copy.referenceHandleBucketMask = referenceHandleBucketMask;
+            copy.reusedOriginalShadow = reusedOriginalShadow;
+            copy.reusedOriginalMask = reusedOriginalMask;
             return copy;
         }
 

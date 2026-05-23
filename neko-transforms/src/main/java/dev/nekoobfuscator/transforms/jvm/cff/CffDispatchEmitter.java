@@ -77,7 +77,13 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         CffTransitionOutliner.TransitionOutliner dispatcherOutliner,
         CffTransitionOutliner.TransitionOutliner transitionOutliner
     ) {
-        for (IslandGroup group : dispatchPlan.groups()) {
+        List<IslandGroup> outlinedGroups = dispatchPlan.groups();
+        LabelNode sharedGroupDispatch = dispatcherOutliner == null
+            ? null
+            : new LabelNode();
+        int sharedGroupLocal = keyTmpLocal + 3;
+        for (int groupIndex = 0; groupIndex < outlinedGroups.size(); groupIndex++) {
+            IslandGroup group = outlinedGroups.get(groupIndex);
             Block entryBlock = group.blocks().get(0);
             InsnList insns = new InsnList();
             LabelNode poison = new LabelNode();
@@ -158,7 +164,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     entryTarget.domainSeed(),
                     keyTmpLocal
                 );
-                if (entryTarget.islandLabels().length == 1) {
+                if (dispatcherOutliner != null) {
+                    insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+                } else if (entryTarget.islandLabels().length == 1) {
                     insns.add(
                         new JumpInsnNode(
                             Opcodes.GOTO,
@@ -182,41 +190,71 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 );
             }
             insns.add(group.hub());
-            emitDomainDispatch(
-                insns,
-                domainLocal,
-                guardLocal,
-                pathKeyLocal,
-                blockKeyLocal,
-                group,
-                poison
-            );
-            for (
-                int island = 0;
-                island < group.islandLabels().length;
-                island++
-            ) {
-                insns.add(
-                    buildIslandDispatcher(
-                        group,
-                        stateByLabel,
-                        keyLocal,
-                        guardLocal,
-                        pathKeyLocal,
-                        blockKeyLocal,
-                        pcLocal,
-                        domainLocal,
-                        keyTmpLocal,
-                        poison,
-                        island,
-                        keyStateByLabel,
-                        methodSeed,
-                        salt,
-                        smallTokenDispatchCases,
-                        dispatcherOutliner,
-                        transitionOutliner
-                    )
+            if (dispatcherOutliner != null) {
+                dispatcherOutliner.prepareGroupDispatchHelper(
+                    group,
+                    stateByLabel,
+                    keyStateByLabel,
+                    poison,
+                    methodSeed,
+                    salt
                 );
+                JvmPassBytecode.pushInt(insns, groupIndex);
+                insns.add(new VarInsnNode(Opcodes.ISTORE, sharedGroupLocal));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, sharedGroupDispatch));
+                for (
+                    int island = 0;
+                    island < group.islandLabels().length;
+                    island++
+                ) {
+                    if (!dispatcherOutliner.needsGroupedIslandEntry(group, island)) {
+                        continue;
+                    }
+                    insns.add(
+                        dispatcherOutliner.emitGroupedIslandEntry(
+                            group,
+                            island,
+                            domainLocal
+                        )
+                    );
+                }
+            } else {
+                emitDomainDispatch(
+                    insns,
+                    domainLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    group,
+                    poison
+                );
+                for (
+                    int island = 0;
+                    island < group.islandLabels().length;
+                    island++
+                ) {
+                    insns.add(
+                        buildIslandDispatcher(
+                            group,
+                            stateByLabel,
+                            keyLocal,
+                            guardLocal,
+                            pathKeyLocal,
+                            blockKeyLocal,
+                            pcLocal,
+                            domainLocal,
+                            keyTmpLocal,
+                            poison,
+                            island,
+                            keyStateByLabel,
+                            methodSeed,
+                            salt,
+                            smallTokenDispatchCases,
+                            dispatcherOutliner,
+                            transitionOutliner
+                        )
+                    );
+                }
             }
             if (dispatcherOutliner != null) {
                 insns.add(
@@ -276,6 +314,26 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 );
             }
             mn.instructions.insertBefore(entryBlock.label(), insns);
+        }
+        if (dispatcherOutliner != null) {
+            LabelNode first = firstNonHandler(blocks).label();
+            InsnList shared = new InsnList();
+            shared.add(sharedGroupDispatch);
+            shared.add(
+                dispatcherOutliner.emitSharedGroupDispatchCall(
+                    outlinedGroups,
+                    sharedGroupLocal,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    keyTmpLocal,
+                    first
+                )
+            );
+            mn.instructions.insertBefore(first, shared);
         }
     }
 

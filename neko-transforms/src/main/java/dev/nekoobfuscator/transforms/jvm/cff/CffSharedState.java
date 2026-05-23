@@ -97,7 +97,8 @@ abstract class CffSharedState {
     protected static final int TRANSITION_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 11;
     protected static final int STEP_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 12;
     protected static final int CFF_ISLAND_MATERIAL_SLOT = CLASS_KEY_TABLE_SIZE + 13;
-    protected static final int TOKEN_MATERIAL_CARRIER_SIZE = CLASS_KEY_TABLE_SIZE + 14;
+    public static final int RUNTIME_VARIABLE_FRAME_SLOT = CLASS_KEY_TABLE_SIZE + 14;
+    protected static final int TOKEN_MATERIAL_CARRIER_SIZE = CLASS_KEY_TABLE_SIZE + 15;
     protected static final int TOKEN_MATERIAL_INIT_CHUNK_SIZE = 1024;
     protected static final int TRANSITION_MATERIAL_INIT_CHUNK_SIZE = 192;
     protected static final int STEP_MATERIAL_TABLE_SIZE = 8_192;

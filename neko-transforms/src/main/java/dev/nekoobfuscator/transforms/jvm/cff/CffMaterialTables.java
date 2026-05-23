@@ -125,6 +125,18 @@ abstract class CffMaterialTables extends CffClassSetup {
         init.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         init.add(new InsnNode(Opcodes.AASTORE));
         init.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
+        JvmPassBytecode.pushInt(init, RUNTIME_VARIABLE_FRAME_SLOT);
+        init.add(new TypeInsnNode(Opcodes.NEW, "java/lang/ThreadLocal"));
+        init.add(new InsnNode(Opcodes.DUP));
+        init.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/ThreadLocal",
+            "<init>",
+            "()V",
+            false
+        ));
+        init.add(new InsnNode(Opcodes.AASTORE));
+        init.add(new VarInsnNode(Opcodes.ALOAD, arrayLocal));
         JvmPassBytecode.pushInt(init, CLASS_KEY_WORDS_SLOT);
         init.add(new VarInsnNode(Opcodes.ALOAD, classWordsLocal));
         init.add(new InsnNode(Opcodes.AASTORE));

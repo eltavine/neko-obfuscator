@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.BitSet;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
@@ -57,6 +58,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
 
     protected final class TransitionOutliner {
         private static final String DESC = "(JIIIII[J)J";
+        private static final String SHARED_GROUP_DESC = "(JIIIIII[J)J";
         private final PipelineContext pctx;
         private final L1Class clazz;
         private final String owner;
@@ -65,6 +67,8 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
         private final int smallTokenDispatchCases;
         private final boolean materializeDirectIslandTransitions;
         private final Map<IslandGroup, RouterState> routers = new IdentityHashMap<>();
+        private final Map<IslandGroup, String> groupDispatchHelpers = new IdentityHashMap<>();
+        private final Map<LabelNode, BitSet> directIslandEntries = new IdentityHashMap<>();
         private int counter;
 
         TransitionOutliner(
@@ -85,6 +89,140 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
 
         int outLocal() {
             return outLocal;
+        }
+
+        InsnList emitGroupDispatchCall(
+            IslandGroup group,
+            Map<LabelNode, Integer> stateByLabel,
+            Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+            int keyLocal,
+            int guardLocal,
+            int pathKeyLocal,
+            int blockKeyLocal,
+            int pcLocal,
+            int domainLocal,
+            int keyTmpLocal,
+            LabelNode poison,
+            long methodSeed,
+            long salt
+        ) {
+            String helperName = prepareGroupDispatchHelper(
+                group,
+                stateByLabel,
+                keyStateByLabel,
+                poison,
+                methodSeed,
+                salt
+            );
+
+            InsnList insns = new InsnList();
+            insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+            insns.add(
+                new MethodInsnNode(
+                    Opcodes.INVOKESTATIC,
+                    owner,
+                    helperName,
+                    DESC,
+                    interfaceOwner
+                )
+            );
+            insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+            emitTransitionOutLoads(
+                insns,
+                outLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal
+            );
+            emitTransitionOutLowLoad(insns, outLocal, 2, keyTmpLocal);
+            insns.add(new JumpInsnNode(Opcodes.GOTO, router(group).label));
+            JvmKeyDispatchPass.markGenerated(pctx, insns);
+            return insns;
+        }
+
+        InsnList emitSharedGroupDispatchCall(
+            List<IslandGroup> groups,
+            int groupLocal,
+            int keyLocal,
+            int guardLocal,
+            int pathKeyLocal,
+            int blockKeyLocal,
+            int pcLocal,
+            int domainLocal,
+            int keyTmpLocal,
+            LabelNode poison
+        ) {
+            String helperName = createSharedGroupDispatchHelper(groups);
+            InsnList insns = new InsnList();
+            insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, groupLocal));
+            insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+            insns.add(new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                owner,
+                helperName,
+                SHARED_GROUP_DESC,
+                interfaceOwner
+            ));
+            insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+            emitTransitionOutLoads(
+                insns,
+                outLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                domainLocal
+            );
+            emitTransitionOutLowLoad(insns, outLocal, 2, keyTmpLocal);
+            TreeMap<Integer, LabelNode> routerCases = new TreeMap<>();
+            for (int i = 0; i < groups.size(); i++) {
+                routerCases.put(i, router(groups.get(i)).label);
+            }
+            int[] keys = new int[routerCases.size()];
+            LabelNode[] labels = new LabelNode[routerCases.size()];
+            int index = 0;
+            for (Map.Entry<Integer, LabelNode> entry : routerCases.entrySet()) {
+                keys[index] = entry.getKey();
+                labels[index] = entry.getValue();
+                index++;
+            }
+            insns.add(new VarInsnNode(Opcodes.ILOAD, groupLocal));
+            insns.add(new LookupSwitchInsnNode(poison, keys, labels));
+            JvmKeyDispatchPass.markGenerated(pctx, insns);
+            return insns;
+        }
+
+        InsnList emitGroupedIslandEntry(
+            IslandGroup group,
+            int island,
+            int domainLocal
+        ) {
+            InsnList insns = new InsnList();
+            insns.add(group.islandLabels()[island]);
+            JvmPassBytecode.pushInt(insns, directIslandDomainToken(group, island));
+            insns.add(new VarInsnNode(Opcodes.ISTORE, domainLocal));
+            insns.add(new JumpInsnNode(Opcodes.GOTO, group.hub()));
+            JvmKeyDispatchPass.markGenerated(pctx, insns);
+            return insns;
+        }
+
+        boolean needsGroupedIslandEntry(IslandGroup group, int island) {
+            BitSet entries = directIslandEntries.get(group.hub());
+            return entries != null && entries.get(island);
         }
 
         InsnList emitIslandDispatchCall(
@@ -201,6 +339,271 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             return insns;
         }
 
+        String prepareGroupDispatchHelper(
+            IslandGroup group,
+            Map<LabelNode, Integer> stateByLabel,
+            Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+            LabelNode poison,
+            long methodSeed,
+            long salt
+        ) {
+            String existing = groupDispatchHelpers.get(group);
+            if (existing != null) return existing;
+            RouterState router = router(group);
+            boolean denseResultRouter = useDenseResultRouter(group);
+            router.denseResultRouter = denseResultRouter;
+            long resultMaskSeed = resultRouteMaskSeed(group);
+            int poisonToken = denseResultRouter
+                ? addResultCase(router, poison)
+                : uniqueResultToken(
+                    router,
+                    resultMaskSeed ^ 0x475250504F49534FL,
+                    poison,
+                    group.blocks().size()
+                );
+
+            String groupHelperName = nextHelperName();
+            int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+            access |= interfaceOwner ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
+            MethodNode helper = new MethodNode(
+                access,
+                groupHelperName,
+                DESC,
+                null,
+                null
+            );
+            int helperKeyLocal = 0;
+            int helperGuardLocal = 2;
+            int helperPathLocal = 3;
+            int helperBlockLocal = 4;
+            int helperPcLocal = 5;
+            int helperDomainLocal = 6;
+            int helperOutLocal = 7;
+
+            TreeMap<Integer, LabelNode> domainCases = new TreeMap<>();
+            List<LabelNode> islandLabels = new ArrayList<>();
+            List<String> islandHelpers = new ArrayList<>();
+            for (int island = 0; island < group.islandLabels().length; island++) {
+                List<Block> islandBlocks = blocksForIsland(group, island);
+                if (islandBlocks.isEmpty()) continue;
+                int firstState = requireState(
+                    islandBlocks.get(0).label(),
+                    stateByLabel.get(islandBlocks.get(0).label())
+                );
+                int fakeCount = fakeCaseCount(group.salt() ^ salt ^ island);
+                long dispatchSeed = tokenDispatchSeed(group, island, keyStateByLabel);
+                Map<LabelNode, Integer> resultTokens = new IdentityHashMap<>();
+                for (int i = 0; i < islandBlocks.size(); i++) {
+                    Block block = islandBlocks.get(i);
+                    int token = denseResultRouter
+                        ? addResultCase(router, block.label())
+                        : uniqueResultToken(
+                            router,
+                            resultMaskSeed ^ island,
+                            block.label(),
+                            requireState(block.label(), stateByLabel.get(block.label())) ^ i
+                        );
+                    resultTokens.put(block.label(), token);
+                }
+                int bounceToken = denseResultRouter
+                    ? addResultCase(router, group.hub())
+                    : uniqueResultToken(
+                        router,
+                        resultMaskSeed ^ 0x424F554E43454B31L ^ island,
+                        group.hub(),
+                        fakeCount ^ firstState
+                    );
+                IslandDispatchHelperPlan helperPlan = createIslandDispatchHelper(
+                    group,
+                    island,
+                    islandBlocks,
+                    firstState,
+                    fakeCount,
+                    dispatchSeed,
+                    stateByLabel,
+                    keyStateByLabel,
+                    resultTokens,
+                    bounceToken,
+                    methodSeed,
+                    salt,
+                    resultMaskSeed,
+                    denseResultRouter
+                );
+                LabelNode caseLabel = new LabelNode();
+                islandLabels.add(caseLabel);
+                islandHelpers.add(helperPlan.name());
+                domainCases.put(domainToken(group.salt(), island), caseLabel);
+                if (needsGroupedIslandEntry(group, island)) {
+                    domainCases.put(directIslandDomainToken(group, island), caseLabel);
+                }
+                recordIslandDryRun(
+                    islandBlocks.size(),
+                    fakeCount,
+                    denseResultRouter,
+                    resultTokens.size(),
+                    helperPlan.dispatchCases(),
+                    helperPlan.helperInstructions(),
+                    0
+                );
+                recordIslandMaterialOpDryRun(
+                    group,
+                    island,
+                    fakeCount,
+                    denseResultRouter,
+                    resultTokens.size(),
+                    salt
+                );
+            }
+
+            LabelNode poisonCase = new LabelNode();
+            int[] keys = new int[domainCases.size()];
+            LabelNode[] labels = new LabelNode[domainCases.size()];
+            int index = 0;
+            for (Map.Entry<Integer, LabelNode> entry : domainCases.entrySet()) {
+                keys[index] = entry.getKey();
+                labels[index] = entry.getValue();
+                index++;
+            }
+            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDomainLocal));
+            helper.instructions.add(new LookupSwitchInsnNode(poisonCase, keys, labels));
+            for (int i = 0; i < islandLabels.size(); i++) {
+                helper.instructions.add(islandLabels.get(i));
+                helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperGuardLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPathLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperBlockLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPcLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDomainLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, helperOutLocal));
+                helper.instructions.add(new MethodInsnNode(
+                    Opcodes.INVOKESTATIC,
+                    owner,
+                    islandHelpers.get(i),
+                    DESC,
+                    interfaceOwner
+                ));
+                helper.instructions.add(new InsnNode(Opcodes.LRETURN));
+            }
+            helper.instructions.add(poisonCase);
+            finishOutlinedDispatchReturn(
+                helper.instructions,
+                helperKeyLocal,
+                helperGuardLocal,
+                helperPathLocal,
+                helperBlockLocal,
+                helperPcLocal,
+                helperDomainLocal,
+                helperOutLocal,
+                poisonToken,
+                resultMaskSeed,
+                denseResultRouter
+            );
+            helper.maxLocals = 8;
+            helper.maxStack = 16;
+            JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+            clazz.asmNode().methods.add(helper);
+            clazz.markDirty();
+            publishGeneratedHelperFlowKey(pctx, owner, groupHelperName, DESC, helperKeyLocal);
+            groupDispatchHelpers.put(group, groupHelperName);
+            return groupHelperName;
+        }
+
+        private int directIslandDomainToken(IslandGroup group, int island) {
+            int islandCount = Math.max(1, group.islandLabels().length);
+            int token = -1 - island;
+            int attempt = 0;
+            while (collidesWithIslandDomainToken(group, token)) {
+                attempt++;
+                token = -1 - island - (attempt * islandCount);
+            }
+            return token;
+        }
+
+        private boolean collidesWithIslandDomainToken(IslandGroup group, int token) {
+            for (int island = 0; island < group.islandLabels().length; island++) {
+                if (domainToken(group.salt(), island) == token) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private String createSharedGroupDispatchHelper(List<IslandGroup> groups) {
+            String helperName = nextHelperName();
+            int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+            access |= interfaceOwner ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
+            MethodNode helper = new MethodNode(access, helperName, SHARED_GROUP_DESC, null, null);
+            int helperKeyLocal = 0;
+            int helperGuardLocal = 2;
+            int helperPathLocal = 3;
+            int helperBlockLocal = 4;
+            int helperPcLocal = 5;
+            int helperDomainLocal = 6;
+            int helperGroupLocal = 7;
+            int helperOutLocal = 8;
+            TreeMap<Integer, LabelNode> cases = new TreeMap<>();
+            List<LabelNode> labels = new ArrayList<>();
+            List<String> helpers = new ArrayList<>();
+            for (int i = 0; i < groups.size(); i++) {
+                String groupHelper = groupDispatchHelpers.get(groups.get(i));
+                if (groupHelper == null) continue;
+                LabelNode label = new LabelNode();
+                cases.put(i, label);
+                labels.add(label);
+                helpers.add(groupHelper);
+            }
+            int[] keys = new int[cases.size()];
+            LabelNode[] switchLabels = new LabelNode[cases.size()];
+            int index = 0;
+            for (Map.Entry<Integer, LabelNode> entry : cases.entrySet()) {
+                keys[index] = entry.getKey();
+                switchLabels[index] = entry.getValue();
+                index++;
+            }
+            LabelNode poison = new LabelNode();
+            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperGroupLocal));
+            helper.instructions.add(new LookupSwitchInsnNode(poison, keys, switchLabels));
+            for (int i = 0; i < labels.size(); i++) {
+                helper.instructions.add(labels.get(i));
+                helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperGuardLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPathLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperBlockLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPcLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDomainLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, helperOutLocal));
+                helper.instructions.add(new MethodInsnNode(
+                    Opcodes.INVOKESTATIC,
+                    owner,
+                    helpers.get(i),
+                    DESC,
+                    interfaceOwner
+                ));
+                helper.instructions.add(new InsnNode(Opcodes.LRETURN));
+            }
+            helper.instructions.add(poison);
+            helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
+            helper.instructions.add(new InsnNode(Opcodes.LRETURN));
+            helper.maxLocals = 9;
+            helper.maxStack = 16;
+            JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+            clazz.asmNode().methods.add(helper);
+            clazz.markDirty();
+            publishGeneratedHelperFlowKey(pctx, owner, helperName, SHARED_GROUP_DESC, helperKeyLocal);
+            return helperName;
+        }
+
+        private List<Block> blocksForIsland(IslandGroup group, int island) {
+            List<Block> islandBlocks = new ArrayList<>();
+            for (Block block : group.blocks()) {
+                Integer blockIsland = group.islands().get(block.label());
+                if (blockIsland != null && blockIsland == island) {
+                    islandBlocks.add(block);
+                }
+            }
+            return islandBlocks;
+        }
+
         private RouterState router(IslandGroup group) {
             return routers.computeIfAbsent(group, ignored -> new RouterState());
         }
@@ -288,7 +691,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
         }
 
         private boolean useDenseResultRouter(IslandGroup group) {
-            return group.blocks().size() >= 8;
+            return group.blocks().size() >= 32;
         }
 
         private IslandDispatchHelperPlan createIslandDispatchHelper(
@@ -1273,6 +1676,11 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             long stepSeed,
             EdgeRole role
         ) {
+            if (edgeKind == EdgeKind.DIRECT_ISLAND) {
+                directIslandEntries
+                    .computeIfAbsent(target.hub(), ignored -> new BitSet())
+                    .set(target.island());
+            }
             boolean materialTransition = true;
             CffClassKeyTable table = null;
             int rowBase = -1;

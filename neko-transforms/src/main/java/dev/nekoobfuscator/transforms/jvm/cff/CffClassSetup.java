@@ -35,6 +35,7 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.FrameNode;
@@ -2070,6 +2071,7 @@ abstract class CffClassSetup extends CffSharedState {
             pctx.putPassData(CLASS_CODE_INTEGRITY_FINALIZED, Boolean.TRUE);
             return;
         }
+        relocateLargeCffHelperSets(pctx, classes, hierarchy);
         restoreClassIntegrityHelperNames(pctx, classes);
         restoreCffCarrierFieldNames(pctx, classes);
         int installed = finalizeClassIntegrityCodeMaterial(pctx, tables, hierarchy);
@@ -2077,6 +2079,101 @@ abstract class CffClassSetup extends CffSharedState {
         pctx.putPassData(CLASS_CODE_INTEGRITY_FINALIZED, Boolean.TRUE);
         if (installed > 0) {
             log.info("Finalized class-integrity class-code key material: classes={}", installed);
+        }
+    }
+
+    private void relocateLargeCffHelperSets(
+        PipelineContext pctx,
+        List<L1Class> classes,
+        ClassHierarchy hierarchy
+    ) {
+        List<L1Class> hosts = new ArrayList<>();
+        Map<String, String> relocatedOwners = new LinkedHashMap<>();
+        for (L1Class clazz : new ArrayList<>(classes)) {
+            List<MethodNode> relocatable = relocatableCffHelpers(clazz);
+            if (relocatable.size() < 64) continue;
+
+            String hostName = uniqueCffHelperHostName(pctx, clazz.name());
+            ClassNode hostNode = new ClassNode();
+            hostNode.version = clazz.asmNode().version;
+            hostNode.access = Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC;
+            hostNode.name = hostName;
+            hostNode.superName = "java/lang/Object";
+            hostNode.methods = new ArrayList<>();
+            L1Class host = new L1Class(hostNode);
+            for (MethodNode helper : relocatable) {
+                helper.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
+                helper.access |= Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+                hostNode.methods.add(helper);
+                relocatedOwners.put(clazz.name() + "." + helper.name + helper.desc, hostName);
+            }
+            clazz.asmNode().methods.removeAll(relocatable);
+            clazz.markDirty();
+            hosts.add(host);
+            pctx.classMap().put(host.name(), host);
+            hierarchy.addClass(host);
+        }
+        if (hosts.isEmpty()) return;
+        classes.addAll(hosts);
+        rewriteRelocatedCffHelperCalls(classes, relocatedOwners);
+        for (L1Class host : hosts) {
+            host.markDirty();
+        }
+        log.info(
+            "Relocated large CFF helper sets: hosts={} methods={}",
+            hosts.size(),
+            relocatedOwners.size()
+        );
+    }
+
+    private List<MethodNode> relocatableCffHelpers(L1Class clazz) {
+        List<MethodNode> helpers = new ArrayList<>();
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ((method.access & Opcodes.ACC_STATIC) == 0) continue;
+            if ((method.access & Opcodes.ACC_SYNTHETIC) == 0) continue;
+            if (!isRelocatableCffHelperDesc(method.desc)) continue;
+            helpers.add(method);
+        }
+        return helpers;
+    }
+
+    private boolean isRelocatableCffHelperDesc(String desc) {
+        return "(JIIIII[J)J".equals(desc) || "(JIIIIII[J)J".equals(desc);
+    }
+
+    private String uniqueCffHelperHostName(PipelineContext pctx, String owner) {
+        String base = owner + "$" + Integer.toUnsignedString(
+            (int) JvmPassBytecode.mix(owner.hashCode(), 0x434646484F535431L),
+            36
+        );
+        String name = base;
+        int suffix = 0;
+        while (pctx.classMap().containsKey(name)) {
+            name = base + "$" + Integer.toUnsignedString(++suffix, 36);
+        }
+        return name;
+    }
+
+    private void rewriteRelocatedCffHelperCalls(
+        List<L1Class> classes,
+        Map<String, String> relocatedOwners
+    ) {
+        for (L1Class clazz : classes) {
+            boolean changed = false;
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof MethodInsnNode call)) continue;
+                    String newOwner = relocatedOwners.get(call.owner + "." + call.name + call.desc);
+                    if (newOwner == null) continue;
+                    call.owner = newOwner;
+                    call.itf = false;
+                    changed = true;
+                }
+            }
+            if (changed) {
+                clazz.markDirty();
+            }
         }
     }
 
@@ -2476,7 +2573,35 @@ abstract class CffClassSetup extends CffSharedState {
 
     private byte[] writeClassBytes(ClassHierarchy hierarchy, L1Class clazz) {
         stripFrameNodes(clazz);
-        return JarOutput.previewClassBytes(hierarchy, clazz);
+        try {
+            return JarOutput.previewClassBytes(hierarchy, clazz);
+        } catch (Throwable e) {
+            log.error("Failed to preview class bytes for {}", clazz.name(), e);
+            logLargestMethodEstimates(clazz);
+            throw e;
+        }
+    }
+
+    private void logLargestMethodEstimates(L1Class clazz) {
+        List<MethodNode> methods = new ArrayList<>(clazz.asmNode().methods);
+        methods.removeIf(method -> method.instructions == null || method.instructions.size() == 0);
+        methods.sort((left, right) ->
+            Integer.compare(
+                JvmCodeSizeEstimator.estimateMethodBytes(right),
+                JvmCodeSizeEstimator.estimateMethodBytes(left)
+            )
+        );
+        int limit = Math.min(8, methods.size());
+        for (int i = 0; i < limit; i++) {
+            MethodNode method = methods.get(i);
+            log.error(
+                "CFF finalizer largest method estimate: class={} method={}{} estimatedCodeBytes={}",
+                clazz.name(),
+                method.name,
+                method.desc,
+                JvmCodeSizeEstimator.estimateMethodBytes(method)
+            );
+        }
     }
 
     private void stripFrameNodes(L1Class clazz) {
