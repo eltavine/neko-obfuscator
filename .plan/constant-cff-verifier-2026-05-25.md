@@ -44,7 +44,7 @@
 
 ## Subtasks
 
-- [ ] 1. Plan intake checkpoint.
+- [x] 1. Plan intake checkpoint.
   - Scope: record this independent high-risk plan, keep it isolated from
     unrelated native/runtime worktree changes, record the active todo
     counterpart, and dispatch subagent plan-intake review before code edits.
