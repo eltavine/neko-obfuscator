@@ -939,6 +939,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
     private static void rewriteMethodLookup(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
         recordLiteralReflectiveTargets(pctx, call);
 
+        boolean literalNullParameters = hasLiteralNullMethodLookupParameters(call);
         int paramsLocal = allocateLocal(mn, Type.getType(Class[].class));
         int nameLocal = allocateLocal(mn, Type.getType(String.class));
         int classLocal = allocateLocal(mn, Type.getType(Class.class));
@@ -950,28 +951,34 @@ public final class JvmKeyDispatchPass implements TransformPass {
         before.add(new VarInsnNode(Opcodes.ASTORE, nameLocal));
         before.add(new VarInsnNode(Opcodes.ASTORE, classLocal));
 
-        before.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
-        before.add(new JumpInsnNode(Opcodes.IFNONNULL, copyExisting));
-        JvmPassBytecode.pushInt(before, 1);
-        before.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Class"));
-        before.add(new VarInsnNode(Opcodes.ASTORE, newParamsLocal));
-        before.add(new JumpInsnNode(Opcodes.GOTO, storeLongType));
+        if (literalNullParameters) {
+            JvmPassBytecode.pushInt(before, 1);
+            before.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Class"));
+            before.add(new VarInsnNode(Opcodes.ASTORE, newParamsLocal));
+        } else {
+            before.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
+            before.add(new JumpInsnNode(Opcodes.IFNONNULL, copyExisting));
+            JvmPassBytecode.pushInt(before, 1);
+            before.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Class"));
+            before.add(new VarInsnNode(Opcodes.ASTORE, newParamsLocal));
+            before.add(new JumpInsnNode(Opcodes.GOTO, storeLongType));
 
-        before.add(copyExisting);
-        before.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
-        before.add(new InsnNode(Opcodes.ARRAYLENGTH));
-        JvmPassBytecode.pushInt(before, 1);
-        before.add(new InsnNode(Opcodes.IADD));
-        before.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Class"));
-        before.add(new VarInsnNode(Opcodes.ASTORE, newParamsLocal));
-        before.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
-        JvmPassBytecode.pushInt(before, 0);
-        before.add(new VarInsnNode(Opcodes.ALOAD, newParamsLocal));
-        JvmPassBytecode.pushInt(before, 0);
-        before.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
-        before.add(new InsnNode(Opcodes.ARRAYLENGTH));
-        before.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System", "arraycopy",
-            "(Ljava/lang/Object;ILjava/lang/Object;II)V", false));
+            before.add(copyExisting);
+            before.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
+            before.add(new InsnNode(Opcodes.ARRAYLENGTH));
+            JvmPassBytecode.pushInt(before, 1);
+            before.add(new InsnNode(Opcodes.IADD));
+            before.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Class"));
+            before.add(new VarInsnNode(Opcodes.ASTORE, newParamsLocal));
+            before.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
+            JvmPassBytecode.pushInt(before, 0);
+            before.add(new VarInsnNode(Opcodes.ALOAD, newParamsLocal));
+            JvmPassBytecode.pushInt(before, 0);
+            before.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
+            before.add(new InsnNode(Opcodes.ARRAYLENGTH));
+            before.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/System", "arraycopy",
+                "(Ljava/lang/Object;ILjava/lang/Object;II)V", false));
+        }
 
         before.add(storeLongType);
         before.add(new VarInsnNode(Opcodes.ALOAD, newParamsLocal));
@@ -987,6 +994,16 @@ public final class JvmKeyDispatchPass implements TransformPass {
         before.add(new VarInsnNode(Opcodes.ALOAD, newParamsLocal));
         markGenerated(pctx, before);
         mn.instructions.insertBefore(call, before);
+    }
+
+    private static boolean hasLiteralNullMethodLookupParameters(MethodInsnNode call) {
+        AbstractInsnNode params = previousReal(call.getPrevious());
+        if (params instanceof TypeInsnNode cast
+                && params.getOpcode() == Opcodes.CHECKCAST
+                && "[Ljava/lang/Class;".equals(cast.desc)) {
+            params = previousReal(params.getPrevious());
+        }
+        return params != null && params.getOpcode() == Opcodes.ACONST_NULL;
     }
 
     private static void recordLiteralReflectiveTargets(PipelineContext pctx, MethodInsnNode call) {
