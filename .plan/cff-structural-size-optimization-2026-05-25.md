@@ -907,7 +907,7 @@ Progress evidence:
   with state token and protected class-key material, and found no new bridge,
   adapter, fallback, JNI path, or generic runtime helper.
 
-### [ ] 8. Indy Call-Site Flow-Word Budget Thinning
+### [x] 8. Indy Call-Site Flow-Word Budget Thinning
 
 Scope:
 
@@ -921,6 +921,14 @@ Required evidence:
 
 - Current indy call sites already call a shared flow helper, but still expand
   repeated argument loads and non-loop runtime-word derivation at every site.
+- The final `state.state()` argument to `__neko_indy_flow` is a per-site CFF
+  state token that is currently pushed at every invoke-dynamic call site. It can
+  be moved into the existing class-owned indy flow salt table and decoded inside
+  the existing flow helper without adding a second helper, bridge, resolver
+  fallback, or static key path.
+- The flow helper must still consume the caller's live guard/path/block/pc
+  locals and live method key. Moving only the per-site state token must not
+  replace live CFF flow with table-only dispatch.
 
 Validation target:
 
@@ -942,6 +950,54 @@ Continuation evidence:
   existing loop-aware indy path passed full-JVM validation. Reopened on
   2026-05-26 by user request to complete the full plan. The implementation is
   limited to generic size-budgeted non-loop indy call sites.
+
+Progress evidence:
+
+- Implemented indy flow call-site thinning by moving the per-site CFF
+  `state.state()` token from the `__neko_indy_flow` call-site argument list into
+  the existing protected class-owned indy flow salt table. The flow salt cell
+  stride is now four words: epoch, protected method salt, protected site seed,
+  and protected state token.
+- The flow helper ABI changed from `(IIII[Ljava/lang/Object;IJI)J` to
+  `(IIII[Ljava/lang/Object;IJ)J`, removing one pushed int from each flow call
+  while still consuming the caller's live guard/path/block/pc locals, class
+  carrier, flow slot, and live method key. The helper decodes the state token
+  from method salt and site seed before using it in epoch update and class-key
+  live-word calculation.
+- The implementation keeps a single per-class `__neko_indy_flow` helper instead
+  of adding a second thin helper. This preserves the existing helper-count
+  invariant and loop cache wrapper shape; the only loop-path effect is the same
+  redundant state-token argument removal before the cached flow value is
+  stored/reused.
+- Updated `JvmInvokeDynamicObfuscationIntegrationTest` to assert the new thin
+  flow descriptor and reject the old call-site state-token descriptor.
+- Fresh `R-build` passed:
+  `./gradlew :neko-test:compileTestJava`.
+- Fresh focused `R-cff` and `R-string-indy` validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --rerun-tasks`.
+- Fresh `R-full-jvm` passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`.
+- Fresh `R-inspect` of full-JVM logs showed no
+  `ClassTooLargeException`, `MethodTooLargeException`, `VerifyError`,
+  bootstrap error, skip-on-error marker, or fallback marker in obfuscation and
+  runtime stderr logs. SnakeGame retains the expected headless stderr behavior.
+- Fresh direct `javap` inspection of
+  `build/tmp/neko-test-indy-reference/indy-reference-shapes-obf.jar` showed
+  `IndyReferenceShapes.__neko_indy_flow:(IIII[Ljava/lang/Object;IJ)J` at the
+  helper definition and call sites, with no old
+  `(IIII[Ljava/lang/Object;IJI)J` descriptor in that focused generated jar.
+- The first implementation review failed because the helper removed the state
+  argument but still read `stateLocal` before decoding it from the protected flow
+  table. The fix changed the early material-table selector to use only available
+  live inputs, decodes method salt, site seed, and state token first, then uses
+  the decoded state in stack-source collection, selector fold recomputation,
+  epoch update, and final live-word calculation. Validation was rerun after this
+  source change.
+- The second implementation subagent review returned PASS. The review confirmed
+  the descriptor/local layout, four-word flow-table stride, loop cache wrapper
+  preservation, live dependency on method key, decoded state, stack source,
+  guard/path/block/pc and class-key material, and absence of fallback, bridge
+  helper, JNI-style bypass, or plaintext state-token exposure.
 
 ### [ ] 9. Final Compatibility and Performance Review
 

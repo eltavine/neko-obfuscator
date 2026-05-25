@@ -48,6 +48,8 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static final String OLD_RESOLVER_DESC =
         "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/invoke/MutableCallSite;Ljava/lang/invoke/MethodType;" +
         "Ljava/lang/String;I[Ljava/lang/Object;)Ljava/lang/Object;";
+    private static final String FLOW_DESC = "(IIII[Ljava/lang/Object;IJ)J";
+    private static final String OLD_FLOW_DESC = "(IIII[Ljava/lang/Object;IJI)J";
 
     @Test
     void invokeDynamicObfuscatesCffKeyedMethodAndFieldReferences() throws Exception {
@@ -108,6 +110,8 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         boolean sawResolverPrimitiveGuardHandle = false;
         boolean sawResolverBoxedEqualsGuard = false;
         boolean sawResolverGetTarget = false;
+        boolean sawFlowThinDesc = false;
+        boolean sawFlowOldDesc = false;
         boolean sawCacheField = false;
         boolean sawMixCall = false;
         int indySites = 0;
@@ -170,6 +174,8 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
                 );
             }
             if (method.name.startsWith("__neko_indy_flow")) {
+                sawFlowThinDesc |= FLOW_DESC.equals(method.desc);
+                sawFlowOldDesc |= OLD_FLOW_DESC.equals(method.desc);
                 sawFlowHelperLoadsIndyMaterialSelectorSlot |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SELECTOR_SLOT);
                 sawFlowHelperDirectIndyMaterialSlotLoad |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SLOT);
                 sawFlowHelperLoadsClassKeySelectorSlot |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SELECTOR_SLOT);
@@ -220,6 +226,8 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         }
         assertTrue(sawResolverNewDesc, "indy resolver should use the carrier-bound ABI");
         assertFalse(sawResolverOldDesc, "old indy resolver ABI without bound carrier should be absent");
+        assertTrue(sawFlowThinDesc, "indy flow helper should load per-site state from the protected flow table");
+        assertFalse(sawFlowOldDesc, "old indy flow helper ABI with call-site state token should be absent");
         assertFalse(sawCacheField, "indy cache should live in the CFF object carrier, not a separate ConcurrentHashMap field");
         assertTrue(sawResolverLoadsCacheSlot, "indy resolver should load cache from the CFF carrier slot");
         assertFalse(sawResolverGetsStaticCarrier, "indy resolver should not load the CFF carrier through GETSTATIC");
