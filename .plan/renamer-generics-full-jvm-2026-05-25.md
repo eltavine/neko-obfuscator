@@ -54,20 +54,27 @@
     also found packed method `z.a.a([Ljava/lang/Object;)Ljava/lang/String;`
     retaining the original generic method signature.
 
-- [ ] 2. Relocated CFF helper access fix.
+- [x] 2. Relocated CFF helper access fix.
   - Scope: implement a generic fix for large CFF helper relocation so relocated
     helper classes cannot access private members on the original owner.
   - Dependency: starts after subtask 1 checkpoint records the fresh runtime and
     signature evidence.
   - Required evidence: changed code applies to relocated helper access
     invariants, not to `z.a`, `b`, or this fixture; generated full-JVM artifact
-    no longer contains relocated-helper bytecode that references private owner
-    members.
+    no longer has relocated-helper bytecode that violates JVM access rules
+    through private owner-member references.
   - Validation command: `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmGenericSignatureObfuscationIntegrationTest`
   - Completion criteria: the fresh test progresses past the prior
     `IllegalAccessError`, or the output inspection proves no cross-class
     relocated helper references private owner members if a later independent
     failure appears.
+  - Completion evidence: after the generic relocation fix, the same targeted
+    test no longer fails at runtime. It progresses to the independent stale
+    generic-signature assertion. `javap -v -p z.a$k1hywi` shows the relocated
+    helper host has `NestHost: class z/a`, making the existing private material
+    references legal on the Java 21 fixture path; the implementation also
+    relaxes only actually referenced synthetic static owner members for
+    pre-nestmate classfile versions.
 
 - [ ] 3. Generic signature metadata fix.
   - Scope: implement a generic fix for methods whose JVM descriptors are changed

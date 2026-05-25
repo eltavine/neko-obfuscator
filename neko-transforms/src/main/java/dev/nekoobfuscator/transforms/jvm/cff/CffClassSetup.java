@@ -2089,6 +2089,7 @@ abstract class CffClassSetup extends CffSharedState {
     ) {
         List<L1Class> hosts = new ArrayList<>();
         Map<String, String> relocatedOwners = new LinkedHashMap<>();
+        Map<String, Set<String>> nestMembersByHost = new LinkedHashMap<>();
         for (L1Class clazz : new ArrayList<>(classes)) {
             List<MethodNode> relocatable = relocatableCffHelpers(clazz);
             if (relocatable.size() < 64) continue;
@@ -2100,6 +2101,13 @@ abstract class CffClassSetup extends CffSharedState {
             hostNode.name = hostName;
             hostNode.superName = "java/lang/Object";
             hostNode.methods = new ArrayList<>();
+            String nestHost = relocationNestHost(pctx, clazz);
+            if (nestHost != null && supportsNestmates(clazz.asmNode())) {
+                hostNode.nestHostClass = nestHost;
+                nestMembersByHost.computeIfAbsent(nestHost, ignored -> new LinkedHashSet<>()).add(hostName);
+            } else {
+                relaxReferencedSyntheticOwnerAccess(clazz, relocatable);
+            }
             L1Class host = new L1Class(hostNode);
             for (MethodNode helper : relocatable) {
                 helper.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
@@ -2115,6 +2123,7 @@ abstract class CffClassSetup extends CffSharedState {
         }
         if (hosts.isEmpty()) return;
         classes.addAll(hosts);
+        installRelocatedHelperNestMembers(pctx, classes, nestMembersByHost);
         rewriteRelocatedCffHelperCalls(classes, relocatedOwners);
         for (L1Class host : hosts) {
             host.markDirty();
@@ -2124,6 +2133,80 @@ abstract class CffClassSetup extends CffSharedState {
             hosts.size(),
             relocatedOwners.size()
         );
+    }
+
+    private String relocationNestHost(PipelineContext pctx, L1Class clazz) {
+        String declaredHost = clazz.asmNode().nestHostClass;
+        if (declaredHost == null || declaredHost.equals(clazz.name())) {
+            return clazz.name();
+        }
+        return pctx.classMap().containsKey(declaredHost) ? declaredHost : null;
+    }
+
+    private boolean supportsNestmates(ClassNode node) {
+        return (node.version & 0xFFFF) >= Opcodes.V11;
+    }
+
+    private void installRelocatedHelperNestMembers(
+        PipelineContext pctx,
+        List<L1Class> classes,
+        Map<String, Set<String>> nestMembersByHost
+    ) {
+        if (nestMembersByHost.isEmpty()) return;
+        Map<String, L1Class> classesByName = new LinkedHashMap<>();
+        for (L1Class clazz : classes) {
+            classesByName.put(clazz.name(), clazz);
+        }
+        for (Map.Entry<String, Set<String>> entry : nestMembersByHost.entrySet()) {
+            L1Class host = classesByName.get(entry.getKey());
+            if (host == null) host = pctx.classMap().get(entry.getKey());
+            if (host == null) continue;
+            if (host.asmNode().nestMembers == null) {
+                host.asmNode().nestMembers = new ArrayList<>();
+            }
+            boolean changed = false;
+            for (String member : entry.getValue()) {
+                if (host.asmNode().nestMembers.contains(member)) continue;
+                host.asmNode().nestMembers.add(member);
+                changed = true;
+            }
+            if (changed) {
+                host.markDirty();
+            }
+        }
+    }
+
+    private void relaxReferencedSyntheticOwnerAccess(L1Class owner, List<MethodNode> relocatedHelpers) {
+        Set<String> fields = new LinkedHashSet<>();
+        Set<String> methods = new LinkedHashSet<>();
+        for (MethodNode helper : relocatedHelpers) {
+            if (helper.instructions == null) continue;
+            for (AbstractInsnNode insn = helper.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof FieldInsnNode field && owner.name().equals(field.owner)) {
+                    fields.add(field.name + field.desc);
+                } else if (insn instanceof MethodInsnNode call && owner.name().equals(call.owner)) {
+                    methods.add(call.name + call.desc);
+                }
+            }
+        }
+        boolean changed = false;
+        for (FieldNode field : owner.asmNode().fields) {
+            if ((field.access & Opcodes.ACC_PRIVATE) == 0) continue;
+            if ((field.access & Opcodes.ACC_STATIC) == 0 || (field.access & Opcodes.ACC_SYNTHETIC) == 0) continue;
+            if (!fields.contains(field.name + field.desc)) continue;
+            field.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
+            changed = true;
+        }
+        for (MethodNode method : owner.asmNode().methods) {
+            if ((method.access & Opcodes.ACC_PRIVATE) == 0) continue;
+            if ((method.access & Opcodes.ACC_STATIC) == 0 || (method.access & Opcodes.ACC_SYNTHETIC) == 0) continue;
+            if (!methods.contains(method.name + method.desc)) continue;
+            method.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
+            changed = true;
+        }
+        if (changed) {
+            owner.markDirty();
+        }
     }
 
     private List<MethodNode> relocatableCffHelpers(L1Class clazz) {
