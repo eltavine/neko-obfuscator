@@ -76,7 +76,7 @@
     relaxes only actually referenced synthetic static owner members for
     pre-nestmate classfile versions.
 
-- [ ] 3. Generic signature metadata fix.
+- [x] 3. Generic signature metadata fix.
   - Scope: implement a generic fix for methods whose JVM descriptors are changed
     by full JVM parameter packing so their generic signatures cannot reference
     the old parameter ABI.
@@ -88,6 +88,12 @@
   - Validation command: `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmGenericSignatureObfuscationIntegrationTest`
   - Completion criteria: fresh regression test passes and output inspection
     proves packed methods do not retain original generic method signatures.
+  - Completion evidence: targeted Gradle test passed fresh after clearing
+    stale method signatures on all packed methods, including abstract/interface
+    methods processed during planning. `javap -v -p z.b` shows packed method
+    `c([Ljava/lang/Object;)Ljava/lang/CharSequence;` has no method `Signature`
+    attribute, while the class-level generic signature remains remapped and
+    valid.
 
 - [ ] 4. Existing renamer/full-JVM compatibility validation.
   - Scope: run existing renamer and full JVM compatibility tests that cover

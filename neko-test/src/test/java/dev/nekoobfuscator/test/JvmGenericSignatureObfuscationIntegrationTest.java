@@ -231,7 +231,12 @@ public class JvmGenericSignatureObfuscationIntegrationTest {
 
                     Method generic = null;
                     for (Method method : GenericShapes.class.getDeclaredMethods()) {
-                        if (method.getGenericParameterTypes().length == 3
+                        int genericParameterCount = method.getGenericParameterTypes().length;
+                        Class<?>[] parameterTypes = method.getParameterTypes();
+                        boolean originalGenericAbi = genericParameterCount == 3;
+                        boolean packedObfuscatedAbi = parameterTypes.length == 1
+                                && parameterTypes[0] == Object[].class;
+                        if ((originalGenericAbi || packedObfuscatedAbi)
                                 && Objects.equals(method.getGenericReturnType().getTypeName(), "java.lang.String")) {
                             generic = method;
                             break;

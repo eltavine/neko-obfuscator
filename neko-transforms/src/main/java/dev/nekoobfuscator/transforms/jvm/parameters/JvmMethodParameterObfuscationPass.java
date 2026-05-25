@@ -233,6 +233,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 : JvmKeyDispatchPass.methodSeed(pctx, clazz, seedMethod, mn);
             mn.name = plan.finalName();
             mn.desc = plan.packedDesc();
+            cleanupParameterMetadata(mn);
             clazz.markDirty();
             String finalKey = key(plan.owner(), plan.finalName(), plan.packedDesc());
             oldPlans.put(oldKey, plan);
@@ -1752,13 +1753,19 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     private static void cleanupParameterMetadata(MethodNode mn) {
+        mn.signature = null;
         mn.parameters = null;
         mn.visibleParameterAnnotations = null;
         mn.invisibleParameterAnnotations = null;
+        mn.visibleTypeAnnotations = null;
+        mn.invisibleTypeAnnotations = null;
+        mn.visibleLocalVariableAnnotations = null;
+        mn.invisibleLocalVariableAnnotations = null;
         if (mn.localVariables == null) return;
         for (LocalVariableNode local : mn.localVariables) {
             if (local.index > 0 || (mn.access & Opcodes.ACC_STATIC) != 0) {
                 local.desc = "Ljava/lang/Object;";
+                local.signature = null;
             }
         }
     }
