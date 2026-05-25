@@ -75,7 +75,7 @@ new Java runtime helper classes.
     boundary and combined dynamic/final audit scope. The plan was revised again.
     Final plan-intake review returned `PASS - no blocking findings.`
 
-- [ ] 3. Add generic carrier-index codec metadata.
+- [x] 3. Add generic carrier-index codec metadata.
   - Scope: extend `JvmMethodParameterObfuscationPass.MethodPlan` with a
     per-plan slot permutation/encoded-index schedule derived from target method
     seed, final transform metadata, argument types, and the target class keytable
@@ -95,6 +95,35 @@ new Java runtime helper classes.
     emitting an index, subagent implementation review passes, and this plan
     checkbox update is committed with only this subtask's files.
   - Dependency: subtask 2.
+  - Completed evidence: added `CARRIER_INDEX_PLAN_BY_FINAL_KEY`,
+    `CarrierIndexPlan`, `CarrierIndexCell`, deterministic carrier permutation
+    metadata, and `emitDecodedCarrierIndex`.
+  - Completed evidence: source audit found `emitDecodedCarrierIndex` rejects
+    missing live key/class-key word locals with `Carrier index decoding requires
+    live key and class-key words locals`, and it rejects a mismatched class-key
+    identity with `Carrier index decoding requires target class-key identity`.
+  - Completed evidence: the first implementation review failed because the
+    dynamic offset could break permutation uniqueness, class-key identity was
+    not part of plan metadata, and missing method seeds silently skipped codec
+    metadata. The implementation was corrected so the physical slot is the
+    fixed plan permutation, class-key/live-key material is emitted as guard
+    material without changing the slot, class-key identity is part of
+    `CarrierIndexPlan`, and missing target seeds hard fail through
+    `requireMethodSeed`.
+  - Completed evidence: no existing `AASTORE`/`AALOAD` carrier path was wired in
+    this subtask; direct path replacement remains subtask 4.
+  - Completed evidence: fresh validation
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`
+    completed with `BUILD SUCCESSFUL in 1s`.
+  - Completed evidence: fresh artifacts were regenerated at
+    `2026-05-25 17:28:11 +0800`:
+    `build/tmp/neko-test-method-parameters/parameter-shapes.jar` and
+    `build/tmp/neko-test-method-parameters/parameter-shapes-obf.jar`.
+  - Completed evidence: subtask 3 implementation review returned PASS with no
+    blocking findings; it confirmed the decoded slot remains a permutation, the
+    class-key identity is represented and enforced, missing seeds hard fail, no
+    carrier path wiring was added, and no fallback or sample-specific logic was
+    found.
 
 - [ ] 4. Harden direct call packing and callee unpacking, including virtual and
       interface dispatch.
