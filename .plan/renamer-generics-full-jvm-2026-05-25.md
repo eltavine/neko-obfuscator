@@ -103,6 +103,16 @@
   - Validation command: `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`
   - Completion criteria: no stale output is used; failures are investigated
     before any completion claim.
+  - Current evidence: the targeted generic-signature integration test passes,
+    but the broader full-JVM gate is not complete. Fresh execution of
+    `JvmFullObfuscationPerfTest` now runs past the prior relocated-helper
+    `IllegalAccessError` and fails with `TEST full-obf missing baseline row
+    Test 2.4: Field PASS`; stdout contains `Test 2.4: Field ERROR` and stderr
+    is empty. Reverting the CFF relocation access fix reproduces the earlier
+    `IllegalAccessError`, proving that fix is still required. Temporarily
+    reverting the generic-signature cleanup does not change the `Field ERROR`,
+    so the remaining failure is a separate full-JVM reflective method-key path,
+    not the packed generic-signature invariant fixed by subtask 3.
 
 ## Constraints
 
