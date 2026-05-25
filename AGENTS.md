@@ -29,8 +29,10 @@
   continuing.
 - Do not revert or overwrite unrelated user work. Work with existing changes if
   they affect the task.
-- Ask for permission to use the repository/system `./gradlew`; do not create, copy, or use a
-  temporary `gradlew`.
+- Use the repository/system `./gradlew` directly. If the active harness runs in
+  a sandbox or approval environment, use that harness's escalation mechanism to
+  run `./gradlew` rather than asking the user conversationally for permission.
+  Do not create, copy, or use a temporary `gradlew`.
 
 ## Task planning and clarification
 
@@ -50,7 +52,11 @@ Use the lightest workflow that still preserves auditability:
   MethodHandle rewriting, GC compatibility, performance gates, and any change
   requiring runtime/code validation must be split into concrete subtasks before
   implementation starts. Record those subtasks both in the active agent todo
-  system and in a matching `.plan/` todo document.
+  system and in a matching `.plan/` todo document. The `.plan/` document itself
+  must include the baseline/evidence-gathering work, the written plan/review
+  work, and the implementation repair work; the first implementation-stage task
+  must be the concrete repair being made, not a later workaround or validation
+  cleanup.
 - **User-requested planning**: if the user explicitly asks for a plan, audit
   trail, staged execution, or checkpoint commits, follow the high-risk planning
   workflow even for otherwise routine work.
@@ -60,12 +66,23 @@ for every recorded plan:
 
 - A plan must be split into multiple concrete tasks, and every task must be
   split into multiple concrete subtasks unless the task is indivisible by its
-  stated acceptance criteria. Record the dependency order before implementation.
+  stated acceptance criteria. Record the dependency order before implementation,
+  including baseline capture and plan-writing/review as explicit plan-body
+  entries before the first implementation subtask.
 - After a plan is written and before any implementation starts, dispatch a
   subagent plan-intake review to verify that the plan is credible, complete,
   evidence-backed, correctly decomposed, and compliant with this file. If the
   plan-intake review fails, revise the plan and repeat the review before
   starting implementation.
+- After the plan document and plan-intake review are complete, but before the
+  plan commit and before any implementation, report the plan to the user. The
+  report must summarize the planned change scope, why this change order and
+  approach are being used, and the concrete benefits and drawbacks/tradeoffs of
+  the plan.
+- After the plan document and plan-intake review are complete and the plan has
+  been reported to the user, commit only the plan/todo files before starting
+  any implementation. This is the required checkpoint for the approved plan
+  itself.
 - Each subtask must have a bounded scope, evidence requirement, validation
   target, and completion criteria. Do not merge unrelated concerns into one
   subtask merely to reduce commit count.
@@ -262,8 +279,8 @@ Before editing code for a new high-risk runtime subtask, record the runtime
 target row that will prove the changed path. Then:
 
 1. Make one coherent generic change.
-2. Regenerate the affected native artifact with repository `./gradlew` after
-   asking for permission to use it.
+2. Regenerate the affected native artifact with repository `./gradlew`, using
+   the harness escalation mechanism directly when sandbox approval is required.
 3. Run the required runtime targets from the todo.
 4. Inspect stdout, stderr, native logs, `hs_err` files, and generated C when
    claiming JNI removal.
