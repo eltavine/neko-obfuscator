@@ -87,6 +87,12 @@ for every recorded plan:
   in parallel to research or complete non-overlapping parts when the harness
   supports it. Parallel subagents must not edit the same files or depend on
   uncommitted changes from each other without an explicit handoff.
+- When a subagent has completed its assigned task and no later task needs to
+  resume that same subagent context, close that subagent to preserve context
+  budget.
+- Never use one subagent to complete two independent tasks. Independent tasks
+  require separate subagent contexts so findings, assumptions, and evidence do
+  not become mixed across task boundaries.
 
 Each recorded high-risk subtask must include its scope, required evidence,
 validation command or runtime target, and completion criteria. Do not start
