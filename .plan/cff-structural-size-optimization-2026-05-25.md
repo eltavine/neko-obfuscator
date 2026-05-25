@@ -19,15 +19,14 @@ string/indy CFF integration. Every implementation subtask must be generic,
 evidence-backed, freshly validated, reviewed by a subagent, and committed with
 only its matching plan update before the next implementation subtask starts.
 
-Milestone closure decision on 2026-05-26: after the budgeted synthetic-noise,
-helper-relocation, generated-helper hardening, key-transfer, and verifier fixes,
-the original bytecode-size failure is repaired and the fresh full-JVM target
-regenerates and runs all four artifacts. The remaining thinning ideas below are
-kept as deferred candidate rows, not retained implementation subtasks for this
-milestone. They would touch additional CFF/string/indy semantics without a
-current failing invariant after task 3, so implementing them now would violate
-the dependency rule against moving to later-stage optimizations when the stated
-bytecode-size repair is already validated.
+Continuation decision on 2026-05-26: the user explicitly requested finishing
+the complete plan, including the optimization rows previously deferred after
+the first size milestone. The prior milestone closure remains historical
+evidence only. Tasks 4 through 8 are reopened as retained high-risk
+implementation subtasks, and task 9 is reopened as the final review that must
+run after those subtasks. Each reopened subtask must still preserve real CFF
+coverage, dynamic key propagation, hidden key ABI behavior, string/indy live
+dependencies, and fail-closed behavior.
 
 ## Baseline Evidence
 
@@ -206,6 +205,51 @@ Completion evidence:
   fake helper must remain inside the existing CFF-generated helper surface; any
   string helper thinning must remain inside the string-decode surface and must
   not become an indy or CFF bridge.
+
+### [x] 1B. Full Plan Continuation Intake Checkpoint
+
+Scope:
+
+- Reopen tasks 4 through 8 after the 2026-05-26 user request to complete the
+  full plan rather than stopping at the first validated size milestone.
+- Reopen task 9 so final compatibility and performance review happens after
+  all retained implementation subtasks, not after task 3 only.
+- Dispatch a plan-intake subagent review before starting any reopened
+  implementation subtask.
+- Report the continuation scope, ordering, benefits, and tradeoffs to the user.
+- Commit only this continuation plan checkpoint before implementation resumes.
+
+Required evidence:
+
+- The existing plan already records scope, required evidence, validation
+  targets, and completion criteria for tasks 4 through 8.
+- The previous milestone completion evidence proves task 3 fixed the first
+  failing size invariant, but does not complete the user-requested remaining
+  optimization rows.
+- Plan-intake subagent review returns PASS or all blocking findings are fixed.
+
+Validation target:
+
+- Plan-intake subagent review.
+
+Completion criteria:
+
+- Tasks 4 through 8 and task 9 are reopened in this plan.
+- The continuation plan-intake review passes.
+- The user-facing continuation plan summary is reported.
+- The checkpoint commit contains only this plan file.
+
+Completion evidence:
+
+- Continuation plan-intake review returned PASS. The review confirmed that the
+  objective section reopens tasks 4 through 8 and task 9, that task 1B records
+  scope/evidence/validation/completion criteria, that task 9 treats the earlier
+  task-3 validation as stale historical evidence, and that the reopened
+  subtasks are bounded enough for one-at-a-time implementation, review, and
+  commit.
+- The review identified task 6 as the riskiest row and confirmed that its plan
+  text correctly requires recording the exact eligible transition family and
+  proof before replacing any transition.
 
 ### [x] 2. Baseline CFF Size/Topology Census
 
@@ -506,7 +550,7 @@ Progress evidence:
   target private carrier fields. The experiment was reverted and is not part of
   the implementation.
 
-### [deferred] 4. Direct Real-Case Island Dispatch Where Verifier-Compatible
+### [ ] 4. Direct Real-Case Island Dispatch Where Verifier-Compatible
 
 Scope:
 
@@ -540,13 +584,14 @@ Completion criteria:
 - No fake/poison case is removed.
 - Subagent implementation review passes.
 
-Deferral evidence:
+Continuation evidence:
 
-- Not retained for the 2026-05-26 milestone. Fresh full-JVM validation passes
-  after task 3, and no current artifact requires changing real-case switch
-  target encoding to satisfy the bytecode-size objective.
+- Previously deferred after task 3 because the first size failure was already
+  repaired. Reopened on 2026-05-26 by user request to complete the full plan.
+  The implementation must record concrete verifier eligibility before changing
+  any real-case target.
 
-### [deferred] 5. CFF Fake Case Shared Router Encoding
+### [ ] 5. CFF Fake Case Shared Router Encoding
 
 Scope:
 
@@ -583,14 +628,14 @@ Completion criteria:
 - Largest-method and output-size reports show reduced physical growth.
 - Subagent implementation review passes.
 
-Deferral evidence:
+Continuation evidence:
 
-- Not retained for the 2026-05-26 milestone. The budgeted fake/alias policy
-  already removes fake rows under `CRITICAL` pressure and the validated
-  artifacts no longer fail size gates. Shared fake routing remains a future
-  candidate only for retained fake rows in smaller pressure tiers.
+- Previously deferred after task 3 because `CRITICAL` methods already shed fake
+  rows. Reopened on 2026-05-26 by user request to complete the full plan. The
+  implementation is limited to retained fake rows in budget tiers that still
+  emit fake cases, and must preserve retained fake token/cardinality behavior.
 
-### [deferred] 6. Transition Delta-Key Update Encoding
+### [ ] 6. Transition Delta-Key Update Encoding
 
 Scope:
 
@@ -634,14 +679,14 @@ Completion criteria:
 - CFF audits and full-obf artifacts pass.
 - Subagent implementation review passes.
 
-Deferral evidence:
+Continuation evidence:
 
-- Not retained for the 2026-05-26 milestone. Existing rejected optimization
-  rows show transition/key updates are sensitive; task 3 repaired the size
-  failure without replacing full guard/path/block refreshes. No current failing
-  invariant justifies delta-key semantics in this milestone.
+- Previously deferred after task 3 because rejected optimization rows show this
+  path is sensitive. Reopened on 2026-05-26 by user request to complete the full
+  plan. The implementation must first record the exact transition family and
+  eligibility proof before replacing any full guard/path/block refresh.
 
-### [deferred] 7. String Call-Site Live-Word Thinning
+### [ ] 7. String Call-Site Live-Word Thinning
 
 Scope:
 
@@ -678,14 +723,14 @@ Completion criteria:
   key-cell update.
 - Subagent implementation review passes.
 
-Deferral evidence:
+Continuation evidence:
 
-- Not retained for the 2026-05-26 milestone. Generated-helper hardening gates
-  and helper relocation repaired the current string-related size pressure while
-  keeping the existing string decode surface intact. Further string call-site
-  thinning remains a separate future optimization.
+- Previously deferred after task 3 because generated-helper hardening and
+  relocation repaired the first string-related size pressure. Reopened on
+  2026-05-26 by user request to complete the full plan. The implementation must
+  stay inside the existing string decode helper surface.
 
-### [deferred] 8. Indy Call-Site Flow-Word Budget Thinning
+### [ ] 8. Indy Call-Site Flow-Word Budget Thinning
 
 Scope:
 
@@ -714,13 +759,14 @@ Completion criteria:
 - Existing loop caching behavior is preserved.
 - Subagent implementation review passes.
 
-Deferral evidence:
+Continuation evidence:
 
-- Not retained for the 2026-05-26 milestone. Split-hidden-key transfer and the
-  existing loop-aware indy flow path now pass full-JVM validation. Additional
-  non-loop indy thinning remains a separate future optimization.
+- Previously deferred after task 3 because split-hidden-key transfer and the
+  existing loop-aware indy path passed full-JVM validation. Reopened on
+  2026-05-26 by user request to complete the full plan. The implementation is
+  limited to generic size-budgeted non-loop indy call sites.
 
-### [x] 9. Final Compatibility and Performance Review
+### [ ] 9. Final Compatibility and Performance Review
 
 Scope:
 
@@ -750,7 +796,7 @@ Completion criteria:
   census where changed paths apply.
 - Final subagent plan review passes.
 
-Completion evidence:
+Historical evidence from the earlier task-3 milestone:
 
 - Fresh final `R-build`, focused method-parameter reflection regression,
   targeted CFF/parameter/indy/string validation, and `R-full-jvm` passed after
@@ -767,3 +813,9 @@ Completion evidence:
   gap was fixed. The review found no sample-specific production logic, no
   temporary diagnostics, and confirmed the runtime reflective split-key path and
   regression coverage.
+
+Continuation requirement:
+
+- The historical evidence above is stale for the reopened full-plan objective.
+  Task 9 remains incomplete until fresh validation and final plan review pass
+  after tasks 4 through 8 are implemented and committed.
