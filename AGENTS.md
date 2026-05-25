@@ -55,6 +55,39 @@ Use the lightest workflow that still preserves auditability:
   trail, staged execution, or checkpoint commits, follow the high-risk planning
   workflow even for otherwise routine work.
 
+Plan decomposition, subagent review, and atomic commit discipline are mandatory
+for every recorded plan:
+
+- A plan must be split into multiple concrete tasks, and every task must be
+  split into multiple concrete subtasks unless the task is indivisible by its
+  stated acceptance criteria. Record the dependency order before implementation.
+- After a plan is written and before any implementation starts, dispatch a
+  subagent plan-intake review to verify that the plan is credible, complete,
+  evidence-backed, correctly decomposed, and compliant with this file. If the
+  plan-intake review fails, revise the plan and repeat the review before
+  starting implementation.
+- Each subtask must have a bounded scope, evidence requirement, validation
+  target, and completion criteria. Do not merge unrelated concerns into one
+  subtask merely to reduce commit count.
+- After each subtask is implemented and validated, dispatch a subagent review
+  before committing. The review must analyze whether the current diff, evidence,
+  validation, and scope discipline satisfy this file's standards.
+- If the subagent review passes, commit only that subtask's implementation and
+  matching todo or plan update before starting the next subtask. If the review
+  fails, record the reason, continue iterating on the same subtask, rerun the
+  required validation, and dispatch another review before commit.
+- When an entire plan is completed, dispatch a separate subagent plan review to
+  audit task/subtask completion, evidence freshness, validation coverage, commit
+  atomicity, and compliance with this file before final acceptance.
+- For technical details that require substantial external research, or for
+  complex tasks where independent investigation can reduce risk, dispatch
+  subagents to research or complete bounded parts of the work and reconcile
+  their findings against repository evidence before implementation.
+- For multi-file work whose files or topics are independent, dispatch subagents
+  in parallel to research or complete non-overlapping parts when the harness
+  supports it. Parallel subagents must not edit the same files or depend on
+  uncommitted changes from each other without an explicit handoff.
+
 Each recorded high-risk subtask must include its scope, required evidence,
 validation command or runtime target, and completion criteria. Do not start
 implementation for a recorded high-risk subtask until those fields are
