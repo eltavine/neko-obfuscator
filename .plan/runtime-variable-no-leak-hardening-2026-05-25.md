@@ -55,7 +55,7 @@
 
 ## Subtasks
 
-- [ ] 1. Plan intake and recorded baseline.
+- [x] 1. Plan intake and recorded baseline.
   - Scope: record this high-risk plan, keep it isolated from unrelated native
     worktree changes, record the active todo counterpart, and dispatch a
     subagent plan-intake review before code edits.
@@ -66,8 +66,11 @@
   - Completion criteria: plan review passes, this plan/todo record is committed
     with `git add -f` because `.plan/` is ignored, and no runtime implementation
     starts before that commit.
+  - Completed evidence: plan-intake subagent review passed after evidence and
+    dependency-order revisions; checkpoint committed as
+    `0e2f534 Plan runtime variable no-leak hardening`.
 
-- [ ] 2. Primitive masks become transient stack material with matching tests.
+- [x] 2. Primitive masks become transient stack material with matching tests.
   - Scope: remove persistent runtime-variable primitive mask locals from
     `JvmRuntimeVariableObfuscationPass`; encode/decode int, long, float, double,
     IINC, and encoded zero branches by recomputing the pad transiently from live
@@ -81,6 +84,25 @@
     `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRuntimeVariableObfuscationIntegrationTest`.
   - Completion criteria: focused test passes from a fresh artifact; no plaintext
     primitive local landing or stable shadow/mask decode pair remains.
+  - Completed evidence: final focused validation used
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRuntimeVariableObfuscationIntegrationTest`
+    and completed with `BUILD SUCCESSFUL in 1s`.
+  - Completed evidence: freshly regenerated
+    `build/tmp/neko-test-runtime-vars/RuntimeVariableShapes.java`,
+    `runtime-variable-shapes.jar`, and `runtime-variable-shapes-obf.jar` had
+    timestamp `2026-05-25 13:10 +0800`.
+  - Completed evidence: static grep of
+    `JvmRuntimeVariableObfuscationPass.java` for
+    `runtimeSeedLocal|emitRuntimeSeed|maskLocal|maskSize|reusedOriginalMask|hasMask`
+    returned no matches.
+  - Completed evidence: representative fresh `javap` output showed normal mask
+    calls as `ldc seed; lload_1; invokestatic __neko_rv_mask`, stack-only
+    pending-key rekey calls as `dup2; ldc seed; dup_x2; pop; invokestatic
+    __neko_rv_mask; ... lload_1; invokestatic __neko_rv_mask; ixor; ixor;
+    istore shadow; lstore_1`, and encoded zero branches using
+    `invokestatic __neko_rv_mask; if_icmp*`.
+  - Completed evidence: RVNL-2 subagent review returned PASS with no blocking
+    findings.
 
 - [ ] 3. Remove plaintext reference frame warehouse with matching tests.
   - Scope: remove runtime-variable `ThreadLocal` frame install/restore,

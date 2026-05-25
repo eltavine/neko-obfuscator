@@ -13,9 +13,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
@@ -24,6 +26,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
@@ -58,7 +61,9 @@ public class JvmRuntimeVariableObfuscationIntegrationTest {
         assertTrue(obfuscated.contains("RUNTIME VARS OK"), obfuscated);
         assertPrimitiveSlotsArePoisoned(outputJar);
         assertReferenceSlotsAreNulled(outputJar);
-        assertAccumulatorZeroBranchUsesEncodedCompare(outputJar);
+        assertNoStoredPrimitiveMaskInitialization(outputJar);
+        assertPrimitiveMasksUseCffKeyOrPendingStack(outputJar);
+        assertAccumulatorZeroBranchUsesTransientMaskCompare(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -129,7 +134,21 @@ public class JvmRuntimeVariableObfuscationIntegrationTest {
         assertTrue(sawNullStore, "reference locals should be nulled after shadow transfer");
     }
 
-    private void assertAccumulatorZeroBranchUsesEncodedCompare(Path jar) throws Exception {
+    private void assertNoStoredPrimitiveMaskInitialization(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("RuntimeVariableShapes");
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (!isRuntimeMaskCall(insn)) continue;
+                AbstractInsnNode next = nextReal(insn.getNext());
+                assertFalse(next != null && (next.getOpcode() == Opcodes.DUP || next.getOpcode() == Opcodes.DUP2),
+                    "runtime-variable primitive masks must not be duplicated into persistent local mask slots");
+            }
+        }
+    }
+
+    private void assertAccumulatorZeroBranchUsesTransientMaskCompare(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
         L1Class clazz = input.classMap().get("RuntimeVariableShapes");
         boolean sawEncodedZeroCompare = false;
@@ -139,17 +158,47 @@ public class JvmRuntimeVariableObfuscationIntegrationTest {
                 if (insn instanceof JumpInsnNode jump) {
                     if (jump.getOpcode() == Opcodes.IF_ICMPEQ || jump.getOpcode() == Opcodes.IF_ICMPNE) {
                         AbstractInsnNode right = previousReal(insn.getPrevious());
-                        AbstractInsnNode left = right == null ? null : previousReal(right.getPrevious());
-                        if (left instanceof VarInsnNode l && right instanceof VarInsnNode r
-                                && l.getOpcode() == Opcodes.ILOAD && r.getOpcode() == Opcodes.ILOAD
-                                && l.var != r.var) {
+                        if (isRuntimeMaskCall(right)) {
                             sawEncodedZeroCompare = true;
                         }
                     }
                 }
             }
         }
-        assertTrue(sawEncodedZeroCompare, "accumulator zero branch should compare encoded shadow and mask locals");
+        assertTrue(sawEncodedZeroCompare,
+            "accumulator zero branch should compare encoded shadow with a transiently recomputed mask");
+    }
+
+    private void assertPrimitiveMasksUseCffKeyOrPendingStack(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("RuntimeVariableShapes");
+        Set<Integer> cffKeyLocals = new LinkedHashSet<>();
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (!(insn instanceof MethodInsnNode call) || !call.name.startsWith("__neko_cff_mkey")) continue;
+                AbstractInsnNode next = nextReal(insn.getNext());
+                if (next instanceof VarInsnNode store && store.getOpcode() == Opcodes.LSTORE) {
+                    cffKeyLocals.add(store.var);
+                }
+            }
+        }
+        assertFalse(cffKeyLocals.isEmpty(), "fixture should expose CFF key locals for runtime-mask audits");
+
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (!isRuntimeMaskCall(insn)) continue;
+                AbstractInsnNode prev = previousReal(insn.getPrevious());
+                if (prev instanceof VarInsnNode load && load.getOpcode() == Opcodes.LLOAD) {
+                    assertTrue(cffKeyLocals.contains(load.var),
+                        "runtime-variable primitive masks must load the live CFF key local, not a persisted derived seed");
+                } else {
+                    assertEquals(Opcodes.POP, prev == null ? -1 : prev.getOpcode(),
+                        "runtime-variable primitive masks without a CFF key load must consume a pending stack key");
+                }
+            }
+        }
     }
 
     private AbstractInsnNode previousReal(AbstractInsnNode insn) {
@@ -158,6 +207,20 @@ public class JvmRuntimeVariableObfuscationIntegrationTest {
             cursor = cursor.getPrevious();
         }
         return cursor;
+    }
+
+    private AbstractInsnNode nextReal(AbstractInsnNode insn) {
+        AbstractInsnNode cursor = insn;
+        while (cursor != null && cursor.getOpcode() < 0) {
+            cursor = cursor.getNext();
+        }
+        return cursor;
+    }
+
+    private boolean isRuntimeMaskCall(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+            && call.name.startsWith("__neko_rv_mask")
+            && "(IJ)I".equals(call.desc);
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {

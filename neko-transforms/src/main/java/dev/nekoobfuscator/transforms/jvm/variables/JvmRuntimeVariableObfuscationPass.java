@@ -51,8 +51,9 @@ import org.objectweb.asm.tree.analysis.SourceValue;
  * Keeps protected application locals out of their original plaintext slots.
  *
  * <p>The pass runs after CFF and derives store-site masks from live CFF state.
- * Primitive values are kept in encrypted shadow locals, while reference values
- * are held in a per-call frame addressed by encrypted integer handles.</p>
+ * Primitive values are kept in encrypted shadow locals and their masks are
+ * recomputed transiently on the operand stack. Reference values are held in a
+ * per-call frame addressed by encrypted integer handles.</p>
  */
 public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     public static final String ID = "runtimeVariableObfuscation";
@@ -121,10 +122,12 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         allocateShadows(mn, shadows, metadata);
         ReferenceFrameLocals referenceFrame = allocateReferenceFrameLocals(mn, shadows);
         int initialized = initializeShadowDefaults(pctx, mn, metadata, maskHelper, refHandleHelper, shadows);
-        int encodedBranches = rewriteEncodedZeroBranches(pctx, mn, metadata, shadows);
-        int rewritten = rewriteLocalInstructions(pctx, mn, metadata, shadows, refLoadCasts, referenceFrame);
+        int rekeyed = rewriteKeyLocalUpdates(pctx, mn, metadata, maskHelper, shadows);
+        int encodedBranches = rewriteEncodedZeroBranches(pctx, mn, metadata, maskHelper, shadows);
+        int rewritten = rewriteLocalInstructions(pctx, mn, metadata, maskHelper, shadows, refLoadCasts, referenceFrame);
+        int decodedBranches = rewriteDecodedZeroBranches(pctx, mn, metadata, maskHelper, shadows);
         int framedRefs = installReferenceFrame(pctx, mn, metadata, referenceFrame);
-        if (initialized + encodedBranches + rewritten + framedRefs + directReferenceCasts == 0) return;
+        if (initialized + rekeyed + encodedBranches + rewritten + decodedBranches + framedRefs + directReferenceCasts == 0) return;
 
         mn.localVariables = null;
         mn.visibleLocalVariableAnnotations = null;
@@ -138,7 +141,9 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             method.name(),
             method.descriptor(),
             "cff-keyed-local-shadows-init-" + initialized +
+                "-rekeys-" + rekeyed +
                 "-branches-" + encodedBranches +
+                "-decodedBranches-" + decodedBranches +
                 "-sites-" + rewritten +
                 "-refFrames-" + framedRefs +
                 "-directRefCasts-" + directReferenceCasts
@@ -241,15 +246,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 shadow.shadowLocal = next;
                 next += shadow.kind.shadowSize();
             }
-            if (shadow.kind.hasMask()) {
-                if (canReuseOriginalSlotForMask(shadow, originalSlotUse, argumentLimit, metadata)) {
-                    shadow.maskLocal = shadow.var;
-                    shadow.reusedOriginalMask = true;
-                } else {
-                    shadow.maskLocal = next;
-                    next += shadow.kind.maskSize();
-                }
-            }
             if (shadow.kind == LocalKind.REF) {
                 shadow.frameSlot = referenceFrameSlots++;
             }
@@ -271,28 +267,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             }
         }
         return use;
-    }
-
-    private boolean canReuseOriginalSlotForMask(
-        LocalShadow shadow,
-        Map<Integer, List<LocalKey>> originalSlotUse,
-        int argumentLimit,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata
-    ) {
-        if (shadow.kind == LocalKind.FLOAT || shadow.kind == LocalKind.DOUBLE) return false;
-        if (shadow.reusedOriginalShadow) return false;
-        if (shadow.var < argumentLimit) return false;
-        for (int i = 0; i < shadow.kind.maskSize(); i++) {
-            int local = shadow.var + i;
-            if (isReservedLocal(local, metadata)) return false;
-            List<LocalKey> users = originalSlotUse.get(local);
-            if (users == null || users.isEmpty()) return false;
-            for (LocalKey user : users) {
-                if (user.var() != shadow.var) return false;
-                if (user.kind().maskSize() != shadow.kind.maskSize()) return false;
-            }
-        }
-        return true;
     }
 
     private boolean canReuseOriginalSlotForShadow(
@@ -356,7 +330,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         InsnList maskInit = new InsnList();
         for (LocalShadow shadow : ordered) {
             emitDefaultShadow(init, shadow);
-            if (shadow.reusedOriginalMask || shadow.reusedOriginalShadow) {
+            if (shadow.reusedOriginalShadow) {
                 emitInitialShadow(maskInit, metadata, maskHelper, refHandleHelper, shadow);
             } else {
                 emitInitialShadow(maskInit, metadata, maskHelper, refHandleHelper, shadow);
@@ -382,6 +356,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         PipelineContext pctx,
         MethodNode mn,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
         Map<LocalKey, LocalShadow> shadows
     ) {
         int changed = 0;
@@ -394,11 +369,11 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             if (!(previous instanceof VarInsnNode load)) continue;
             if (load.getOpcode() != Opcodes.ILOAD || !metadata.applicationInstructions().contains(load)) continue;
             LocalShadow shadow = shadows.get(new LocalKey(load.var, LocalKind.INT));
-            if (shadow == null || shadow.shadowLocal < 0 || shadow.maskLocal < 0) continue;
+            if (shadow == null || shadow.shadowLocal < 0) continue;
 
             InsnList replacement = new InsnList();
             replacement.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
-            replacement.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
+            emitStableMaskInt(replacement, metadata, maskHelper, shadow);
             replacement.add(new JumpInsnNode(opcode == Opcodes.IFEQ ? Opcodes.IF_ICMPEQ : Opcodes.IF_ICMPNE, jump.label));
             JvmKeyDispatchPass.markGenerated(pctx, replacement);
             mn.instructions.insertBefore(previous, replacement);
@@ -409,10 +384,42 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         return changed;
     }
 
+    private int rewriteKeyLocalUpdates(
+        PipelineContext pctx,
+        MethodNode mn,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
+        Map<LocalKey, LocalShadow> shadows
+    ) {
+        List<LocalShadow> primitiveShadows = shadows.values().stream()
+            .filter(shadow -> shadow.kind.primitive() && shadow.shadowLocal >= 0)
+            .sorted(Comparator.comparingInt(LocalShadow::var))
+            .toList();
+        if (primitiveShadows.isEmpty()) return 0;
+
+        AbstractInsnNode protectedStart = firstApplicationInstruction(mn, metadata);
+        int changed = 0;
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (!(insn instanceof VarInsnNode store)) continue;
+            if (store.getOpcode() != Opcodes.LSTORE || store.var != metadata.keyLocal()) continue;
+            if (protectedStart != null && before(insn, protectedStart)) continue;
+
+            InsnList rekey = new InsnList();
+            for (LocalShadow shadow : primitiveShadows) {
+                emitRekeyShadowForPendingKey(rekey, metadata, maskHelper, shadow);
+            }
+            JvmKeyDispatchPass.markGenerated(pctx, rekey);
+            mn.instructions.insertBefore(insn, rekey);
+            changed++;
+        }
+        return changed;
+    }
+
     private int rewriteLocalInstructions(
         PipelineContext pctx,
         MethodNode mn,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
         Map<LocalKey, LocalShadow> shadows,
         Map<AbstractInsnNode, String> refLoadCasts,
         ReferenceFrameLocals referenceFrame
@@ -429,9 +436,9 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 if (shadow == null || shadow.shadowLocal < 0) continue;
                 InsnList replacement = new InsnList();
                 if (isLoadOpcode(var.getOpcode())) {
-                    emitLoadFromShadow(replacement, metadata, shadow, refLoadCasts.get(insn), referenceFrame);
+                    emitLoadFromShadow(replacement, metadata, maskHelper, shadow, refLoadCasts.get(insn), referenceFrame);
                 } else if (isStoreOpcode(var.getOpcode())) {
-                    emitStoreShadowFromStack(replacement, shadow, referenceFrame);
+                    emitStoreShadowFromStack(replacement, metadata, maskHelper, shadow, referenceFrame);
                 } else {
                     continue;
                 }
@@ -441,19 +448,74 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                 changed++;
             } else if (insn instanceof IincInsnNode iinc) {
                 LocalShadow shadow = shadows.get(new LocalKey(iinc.var, LocalKind.INT));
-                if (shadow == null || shadow.shadowLocal < 0 || shadow.maskLocal < 0) continue;
+                if (shadow == null || shadow.shadowLocal < 0) continue;
                 InsnList replacement = new InsnList();
                 replacement.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
-                replacement.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
+                emitStableMaskInt(replacement, metadata, maskHelper, shadow);
                 replacement.add(new InsnNode(Opcodes.IXOR));
                 JvmPassBytecode.pushInt(replacement, iinc.incr);
                 replacement.add(new InsnNode(Opcodes.IADD));
-                emitStoreShadowFromStack(replacement, shadow, referenceFrame);
+                emitStoreShadowFromStack(replacement, metadata, maskHelper, shadow, referenceFrame);
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
                 mn.instructions.insertBefore(insn, replacement);
                 mn.instructions.remove(insn);
                 changed++;
             }
+        }
+        return changed;
+    }
+
+    private int rewriteDecodedZeroBranches(
+        PipelineContext pctx,
+        MethodNode mn,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
+        Map<LocalKey, LocalShadow> shadows
+    ) {
+        Map<Integer, LocalShadow> intShadowsByShadowLocal = new LinkedHashMap<>();
+        for (LocalShadow shadow : shadows.values()) {
+            if (shadow.kind == LocalKind.INT && shadow.shadowLocal >= 0) {
+                intShadowsByShadowLocal.put(shadow.shadowLocal, shadow);
+            }
+        }
+        if (intShadowsByShadowLocal.isEmpty()) return 0;
+
+        int changed = 0;
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (!(insn instanceof JumpInsnNode jump)) continue;
+            int opcode = jump.getOpcode();
+            if (opcode != Opcodes.IFEQ && opcode != Opcodes.IFNE) continue;
+
+            AbstractInsnNode xor = previousReal(insn.getPrevious());
+            if (xor == null || xor.getOpcode() != Opcodes.IXOR) continue;
+            AbstractInsnNode maskCall = previousReal(xor.getPrevious());
+            if (!isRuntimeMaskCall(maskCall, maskHelper)) continue;
+            AbstractInsnNode seedLoad = previousReal(maskCall.getPrevious());
+            if (!(seedLoad instanceof VarInsnNode seedVar)
+                    || seedVar.getOpcode() != Opcodes.LLOAD
+                    || seedVar.var != metadata.keyLocal()) {
+                continue;
+            }
+            AbstractInsnNode seedConst = previousReal(seedLoad.getPrevious());
+            if (seedConst == null) continue;
+            AbstractInsnNode shadowLoad = previousReal(seedConst.getPrevious());
+            if (!(shadowLoad instanceof VarInsnNode shadowVar) || shadowVar.getOpcode() != Opcodes.ILOAD) continue;
+            LocalShadow shadow = intShadowsByShadowLocal.get(shadowVar.var);
+            if (shadow == null) continue;
+
+            InsnList replacement = new InsnList();
+            replacement.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
+            emitStableMaskInt(replacement, metadata, maskHelper, shadow);
+            replacement.add(new JumpInsnNode(opcode == Opcodes.IFEQ ? Opcodes.IF_ICMPEQ : Opcodes.IF_ICMPNE, jump.label));
+            JvmKeyDispatchPass.markGenerated(pctx, replacement);
+            mn.instructions.insertBefore(shadowLoad, replacement);
+            mn.instructions.remove(shadowLoad);
+            mn.instructions.remove(seedConst);
+            mn.instructions.remove(seedLoad);
+            mn.instructions.remove(maskCall);
+            mn.instructions.remove(xor);
+            mn.instructions.remove(insn);
+            changed++;
         }
         return changed;
     }
@@ -468,14 +530,10 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         switch (shadow.kind) {
             case INT, FLOAT -> {
                 emitStableMaskInt(insns, metadata, maskHelper, shadow);
-                insns.add(new InsnNode(Opcodes.DUP));
-                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.maskLocal));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
             }
             case LONG, DOUBLE -> {
                 emitStableMaskLong(insns, metadata, maskHelper, shadow);
-                insns.add(new InsnNode(Opcodes.DUP2));
-                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.maskLocal));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
             }
             case REF -> {
@@ -501,8 +559,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             return;
         }
         emitDefaultShadowValue(insns, shadow.kind, shadow.shadowLocal);
-        if (!shadow.kind.hasMask()) return;
-        emitDefaultShadowValue(insns, shadow.kind, shadow.maskLocal);
     }
 
     private void emitDefaultShadowValue(InsnList insns, LocalKind kind, int local) {
@@ -549,17 +605,19 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
 
     private void emitStoreShadowFromStack(
         InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
         LocalShadow shadow,
         ReferenceFrameLocals referenceFrame
     ) {
         switch (shadow.kind) {
             case INT -> {
-                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
+                emitStableMaskInt(insns, metadata, maskHelper, shadow);
                 insns.add(new InsnNode(Opcodes.IXOR));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
             }
             case LONG -> {
-                insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.maskLocal));
+                emitStableMaskLong(insns, metadata, maskHelper, shadow);
                 insns.add(new InsnNode(Opcodes.LXOR));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
             }
@@ -571,7 +629,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                     "(F)I",
                     false
                 ));
-                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
+                emitStableMaskInt(insns, metadata, maskHelper, shadow);
                 insns.add(new InsnNode(Opcodes.IXOR));
                 insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
             }
@@ -583,7 +641,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
                     "(D)J",
                     false
                 ));
-                insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.maskLocal));
+                emitStableMaskLong(insns, metadata, maskHelper, shadow);
                 insns.add(new InsnNode(Opcodes.LXOR));
                 insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
             }
@@ -600,6 +658,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     private void emitLoadFromShadow(
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
         LocalShadow shadow,
         String refCast,
         ReferenceFrameLocals referenceFrame
@@ -607,17 +666,17 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         switch (shadow.kind) {
             case INT -> {
                 insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
-                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
+                emitStableMaskInt(insns, metadata, maskHelper, shadow);
                 insns.add(new InsnNode(Opcodes.IXOR));
             }
             case LONG -> {
                 insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.shadowLocal));
-                insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.maskLocal));
+                emitStableMaskLong(insns, metadata, maskHelper, shadow);
                 insns.add(new InsnNode(Opcodes.LXOR));
             }
             case FLOAT -> {
                 insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
-                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.maskLocal));
+                emitStableMaskInt(insns, metadata, maskHelper, shadow);
                 insns.add(new InsnNode(Opcodes.IXOR));
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
@@ -629,7 +688,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             }
             case DOUBLE -> {
                 insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.shadowLocal));
-                insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.maskLocal));
+                emitStableMaskLong(insns, metadata, maskHelper, shadow);
                 insns.add(new InsnNode(Opcodes.LXOR));
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
@@ -766,6 +825,13 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         return null;
     }
 
+    private boolean before(AbstractInsnNode left, AbstractInsnNode right) {
+        for (AbstractInsnNode cursor = left; cursor != null; cursor = cursor.getNext()) {
+            if (cursor == right) return true;
+        }
+        return false;
+    }
+
     private void emitReferenceFrame(InsnList insns, ReferenceFrameLocals referenceFrame) {
         insns.add(new VarInsnNode(Opcodes.ALOAD, referenceFrame.frameLocal()));
     }
@@ -860,6 +926,34 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
     }
 
+    private void emitRekeyShadowForPendingKey(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
+        LocalShadow shadow
+    ) {
+        insns.add(new InsnNode(Opcodes.DUP2));
+        switch (shadow.kind) {
+            case INT, FLOAT -> {
+                emitStableMaskIntFromStack(insns, metadata, maskHelper, shadow);
+                insns.add(new VarInsnNode(Opcodes.ILOAD, shadow.shadowLocal));
+                emitStableMaskInt(insns, metadata, maskHelper, shadow);
+                insns.add(new InsnNode(Opcodes.IXOR));
+                insns.add(new InsnNode(Opcodes.IXOR));
+                insns.add(new VarInsnNode(Opcodes.ISTORE, shadow.shadowLocal));
+            }
+            case LONG, DOUBLE -> {
+                emitStableMaskLongFromStack(insns, metadata, maskHelper, shadow);
+                insns.add(new VarInsnNode(Opcodes.LLOAD, shadow.shadowLocal));
+                emitStableMaskLong(insns, metadata, maskHelper, shadow);
+                insns.add(new InsnNode(Opcodes.LXOR));
+                insns.add(new InsnNode(Opcodes.LXOR));
+                insns.add(new VarInsnNode(Opcodes.LSTORE, shadow.shadowLocal));
+            }
+            case REF -> throw new IllegalStateException("reference shadow cannot be primitive rekeyed");
+        }
+    }
+
     private void emitStableMaskLong(
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
@@ -871,6 +965,26 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LSHL));
         emitStableMaskInt(insns, metadata, maskHelper, shadow.withDomain(0x4C4F574B));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private void emitStableMaskLongFromStack(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
+        LocalShadow shadow
+    ) {
+        insns.add(new InsnNode(Opcodes.DUP2));
+        emitStableMaskIntFromStack(insns, metadata, maskHelper, shadow.withDomain(0x48494748));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new InsnNode(Opcodes.DUP2_X2));
+        insns.add(new InsnNode(Opcodes.POP2));
+        emitStableMaskIntFromStack(insns, metadata, maskHelper, shadow.withDomain(0x4C4F574B));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
@@ -899,6 +1013,40 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             RUNTIME_MASK_HELPER_DESC,
             maskHelper.interfaceOwner()
         ));
+    }
+
+    private void emitStableMaskIntFromStack(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        RuntimeMaskHelper maskHelper,
+        LocalShadow shadow
+    ) {
+        long seed = JvmPassBytecode.mix(
+            metadata.methodSeed() ^ 0x52564F4D41534B31L,
+            ((long) shadow.var << 32) ^ maskKindDomain(shadow) ^ shadow.domain
+        );
+        JvmPassBytecode.pushInt(
+            insns,
+            (int) seed ^ Integer.rotateLeft((int) (seed >>> 32), 11)
+        );
+        insns.add(new InsnNode(Opcodes.DUP_X2));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            maskHelper.owner(),
+            maskHelper.name(),
+            RUNTIME_MASK_HELPER_DESC,
+            maskHelper.interfaceOwner()
+        ));
+    }
+
+    private boolean isRuntimeMaskCall(AbstractInsnNode insn, RuntimeMaskHelper maskHelper) {
+        return insn instanceof MethodInsnNode call
+            && call.getOpcode() == Opcodes.INVOKESTATIC
+            && call.owner.equals(maskHelper.owner())
+            && call.name.equals(maskHelper.name())
+            && call.desc.equals(RUNTIME_MASK_HELPER_DESC)
+            && call.itf == maskHelper.interfaceOwner();
     }
 
     private RuntimeMaskHelper ensureRuntimeMaskHelper(
@@ -1002,16 +1150,16 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             null,
             null
         );
-        int maskLocal = 0;
+        int handleMaskLocal = 0;
         int frameSlotLocal = 1;
         int bucketMaskLocal = 2;
         InsnList insns = helper.instructions;
         insns.add(new VarInsnNode(Opcodes.ILOAD, frameSlotLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, maskLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, handleMaskLocal));
         insns.add(new InsnNode(Opcodes.ICONST_1));
         insns.add(new InsnNode(Opcodes.IOR));
         insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, maskLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, handleMaskLocal));
         JvmPassBytecode.pushInt(insns, 16);
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IADD));
@@ -1054,9 +1202,6 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     }
 
     private int maskKindDomain(LocalShadow shadow) {
-        if (shadow.reusedOriginalMask) {
-            return shadow.kind.maskSize() == 2 ? 0x324D534B : 0x314D534B;
-        }
         return shadow.kind.ordinal();
     }
 
@@ -1600,19 +1745,17 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
     }
 
     private enum LocalKind {
-        INT(1, 1, true),
-        LONG(2, 2, true),
-        FLOAT(1, 1, true),
-        DOUBLE(2, 2, true),
-        REF(1, 0, false);
+        INT(1, true),
+        LONG(2, true),
+        FLOAT(1, true),
+        DOUBLE(2, true),
+        REF(1, false);
 
         private final int shadowSize;
-        private final int maskSize;
         private final boolean primitive;
 
-        LocalKind(int shadowSize, int maskSize, boolean primitive) {
+        LocalKind(int shadowSize, boolean primitive) {
             this.shadowSize = shadowSize;
-            this.maskSize = maskSize;
             this.primitive = primitive;
         }
 
@@ -1620,15 +1763,7 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             return shadowSize;
         }
 
-        int maskSize() {
-            return maskSize;
-        }
-
         boolean primitive() {
-            return primitive;
-        }
-
-        boolean hasMask() {
             return primitive;
         }
     }
@@ -1741,11 +1876,9 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         private final LocalKind kind;
         private final int domain;
         private int shadowLocal = -1;
-        private int maskLocal = -1;
         private int frameSlot = -1;
         private int referenceHandleBucketMask;
         private boolean reusedOriginalShadow;
-        private boolean reusedOriginalMask;
 
         LocalShadow(int var, LocalKind kind) {
             this(var, kind, 0);
@@ -1760,11 +1893,9 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
         LocalShadow withDomain(int domain) {
             LocalShadow copy = new LocalShadow(var, kind, domain);
             copy.shadowLocal = shadowLocal;
-            copy.maskLocal = maskLocal;
             copy.frameSlot = frameSlot;
             copy.referenceHandleBucketMask = referenceHandleBucketMask;
             copy.reusedOriginalShadow = reusedOriginalShadow;
-            copy.reusedOriginalMask = reusedOriginalMask;
             return copy;
         }
 
