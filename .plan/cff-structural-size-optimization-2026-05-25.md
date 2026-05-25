@@ -19,6 +19,16 @@ string/indy CFF integration. Every implementation subtask must be generic,
 evidence-backed, freshly validated, reviewed by a subagent, and committed with
 only its matching plan update before the next implementation subtask starts.
 
+Milestone closure decision on 2026-05-26: after the budgeted synthetic-noise,
+helper-relocation, generated-helper hardening, key-transfer, and verifier fixes,
+the original bytecode-size failure is repaired and the fresh full-JVM target
+regenerates and runs all four artifacts. The remaining thinning ideas below are
+kept as deferred candidate rows, not retained implementation subtasks for this
+milestone. They would touch additional CFF/string/indy semantics without a
+current failing invariant after task 3, so implementing them now would violate
+the dependency rule against moving to later-stage optimizations when the stated
+bytecode-size repair is already validated.
+
 ## Baseline Evidence
 
 - JVM pass order is fixed through `StandardJvmPasses.register()`: key dispatch
@@ -496,7 +506,7 @@ Progress evidence:
   target private carrier fields. The experiment was reverted and is not part of
   the implementation.
 
-### [ ] 4. Direct Real-Case Island Dispatch Where Verifier-Compatible
+### [deferred] 4. Direct Real-Case Island Dispatch Where Verifier-Compatible
 
 Scope:
 
@@ -530,7 +540,13 @@ Completion criteria:
 - No fake/poison case is removed.
 - Subagent implementation review passes.
 
-### [ ] 5. CFF Fake Case Shared Router Encoding
+Deferral evidence:
+
+- Not retained for the 2026-05-26 milestone. Fresh full-JVM validation passes
+  after task 3, and no current artifact requires changing real-case switch
+  target encoding to satisfy the bytecode-size objective.
+
+### [deferred] 5. CFF Fake Case Shared Router Encoding
 
 Scope:
 
@@ -567,7 +583,14 @@ Completion criteria:
 - Largest-method and output-size reports show reduced physical growth.
 - Subagent implementation review passes.
 
-### [ ] 6. Transition Delta-Key Update Encoding
+Deferral evidence:
+
+- Not retained for the 2026-05-26 milestone. The budgeted fake/alias policy
+  already removes fake rows under `CRITICAL` pressure and the validated
+  artifacts no longer fail size gates. Shared fake routing remains a future
+  candidate only for retained fake rows in smaller pressure tiers.
+
+### [deferred] 6. Transition Delta-Key Update Encoding
 
 Scope:
 
@@ -611,7 +634,14 @@ Completion criteria:
 - CFF audits and full-obf artifacts pass.
 - Subagent implementation review passes.
 
-### [ ] 7. String Call-Site Live-Word Thinning
+Deferral evidence:
+
+- Not retained for the 2026-05-26 milestone. Existing rejected optimization
+  rows show transition/key updates are sensitive; task 3 repaired the size
+  failure without replacing full guard/path/block refreshes. No current failing
+  invariant justifies delta-key semantics in this milestone.
+
+### [deferred] 7. String Call-Site Live-Word Thinning
 
 Scope:
 
@@ -648,7 +678,14 @@ Completion criteria:
   key-cell update.
 - Subagent implementation review passes.
 
-### [ ] 8. Indy Call-Site Flow-Word Budget Thinning
+Deferral evidence:
+
+- Not retained for the 2026-05-26 milestone. Generated-helper hardening gates
+  and helper relocation repaired the current string-related size pressure while
+  keeping the existing string decode surface intact. Further string call-site
+  thinning remains a separate future optimization.
+
+### [deferred] 8. Indy Call-Site Flow-Word Budget Thinning
 
 Scope:
 
@@ -677,7 +714,13 @@ Completion criteria:
 - Existing loop caching behavior is preserved.
 - Subagent implementation review passes.
 
-### [ ] 9. Final Compatibility and Performance Review
+Deferral evidence:
+
+- Not retained for the 2026-05-26 milestone. Split-hidden-key transfer and the
+  existing loop-aware indy flow path now pass full-JVM validation. Additional
+  non-loop indy thinning remains a separate future optimization.
+
+### [x] 9. Final Compatibility and Performance Review
 
 Scope:
 
@@ -706,3 +749,21 @@ Completion criteria:
 - Reports show reduced CFF/string/indy physical growth versus the baseline
   census where changed paths apply.
 - Final subagent plan review passes.
+
+Completion evidence:
+
+- Fresh final `R-build`, focused method-parameter reflection regression,
+  targeted CFF/parameter/indy/string validation, and `R-full-jvm` passed after
+  the final source change.
+- Fresh `R-full-jvm` report was captured at
+  `build/test-jvm-full-obf-perf/jvm-full-obf-performance-baseline.json` with
+  TEST and obfusjack `exitCode=0`, evaluator `exitCode=0`, and SnakeGame
+  preserving the expected headless `exitCode=1` behavior.
+- Fresh obfuscation logs show no `ClassTooLargeException` or
+  `MethodTooLargeException` in the generated obfuscation output. The previously
+  failing `test21` artifact writes `Wrote 30 classes and 1 resources` with
+  `Relocated large CFF helper sets: hosts=9 methods=569`.
+- Implementation subagent review passed after the split-hidden-key reflection
+  gap was fixed. The review found no sample-specific production logic, no
+  temporary diagnostics, and confirmed the runtime reflective split-key path and
+  regression coverage.
