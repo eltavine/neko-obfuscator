@@ -628,7 +628,7 @@ Progress evidence:
   remain where needed, fake/poison emission is intact, and no static-key or
   fallback semantics were introduced.
 
-### [ ] 5. CFF Fake Case Shared Router Encoding
+### [x] 5. CFF Fake Case Shared Router Encoding
 
 Scope:
 
@@ -671,6 +671,49 @@ Continuation evidence:
   rows. Reopened on 2026-05-26 by user request to complete the full plan. The
   implementation is limited to retained fake rows in budget tiers that still
   emit fake cases, and must preserve retained fake token/cardinality behavior.
+
+Concrete shared-router eligibility recorded before code changes:
+
+- The in-method shared fake router is eligible only when an inline island
+  dispatcher retains more than one fake case. `CRITICAL` methods still emit zero
+  fake cases by task 3 policy, and single-fake islands keep the current direct
+  fake body because a shared router would not reduce repeated physical blocks.
+- Each retained fake dispatch token still maps to a distinct fake label. The
+  label stores a fake selector and jumps to the island-local shared fake body.
+- The shared fake body must mix the fake selector into live guard/path/block and
+  method-key state before executing fake-key pollution and bounce logic, so the
+  route remains live-state-dependent and selector-dependent without exposing a
+  static key or removing fake/poison rows.
+
+Progress evidence:
+
+- Implemented an island-local shared fake router for inline dispatchers with
+  more than one retained fake case. Each fake token still targets a distinct
+  fake label; the labels store a selector and jump to the shared fake body.
+- The shared fake body mixes the selector with live guard/path/block and method
+  key state before running fake step-key pollution and fake bounce logic.
+  Single-fake islands still use the original direct fake body.
+- Fresh `R-build` passed:
+  `./gradlew :neko-test:compileTestJava`.
+- Fresh focused `R-cff` and `R-string-indy` validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --rerun-tasks`.
+- Fresh `R-full-jvm` passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`.
+- Fresh `R-inspect` confirms retained fake cardinality remains present in
+  budget tiers that emit fake rows, for example
+  `a/c.a([Ljava/lang/Object;)V realRows=17 fakeRows=5 poisonRows=5`,
+  `a/w.q([Ljava/lang/Object;)V realRows=25 fakeRows=45 poisonRows=24`, and
+  `a/a.d([Ljava/lang/Object;J)Ljava/lang/String; realRows=49 fakeRows=22
+  poisonRows=49`.
+- Fresh obfuscation/run stderr inspection showed no `ClassTooLargeException`,
+  `MethodTooLargeException`, bootstrap error, skip-on-error marker, or fallback
+  marker in the generated full-JVM logs. SnakeGame retains the expected
+  headless stderr behavior.
+- Implementation subagent review returned PASS. The review confirmed retained
+  fake tokens still enter dispatch cases individually, fake labels route through
+  a bounded shared body, selector/live-state mixing happens before fake
+  step/bounce logic, poison/default dispatch remains intact, and no fallback or
+  static-key replacement was introduced.
 
 ### [ ] 6. Transition Delta-Key Update Encoding
 

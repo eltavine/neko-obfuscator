@@ -1120,13 +1120,30 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             insns.add(stub.getKey());
             insns.add(new JumpInsnNode(Opcodes.GOTO, stub.getValue()));
         }
-        for (int fakeIndex = 0; fakeIndex < fakes.size(); fakeIndex++) {
-            insns.add(fakes.get(fakeIndex));
-            long fakeSeed = edgeSeed(
+        if (useSharedFakeCaseRouter(fakes.size(), syntheticNoiseBudget)) {
+            LabelNode sharedFake = new LabelNode();
+            int fakeSelectorLocal = keyTmpLocal + 3;
+            for (int fakeIndex = 0; fakeIndex < fakes.size(); fakeIndex++) {
+                insns.add(fakes.get(fakeIndex));
+                JvmPassBytecode.pushInt(insns, fakeIndex);
+                insns.add(new VarInsnNode(Opcodes.ISTORE, fakeSelectorLocal));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, sharedFake));
+            }
+            long sharedFakeSeed = edgeSeed(
                 salt,
                 group.hub(),
                 group.islandLabels()[island],
-                0x46414B4549534C45L ^ island ^ fakeIndex
+                0x534846414B45524CL ^ island ^ fakes.size()
+            );
+            insns.add(sharedFake);
+            emitSharedFakeSelectorPollution(
+                insns,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                fakeSelectorLocal,
+                sharedFakeSeed
             );
             emitStepKeys(
                 insns,
@@ -1134,7 +1151,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 guardLocal,
                 pathKeyLocal,
                 blockKeyLocal,
-                fakeSeed,
+                sharedFakeSeed,
                 EdgeRole.FAKE
             );
             emitFakeCaseBounce(
@@ -1151,11 +1168,96 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 island,
                 keyStateByLabel,
                 methodSeed,
-                fakeSeed,
+                sharedFakeSeed,
                 transitionOutliner
             );
+        } else {
+            for (int fakeIndex = 0; fakeIndex < fakes.size(); fakeIndex++) {
+                insns.add(fakes.get(fakeIndex));
+                long fakeSeed = edgeSeed(
+                    salt,
+                    group.hub(),
+                    group.islandLabels()[island],
+                    0x46414B4549534C45L ^ island ^ fakeIndex
+                );
+                emitStepKeys(
+                    insns,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    fakeSeed,
+                    EdgeRole.FAKE
+                );
+                emitFakeCaseBounce(
+                    insns,
+                    group,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    keyTmpLocal,
+                    firstState,
+                    island,
+                    keyStateByLabel,
+                    methodSeed,
+                    fakeSeed,
+                    transitionOutliner
+                );
+            }
         }
         return insns;
+    }
+
+    private boolean useSharedFakeCaseRouter(
+        int fakeCount,
+        SyntheticNoiseBudget syntheticNoiseBudget
+    ) {
+        return fakeCount > 1 && syntheticNoiseBudget != SyntheticNoiseBudget.CRITICAL;
+    }
+
+    private void emitSharedFakeSelectorPollution(
+        InsnList insns,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int fakeSelectorLocal,
+        long seed
+    ) {
+        int guardMask = nonZeroInt(JvmPassBytecode.mix(seed, 0x5348464755415244L));
+        int blockMask = nonZeroInt(JvmPassBytecode.mix(seed, 0x534846424C4F434BL));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, fakeSelectorLocal));
+        JvmPassBytecode.pushInt(insns, guardMask);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, guardLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, fakeSelectorLocal));
+        JvmPassBytecode.pushInt(insns, blockMask);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, blockKeyLocal));
+
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, fakeSelectorLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
     }
 
     private boolean isDirectRealCaseTargetVerifierCompatible(
