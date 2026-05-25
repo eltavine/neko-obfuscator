@@ -999,7 +999,7 @@ Progress evidence:
   guard/path/block/pc and class-key material, and absence of fallback, bridge
   helper, JNI-style bypass, or plaintext state-token exposure.
 
-### [ ] 9. Final Compatibility and Performance Review
+### [x] 9. Final Compatibility and Performance Review
 
 Scope:
 
@@ -1052,3 +1052,64 @@ Continuation requirement:
 - The historical evidence above is stale for the reopened full-plan objective.
   Task 9 remains incomplete until fresh validation and final plan review pass
   after tasks 4 through 8 are implemented and committed.
+
+Final validation evidence after tasks 4-8:
+
+- Fresh final `R-build` passed after the final plan runtime source change
+  (`1b12af8`):
+  `./gradlew :neko-test:compileTestJava`.
+- Fresh final focused `R-cff` and `R-string-indy` validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --rerun-tasks`.
+- Fresh final `R-full-jvm` passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`.
+- Fresh final `R-inspect` of full-JVM obfuscation and runtime stderr logs found
+  no `ClassTooLargeException`, `MethodTooLargeException`, `VerifyError`,
+  bootstrap error, skip-on-error marker, fallback marker, `translated=0`, or
+  `Native compilation produced no libraries`. The only `Exception in thread`
+  rows are the expected original and full-obf SnakeGame headless stderr rows.
+- Worktree freshness note: the repository still contains unrelated pre-existing
+  dirty native/performance files outside this CFF/string/indy plan. The
+  plan-scoped runtime and test files changed by tasks 4-8 were clean after
+  `1b12af8` before the final validation commands ran; only this plan document
+  changed afterward to record Task 9 evidence.
+- The fresh full-JVM performance report at
+  `build/test-jvm-full-obf-perf/jvm-full-obf-performance-baseline.json` records
+  `exitCode=0` for TEST full-obf, obfusjack full-obf, and evaluator full-obf.
+  SnakeGame remains the expected headless `exitCode=1` for both original and
+  full-obf runs.
+- Fresh obfuscation logs retain successful large-method materialization:
+  `test21-obf.jar` writes 30 classes and 1 resource with relocated CFF helper
+  sets `hosts=9 methods=569`; TEST writes 48 classes and 4 resources with
+  relocated helper sets `hosts=11 methods=550`; evaluator writes 42 classes and
+  2 resources with relocated helper sets `hosts=11 methods=605`.
+- CFF physical-growth comparison against the recorded baseline size failure:
+  `test21` `a/a.main([Ljava/lang/String;)V` went from baseline
+  `fakeCases=303`, `fakeBounceRows=303`, `materialWords=15995`, and
+  `rawBytes=63980` to final `fakeCases=0`, `fakeBounceRows=0`,
+  `materialWords=6905`, and `rawBytes=27620`, while preserving
+  `realBlocks=217` and `poisonRows=148`.
+- CFF direct-dispatch reduction remains present in final generated artifacts:
+  task-4 inspection showed real zero-stack cases routed directly with
+  `a-a.javap directTargets=1335 stubTargets=84`,
+  `evaluator-a-a.javap directTargets=175 stubTargets=2`, and
+  `test21-a-a.javap directTargets=1274 stubTargets=74`; fallback stubs remain
+  only for labels not proven zero-stack.
+- Fresh focused `javap` inspection confirmed the new string tail ABI:
+  `StringShapes.__neko_strtail$:([Ljava/lang/Object;IJIII)Ljava/lang/String;`
+  appears at the helper definition and 12 call sites. Compared with the
+  pre-task-7 inline call-site form, the class-key-table suffix and final
+  live-word mix are now in the shared tail, so those suffix instructions are no
+  longer duplicated at each string site.
+- Fresh focused `javap` inspection confirmed the new indy flow ABI:
+  `IndyReferenceShapes.__neko_indy_flow:(IIII[Ljava/lang/Object;IJ)J` appears
+  at the helper definition and 16 invoke call sites, with no old
+  `(IIII[Ljava/lang/Object;IJI)J` descriptor in the generated focused jar. This
+  removes the per-site pushed state-token argument from every indy flow helper
+  call while preserving live guard/path/block/pc and method-key inputs.
+- The current implementation commits for the reopened plan are:
+  `5e34866` plan reopen checkpoint, `d2caf9f` direct CFF real-case dispatch
+  targets, `4677af6` shared retained fake-case routing, `f363fbe` delta CFF
+  transition key updates, `1520879` string live-word call-site thinning, and
+  `1b12af8` indy flow helper call-site thinning.
+- Final plan review subagent returned PASS after the freshness and physical
+  growth evidence was clarified. The review reported no concrete blockers.
