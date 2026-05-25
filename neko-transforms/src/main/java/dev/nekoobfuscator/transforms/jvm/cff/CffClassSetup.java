@@ -2225,16 +2225,26 @@ abstract class CffClassSetup extends CffSharedState {
     }
 
     private String uniqueCffHelperHostName(PipelineContext pctx, String owner) {
-        String base = owner + "$" + Integer.toUnsignedString(
-            (int) JvmPassBytecode.mix(owner.hashCode(), 0x434646484F535431L),
-            36
-        );
-        String name = base;
-        int suffix = 0;
-        while (pctx.classMap().containsKey(name)) {
-            name = base + "$" + Integer.toUnsignedString(++suffix, 36);
+        String prefix = packageName(owner);
+        if (!prefix.isEmpty()) {
+            prefix += "/";
         }
+        int index = 0;
+        String name;
+        do {
+            name = prefix + renamerSimpleName(index++);
+        } while (pctx.classMap().containsKey(name));
         return name;
+    }
+
+    private String renamerSimpleName(int index) {
+        int value = index;
+        StringBuilder name = new StringBuilder();
+        do {
+            name.append((char) ('a' + (value % 26)));
+            value = value / 26 - 1;
+        } while (value >= 0);
+        return name.toString();
     }
 
     private void rewriteRelocatedCffHelperCalls(

@@ -2,15 +2,22 @@ package dev.nekoobfuscator.test;
 
 import dev.nekoobfuscator.api.config.ObfuscationConfig;
 import dev.nekoobfuscator.api.config.TransformConfig;
+import dev.nekoobfuscator.core.ir.l1.L1Class;
+import dev.nekoobfuscator.core.jar.ClassHierarchy;
 import dev.nekoobfuscator.core.jar.JarInput;
 import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
+import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
+import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.MethodNode;
 
 import java.io.FileOutputStream;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -95,6 +102,41 @@ public class JvmRenamerIntegrationTest {
         assertEquals(original, obfuscated);
         assertTrue(obfuscated.contains("COUNTER OK"), obfuscated);
         assertNoGeneratedDollarFields(outputJar);
+    }
+
+    @Test
+    void renamerStyleCffHelperHostsStayInPackageWithoutDollarNames() throws Exception {
+        ObfuscationConfig config = new ObfuscationConfig();
+        config.setTransforms(Map.of("renamer", new TransformConfig(true, 1.0, Map.of("packagePrefix", "z/"))));
+        ClassHierarchy hierarchy = new ClassHierarchy();
+        Map<String, L1Class> classes = new LinkedHashMap<>();
+        for (String name : List.of("z/a", "z/b", "z/e")) {
+            L1Class clazz = new L1Class(emptyClass(name));
+            classes.put(name, clazz);
+            hierarchy.addClass(clazz);
+        }
+        PipelineContext pctx = new PipelineContext(config, hierarchy, classes);
+
+        Method allocator = Class
+            .forName("dev.nekoobfuscator.transforms.jvm.cff.CffClassSetup")
+            .getDeclaredMethod("uniqueCffHelperHostName", PipelineContext.class, String.class);
+        allocator.setAccessible(true);
+
+        String helperHost = (String) allocator.invoke(new ControlFlowFlatteningPass(), pctx, "z/e");
+
+        assertEquals("z/c", helperHost);
+        assertFalse(helperHost.substring(helperHost.lastIndexOf('/') + 1).contains("$"), helperHost);
+    }
+
+    private ClassNode emptyClass(String name) {
+        ClassNode node = new ClassNode();
+        node.version = Opcodes.V17;
+        node.access = Opcodes.ACC_PUBLIC;
+        node.name = name;
+        node.superName = "java/lang/Object";
+        node.methods = new ArrayList<>();
+        node.fields = new ArrayList<>();
+        return node;
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {

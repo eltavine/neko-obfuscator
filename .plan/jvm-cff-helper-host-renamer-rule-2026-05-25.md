@@ -36,7 +36,7 @@
     user-requested delegation, so this plan uses local review as the available
     substitute.
 
-- [ ] Repair CFF relocated helper host naming
+- [x] Repair CFF relocated helper host naming
   - Scope: replace `owner + "$" + hash` host names with deterministic,
     same-package, renamer-style simple class names.
   - Required evidence: generated host names are selected from the same base-26
@@ -45,8 +45,11 @@
     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest`.
   - Completion criteria: code no longer emits `$` helper host class names from
     the CFF relocation path and targeted tests pass.
+  - Completion evidence 2026-05-25: `uniqueCffHelperHostName` now allocates a
+    same-package base-26 simple class name and skips occupied entries in
+    `pctx.classMap()`.
 
-- [ ] Add regression coverage
+- [x] Add regression coverage
   - Scope: prove the helper host allocator returns same-package names without
     `$` and without colliding with existing classes.
   - Required evidence: focused test exercises the allocator behavior directly.
@@ -54,11 +57,17 @@
     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest`.
   - Completion criteria: test fails on the previous `owner + "$"` behavior and
     passes with the repair.
+  - Completion evidence 2026-05-25:
+    `renamerStyleCffHelperHostsStayInPackageWithoutDollarNames` proves occupied
+    `z/a` and `z/b` are skipped and owner `z/e` receives helper host `z/c`.
 
-- [ ] Final review and commit
+- [x] Final review and commit
   - Scope: review diff for scope discipline and commit only this plan plus the
     implementation/test files.
   - Required evidence: `git diff --check`, targeted Gradle result, and scoped
     `git status`.
   - Validation target: local diff review and targeted test output.
   - Completion criteria: no unrelated dirty work is included.
+  - Completion evidence 2026-05-25: `git diff --check` passed for the scoped
+    files and `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest`
+    passed.
