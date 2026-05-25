@@ -116,8 +116,8 @@ CFF also installs one synthetic class key table field per class that has protect
 
 - Primitive locals written by protected application stores are moved into encrypted shadow slots. Store masks are derived from live CFF locals, method key material, and the class key table.
 - Original primitive local slots are poisoned after each protected store, while later protected loads project the value transiently from the encrypted shadow.
-- Reference locals written by protected application stores are moved into verifier-valid shadow slots and the original slot is nulled.
-- Safe zero/equality branches over protected int-like locals can compare encoded shadow and mask locals directly instead of restoring a plaintext accumulator local.
+- Reference locals stay on the verifier-correct JVM local path; the pass does not create a `ThreadLocal` or `Object[]` reference warehouse.
+- Safe zero/equality branches over protected int-like locals compare the encoded shadow with a transiently recomputed live-key mask instead of restoring a plaintext accumulator local.
 
 ### `methodParameterObfuscation`
 

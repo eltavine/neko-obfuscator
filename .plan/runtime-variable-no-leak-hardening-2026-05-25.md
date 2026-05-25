@@ -151,6 +151,30 @@
     review passes; no JNI, JVMTI, native fallback, original-bytecode fallback,
     skip-on-error behavior, sample-specific logic, or CFF/key weakening is
     introduced.
+  - Partial evidence: documentation was updated to state that runtime-variable
+    obfuscation protects primitive locals with CFF-live transient masks, poisons
+    original primitive slots, and leaves references on the verifier-correct JVM
+    local path without a `ThreadLocal`/`Object[]` reference warehouse.
+  - Partial evidence: the fresh compatibility command above failed in
+    `JvmConstantObfuscationIntegrationTest.constantObfuscationCoversJvmNumericShapesWithCff`
+    with `Cannot write verifiable class ConstantShapes with COMPUTE_FRAMES` and
+    `AnalyzerException: Expected D, but found .` at generated instruction 7989.
+    The failing transform set was `keyDispatch`, `controlFlowFlattening`, and
+    `constantObfuscation`; `runtimeVariableObfuscation` was not scheduled in
+    that failing test.
+  - Partial evidence: a fresh pre-RVNL worktree at commit `0e2f534` reproduced
+    the same constant test failure with
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/rvnl-precheck/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest`,
+    proving the blocker predates RVNL-2/RVNL-3.
+  - Partial evidence: rerunning the remaining compatibility set without the
+    pre-existing constant blocker completed with `BUILD SUCCESSFUL in 3s`:
+    `JvmRuntimeVariableObfuscationIntegrationTest`,
+    `JvmStringObfuscationIntegrationTest`,
+    `JvmInvokeDynamicObfuscationIntegrationTest`, and
+    `JvmMethodParameterObfuscationIntegrationTest`.
+  - Blocked: this subtask remains open because the full compatibility command
+    cannot pass until the pre-existing `constantObfuscation`/CFF verifier issue
+    is fixed under its own evidence-backed high-risk plan.
 
 ## Constraints
 

@@ -114,8 +114,8 @@ stringObfuscation
 
 - 受保护的应用层 primitive local 写入会移动到加密 shadow slot；store mask 来自 live CFF locals、method key material 与 class key table。
 - 原始 primitive local slot 会在每次受保护 store 后被污染；后续受保护 load 只会在操作数栈上临时从 encrypted shadow 投影真实值。
-- 受保护的应用层 reference local 写入会移动到 verifier-valid shadow slot，原始 slot 会被置空。
-- 安全的 int-like local zero/equality 分支可以直接比较 encoded shadow 与 mask local，而不需要恢复 plaintext accumulator local。
+- reference local 保留在 verifier-correct JVM local 路径上；该 Pass 不创建 `ThreadLocal` 或 `Object[]` 引用仓库。
+- 安全的 int-like local zero/equality 分支会将 encoded shadow 与临时重算的 live-key mask 比较，而不需要恢复 plaintext accumulator local。
 
 ### `methodParameterObfuscation`（方法参数混淆）
 

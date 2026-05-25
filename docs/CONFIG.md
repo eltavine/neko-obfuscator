@@ -89,7 +89,7 @@ The current CLI registers:
 | `methodParameterObfuscation` | `PRE_TRANSFORM` | Packs eligible method parameters into one `Object[]` carrier after key dispatch. | `{ enabled: true }` |
 | `controlFlowFlattening` | `TRANSFORM` | Rewrites eligible methods into keyed island dispatchers and publishes CFF metadata. | `{ enabled: true, intensity: 1.0 }` |
 | `validationSinkHardening` | `TRANSFORM` | Rewrites fixed `String.equals` validation sinks into CFF-live keyed tag checks. | `{ enabled: true }` |
-| `runtimeVariableObfuscation` | `TRANSFORM` | Moves protected local values into CFF-keyed shadow slots and poisons original local slots after stores. | `{ enabled: true }` |
+| `runtimeVariableObfuscation` | `TRANSFORM` | Moves protected primitive locals into CFF-keyed shadow slots, poisons original primitive slots after stores, and leaves references on the JVM local path without a runtime reference warehouse. | `{ enabled: true }` |
 | `constantObfuscation` | `TRANSFORM` | Rewrites numeric constants using CFF live state and class key tables. | `{ enabled: true, intensity: 1.0 }` |
 | `stringObfuscation` | `TRANSFORM` | Encrypts string literals and concat recipe constants using CFF live state, AES/DES, XOR, and class-local caches. | `{ enabled: true, intensity: 1.0 }` |
 

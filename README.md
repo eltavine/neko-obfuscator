@@ -22,7 +22,7 @@ The current CLI registers the rebuilt JVM obfuscation pipeline:
 - `keyDispatch`: in-place hidden long-key dispatch for application methods.
 - `methodParameterObfuscation`: replaces eligible method parameter lists with one `Object[]` carrier after key dispatch.
 - `controlFlowFlattening`: direct keyed island dispatchers over the original method body.
-- `runtimeVariableObfuscation`: CFF-live keyed shadow storage for protected local variables.
+- `runtimeVariableObfuscation`: CFF-live keyed shadow storage for protected primitive locals without a runtime reference warehouse.
 - `invokeDynamic`: CFF-state keyed invokedynamic indirection for method and field references.
 - `constantObfuscation`: CFF-state keyed numeric constant decoding.
 - `stringObfuscation`: CFF-state keyed AES/DES plus XOR string literal decoding with per-class cipher caches.
@@ -47,6 +47,7 @@ The ultimate objective of neko-obfuscator is to disrupt this landscape by provid
 | JVM key dispatch | Adds hidden long key material to eligible method signatures, rewrites application calls to carry the key, and seeds boundary methods locally. |
 | Method parameter obfuscation | Packs eligible method parameters into a single `Object[]` argument, preserves hidden key propagation, and rewrites call sites. |
 | Control-flow flattening | Splits verifier-safe basic blocks, groups dispatchers by frame shape, encodes state/domain values with per-edge evolving keys, and keeps constructors' initialization prefix intact. |
+| Runtime variable obfuscation | Stores protected primitive locals in CFF-live keyed shadows with transient masks, poisons original primitive slots, and leaves references on the JVM local path without a `ThreadLocal`/`Object[]` warehouse. |
 | Numeric constants | Rewrites numeric pushes, numeric `LDC`, `IINC`, and numeric `ConstantValue` fields. Runtime decodes depend on CFF live locals and the class key table. |
 | String literals | Encrypts direct string `LDC`, string `ConstantValue` fields lowered into `<clinit>`, and string concat recipe constants. Runtime decoding uses AES or DES, XOR stream mixing, live CFF state, and class-local caches without helper classes. |
 | Native translation | Selects annotated or glob-matched methods, closes over application callees, lowers supported invokedynamic forms, translates JVM bytecode to generated C, builds native libraries with Zig, and patches HotSpot method entries during `JNI_OnLoad`. |
