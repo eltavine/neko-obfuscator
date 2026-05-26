@@ -3159,6 +3159,161 @@ P2.2.10 acceptance evidence:
   evidence does not show reduced CFF coverage, and unrelated dirty native,
   core, test, and untracked files must stay out of the checkpoint commit.
 
+#### P2.2.11 Replace packed transition-state `long[]` carrier with `int[]`
+
+Status: `[-]` plan-intake review passed; implementation pending.
+
+Scope:
+
+- Optimize only the generated CFF transition-state carrier used by transition
+  helpers, step helpers, and transition outliners to return decoded `int`
+  state through an array.
+- Replace the current packed `long[]` transition carrier with an `int[]`
+  carrier using explicit slots:
+  - `0 = guard`.
+  - `1 = path`.
+  - `2 = block`.
+  - `3 = pc`.
+  - `4 = domain`.
+  - `5 = result/token low value`.
+  - `6 = thread identity hash` for runtime-source mixing.
+- Keep the returned method key as `long`, keep the same live method-entry key
+  inputs, transition material rows, step material rows, outliner dispatch
+  formulas, result route masks, runtime-source cursor semantics, CFF block
+  coverage, fake/poison semantics, and helper generation coverage.
+- Update only generated/internal helper descriptors and descriptor recognizers
+  that currently carry the transition state as `[J`, including
+  `TRANSITION_MATERIAL_HELPER_DESC`, `STEP_MATERIAL_HELPER_DESC`,
+  `CffTransitionOutliner.DESC`, and relocatable CFF helper descriptor checks.
+  These are generated helper ABIs, not original application JVM ABI surfaces.
+- Do not change transition row indexes, row-base scaling, row cursor logic,
+  transition material word order, direct `out[]` store timing, token
+  object-cell helpers, compressed island material, invokedynamic, reflection,
+  MethodHandle, LambdaMetafactory, hidden method-key injection, fallback/skip
+  behavior, or original bytecode coverage.
+
+Required evidence:
+
+- P2.2.10 accepted-source ten-run runtime gate at
+  `build/jvm-runtime-perf/repeats-p2-2-10-10x/runtime-medians.tsv` is the
+  current comparison baseline: full TEST `Calc=179/179 ms` and full
+  obfusjack `Seq=307/309 ms`.
+- Fresh accepted-source JFR at
+  `build/jvm-runtime-perf/jfr/p2-2-11-current-obfusjack-1ms.jfr` completed
+  with `=== All tests completed ===`. `jfr view hot-methods` recorded
+  `a.da.ua(long, int, int, int, Object[], int, int, long[])` with `12`
+  samples, `a.da.za(...)` with `9` samples, and `a.a.fa(Object[], long)` with
+  `4` samples in the current hot-method table.
+- Filtering
+  `build/jvm-runtime-perf/jfr/p2-2-11-current-obfusjack-1ms-samples.txt` to
+  stacks containing the sequential matrix frame `a.a.o(...)` found `25`
+  sequential samples: `a.da.ua(...)=12`, `a.da.za(...)=9`, and
+  `a.a.fa(Object[], long)=4`. This binds the carrier work to the obfusjack
+  `Seq` runtime path rather than to parallel/thread setup samples.
+- Fresh bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-11-current-obfusjack-a-a.javap.txt` shows the
+  hot `a.a.fa(Object[], long)` path allocates a `newarray long` carrier,
+  invokes `a.da.ua:(JIII[Ljava/lang/Object;II[J)J`, then reloads and unpacks
+  the decoded transition state through repeated `LALOAD`, `LUSHR`, and `L2I`
+  sequences before dispatch.
+- The same bytecode inspection shows generated transition outliners still use
+  descriptor shape `(JIIIII[J)J`, so the packed carrier is shared by both the
+  material-helper path and outlined transition helper path.
+- Fresh bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-11-current-obfusjack-a-da.javap.txt` shows
+  generated `a.da.ua:(JIII[Ljava/lang/Object;II[J)J` still performs the
+  helper-entry `row * 37`, decodes the same transition material words, writes
+  packed state to `out[0]`, `out[1]`, and `out[2]` with `LASTORE`, and returns
+  the decoded method key as `long`.
+- Source inspection shows the current carrier contract is centralized in
+  `CffKeyTransferRewriter.emitInitTransitionOut`, `emitTransitionOutStores*`,
+  `emitTransitionOutPairStore*`, `emitTransitionOutHighStore`,
+  `emitTransitionOutPairLoad`, `emitTransitionOutHighLoad`, and
+  `emitTransitionOutLowLoad`; the same helpers are consumed by
+  `CffMaterialTables.installTransitionMaterialHelper`,
+  `CffMaterialTables.installStepMaterialHelper`,
+  `CffKeyStateEmitter.emitStepKeys`, and `CffTransitionOutliner`.
+- `CffIslandMaterial.emitCffIslandCallsiteRuntimeSource` currently reads the
+  thread hash from `long out[3]` for runtime-source mixing; this must become
+  `int out[6]` without removing the thread contribution.
+
+Invariant preservation:
+
+| Current carrier | P2.2.11 carrier | Preserved invariant |
+| --- | --- | --- |
+| `long[0]` high bits hold guard and low bits hold path | `int[0]` guard and `int[1]` path | decoded guard/path values remain separate live `int` state |
+| `long[1]` high bits hold block and low bits hold pc | `int[2]` block and `int[3]` pc | decoded block/pc values remain separate live `int` state |
+| `long[2]` high bits hold domain and low bits hold result/token | `int[4]` domain and `int[5]` result/token | domain and result routing remain live and mask-protected |
+| `long[3]` holds thread identity hash | `int[6]` holds thread identity hash | runtime-source thread mixing remains live |
+| helper returns decoded method key as `long` | unchanged | hidden method-key propagation remains live |
+
+Rejected-route separation:
+
+- P1.6 and P2.2.7 changed the transition row call-boundary contract by passing
+  pre-scaled row bases. P2.2.11 keeps row indexes, row-base scaling, and the
+  P2.2.10 helper-local row cursor unchanged.
+- P2.2.8 moved decoded transition output stores directly into `out[]`.
+  P2.2.11 does not move store timing or decode formulas; it only changes the
+  carrier element type and removes pair pack/unpack operations.
+- P2.2.9 streamed compressed-island local staging. P2.2.11 does not touch
+  compressed-island material lookup or its value/mask decode shape.
+- The current evidence also shows `invokeDynamic` is not the primary P1 path;
+  P2.2.11 does not alter invokedynamic bootstrap, caching, or callsite
+  materialization.
+
+Subtasks:
+
+1. `[x]` Record and review the transition-state carrier plan.
+   Evidence requirement: this P2.2.11 section, fresh P2.2.10 runtime baseline,
+   fresh accepted-source JFR evidence, generated `javap` evidence for
+   `a.a.fa` and `a.da.ua`, source evidence for every centralized carrier
+   store/load/descriptor site, and explicit non-duplication against rejected
+   P1.6/P2.2.7, P2.2.8, and P2.2.9 routes.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic,
+   evidence-backed, correctly bounded to generated/internal transition-state
+   carrier ABI, invariant-preserving, and compliant before source edits begin.
+2. `[ ]` Implement, validate, and measure the `int[]` transition-state carrier.
+   Evidence requirement: source diff changes only the transition-state carrier
+   allocation, centralized carrier store/load helpers, generated/internal
+   helper descriptors/descriptor checks, and the runtime-source thread-hash
+   slot load required by the carrier slot map.
+   Validation target: the same targeted JVM command as P1.1, followed by
+   generated bytecode inspection for `a.a.fa`, `a.da.ua`, transition outliners,
+   and step helper callsites; helper descriptor/topology comparison;
+   stdout/stderr scan for verifier/linkage errors and fallback/skip markers;
+   `hs_err` scan in the repository tree; and a fresh ten-run JVM runtime gate
+   for full TEST and full obfusjack generated jars.
+   Completion criteria: targeted JVM validation passes; generated bytecode
+   shows transition-state carriers are allocated with `NEWARRAY int`, internal
+   helper descriptors use `[I` for the transition carrier, carrier reloads use
+   `IALOAD` without transition-state `LALOAD/LUSHR/L2I` pair unpacking,
+   thread-hash runtime-source mixing still reads the carrier slot, full
+   obfusjack `Seq` improves from accepted P2.2.10 ten-run lower/upper median
+   `307/309 ms`, full TEST `Calc` does not regress from accepted P2.2.10
+   `179/179 ms`, and Platform, Virtual, Parallel, and VThreads remain within
+   the accepted P2.2.10 observed spreads. If either target regresses, revert
+   the source change, regenerate the accepted-source artifact, record
+   rejection evidence, and commit only the rejection record.
+
+P2.2.11 plan-intake review:
+
+- Subagent plan-intake review passed. The review confirmed that the plan is
+  evidence-backed by the current P2.2.10 ten-run baseline, fresh JFR/sample
+  attribution, generated `javap` evidence for the `[J` transition carrier
+  allocation and pack/unpack path, and source-level carrier ownership sites.
+- The review confirmed the scope is generic and architecture-level because it
+  targets the generated transition-state carrier contract across transition
+  helpers, step helpers, and outliners, and limits descriptor changes to
+  generated/internal helper ABIs rather than original application JVM ABI
+  surfaces.
+- Required post-implementation checks from the review: update all centralized
+  carrier descriptors and descriptor checks together, leave unrelated
+  non-carrier `[J` uses untouched, prove generated bytecode uses `[I`
+  carriers and `IALOAD` instead of transition-state `LALOAD/LUSHR/L2I`
+  unpacking, keep CFF/topology coverage unchanged, and beat the P2.2.10
+  obfusjack `Seq` baseline without TEST `Calc` regression.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
