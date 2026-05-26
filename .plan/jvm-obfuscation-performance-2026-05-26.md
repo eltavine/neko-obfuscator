@@ -2574,6 +2574,62 @@ P2.2.6 rejection evidence:
   object-result stack-carry shape unless it first explains and removes the
   generic TEST `Calc` regression.
 
+#### P2.2.7 Rejected candidate: precompute transition-material row bases
+
+Status: `[x]` plan-intake rejected before implementation. No source change was
+made for this branch.
+
+Rejected scope:
+
+- The candidate was to change the generated CFF transition-material helper's
+  sixth `int` argument from transition row index to precomputed transition row
+  base offset. `registerTransitionMaterialRow` already computes
+  `base = index * TRANSITION_MATERIAL_ROW_WORDS` to initialize the row; the
+  candidate would have returned that base to callsites and removed the helper
+  entry `row * TRANSITION_MATERIAL_ROW_WORDS` computation.
+
+Fresh supporting evidence for considering the candidate:
+
+- Fresh post-P2.2.6-revert obfusjack JFR filtered to the actual sequential
+  matrix stack (`a.a.o(...)`) captured `273` Seq samples. The first-frame
+  distribution was `a.da.za(...)=112`, `a.da.ua(...)=102`, and
+  `a.a.fa(Object[], long)=47`; no invokedynamic helper was in this Seq hot
+  stack.
+- Fresh obfusjack PrintInlining shows `a.da::ua (473 bytes)` compiled as a hot
+  transition-material helper and repeatedly reported as `callee is too large`
+  or `hot method too big` at `a.a::fa` callsites.
+- Fresh bytecode inspection of generated obfusjack `a.da.ua` shows the helper
+  starts by multiplying argument local `6` by `37` before any material word
+  load, and callsite inspection shows `a.a.fa` passes generated constant row
+  indexes.
+
+Plan-intake rejection evidence:
+
+- Subagent plan-intake review failed because this candidate is the same
+  row-boundary pre-scaling shape already tested and rejected in P1.6.
+- P1.6 already implemented the equivalent contract change, passed the fresh
+  targeted JVM validation command, and generated the intended bytecode:
+  `a.da.ua:(JIII[Ljava/lang/Object;II[J)J` no longer contained the entry
+  `iload row; bipush 37; imul; istore row`, while `a.a.fa(Object[], long)`
+  still invoked the original helper descriptor and passed pre-scaled constants
+  such as `12062`, `12099`, and `12136`.
+- P1.6 was rejected by a fresh ten-run runtime gate: full TEST `Calc` sorted
+  values were `199,206,207,208,210,211,215,218,221,225`, with lower/upper
+  medians `210/211 ms`; full obfusjack `Seq` sorted values were
+  `308,309,309,309,310,315,316,318,318,349`, with lower/upper medians
+  `310/315 ms`.
+- The P1.6 shape slightly improved full-obf obfusjack `Seq` from the then
+  accepted `318/320 ms` median, but regressed full TEST `Calc` from
+  `182/183 ms` to `210/211 ms`. Therefore the same row-boundary pre-scaling
+  must not be reused unless a later plan first explains and removes that Calc
+  regression generically.
+
+Conclusion:
+
+- No P2.2.7 implementation is allowed from this plan. The next key-update
+  optimization must target a different proven runtime path or include new
+  concrete evidence that removes the prior P1.6 Calc regression mechanism.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
