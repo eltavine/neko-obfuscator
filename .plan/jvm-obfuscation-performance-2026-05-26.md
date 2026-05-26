@@ -1173,6 +1173,108 @@ P1.4 rejection evidence:
 - The next P1 attempt must not reuse the no-domain direct-island transition
   helper unless it first explains and removes the Calc regression generically.
 
+#### P1.5 Mark direct-island transition rows on the existing helper ABI
+
+Scope:
+
+- Optimize the same generic CFF direct-island transition-material path proven
+  by P1.4, but keep the existing transition-material helper descriptor
+  `(JIII[Ljava/lang/Object;II[J)J` and helper count.
+- For direct-island materialized transition callsites only, set a private
+  high-bit flag on the row argument before invoking the existing helper.
+- In the existing transition-material helper, read and clear that row high-bit
+  flag before row-index scaling. When the flag is set, decode guard, path,
+  block, pc, and method key exactly as before, but skip
+  `TRANSITION_MATERIAL_DOMAIN_WORD` decode and write only `out[0]` / `out[1]`.
+  When the flag is clear, execute the current domain-bearing path unchanged.
+- Preserve transition material row registration, row encryption/masking,
+  method-key update, CFF block construction, island helper topology, hidden
+  method keys, packed carriers, fake/poison coverage, and non-direct domain
+  semantics.
+- Do not add a new helper method or descriptor, remove domain material from the
+  stored row, change domain-token semantics, special-case a method/class/
+  fixture, expose row words, or add fallback/skip/original-bytecode behavior.
+
+Dependency/order reason:
+
+- P1.4 proved the direct-island domain decode is generated and unconsumed on
+  the hot `mmulSeq` path, and that removing it can reduce full-obfusjack
+  `Seq`, but P1.4 also introduced a second transition-material helper and
+  regressed TEST `Calc`.
+- P1.5 keeps the original helper ABI and helper count while removing only the
+  unconsumed direct-island domain decode. It therefore tests the same proven
+  runtime invariant without the rejected P1.4 helper-surface change.
+
+Required evidence:
+
+- The freshly regenerated post-P1.4-revert full-obfusjack artifact completed a
+  same-JVM 8-run JFR probe with target `Seq` rows `310`, `308`, `306`, `305`,
+  `319`, `308`, `306`, and `305 ms`.
+- Filtering that fresh JFR to stacks containing obfuscated `mmulSeq`,
+  `a.a.fa(Object[], long)`, reports `fa_total=474`, `da_za_under_fa=240`,
+  `da_ua_under_fa=149`, and `ba_under_fa=260`, proving the transition helper
+  remains on the accepted post-revert hot path.
+- P1.4 bytecode inspection before revert proved the current obfuscated
+  `mmulSeq` direct-island shape: `22` transition-material helper callsites,
+  with only `2` reloading `out[2]` afterward. The other `20` direct-island
+  callsites consumed only `out[0]` / `out[1]`.
+- Source inspection shows `emitTransitionOutLoads(..., edgeKind !=
+  EdgeKind.DIRECT_ISLAND)` still intentionally avoids loading the domain word
+  for direct-island transitions, while `installTransitionMaterialHelper`
+  currently decodes `TRANSITION_MATERIAL_DOMAIN_WORD` and stores `out[2]`
+  unconditionally.
+- Source inspection shows `TRANSITION_MATERIAL_TABLE_SIZE` is `16_384` in
+  `CffSharedState`, and `registerTransitionMaterialRow` increments
+  `transitionMaterialCounter` then hard-fails when
+  `index >= TRANSITION_MATERIAL_TABLE_SIZE`. Therefore every real transition
+  material row index is below `0x4000`, and a private `0x80000000` callsite
+  flag can be stripped before scaling without colliding with any real row
+  identity.
+- P1.4 rejection evidence requires avoiding the extra no-domain helper
+  descriptor unless the Calc regression is explained and removed. P1.5
+  therefore forbids adding that helper descriptor and changes only the existing
+  helper's internal row-flag path.
+
+Invariant mapping:
+
+| Current transition path | P1.5 transition path | Preserved invariant |
+| --- | --- | --- |
+| direct and non-direct callsites invoke the same helper descriptor | unchanged | helper ABI and generated helper count do not change |
+| row argument is a table index below `TRANSITION_MATERIAL_TABLE_SIZE` | direct-island callsites pass the same row index with a private high-bit flag; helper clears the flag before scaling | material row identity and row table lookup are unchanged |
+| helper always decodes guard/path/block/pc/method/domain | helper decodes domain only when the high-bit flag is clear | every caller-consumed value is unchanged; non-direct domain semantics remain unchanged |
+| direct-island caller reads `out[0]` and `out[1]`, not `out[2]` | unchanged | direct-island routing observes the same guard/path/block/pc and method key |
+
+Validation target:
+
+Same targeted JVM command as P1.1.
+
+Runtime target:
+
+- Run the common runtime validation commands.
+- If full-obf obfusjack `Seq` remains above `200 ms`, run a fresh full
+  obfusjack JFR and record the remaining `a.da.ua(...)` samples under
+  `a.a.fa(Object[], long)`.
+
+Completion criteria:
+
+- Targeted JVM validation passes.
+- Common runtime validation commands complete and medians are recorded.
+- Full-obf obfusjack `Seq` improves from the current post-revert `312 ms`
+  median, or the source change is reverted before proceeding.
+- Full-obf TEST `Calc` remains no worse than the current P1.2.2b.2
+  before-edit median `180 ms`.
+- Generated bytecode inspection shows no new transition-material helper
+  descriptor was added, direct-island callsites still invoke the original
+  helper descriptor with flagged row constants, and the helper clears the flag
+  before indexing the row.
+- Non-direct transition callsites still pass unflagged row constants and still
+  decode/store domain.
+- CFF dry-run row counts for `realRows`, `fakeRows`, `poisonRows`,
+  `liveDispatchTokenRows`, material rows, and missing-row counters do not show
+  reduced coverage or new blockers compared with the P1.2.2b.2 artifact.
+- No forbidden runtime/log/marker scan hit is introduced.
+- Subagent implementation review passes before commit.
+
 ### P2 Bring TEST Calc runtime median to <= 60 ms
 
 Scope:
