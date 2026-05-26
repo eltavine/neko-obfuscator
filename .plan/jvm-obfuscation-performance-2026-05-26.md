@@ -831,6 +831,28 @@ P1.2.2b.1 completion criteria:
 - No forbidden runtime/log/marker scan hit is introduced.
 - Subagent implementation review passes before commit.
 
+P1.2.2b.1 status: `[x]` measured, rejected, and reverted before P1.2.2b.2.
+No implementation commit was made for this branch.
+
+P1.2.2b.1 rejection evidence:
+
+- The inline real-result material decode implementation passed the fresh
+  targeted JVM validation command for the CFF algebraic audit, strong-entry
+  seed regression, full JVM obfuscation performance test, invokedynamic,
+  constant, string, method-parameter, renamer, and obfuscation integration
+  tests. Gradle reported `BUILD SUCCESSFUL` with `19 executed` tasks.
+- The same implementation failed runtime acceptance. Fresh five-run medians
+  were original TEST `Calc=10 ms`, original obfusjack `Seq=2 ms`, full TEST
+  `Calc=210 ms`, full obfusjack `Platform=81 ms`, `Virtual=84 ms`,
+  `Seq=327 ms`, `Parallel=7 ms`, and `VThreads=8 ms`.
+- This violates the P1.2.2b.1 criteria because full TEST `Calc` regressed
+  beyond the original plan baseline `198 ms`, and full obfusjack `Seq` did not
+  improve from the P1.2.1 `327 ms` median.
+- The source change was fully reverted to the P1.2.2b.1 plan-checkpoint shape.
+  The next accepted implementation attempt must therefore target a different
+  remaining CFF runtime path; inlining only the island-material helper real
+  result decode is not sufficient.
+
 P1.2.2b shared-interpreter invariant mapping, if P1.2.2a is insufficient:
 
 | Current per-island helper surface | Shared interpreter surface | Preserved invariant |
