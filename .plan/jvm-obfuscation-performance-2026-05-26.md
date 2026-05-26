@@ -4877,6 +4877,10 @@ Rejected-route separation:
 
 #### P4.1 Replace material object-cell `AtomicLong` buckets with an `AtomicLongArray`
 
+Status: `[x]` rejected after fresh implementation validation. Do not retry this
+storage-shape change without new evidence that explains why the accepted
+rejection evidence below no longer applies.
+
 Scope:
 
 - Add one internal CFF material-carrier slot for the dynamic object-cell
@@ -4907,6 +4911,12 @@ Scope:
   `AtomicLongArray` indexed material object-cell update shape and still rejects
   missing sidecar mutation. This is a test assertion update for the planned
   generic storage change, not a runtime workaround.
+- Update integration-test slot constants that assert CFF material selector and
+  cache loads (`JvmStringObfuscationIntegrationTest` and
+  `JvmInvokeDynamicObfuscationIntegrationTest`) to match the one-slot internal
+  carrier layout shift introduced by `OBJECT_CELL_ARRAY_SLOT`. These updates
+  must preserve the existing selector/cache assertions and must not loosen them
+  into owner/name/descriptor-specific acceptance.
 
 Required evidence:
 
@@ -4932,6 +4942,9 @@ Required evidence:
   `getPlain(I)J`/`setPlain(IJ)V` as a valid sidecar mutation while preserving
   the existing requirement that generated helper bytecode mutates the CFF
   sidecar.
+- Integration tests with hard-coded CFF material slots must be updated only by
+  applying the documented one-slot shift. Passing by disabling selector/cache
+  slot checks is not allowed.
 - Subagent plan-intake review must confirm P4.1 is materially distinct from
   rejected P2.2.3, P2.2.6, P2.2.13, and P2.2.14 routes and preserves live
   dynamic key propagation.
@@ -5000,6 +5013,10 @@ Completion criteria:
 - `ControlFlowFlatteningAlgebraicAuditTest` passes because it detects the new
   `AtomicLongArray` indexed sidecar mutation shape; it must not pass by
   removing the sidecar mutation assertion.
+- `JvmStringObfuscationIntegrationTest` and
+  `JvmInvokeDynamicObfuscationIntegrationTest` pass with their selector/cache
+  slot assertions still active and adjusted only for the single added internal
+  carrier slot.
 - Full TEST `Calc` 10x lower/upper median improves from the current accepted
   `177/178 ms`; full obfusjack `Seq` 10x lower/upper median improves from the
   current accepted `303/304 ms`. If either target regresses or fails to
@@ -5014,6 +5031,25 @@ Completion criteria:
 - Subagent implementation review passes before commit.
 - Commit contains only the P4.1 implementation and the matching plan/todo
   update.
+
+Rejected implementation evidence:
+
+- Implementation attempted after the plan-only checkpoint `f81fd1c` changed only
+  CFF material object-cell storage, the two active material consumers, and the
+  slot-shape tests described in this subtask. Targeted JVM validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ObfuscationIntegrationTest --rerun-tasks`.
+- Fresh 10x runtime evidence in
+  `build/jvm-runtime-perf/p4-atomiclongarray-10x/runtime-medians.tsv` rejected
+  the change: TEST full `Calc` sorted
+  `182,185,185,186,186,186,187,188,190,191` with lower/upper median
+  `186/186 ms`, worse than the accepted current baseline `177/178 ms`;
+  obfusjack full `Seq` sorted `302,303,303,304,305,305,307,307,307,310` with
+  lower/upper median `305/305 ms`, not better than `303/304 ms`.
+- All P4.1 10x stderr logs under
+  `build/jvm-runtime-perf/p4-atomiclongarray-10x/` were empty, so the rejection
+  is performance-based rather than a crash, verifier, or fallback failure.
+- The failed P4.1 source/test edits were reverted before any implementation
+  commit. The remaining worktree change for this rejection is this plan record.
 
 #### P4.2 Extend delta block-key updates to eligible non-handler inline transitions
 
