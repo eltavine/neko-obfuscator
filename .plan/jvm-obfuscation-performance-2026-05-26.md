@@ -733,6 +733,36 @@ P1.2.2a completion criteria:
 - No forbidden runtime/log/marker scan hit is introduced.
 - Subagent implementation review passes before commit.
 
+P1.2.2a status: `[x]` measured, rejected, and reverted before P1.2.2b.
+No implementation commit was made for this branch.
+
+P1.2.2a rejection evidence:
+
+- Inline group-domain switch without a method-size gate failed the fresh
+  targeted JVM validation during full-obfusjack generation with
+  `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`.
+  The fresh finalizer log estimated `a/a.main` at `79101` bytes and
+  `<clinit>` at `61104` bytes, proving the generic inline wrapper removal can
+  exceed the JVM method-size limit on current full-obfusjack topology.
+- A generic size-gated version preserved current group-helper routing for
+  materialized direct-island paths and passed the same targeted JVM validation.
+  Its generated topology still preserved coverage: obfusjack reported
+  `totalCffSharedGroupDispatchCalls=0`, `totalCffTransitionMaterialCalls=391`,
+  `totalCffStepMaterialCalls=451`, `totalCffIslandMaterialCalls=347`,
+  `readyHelpers=275`, `currentHelpers=275`, `projectedHelperReduction=269`,
+  `liveDispatchTokenRows=347`, `staticDispatchTokenRows=0`, `realRows=347`,
+  `fakeRows=176`, `poisonRows=550`, and no missing-row blockers.
+- The size-gated version failed P1.2.2a runtime acceptance. Fresh five-run
+  medians were full TEST `Calc=224 ms`, full obfusjack `Platform=87 ms`,
+  `Virtual=85 ms`, `Seq=326 ms`, `Parallel=8 ms`, and `VThreads=8 ms`.
+  This violates the P1.2.2a criteria because TEST Calc regressed beyond the
+  `198 ms` baseline and obfusjack `Seq` did not improve from the P1.2.1
+  `327 ms` median.
+- The source change was fully reverted to the P1.2.1 committed shape before
+  continuing. P1.2.2b must therefore attack the remaining island execution
+  cost through the semantic shared-interpreter route, not through the rejected
+  group-wrapper inline route.
+
 P1.2.2b shared-interpreter invariant mapping, if P1.2.2a is insufficient:
 
 | Current per-island helper surface | Shared interpreter surface | Preserved invariant |
