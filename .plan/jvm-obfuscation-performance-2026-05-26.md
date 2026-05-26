@@ -2630,6 +2630,145 @@ Conclusion:
   optimization must target a different proven runtime path or include new
   concrete evidence that removes the prior P1.6 Calc regression mechanism.
 
+#### P2.2.8 Stream transition-material decoded outputs into `out[]`
+
+Status: `[-]` plan-intake reviewed and ready for plan-only checkpoint. No
+source change has been made for this branch.
+
+Scope:
+
+- Optimize only the generic CFF transition-material helper emitted by
+  `CffMaterialTables.installTransitionMaterialHelper`.
+- Keep the existing helper descriptor
+  `(JIII[Ljava/lang/Object;II[J)J`, transition row layout, row index contract,
+  material encryption/masking formulas, method-key high/low decode, domain
+  decode, packed `out[]` ABI, hidden method key, CFF block coverage, and
+  callsite rewriting unchanged.
+- Replace the helper-local decoded output staging pattern with immediate
+  output stores: decode `guard` and `path`, pack them into `out[0]`; decode
+  `block` and `pc`, pack them into `out[1]`; decode the method-key high/low
+  words into the returned method key as before; decode `domain` and pack it
+  into the high half of `out[2]`.
+- Do not pre-scale transition row bases, do not change transition row
+  callsite constants, do not share runtime-source/stack-derived cursor work,
+  do not change key-transfer material semantics, and do not add fallback,
+  skip, helper-layer rescue, or original-bytecode behavior.
+
+Required evidence:
+
+- Fresh post-P2.2.6-revert obfusjack Seq JFR filtered to
+  `a.a.o(double[][], double[][], double[][], long)` captured `273` sequential
+  matrix samples. The first-frame distribution was
+  `a.da.za(...)=112`, `a.da.ua(...)=102`, and
+  `a.a.fa(Object[], long)=47`, with no invokedynamic helper frame in the Seq
+  hot stack. The backing artifacts are
+  `build/jvm-runtime-perf/jfr/post-p2-2-6-revert-obfusjack-1ms.jfr`,
+  `build/jvm-runtime-perf/jfr/post-p2-2-6-revert-obfusjack-1ms-samples.txt`,
+  `build/jvm-runtime-perf/jfr/post-p2-2-6-revert-obfusjack-1ms.stdout.log`,
+  and
+  `build/jvm-runtime-perf/jfr/post-p2-2-6-revert-obfusjack-1ms.stderr.log`.
+  This identifies transition/island/key-material helpers as the current Seq
+  runtime path.
+- Fresh post-P2.2.6-revert obfusjack PrintInlining reports
+  `a.da::ua (473 bytes)` as a compiled hot transition-material helper and
+  repeatedly reports it as `callee is too large` / `hot method too big` under
+  `a.a::fa(Object[], long)`. The backing artifact is
+  `build/jvm-runtime-perf/inlining/post-p2-2-6-revert-obfusjack-print-inlining.stdout.log`.
+- Fresh accepted-source full TEST PrintInlining reports the same generated
+  transition helper shape as `a.a::k (473 bytes)`, repeatedly `callee is too
+  large` / `hot method too big` at full TEST callsites. The backing artifact is
+  `build/jvm-runtime-perf/p2-2-5-current-full-test-print-inlining.stdout.log`.
+- Fresh bytecode inspection of generated transition helpers
+  `a.da.ua:(JIII[Ljava/lang/Object;II[J)J` and
+  `a.a.k:(JIII[Ljava/lang/Object;II[J)J` shows the helper decodes
+  `guard`, `path`, `block`, `pc`, method-key high/low, and `domain`, stores
+  decoded output words into locals, then reloads those locals only to pack
+  `out[0]`, `out[1]`, and `out[2]`. The decoded `guard/path/block/pc/domain`
+  values are not read by subsequent material-word decode; subsequent decode
+  uses the already computed transition-material `baseLocal`. The backing
+  artifacts are
+  `build/jvm-runtime-perf/post-p2-2-6-revert-obfusjack-a-da.javap.txt` and
+  `build/jvm-runtime-perf/post-p2-2-6-revert-test-a-a.javap.txt`.
+- Source inspection of `installTransitionMaterialHelper` matches the bytecode:
+  after `emitTransitionMaterialBase`, every decoded output word is emitted
+  through `emitTransitionMaterialDecodedWord(..., baseLocal, word)`, staged in
+  a local, and finally written by `emitTransitionOutStores(...)`.
+- P2.2.7 rejected row-base pre-scaling as a P1.6 duplicate. P2.2.8 does not
+  change row indexes or callsite row constants, so it does not reuse that
+  rejected contract.
+- P2.2.6 was rejected after carrying a token object-cell result on the operand
+  stack across `AtomicLong.setPlain(J)V`. P2.2.8 does not touch token-material
+  object-cell decoding, `AtomicLong.getPlain()J`, `AtomicLong.setPlain(J)V`,
+  the token helper, or any mutable object-cell state. It changes only
+  transition-helper output packing after decoded transition words have already
+  been produced.
+- P2.2.4 explicitly did not choose same-mode key-transfer runtime-source
+  sharing because stack runtime-source mixing can include
+  `StackWalker$StackFrame.getByteCodeIndex()`. P2.2.8 does not touch
+  runtime-source acquisition or key-transfer cursors.
+
+Invariant preservation:
+
+| Current transition helper | P2.2.8 transition helper | Preserved invariant |
+| --- | --- | --- |
+| row argument is a transition row index and helper computes `row * 37` | unchanged | P1.6 rejected row-boundary contract is not reused |
+| `emitTransitionMaterialBase` computes one live decode base from input key and current guard/path/block | unchanged | material decode remains keyed by live entry state |
+| decoded `guard/path/block/pc/domain` are staged in locals before `out[]` packing | decoded pairs are packed into `out[]` immediately after both words are decoded | packed transition output values are unchanged |
+| decoded method-key high/low words are combined into returned `long` method key | unchanged | hidden method-key propagation remains live and dynamic |
+| helper writes `out[0]`, `out[1]`, and high half of `out[2]` | unchanged | transition out ABI consumed by callers is unchanged |
+
+Subtasks:
+
+1. `[x]` Record and review the transition decoded-output streaming plan.
+   Evidence requirement: this P2.2.8 section, fresh JFR/PrintInlining evidence,
+   generated `javap` evidence for `a.da.ua` and `a.a.k`, source evidence for
+   `installTransitionMaterialHelper`, and explicit non-duplication against
+   P1.6/P2.2.7, P2.2.6, and P2.2.4.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic, evidence-backed,
+   invariant-preserving, and compliant before source edits begin.
+2. `[ ]` Implement, validate, and measure transition decoded-output streaming.
+   Evidence requirement: source diff changes only transition-material output
+   staging in `CffMaterialTables` and any tightly scoped helper emission needed
+   for stack-based `out[]` stores; generated transition helper bytecode no
+   longer stores/reloads locals solely for `out[0]`, `out[1]`, and `out[2]`;
+   helper descriptor, row contract, material decode sequence, and returned
+   method key are unchanged.
+   Validation target:
+   the same targeted JVM command as P1.1:
+   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ObfuscationIntegrationTest --rerun-tasks`,
+   followed by generated transition-helper `javap` inspection, topology and
+   helper descriptor count comparison, stdout/stderr scan for verifier/linkage
+   errors and fallback/skip markers, `hs_err` scan in the repository tree, and
+   a fresh ten-run JVM runtime gate for full TEST and full obfusjack generated
+   jars.
+   Completion criteria: targeted Gradle validation passes without verifier,
+   linkage, fallback, skip, or forbidden marker failures; full obfusjack `Seq`
+   improves from accepted P2.2.5 ten-run lower/upper median `312/312 ms`;
+   full TEST `Calc` does not regress from accepted P2.2.5 ten-run lower/upper
+   median `181/183 ms`; Platform, Virtual, Parallel, and VThreads do not
+   regress beyond the existing random spread recorded in the accepted P2.2.5
+   gate. If either target regresses, revert the source change, regenerate the
+   accepted-source artifact, record rejection evidence, and commit only the
+   rejection record.
+
+P2.2.8 plan-intake review:
+
+- Initial subagent review failed because the first plan draft did not record
+  concrete artifact paths, did not explicitly distinguish the change from the
+  rejected P2.2.6 object-cell stack-carry shape, and did not list bytecode,
+  topology, log, and `hs_err` checks in the validation target.
+- The plan was revised before source edits to add exact JFR, PrintInlining,
+  and `javap` artifact paths; to state that P2.2.8 does not touch token
+  object-cell decoding, `AtomicLong.getPlain()J`, `AtomicLong.setPlain(J)V`,
+  or mutable object-cell state; and to expand validation to the same targeted
+  JVM command as P1.1 plus bytecode/topology/log/runtime-gate checks.
+- Re-review passed. The subagent confirmed P2.2.8 is generic to the generated
+  transition-material helper, keeps the helper descriptor and row contract
+  unchanged, does not reduce CFF coverage, does not add fallback/static-key
+  exposure/ABI weakening, and is ready for a plan-only checkpoint before source
+  work.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
