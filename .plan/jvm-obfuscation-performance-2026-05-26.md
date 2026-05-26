@@ -2417,6 +2417,127 @@ P2.2.5 evidence:
   `HeadlessException`, obfusjack `Caught MyException: boom`, and the existing
   class-load debug line for `org/example/Main$MyException`.
 
+#### P2.2.6 Carry token object-cell result on stack across the state update
+
+Status: `[ ]` planned.
+
+Scope:
+
+- Optimize only the current generated encrypted token-material helper emitted
+  by `installEncryptedTokenMaterialHelper`.
+- Keep the token-material helper descriptor `([Ljava/lang/Object;IIII)I`,
+  helper count, class-owned `Object[]` carrier layout, 64 `AtomicLong` object
+  cells, token material rows, class-key mask, object-cell mask/update formula,
+  control mask, hidden method keys, packed carriers, row-word load order, CFF
+  coverage, and `AtomicLong.getPlain()` / `setPlain(long)` unchanged.
+- Remove only the helper-local store/reload of the decoded object-cell result
+  currently named `objectResultLocal`. Leave the computed object-cell result on
+  the operand stack while the helper computes `nextEpoch` and writes the next
+  packed object-cell state, so the same result remains on stack after
+  `setPlain(long)` returns.
+- Do not change epoch extraction, current-mask decode, next-epoch computation,
+  packed-cell write ordering, token row registration, seed formulas, token
+  helper ABI, object-cell count, object-cell initialization, key-transfer
+  material cursor encoding, or invokedynamic behavior.
+
+Dependency/order reason:
+
+- P2.2.5 removed the separate encoded-word local and left the accepted
+  key-update helper at `302` JIT-reported bytes. Fresh PrintInlining still
+  reports `a.a::j (302 bytes)` as `callee is too large` at cold Calc callsites
+  before hot inlining, and still shows `AtomicLong.getPlain` and
+  `AtomicLong.setPlain` inline-hot inside that helper.
+- Fresh P2.2.5 bytecode inspection shows the remaining single-use
+  `objectResultLocal` pattern: the helper stores the object-cell result before
+  next-epoch and `setPlain(long)`, then reloads it immediately after
+  `setPlain(long)` before returning to the caller's accumulator/control-mask
+  combination.
+- Keeping the result on the operand stack preserves side-effect order:
+  object-cell result computation still happens before next-epoch computation
+  and before `setPlain(long)`, and the mutable object-cell state is still
+  written before the helper returns.
+
+Required evidence:
+
+- The accepted P2.2.5 ten-run gate is the acceptance baseline: full TEST
+  `Calc` lower/upper median `181/183 ms`, and full obfusjack `Seq`
+  lower/upper median `312/312 ms`.
+- Fresh P2.2.5 TEST Calc 1ms JFR at
+  `build/jvm-runtime-perf/jfr/p2-2-5-current-test-calc-1ms.jfr` completed
+  with `Calc: 198ms` and no unexpected runtime/log scan hits. `jfr view
+  hot-methods` reported `127` samples, with hot Calc CFF bodies still
+  dominating: `a.u.l(Object[], long)=34`, `a.u.m(Object[], long)=22`, and
+  `a.u.o(Object[], long)=21`. The invokedynamic-flow helper was secondary at
+  `a.na.kf(...)=2`, matching the user direction to keep this pass on
+  key-update rather than invokedynamic.
+- Fresh P2.2.5 PrintInlining evidence at
+  `build/jvm-runtime-perf/p2-2-5-current-full-test-print-inlining.stdout.log`
+  reports `a.a::j (302 bytes)` and shows `AtomicLong.getPlain` /
+  `AtomicLong.setPlain` inline-hot inside the key-update helper. The same log
+  shows Calc methods `a.u.l`, `a.u.m`, and `a.u.o` are large hot compiled
+  methods and repeatedly encounter `a.a::j`.
+- Fresh bytecode inspection of current full TEST
+  `a.a.j([Ljava/lang/Object;IIII)I` shows:
+  - the helper stores the decoded object-cell result in local `11` at bytecode
+    offset `175`;
+  - it computes `nextEpoch`, stores it in local `12`, calls
+    `AtomicLong.setPlain(J)V` at offset `253`, and then reloads local `11` at
+    offset `256`;
+  - that result is then XORed with the class-mask accumulator and control-mask
+    result before `IRETURN`.
+
+Invariant mapping:
+
+| Current token object-cell path | P2.2.6 token object-cell path | Preserved invariant |
+| --- | --- | --- |
+| helper computes decoded object-cell result and stores it in `objectResultLocal` | helper computes the same result and leaves it on the operand stack | returned object-cell word is unchanged |
+| helper computes `nextEpoch` after the object-cell result | unchanged, with the result below the next-epoch computation on the operand stack | key-state update order is unchanged |
+| helper writes the next packed object-cell state with `AtomicLong.setPlain(long)` before returning | unchanged, with the result below the receiver/argument stack for `setPlain(long)` | mutable object-cell state update is preserved |
+| helper reloads `objectResultLocal` after `setPlain(long)` | helper uses the already-stacked result after `setPlain(long)` returns | same value reaches the accumulator/control-mask XOR |
+
+Subtasks:
+
+1. `[x]` Record and review the object-cell result stack-carry plan.
+   Evidence requirement: this P2.2.6 section, current P2.2.5 JFR evidence,
+   current P2.2.5 PrintInlining evidence, and current `a.a.j` bytecode
+   evidence for the single-use `objectResultLocal`.
+   Validation target: plan-intake review only.
+   Completion criteria: subagent plan-intake review passes; the plan
+   checkpoint is committed before source edits.
+2. `[ ]` Implement, validate, measure, and either accept or revert the
+   object-cell result stack-carry change.
+   Evidence requirement: source diff changes only token-material object-cell
+   expression emission; generated bytecode shows `a.a.j` still has descriptor
+   `([Ljava/lang/Object;IIII)I`, still loads/casts `AtomicLong`, still calls
+   `getPlain()J` and `setPlain(J)V`, still stores epoch and next epoch, no
+   longer stores or reloads a separate object-cell result local, and leaves the
+   object-cell result on stack across `setPlain(J)V`.
+   Validation target: same targeted JVM command as P1.1, plus a ten-run common
+   runtime gate and required runtime/log scan.
+   Completion criteria: targeted JVM validation passes; full-obf TEST `Calc`
+   improves from the accepted P2.2.5 ten-run lower/upper median `181/183 ms`,
+   or the source change is reverted before proceeding; full-obf obfusjack
+   `Seq` remains no worse than the accepted P2.2.5 ten-run lower/upper median
+   `312/312 ms`; non-target obfusjack rows stay within the regression budget;
+   helper descriptors and CFF dry-run row counts do not regress; no forbidden
+   runtime/log/marker scan hit is introduced; subagent implementation review
+   passes before commit.
+
+P2.2.6 plan-intake review:
+
+- Subagent plan-intake review passed. The review found the plan
+  evidence-backed and scoped to the generic encrypted token-material helper.
+- The review confirmed the stack-carry transformation is semantically valid in
+  the current linear helper shape: the object-cell result can remain below the
+  next-epoch computation and below the `AtomicLong.setPlain(J)V`
+  receiver/argument stack, and after the void call returns the same `int`
+  remains available for the accumulator/control-mask XOR.
+- Residual implementation risks to prove during implementation: generated
+  bytecode must verify with the carried value and unchanged `setPlain(J)V`
+  ordering, bytecode inspection must show the result `ISTORE`/`ILOAD` pair is
+  gone, and runtime acceptance must revert if TEST `Calc` does not improve or
+  obfusjack `Seq` regresses.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
