@@ -3619,6 +3619,148 @@ P2.2.12 rejection evidence:
   source adjustment from `za`, but the ten-run gate still regressed both
   target rows.
 
+#### P2.2.13 Cache step-material mask words inside the key-update helper
+
+Status: `[-]` plan reviewed; source edit not started.
+
+Scope:
+
+- Optimize only the generated CFF step-material helper emitted by
+  `installStepMaterialHelper`.
+- Keep `STEP_MATERIAL_HELPER_DESC` as `(JIII[Ljava/lang/Object;I[J)J`, helper
+  count, row index contract, packed `long[]` step material table, row
+  registration, runtime-source acquisition, StackWalker/thread mixing,
+  `out[]` carrier ABI, hidden method-key update formulas, CFF coverage, fake
+  rows, poison rows, and hard-fail behavior unchanged.
+- Load the protected per-row step-material mask words `5`, `6`, and `7` once
+  into helper-local `int` scratch locals after the row base is computed, then
+  reuse those locals in `emitStepMaterialDecodeBase` and
+  `emitStepMaterialWordMask`.
+- Do not cache decoded material words, decoded guard/path/block, decoded
+  method keys, runtime source, thread/stack values, row indexes, static seeds,
+  descriptors, plaintext constants, token-material words, transition material,
+  compressed-island material, invokedynamic state, or object-cell state.
+- Do not change `emitMaterializedStepKeys` callsites or the generated
+  step-material row contents; this is helper-internal row-word load reduction
+  only.
+
+Required evidence:
+
+- P2.2.10 remains the accepted runtime baseline after the rejected P2.2.11 and
+  P2.2.12 branches: full TEST `Calc=179/179 ms` and full obfusjack
+  `Seq=307/309 ms` from
+  `build/jvm-runtime-perf/repeats-p2-2-10-10x/runtime-medians.tsv`.
+- Fresh accepted-source TEST Calc 1ms JFR at
+  `build/jvm-runtime-perf/jfr/p2-2-13-current-test-calc-1ms.jfr` completed
+  with `Calc: 179ms`. `jfr view hot-methods` reported the Calc bodies as the
+  dominant runtime path: `a.u.l(Object[], long)=30`,
+  `a.u.m(Object[], long)=12`, `a.u.o(Object[], long)=10`, and
+  `a.u.n(Object[], long)=3`; `a.na.kf(...)=7` remained secondary. This keeps
+  the next branch on key/material updates rather than invokedynamic.
+- Fresh bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-13-current-test-a-u.javap.txt` shows the
+  obfuscated Calc class has `30` calls to the generated step-material helper
+  `a.a.m:(JIII[Ljava/lang/Object;I[J)J`, alongside `86` token-material calls,
+  `39` method-key calls, `17` transition-material calls, `8` key-transfer
+  calls, and `17` island-material calls.
+- Fresh PrintInlining at
+  `build/jvm-runtime-perf/p2-2-13-current-full-test-print-inlining.stdout.log`
+  shows `a.a::m (1248 bytes)` is compiled separately and reports
+  `callee is too large` at `26` Calc callsites. This proves the step-material
+  helper is on the runtime-compiled Calc key-update path and is not only
+  obfuscation-time code.
+- Fresh bytecode inspection of `a.a.m` at
+  `build/jvm-runtime-perf/p2-2-13-current-test-a-a.javap.txt` shows the
+  current generated helper executes `31` `laload` instructions. Most decoded
+  step-material word masks reload row words `5`, `6`, and `7` through
+  `aload words; iload base; iconst_2/iconst_3; iadd; laload` sequences even
+  though those three protected mask words are immutable for the selected row
+  during one helper invocation.
+- Source inspection shows `emitStepMaterialDecodeBase` and
+  `emitStepMaterialWordMask` are the repeated consumers of step-material row
+  words `5`, `6`, and `7`, while `registerStepMaterialRow` still initializes
+  the packed row through the existing protected material table.
+
+Rejected-route separation:
+
+- P2.2.3 rejected packed-pair scratch caching in the token-material helper
+  after it improved TEST `Calc` but regressed obfusjack `Seq`. P2.2.13 does
+  not touch token-material helper `a.a.j`, token packed-pair extraction,
+  token object-cell state, or token row layout.
+- P2.2.4 rejected key-transfer method-key fold hoisting. P2.2.13 does not
+  touch key-transfer helper `a.a.l`, key-transfer runtime-source cursors, or
+  class-integrity ticket issue/defer behavior.
+- P2.2.10 accepted transition-material row cursor walking. P2.2.13 does not
+  touch transition-material helper `a.a.k`, transition row indexes, row-base
+  contracts, or transition `out[]` stores.
+- P2.2.11 rejected the transition-state `int[7]` carrier. P2.2.13 does not
+  change any carrier descriptor or packed transition-state ABI.
+- P2.2.12 rejected compressed-island effective cursor hoisting. P2.2.13 does
+  not touch compressed-island material helper `a.a.p`, island cursors, or
+  runtime-source cursor mode handling.
+
+Invariant preservation:
+
+| Current step-material helper | P2.2.13 step-material helper | Preserved invariant |
+| --- | --- | --- |
+| callsite passes live key, guard, path, block, object material, row, and `out[]` | unchanged | helper ABI, live CFF state inputs, and hidden key propagation stay unchanged |
+| helper computes `base = row * STEP_MATERIAL_ROW_LONGS` and reads row words from the class-owned packed `long[]` | unchanged | selected protected step-material row stays unchanged |
+| decode-base and every decoded-word mask reload row words `5`, `6`, and `7` from the same row | helper loads row words `5`, `6`, and `7` once into private scratch locals and reuses them | mask values are identical and remain selected by the live row |
+| runtime-source acquisition uses thread and stack material per helper invocation | unchanged | BCI/thread-sensitive dynamic key flow remains live |
+| tiny updates and optional method-key update consume decoded words and write guard/path/block/key | unchanged formulas consume the same decoded words | CFF state transitions and method-key update semantics stay unchanged |
+
+Subtasks:
+
+1. `[x]` Record and review the step-material mask-word caching plan.
+   Evidence requirement: this P2.2.13 section, fresh TEST Calc 1ms JFR,
+   fresh `a.u` and `a.a.m` `javap` evidence, fresh PrintInlining evidence,
+   and explicit non-duplication against P2.2.3, P2.2.4, P2.2.10, P2.2.11,
+   and P2.2.12.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic,
+   evidence-backed, invariant-preserving, and compliant before source edits.
+2. `[ ]` Implement, validate, and measure step-material mask-word caching.
+   Evidence requirement: source diff changes only step-material helper
+   emission and matching abstract method signatures needed to pass the three
+   helper-local mask-word locals; generated `a.a.m` keeps descriptor
+   `(JIII[Ljava/lang/Object;I[J)J`, keeps the same `row * 4` base, keeps the
+   same runtime-source path, keeps `out[]` writes and method-key update
+   formulas, and no longer reloads row words `5`, `6`, and `7` for every
+   decoded-word mask.
+   Validation target: the same targeted JVM command as P1.1, followed by
+   generated bytecode inspection for `a.a.m`, helper descriptor/topology
+   comparison, stdout/stderr scan for verifier/linkage errors and
+   fallback/skip markers, `hs_err` scan in the repository tree, and a fresh
+   ten-run JVM runtime gate for full TEST and full obfusjack generated jars.
+   Completion criteria: targeted JVM validation passes; generated step helper
+   `laload` count decreases from the current `31` without changing helper
+   descriptor or CFF topology; full TEST `Calc` improves from accepted
+   P2.2.10 `179/179 ms`; full obfusjack `Seq` does not regress from accepted
+   P2.2.10 `307/309 ms`; Platform, Virtual, Parallel, and VThreads remain
+   within accepted P2.2.10 observed spreads. If either target regresses,
+   revert the source change, regenerate the accepted-source artifact, record
+   rejection evidence, and commit only the rejection record.
+
+P2.2.13 plan-intake review:
+
+- Subagent plan-intake review passed. The review confirmed the plan is tied to
+  fresh TEST Calc JFR, `a.u` callsite counts, PrintInlining evidence for
+  `a.a::m (1248 bytes)` at Calc callsites, and `a.a.m` bytecode showing
+  repeated row-word `5/6/7` `laload` loads.
+- The review confirmed the scope is generic and helper-internal: it preserves
+  `STEP_MATERIAL_HELPER_DESC`, row contract, packed `long[]` material table,
+  runtime-source/StackWalker/thread mixing, `out[]` ABI, live key flow, CFF
+  coverage, fake/poison rows, and no fallback/skip behavior.
+- The review confirmed this branch does not duplicate the rejected token
+  packed-pair cache, key-transfer fold hoist, transition carrier, or
+  compressed-island cursor routes, and does not interfere with the accepted
+  transition row-cursor optimization.
+- Required post-implementation checks from the review: `javap` must show the
+  same descriptor/topology, fewer `laload`s in `a.a.m`, unchanged
+  runtime-source and `out[]` behavior, and the ten-run gate must improve TEST
+  Calc over `179/179 ms` without regressing obfusjack `Seq` from
+  `307/309 ms`.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
