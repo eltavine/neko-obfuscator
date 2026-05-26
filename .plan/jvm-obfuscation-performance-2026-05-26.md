@@ -1846,6 +1846,120 @@ P2.2.1 evidence:
   CFF body overhead, and must not claim P2 completion until `Calc <= 60 ms`
   is proven by a fresh runtime gate.
 
+#### P2.2.2 Shrink token object-cell key update bytecode
+
+Status: `[ ]` planned; plan-intake review required before implementation.
+
+Scope:
+
+- Optimize only the generic CFF object-cell key update used by encrypted token
+  material and compressed island material helpers.
+- Keep the generated class-owned `Object[]` carrier, token-material helper
+  descriptor `([Ljava/lang/Object;IIII)I`, island-material helper descriptor
+  `(JIII[Ljava/lang/Object;III)I`, token material rows, island material rows,
+  class-key words, the 64 separate `AtomicLong` object cells in
+  `objectMaterial[0..63]`, object-cell mask formula, live `guard/path/block`
+  inputs, hidden method keys, packed carriers, and CFF block coverage
+  unchanged.
+- Rewrite only the helper-internal object-cell update expression so the
+  decoded current object-cell word `encoded ^ mask(epoch)` is materialized
+  once and reused for both the returned object token and the next encoded
+  epoch. Stream the next encoded word directly into the `setPlain(long)` pack
+  instead of storing it in a temporary local and reloading it.
+- Apply the same expression-level rewrite to both generated object-cell
+  consumers that currently emit the full update formula:
+  `CffMaterialTables.emitAlignedTokenMaterialObjectMask` and
+  `CffIslandMaterial.emitTokenMaterialObjectMask`.
+- Do not remove the object-cell key update, do not replace it with a static
+  value, do not collapse or replace the 64 `AtomicLong` object cells, do not
+  expose raw object-table values, do not change token or island row
+  registration, and do not add fallback/skip/original-bytecode behavior.
+
+Required evidence:
+
+- The accepted P2.2.1 ten-run gate still leaves P2 open: full TEST `Calc`
+  sorted values were `183,184,186,188,189,190,192,193,196,197`, with
+  lower/upper medians `189/190 ms`.
+- The post-P2.2.1 TEST Calc JFR still places samples in the obfuscated Calc
+  CFF bodies: `a.u.l(Object[], long)=29`, `a.u.m(Object[], long)=14`,
+  `a.u.o(Object[], long)=14`, with invokedynamic-flow materialization
+  secondary at `a.na.kf(...)=7`.
+- Fresh bytecode inspection of the current full TEST artifact shows the hot
+  Calc methods repeatedly call the token-material helper `a.a.j(...)` and
+  method-key helper `a.a.r(...)`: `a.u.l` has `6` token helper and `3`
+  method-key helper calls, `a.u.m` has `6` and `3`, `a.u.o` has `10` and `5`,
+  and `a.u.n` has `2` and `1`.
+- Fresh `PrintInlining` evidence from
+  `build/jvm-runtime-perf/p2-2-1-full-test-print-inlining.stdout.log` shows
+  `a.a::j (313 bytes)` is compiled separately, many hot Calc callsites report
+  `a.a::j ... callee is too large`, and only some later hot callsites inline
+  it. The same log shows `AtomicLong.getPlain` and `AtomicLong.setPlain` from
+  inside `a.a::j` are inline-hot, proving this key-state update is on the
+  JIT-compiled Calc path rather than only an obfuscation-time artifact.
+- Fresh bytecode inspection of `a.a.j([Ljava/lang/Object;IIII)I` shows the
+  helper computes a live object-cell index from `guard/path/block` plus
+  protected material words, loads `objectMaterial[index]`, casts it to
+  `AtomicLong`, calls `getPlain()`, computes the decoded object token and next
+  encoded epoch, then calls `setPlain(long)`.
+- The same bytecode shows the current helper computes `encoded ^
+  currentMask` twice in the object-cell update: once for the returned object
+  token and once for `nextEncoded`, then stores and reloads `nextEncoded`
+  before packing the `setPlain(long)` value.
+- Source inspection shows `installClassKeyTableInit` initializes these 64
+  object cells from `table.objectValues()` and `cffObjectCellEpoch`, while
+  `CffMaterialTables.emitAlignedTokenMaterialObjectMask` and
+  `CffIslandMaterial.emitTokenMaterialObjectMask` both consume the same
+  packed cell value and apply the same update formula.
+- Source and bytecode inspection show the older
+  `emitClassObjectTokenMaskAndUpdate -> table.objectHelperName()` path is not
+  a current generated object-cell runtime consumer: `emitEncryptedToken`
+  returns through the shared token-material helper whenever `activeKeyTable`
+  is present, the fallback branch then calls
+  `emitClassObjectTokenMaskAndUpdate` only with `activeKeyTable == null`,
+  and fresh `javap`/`rg` inspection found no
+  `([Ljava/lang/Object;IIIIIIIII)I` object-helper descriptor in the current
+  full TEST or obfusjack artifacts.
+
+Invariant mapping:
+
+| Current object-cell path | P2.2.2 path | Preserved invariant |
+| --- | --- | --- |
+| `objectMaterial[0..63]` hold 64 separate `AtomicLong` packed cells | unchanged | object graph, packed carrier layout, and 64 mutable object-cell key states are preserved |
+| helper computes live `index = f(guard, path, block, protected words) & 63` | unchanged | live CFF state still selects the object-cell key state |
+| helper reads `((AtomicLong)objectMaterial[index]).getPlain()` | unchanged | plain atomic cell read semantics and selected packed value are preserved |
+| helper stores `currentMask = mask(epoch)`, computes `encoded ^ currentMask` for result, then recomputes `encoded ^ currentMask` for `nextEncoded` | helper stores `decoded = encoded ^ mask(epoch)` once and reuses it for both result and next encoding | decoded object-cell value is unchanged and remains derived from live mutable state |
+| helper stores `nextEncoded`, reloads it, packs `(nextEncoded << 32) ^ nextEpoch`, and calls `AtomicLong.setPlain(long)` | helper computes the same `nextEncoded` on stack, packs it directly, and calls `AtomicLong.setPlain(long)` | packed cell contents and plain atomic write semantics are unchanged |
+| token and island helpers both emit the same update formula shape | both are rewritten to the same reduced expression shape | no mixed generated-runtime formula is introduced |
+
+Subtasks:
+
+1. `[ ]` Record and review the object-cell expression shrink.
+   Evidence requirement: this P2.2.2 plan section, current TEST JFR evidence,
+   current `javap` evidence for `a.a.j`/`a.u.*`, current `PrintInlining`
+   evidence, and source evidence identifying every object-cell runtime
+   consumer.
+   Validation target: plan-intake review only.
+   Completion criteria: subagent plan-intake review passes; the plan
+   checkpoint is committed before source edits.
+2. `[ ]` Implement, validate, measure, and either accept or revert the
+   expression shrink.
+   Evidence requirement: source diff updates class-key table initialization
+   nowhere and updates only both token/island object-cell helper emitters;
+   generated bytecode shows token and island helpers still load
+   `objectMaterial[index]`, still cast to `AtomicLong`, still call
+   `getPlain()J` and `setPlain(J)V`, and no longer recompute
+   `encoded ^ currentMask` or store/reload `nextEncoded`.
+   Validation target: same targeted JVM command as P1.1, plus a ten-run common
+   runtime gate and required runtime/log scan.
+   Completion criteria: targeted JVM validation passes; full-obf TEST `Calc`
+   improves from the accepted P2.2.1 ten-run lower/upper median `189/190 ms`,
+   or the source change is reverted before proceeding; full-obf obfusjack
+   `Seq` remains no worse than the accepted P2.2.1 ten-run lower/upper median
+   `314/315 ms`; non-target obfusjack rows stay within the regression budget;
+   helper descriptors and CFF dry-run row counts do not regress; no forbidden
+   runtime/log/marker scan hit is introduced; subagent implementation review
+   passes before commit.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
