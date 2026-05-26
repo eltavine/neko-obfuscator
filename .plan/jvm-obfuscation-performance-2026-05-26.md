@@ -1309,6 +1309,94 @@ P1.5 rejection evidence:
   domain skipping unless it first explains why the existing-helper branch
   shape regresses `Seq` and `Calc` generically.
 
+#### P1.6 Pre-scale transition-material row offsets at the call boundary
+
+Status: `[x]` plan-intake review passed; plan checkpoint pending.
+
+Scope:
+
+- Optimize only the generic CFF transition-material helper row-index boundary.
+- Keep the existing transition-material helper descriptor
+  `(JIII[Ljava/lang/Object;II[J)J` and helper count.
+- Change the helper's `row` argument contract from a transition-material row
+  number to the already-scaled material-word offset.
+- For every generated transition-material helper callsite, pass
+  `registeredRow * TRANSITION_MATERIAL_ROW_WORDS`.
+- Remove the helper-entry `row * TRANSITION_MATERIAL_ROW_WORDS` multiplication
+  and continue using the row local as the material array word offset.
+- Preserve transition material row registration, row encryption/masking,
+  method-key update, CFF block construction, island helper topology, hidden
+  method keys, packed carriers, fake/poison coverage, direct/non-direct
+  domain semantics, and helper ABI.
+- Do not special-case a method/class/fixture, remove domain decode, add a new
+  helper descriptor, expose row words, or add fallback/skip/original-bytecode
+  behavior.
+
+Subtasks:
+
+1. `[x]` Record and review the row-offset contract change.
+   Evidence requirement: current accepted 10-run runtime baseline, fresh
+   full-obfusjack JFR attribution, bytecode evidence for the helper-entry
+   multiplication, and source evidence that all current transition-material
+   helper callsites are generated from registered rows.
+   Validation target: plan-intake review only.
+   Completion criteria: subagent plan-intake review passed; the plan
+   checkpoint must be committed before source edits.
+2. `[ ]` Implement the row-offset boundary change.
+   Evidence requirement: source diff shows only the helper-entry scaling and
+   generated callsite row constants changed; bytecode inspection shows
+   `a.da.ua` no longer contains the entry `bipush 37; imul`, while obfuscated
+   `mmulSeq` still calls the original helper descriptor.
+   Validation target: same targeted JVM command as P1.1, plus the common
+   runtime validation commands with a 10-run gate.
+   Completion criteria: targeted JVM validation passes; full-obf obfusjack
+   `Seq` improves from the current accepted 10-run lower/upper median
+   `318/320 ms`, or the source change is reverted before proceeding; full-obf
+   TEST `Calc` remains no worse than the current accepted 10-run lower/upper
+   median `182/183 ms`; no CFF dry-run row count or missing-row blocker
+   regresses; no forbidden runtime/log/marker scan hit is introduced; subagent
+   implementation review passes before commit.
+
+Dependency/order reason:
+
+- P1.4 and P1.5 both targeted unconsumed direct-island domain decode and were
+  rejected, so the next P1 attempt must not reuse that path.
+- The fresh accepted-source 10-run gate after the P1.5 revert still leaves P1
+  open: full TEST `Calc` sorted values were
+  `179,180,181,181,182,183,183,184,185,185` with lower/upper medians
+  `182/183 ms`, and full obfusjack `Seq` sorted values were
+  `306,310,314,318,318,320,321,322,326,334` with lower/upper medians
+  `318/320 ms`.
+- A fresh same-JVM 8-run full-obfusjack JFR on the accepted-source artifact
+  completed with `Seq` rows `313`, `311`, `326`, `305`, `321`, `337`,
+  `319`, and `323 ms`.
+- Filtering that JFR to stacks containing obfuscated `mmulSeq`,
+  `a.a.fa(Object[], long)`, reports `fa_total=493`,
+  `a.da.ua(...)=208`, `a.da.za(...)=193`, and `a.b.d(...)=154`, proving the
+  transition-material helper remains one of the current hot P1 runtime paths.
+- Fresh bytecode inspection of `a.da.ua` shows every invocation enters with:
+  `iload row; bipush 37; imul; istore row`, before the helper reads any
+  transition-material words.
+- Fresh bytecode inspection of obfuscated `mmulSeq` shows `22` calls to the
+  original transition-material helper descriptor
+  `(JIII[Ljava/lang/Object;II[J)J`.
+- Source inspection shows the current material transition path in
+  `CffTransitionOutliner.emitCall` always registers a transition-material row
+  through `registerTransitionMaterialRow` before invoking the shared helper,
+  and the helper-wrapper path in `createHelper` does the same. Source
+  inspection also shows `registerTransitionMaterialRow` stores each row at
+  `index * TRANSITION_MATERIAL_ROW_WORDS`, while the helper currently repeats
+  the same multiplication at runtime.
+
+Invariant mapping:
+
+| Current transition-material path | P1.6 path | Preserved invariant |
+| --- | --- | --- |
+| callsite passes registered row index | callsite passes `registered row index * TRANSITION_MATERIAL_ROW_WORDS` | selected material row is unchanged |
+| helper multiplies row index by `TRANSITION_MATERIAL_ROW_WORDS` before material loads | helper uses the already-scaled word offset directly | every material word load addresses the same array element |
+| helper descriptor and argument order are `(JIII,Object[],int,int,long[])` | unchanged | JVM ABI surface and generated helper count stay unchanged |
+| transition row storage uses `index * TRANSITION_MATERIAL_ROW_WORDS` | unchanged | row encryption/masking and table layout stay unchanged |
+
 ### P2 Bring TEST Calc runtime median to <= 60 ms
 
 Scope:
