@@ -2985,6 +2985,123 @@ P2.2.9 rejection evidence:
   local-streaming shape as-is. It helps full TEST `Calc` but does not satisfy
   the full obfusjack `Seq` gate.
 
+#### P2.2.10 Walk transition-material row words with a helper-local cursor
+
+Status: `[-]` plan-intake passed. No source change has been made for this
+branch.
+
+Scope:
+
+- Optimize only the generated transition-material helper's internal material
+  word load shape for `TRANSITION_MATERIAL_HELPER_DESC`.
+- Keep the existing helper descriptor
+  `(JIII[Ljava/lang/Object;II[J)J`, callsite row argument contract, helper
+  entry `row * TRANSITION_MATERIAL_ROW_WORDS` multiplication, material table
+  slot, transition row layout, decoded guard/path/block/pc/domain words,
+  method-key high/low reconstruction, `out[]` contract, CFF block coverage,
+  and callsite rewriting unchanged.
+- Replace repeated helper-internal `rowBase + constantOffset` word-address
+  arithmetic with a monotonic helper-local row cursor. The helper still starts
+  from the same row base and reads the same transition row words in the same
+  order; only the bytecode used to address consecutive words changes from
+  repeated `ILOAD row; push offset; IADD` to `IINC row, delta; ILOAD row`.
+- Do not change transition row registration, row index values passed by
+  callsites, transition `out[]` stores or loads, compressed island material,
+  token object-cell helpers, invokedynamic, runtime-source cursor logic, or any
+  fallback/skip/original-bytecode behavior.
+
+Required evidence:
+
+- The accepted-source artifact regenerated after P2.2.9 rejection completed a
+  fresh obfusjack JFR run at
+  `build/jvm-runtime-perf/jfr/p2-2-10-current-obfusjack-1ms.jfr` with
+  `Seq: 327 ms` and `=== All tests completed ===`; stdout/stderr are at
+  `build/jvm-runtime-perf/jfr/p2-2-10-current-obfusjack-1ms.stdout.log` and
+  `build/jvm-runtime-perf/jfr/p2-2-10-current-obfusjack-1ms.stderr.log`.
+- `jfr view hot-methods` for that fresh artifact recorded
+  `a.da.ua(long, int, int, int, Object[], int, int, long[])` in the hot method
+  table with `10` samples. Filtering
+  `build/jvm-runtime-perf/jfr/p2-2-10-current-obfusjack-1ms-samples.txt` to
+  stack traces containing the sequential matrix frame `a.a.o(...)` captured
+  `28` Seq samples, including `a.da.ua(...)=10`, `a.da.za(...)=9`,
+  `a.a.fa(Object[], long)=7`, and one sample each in `a.ba.yr(...)` and
+  `a.ba.cs(...)`.
+- Fresh bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-10-current-obfusjack-a-da.javap.txt` shows
+  `a.da.ua:(JIII[Ljava/lang/Object;II[J)J` keeps the helper-entry
+  `iload row; bipush 37; imul; istore row`, then repeatedly loads transition
+  row words with `ALOAD material; ILOAD row; push constant offset; IADD;
+  IALOAD` for offsets `0` through `36`.
+- Source inspection shows this bytecode is emitted by
+  `CffMaterialTables.installTransitionMaterialHelper` through
+  `CffIslandMaterial.emitTransitionMaterialBase`,
+  `emitTransitionMaterialDecodedWord`, `emitTransitionMaterialMaskFromBase`,
+  and `emitTransitionMaterialWordLoad`. The word load offsets are emitted in
+  strictly increasing order for this helper: base words `0..8`, then seven
+  decoded transition words at offsets `9..36`.
+- P1.6 and P2.2.7 rejected changing the call-boundary row contract to pass
+  pre-scaled row bases. P2.2.10 keeps the same callsite argument and the same
+  helper-entry `row * 37` multiplication, so it does not reuse that rejected
+  contract change.
+- P2.2.8 rejected moving transition decoded output stores directly into
+  `out[]`. P2.2.10 does not change `out[]` stores or callsite `out[]` loads;
+  it only changes helper-internal material word address arithmetic before the
+  same decoded values are produced.
+
+Invariant preservation:
+
+| Current transition helper | P2.2.10 transition helper | Preserved invariant |
+| --- | --- | --- |
+| callsite passes a transition row index and helper multiplies it by `37` | unchanged | P1.6/P2.2.7 rejected call-boundary contract is not reused |
+| each transition word load addresses `material[rowBase + offset]` | helper mutates a private row cursor to the same `rowBase + offset` before `IALOAD` | selected protected material word is unchanged |
+| base mask uses live method key, guard, path, block, class-key table, and row base words | unchanged | live key/state masking remains dynamic |
+| decoded guard/path/block/pc/domain and method high/low are stored to locals, packed to `out[]`, and key is returned | unchanged | transition state transfer ABI is unchanged |
+
+Subtasks:
+
+1. `[x]` Record and review the transition row-cursor plan.
+   Evidence requirement: this P2.2.10 section, fresh accepted-source JFR
+   evidence, generated `javap` evidence for `a.da.ua`, source evidence for
+   the transition-material helper word-load path, and explicit
+   non-duplication against P1.6/P2.2.7 and P2.2.8.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic,
+   evidence-backed, invariant-preserving, and compliant before source edits
+   begin.
+2. `[ ]` Implement, validate, and measure transition row-cursor word loads.
+   Evidence requirement: source diff changes only transition-material helper
+   word-load emission and matching abstract method signatures if needed;
+   generated bytecode for `a.da.ua` keeps descriptor, helper-entry `row * 37`,
+   material slot, decoded values, `out[]` stores, and returned key unchanged,
+   while consecutive material word loads no longer contain repeated
+   `push offset; IADD` address arithmetic.
+   Validation target: the same targeted JVM command as P1.1, followed by
+   generated transition helper `javap` inspection, helper descriptor/topology
+   comparison, stdout/stderr scan for verifier/linkage errors and
+   fallback/skip markers, `hs_err` scan in the repository tree, and a fresh
+   ten-run JVM runtime gate for full TEST and full obfusjack generated jars.
+   Completion criteria: targeted JVM validation passes without verifier,
+   linkage, fallback, skip, or forbidden marker failures; full obfusjack
+   `Seq` improves from accepted P2.2.5 ten-run lower/upper median
+   `312/312 ms`; full TEST `Calc` does not regress from accepted P2.2.5
+   ten-run lower/upper median `181/183 ms`; non-target Platform, Virtual,
+   Parallel, and VThreads remain within the accepted P2.2.5 runtime spread.
+   If either target regresses, revert the source change, regenerate the
+   accepted-source artifact, record rejection evidence, and commit only the
+   rejection record.
+
+P2.2.10 plan-intake review:
+
+- Subagent plan-intake review passed. The review confirmed that only this plan
+  file is changed, the evidence is concrete, the scope is generic to the
+  transition-material helper, and the branch does not reuse P1.6/P2.2.7
+  call-boundary row-base pre-scaling or P2.2.8 direct `out[]` store movement.
+- Required post-implementation checks from the review: `a.da.ua` still has
+  descriptor `(JIII[Ljava/lang/Object;II[J)J`, still performs the helper-entry
+  `row * 37`, still returns the same key and writes the same `out[]` values,
+  and consecutive transition word loads no longer retain repeated
+  `push offset; IADD` address arithmetic.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
