@@ -769,6 +769,7 @@ abstract class CffSharedState {
         int blockLocal,
         int pcLocal,
         int domainLocal,
+        int outLocal,
         int encodedCursor
     );
     protected abstract void emitCffIslandRuntimeSourceCursor(

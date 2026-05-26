@@ -1567,9 +1567,27 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
     }
 
     protected void emitInitTransitionOut(InsnList insns, int outLocal) {
-        JvmPassBytecode.pushInt(insns, 3);
+        JvmPassBytecode.pushInt(insns, 4);
         insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_LONG));
         insns.add(new VarInsnNode(Opcodes.ASTORE, outLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Thread",
+            "currentThread",
+            "()Ljava/lang/Thread;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/System",
+            "identityHashCode",
+            "(Ljava/lang/Object;)I",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LASTORE));
     }
 
     protected void emitTransitionOutStores(

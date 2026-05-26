@@ -256,6 +256,7 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         int blockLocal,
         int pcLocal,
         int domainLocal,
+        int outLocal,
         int encodedCursor
     ) {
         int mode = encodedCursor >>> CFF_ISLAND_CURSOR_MODE_SHIFT;
@@ -269,20 +270,10 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             0x43464953 ^ (mode * 0x45D9F3B) ^ (cursor * 0x119DE1F3)
         );
         if ((mode & CFF_ISLAND_RUNTIME_SOURCE_THREAD) != 0) {
-            insns.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                "java/lang/Thread",
-                "currentThread",
-                "()Ljava/lang/Thread;",
-                false
-            ));
-            insns.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                "java/lang/System",
-                "identityHashCode",
-                "(Ljava/lang/Object;)I",
-                false
-            ));
+            insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+            JvmPassBytecode.pushInt(insns, 3);
+            insns.add(new InsnNode(Opcodes.LALOAD));
+            insns.add(new InsnNode(Opcodes.L2I));
             insns.add(new InsnNode(Opcodes.IXOR));
         }
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));

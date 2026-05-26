@@ -688,6 +688,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 helperBlockLocal,
                 helperPcLocal,
                 helperDomainLocal,
+                helperOutLocal,
                 islandMaterialCursor
             );
             helper.instructions.add(new VarInsnNode(Opcodes.ISTORE, helperSourceLocal));
