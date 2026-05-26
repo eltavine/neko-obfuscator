@@ -4413,6 +4413,176 @@ Subtasks:
      markers after excluding the fixture's expected `Caught MyException: boom`
      output.
 
+### P2.2.17 Split no-runtime key-transfer helper by ticket mode
+
+Status: `[ ]` planned; source edits not started.
+
+Scope:
+
+- JVM runtime performance only. Do not change obfuscation-time goals, native
+  code, invokedynamic linkage, CFF block coverage, CFF block boundaries,
+  hidden-key parameters, packed parameter carriers, token material formulas,
+  key-transfer row registration, method-key fold formulas, class-integrity
+  ticket semantics, or fallback behavior.
+- Change only the generated CFF no-runtime-source key-transfer helper surface
+  accepted in P2.2.16 and the generated callsite helper selection for
+  key-transfer material.
+- Add a second no-runtime-source key-transfer helper for callsites where
+  `runtimeSourceMode == KEY_TRANSFER_RUNTIME_SOURCE_NONE` and
+  `deferTicket == false`. This helper must use the high/low cursor indexes
+  directly, decode high/low token material exactly as P2.2.16 does, pack the
+  result, and call the class-integrity helper with
+  `CLASS_INTEGRITY_TICKET_ISSUE_MODE`.
+- Keep P2.2.16's defer-capable no-runtime helper for `runtimeSourceMode == NONE`
+  and `deferTicket == true`. Keep the original generic helper for all non-NONE
+  runtime-source modes.
+
+Required evidence:
+
+- P2.2.16 is the accepted runtime baseline after commit
+  `d870833 optimize no-runtime-source key transfer helper`: fresh ten-run
+  medians at `build/jvm-runtime-perf/repeats-p2-2-16-10x/runtime-medians.tsv`
+  were full TEST `Calc=171/172 ms` and full obfusjack `Seq=302/303 ms`.
+- P2.2.16 semantic validation came from the broad targeted JVM suite, which
+  passed after regenerating the current full-obf artifacts. The bare timing
+  loop is a timing gate, not the semantic gate: both accepted P2.2.10 and
+  accepted P2.2.16 timing logs contain one occurrence of the fixture's
+  intermittent `Test 1.6: Pool FAIL` despite the strict
+  `JvmFullObfuscationPerfTest` full-obf run passing. P2.2.17 must continue to
+  run the broad targeted JVM suite and must report any bare-loop `FAIL` rows
+  separately instead of treating the timing loop as semantic proof.
+- Fresh post-P2.2.16 full-jar routing scan at
+  `build/jvm-runtime-perf/p2-2-16-after-kxfer-callsite-modes.tsv` found `457`
+  key-transfer callsites: `453` `NONE/NONE` and `4` `THREAD/THREAD`. Among the
+  `NONE/NONE` callsites, `441` have no ticket-defer flag and only `12` defer.
+  In full TEST, all `212` `NONE/NONE` callsites route to P2.2.16's no-runtime
+  helper `a/a.m` and none carry the ticket-defer flag. In full obfusjack,
+  `229` `NONE/NONE` callsites are non-defer and `12` defer.
+- Fresh post-P2.2.16 hot-class bytecode at
+  `build/jvm-runtime-perf/p2-2-16-after-test-a-u.javap.txt` shows the hot Calc
+  `a.u` key-transfer callsites route to `a/a.m` with positive cursor indexes
+  and no ticket-defer flag.
+- Fresh post-P2.2.16 helper bytecode at
+  `build/jvm-runtime-perf/p2-2-16-after-test-a-a.javap.txt` shows
+  `a.a.m:(JIII[Ljava/lang/Object;II)J` is the no-runtime helper. It still
+  extracts the ticket-defer high bit, masks both cursor indexes, branches on
+  the ticket mode at bytecode offset `108`, and emits both defer and issue
+  ticket constants even though every hot TEST callsite is known non-defer at
+  generation time.
+- Fresh post-P2.2.16 PrintInlining at
+  `build/jvm-runtime-perf/p2-2-16-after-full-test-print-inlining.stdout.log`
+  reports `a.a::m (131 bytes)` at the hot Calc callsites, still as
+  `callee is too large` or `already compiled into a big method`. This proves
+  P2.2.16 moved the hot path off `a.a::l (1161 bytes)` but left a smaller
+  still-too-large no-runtime helper in the key-update path.
+- Fresh post-P2.2.16 TEST JFR at
+  `build/jvm-runtime-perf/jfr/p2-2-17-before-test-calc-max.jfr`, summarized in
+  `build/jvm-runtime-perf/jfr/p2-2-17-before-test-calc-max-samples.txt`,
+  still places the Calc bodies as the dominant runtime path:
+  `a.u.l=26`, `a.u.m=20`, `a.u.o=12`, and `a.na.kf=12` samples. This keeps the
+  optimization focused on helper work executed inside the Calc bodies, not on
+  invokedynamic linkage.
+- Fresh post-P2.2.16 obfusjack JFR at
+  `build/jvm-runtime-perf/jfr/p2-2-17-before-obfusjack-max.jfr`, summarized in
+  `build/jvm-runtime-perf/jfr/p2-2-17-before-obfusjack-max-samples.txt`,
+  shows full obfusjack time is now dominated by matrix bodies and CFF material
+  helpers: `a.a.e=743`, `a.a.x=709`, `a.a.y=594`, `a.da.ab=244`,
+  `a.da.ua=196`, while P2.2.16's no-runtime key-transfer helper `a.da.wa`
+  contributes `21` samples. P2.2.17 is therefore expected to be a narrow TEST
+  key-update improvement and must not be accepted if it regresses obfusjack.
+
+Rejected-route separation:
+
+- P2.2.3 rejected token helper packed-pair scratch caching. P2.2.17 does not
+  change token helper internals, token row layout, token object-cell state,
+  token helper descriptor, or token material formulas.
+- P2.2.4 rejected key-transfer method-key fold hoisting. P2.2.17 does not
+  hoist or rewrite the method-key fold formula.
+- P2.2.10 accepted transition-material row cursor walking. P2.2.17 does not
+  touch transition-material helpers, transition rows, row cursors, or `out[]`.
+- P2.2.11 rejected transition-state carrier ABI changes. P2.2.17 does not
+  change packed state carriers or transition/step helper descriptors.
+- P2.2.14 rejected per-method material carrier caching. P2.2.17 does not
+  introduce method-local carrier caching or repeated `GETSTATIC` removal.
+- P2.2.15 rejected signed method-key mixing. P2.2.17 does not change
+  method-key signedness, masked salts, or invokedynamic/string key semantics.
+- P2.2.16 accepted runtime-source mode splitting. P2.2.17 keeps P2.2.16's
+  non-NONE and defer-capable helpers and only adds an issue-only helper for the
+  already-proven `NONE` plus non-defer callsite subset.
+
+Invariant preservation:
+
+| Current P2.2.16 path | P2.2.17 path | Preserved invariant |
+| --- | --- | --- |
+| `runtimeSourceMode == NONE` callsites route to a defer-capable no-runtime helper | non-defer `NONE` callsites route to an issue-only no-runtime helper; defer `NONE` callsites keep the defer-capable helper | runtime-source mode and ticket-defer mode remain generation-time callsite facts |
+| non-NONE modes route to the generic runtime-source-aware helper | unchanged | thread/stack-sensitive key flow remains live |
+| no-runtime helper strips ticket flag and masks cursor indexes before token decode | issue-only helper receives only non-defer NONE cursors and uses the registered cursor indexes directly | cursor indexes still come from `registerKeyTransferMaterialWord`, which bounds them to `KEY_TRANSFER_CURSOR_INDEX_MASK` |
+| token helper decodes high/low material and method-key fold xors live entry key into each word | unchanged | high/low material remains driven by live guard/path/block/key inputs |
+| ticket helper is called with issue or defer mode | issue-only helper always passes issue mode; defer helper still handles defer mode | class-integrity ticket semantics remain explicit and fail-closed |
+
+No-weakening proof:
+
+- `deferTicket` is computed from the same source instruction and
+  runtime-source mode before helper selection. Selecting an issue-only helper
+  for `deferTicket == false` does not add a static key source, descriptor-only
+  recomputation, or fallback path.
+- For `runtimeSourceMode == NONE`, `registerKeyTransferMaterialWord` registers
+  one bucket and `encodeKeyTransferMaterialCursor` returns a cursor whose mode
+  bits are clear. For `deferTicket == false`, the callsite does not OR in the
+  ticket-defer high bit. The issue-only helper therefore receives the same
+  cursor indexes that P2.2.16's helper computes after masking.
+- Defer-capable NONE callsites and all non-NONE runtime-source callsites remain
+  on existing helpers. Lambda/thread/stack-sensitive delayed paths are not
+  approximated or collapsed into issue-only ticket behavior.
+- The new helper remains an additional generated CFF helper inside the existing
+  bootstrap/material surface. It is not a Java-side bridge, adapter, fallback,
+  or helper layer outside the planned transform surface.
+
+Subtasks:
+
+1. `[x]` Record and review the no-runtime ticket-mode split plan.
+   Evidence requirement: this P2.2.17 section, accepted P2.2.16 runtime
+   baseline, current full-jar route/defer distribution, current helper
+   bytecode, current PrintInlining, current TEST and obfusjack JFR evidence,
+   rejected-route separation, invariant table, and no-weakening proof.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic,
+   evidence-backed, invariant-preserving, correctly decomposed, separated from
+   rejected routes, and compliant before source edits.
+   Completed: subagent plan-intake review passed. The reviewer confirmed the
+   plan is evidence-backed, generic, preserves non-NONE and defer-capable
+   paths, keeps token decode/method-key fold/live key inputs/ticket semantics,
+   uses a broad enough validation gate, and honestly separates the bare timing
+   loop's known `Pool FAIL` flake from semantic proof.
+2. `[ ]` Implement, validate, measure, and either accept or reject the
+   no-runtime ticket-mode split.
+   Evidence requirement: source diff is limited to CFF key-transfer helper
+   naming/table metadata, helper installation, and callsite helper selection;
+   non-NONE callsites still invoke the generic runtime-source-aware helper;
+   defer-capable NONE callsites still invoke P2.2.16's helper; non-defer NONE
+   callsites invoke the new issue-only helper; generated issue-only helper
+   bytecode has no Thread/StackWalker/runtime-source branch and no ticket-mode
+   branch, while still calling token helper twice and ticket helper once.
+   Validation target: the same targeted JVM command as P1.1,
+   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ObfuscationIntegrationTest --rerun-tasks`,
+   followed by generated bytecode inspection for helper descriptors and
+   callsite routing, PrintInlining inspection for the new helper and hot Calc
+   callsites, stdout/stderr scan for verifier/linkage/runtime errors and
+   fallback/skip markers, bare timing-loop `FAIL` row reporting, repository
+   `hs_err` scan, and a fresh ten-run JVM runtime gate for full TEST and full
+   obfusjack generated jars.
+   Completion criteria: targeted JVM validation passes; full-jar routing scan
+   shows non-defer `NONE/NONE` callsites routed to the new issue-only helper,
+   defer `NONE/NONE` callsites routed to the defer-capable helper, and non-NONE
+   callsites routed to the generic helper; generated helper topology does not
+   reduce CFF coverage or original application method obfuscation; full TEST
+   `Calc` improves from accepted P2.2.16 `171/172 ms`; full obfusjack `Seq`
+   does not regress from accepted P2.2.16 `302/303 ms`; Platform, Virtual,
+   Parallel, and VThreads remain within accepted P2.2.16 observed spreads. If
+   either target regresses, targeted validation fails, or new unexpected
+   semantic rows fail, revert the source change, regenerate the accepted-source
+   artifact, record rejection evidence, and commit only the rejection record.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
