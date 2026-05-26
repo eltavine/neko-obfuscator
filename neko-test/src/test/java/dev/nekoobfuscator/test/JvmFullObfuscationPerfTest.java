@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,6 +49,9 @@ class JvmFullObfuscationPerfTest {
     private static final Pattern DRY_RUN_METRIC_PATTERN = Pattern.compile(
         "([A-Za-z][A-Za-z0-9]*)=(-?\\d+)"
     );
+    private static final Pattern OBFUSJACK_TIMING_PATTERN = Pattern.compile(
+        "(Platform threads|Virtual threads|Seq|Parallel|VThreads):\\s*(\\d+)\\s+ms"
+    );
 
     private static final String STRING_TAIL_DESC = "([Ljava/lang/Object;IJI)Ljava/lang/String;";
     private static final String INDY_FLOW_DESC = "(IIII[Ljava/lang/Object;IJI)J";
@@ -56,6 +60,64 @@ class JvmFullObfuscationPerfTest {
     private static final String CFF_TRANSITION_MATERIAL_DESC = "(JIII[Ljava/lang/Object;II[J)J";
     private static final String CFF_STEP_MATERIAL_DESC = "(JIII[Ljava/lang/Object;I[J)J";
     private static final String CFF_ISLAND_MATERIAL_DESC = "(JIII[Ljava/lang/Object;III)I";
+    private static final int ABLATION_REPEATS = 3;
+    private static final String CFF_ONLY_STACK_CONFIG = """
+        version: 1
+
+        transforms:
+          renamer: { enabled: true, packagePrefix: a/ }
+          keyDispatch: { enabled: true }
+          methodParameterObfuscation: { enabled: true }
+          controlFlowFlattening: { enabled: true, intensity: 1.0 }
+          validationSinkHardening: { enabled: true }
+          invokeDynamic: { enabled: false }
+          constantObfuscation: { enabled: false }
+          stringObfuscation: { enabled: false }
+
+        native:
+          enabled: false
+
+        keys:
+          masterSeed: auto
+        """;
+    private static final String FULL_NO_INDY_CONFIG = """
+        version: 1
+
+        transforms:
+          renamer: { enabled: true, packagePrefix: a/ }
+          keyDispatch: { enabled: true }
+          methodParameterObfuscation: { enabled: true }
+          controlFlowFlattening: { enabled: true, intensity: 1.0 }
+          validationSinkHardening: { enabled: true }
+          invokeDynamic: { enabled: false }
+          constantObfuscation: { enabled: true, intensity: 1.0 }
+          stringObfuscation: { enabled: true, intensity: 1.0 }
+
+        native:
+          enabled: false
+
+        keys:
+          masterSeed: auto
+        """;
+    private static final String FULL_NO_CONST_STRING_CONFIG = """
+        version: 1
+
+        transforms:
+          renamer: { enabled: true, packagePrefix: a/ }
+          keyDispatch: { enabled: true }
+          methodParameterObfuscation: { enabled: true }
+          controlFlowFlattening: { enabled: true, intensity: 1.0 }
+          validationSinkHardening: { enabled: true }
+          invokeDynamic: { enabled: true }
+          constantObfuscation: { enabled: false }
+          stringObfuscation: { enabled: false }
+
+        native:
+          enabled: false
+
+        keys:
+          masterSeed: auto
+        """;
 
     @Test
     @Timeout(value = 5, unit = TimeUnit.MINUTES)
@@ -96,6 +158,72 @@ class JvmFullObfuscationPerfTest {
         assertTrue(Files.exists(report), () -> "Missing JVM full-obf perf report: " + report);
     }
 
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.MINUTES)
+    void jvmRuntimeAblationReport() throws Exception {
+        Path workDir = Files.createDirectories(
+            NativeObfuscationHelper.projectRoot()
+                .resolve("build")
+                .resolve("test-jvm-runtime-ablation")
+        );
+        Path fullConfig = NativeObfuscationHelper.jarsDir().resolve("full-jvm-obf.yml");
+        assertTrue(Files.exists(fullConfig), () -> "Missing full JVM obfuscation config: " + fullConfig);
+
+        List<Fixture> fixtures = List.of(
+            new Fixture("TEST", "test.jar", BehaviorMode.TEST_PERF),
+            new Fixture("obfusjack", "test21.jar", BehaviorMode.OBFUSJACK_PERF)
+        );
+        List<AblationVariant> variants = List.of(
+            new AblationVariant("original", null, null),
+            new AblationVariant("cff-only-stack", CFF_ONLY_STACK_CONFIG, null),
+            new AblationVariant("full-no-indy", FULL_NO_INDY_CONFIG, null),
+            new AblationVariant("full-no-const-string", FULL_NO_CONST_STRING_CONFIG, null),
+            new AblationVariant("full", null, fullConfig)
+        );
+
+        List<AblationRecord> records = new ArrayList<>();
+        for (Fixture fixture : fixtures) {
+            Path input = NativeObfuscationHelper.jarsDir().resolve(fixture.jarName());
+            assertTrue(Files.exists(input), () -> "Missing fixture jar: " + input);
+            for (AblationVariant variant : variants) {
+                Path config = resolveAblationConfig(workDir, variant);
+                Path artifact = input;
+                NativeObfuscationHelper.ObfuscationRunResult obfuscation = null;
+                if (variant.obfuscates()) {
+                    artifact = workDir.resolve(fixture.name() + "-" + variant.name() + ".jar");
+                    obfuscation = NativeObfuscationHelper.obfuscateJar(
+                        input,
+                        artifact,
+                        config,
+                        Duration.ofMinutes(2)
+                    );
+                    assertNoStaticGeneratedHelperHardening(fixture, obfuscation);
+                }
+                List<AblationRunRecord> runs = runAblationVariant(workDir, fixture, variant, artifact);
+                records.add(new AblationRecord(
+                    fixture,
+                    variant.name(),
+                    input,
+                    artifact,
+                    config,
+                    obfuscation,
+                    analyzeTopology(artifact),
+                    runs,
+                    validMedians(runs)
+                ));
+            }
+        }
+
+        Path report = workDir.resolve("jvm-runtime-ablation-report.json");
+        Files.writeString(report, renderAblationReport(records), StandardCharsets.UTF_8);
+        assertTrue(Files.exists(report), () -> "Missing JVM runtime ablation report: " + report);
+        assertEquals(
+            fixtures.size() * variants.size(),
+            records.size(),
+            () -> "Incomplete JVM runtime ablation report: " + report
+        );
+    }
+
     private static RunRecord runFixture(
         Path workDir,
         Fixture fixture,
@@ -116,6 +244,121 @@ class JvmFullObfuscationPerfTest {
         String combined = NativeObfuscationHelper.combinedOutput(run);
         Long calcMillis = validateRun(fixture, variant, run, combined);
         return new RunRecord(run, calcMillis, extractPerformanceTimingLines(combined));
+    }
+
+    private static Path resolveAblationConfig(Path workDir, AblationVariant variant)
+        throws Exception {
+        if (!variant.obfuscates()) return null;
+        if (variant.existingConfig() != null) return variant.existingConfig();
+        Path configDir = Files.createDirectories(workDir.resolve("configs"));
+        Path config = configDir.resolve(variant.name() + ".yml");
+        Files.writeString(config, variant.configText(), StandardCharsets.UTF_8);
+        return config;
+    }
+
+    private static List<AblationRunRecord> runAblationVariant(
+        Path workDir,
+        Fixture fixture,
+        AblationVariant variant,
+        Path jar
+    )
+        throws Exception {
+        Path runDir = Files.createDirectories(workDir.resolve("runs"));
+        List<AblationRunRecord> runs = new ArrayList<>();
+        for (int index = 1; index <= ABLATION_REPEATS; index++) {
+            Path stdout = runDir.resolve(fixture.name() + "." + variant.name() + "." + index + ".stdout.log");
+            Path stderr = runDir.resolve(fixture.name() + "." + variant.name() + "." + index + ".stderr.log");
+            NativeObfuscationHelper.JarRunResult run = NativeObfuscationHelper.runJar(
+                jar,
+                fixture.jvmArgs(),
+                List.of(),
+                stdout,
+                stderr,
+                Duration.ofMinutes(2)
+            );
+            String combined = NativeObfuscationHelper.combinedOutput(run);
+            RunValidity validity = validateAblationRun(fixture, run, combined);
+            Map<String, Long> timingMillis = validity.valid()
+                ? parseTimingMillis(fixture, combined)
+                : Map.of();
+            runs.add(new AblationRunRecord(
+                index,
+                run,
+                validity.valid(),
+                validity.reason(),
+                timingMillis,
+                extractPerformanceTimingLines(combined)
+            ));
+        }
+        return runs;
+    }
+
+    private static RunValidity validateAblationRun(
+        Fixture fixture,
+        NativeObfuscationHelper.JarRunResult run,
+        String combined
+    ) {
+        if (run.exitCode() != 0) {
+            return new RunValidity(false, "exitCode=" + run.exitCode());
+        }
+        return switch (fixture.behaviorMode()) {
+            case TEST_PERF -> missingExpectedRows(testExpectedRows(), combined);
+            case OBFUSJACK_PERF -> combined.contains("=== All tests completed ===")
+                ? new RunValidity(true, null)
+                : new RunValidity(false, "missing obfusjack completion marker");
+            case HEADLESS_GUI -> new RunValidity(false, "headless GUI fixture is not part of the ablation matrix");
+            case EVALUATOR -> new RunValidity(false, "evaluator fixture is not part of the ablation matrix");
+        };
+    }
+
+    private static RunValidity missingExpectedRows(List<String> expectedRows, String combined) {
+        for (String expected : expectedRows) {
+            if (!combined.contains(expected)) {
+                return new RunValidity(false, "missing marker: " + expected);
+            }
+        }
+        return new RunValidity(true, null);
+    }
+
+    private static Map<String, Long> parseTimingMillis(Fixture fixture, String combined) {
+        Map<String, Long> timings = new LinkedHashMap<>();
+        if (fixture.behaviorMode() == BehaviorMode.TEST_PERF) {
+            Long calc = NativeObfuscationHelper.parseCalcMillis(combined);
+            if (calc != null) timings.put("Calc", calc);
+            return timings;
+        }
+        if (fixture.behaviorMode() == BehaviorMode.OBFUSJACK_PERF) {
+            Matcher matcher = OBFUSJACK_TIMING_PATTERN.matcher(combined);
+            while (matcher.find()) {
+                timings.put(obfusjackMetricName(matcher.group(1)), Long.parseLong(matcher.group(2)));
+            }
+        }
+        return timings;
+    }
+
+    private static String obfusjackMetricName(String label) {
+        return switch (label) {
+            case "Platform threads" -> "Platform";
+            case "Virtual threads" -> "Virtual";
+            default -> label;
+        };
+    }
+
+    private static Map<String, Long> validMedians(List<AblationRunRecord> runs) {
+        Map<String, List<Long>> valuesByMetric = new LinkedHashMap<>();
+        for (AblationRunRecord run : runs) {
+            if (!run.valid()) continue;
+            for (Map.Entry<String, Long> entry : run.timingMillis().entrySet()) {
+                valuesByMetric.computeIfAbsent(entry.getKey(), ignored -> new ArrayList<>()).add(entry.getValue());
+            }
+        }
+        Map<String, Long> medians = new LinkedHashMap<>();
+        for (Map.Entry<String, List<Long>> entry : valuesByMetric.entrySet()) {
+            List<Long> values = entry.getValue();
+            values.sort(Long::compareTo);
+            medians.put(entry.getKey(), values.get(values.size() / 2));
+        }
+        return medians;
     }
 
     private static Long validateRun(
@@ -155,7 +398,16 @@ class JvmFullObfuscationPerfTest {
     }
 
     private static void assertTestRows(Fixture fixture, String variant, String combined) {
-        for (String expected : List.of(
+        for (String expected : testExpectedRows()) {
+            assertTrue(
+                combined.contains(expected),
+                () -> fixture.name() + " " + variant + " missing baseline row " + expected + "\n" + combined
+            );
+        }
+    }
+
+    private static List<String> testExpectedRows() {
+        return List.of(
             "Test 1.1: Inheritance PASS",
             "Test 1.2: Cross PASS",
             "Test 1.3: Throw PASS",
@@ -171,12 +423,7 @@ class JvmFullObfuscationPerfTest {
             "Test 2.7: Annotation PASS",
             "Test 2.8: Sec ERROR",
             "-------------Tests r Finished-------------"
-        )) {
-            assertTrue(
-                combined.contains(expected),
-                () -> fixture.name() + " " + variant + " missing baseline row " + expected + "\n" + combined
-            );
-        }
+        );
     }
 
     private static void assertEvaluatorRows(Fixture fixture, String variant, String combined) {
@@ -374,6 +621,28 @@ class JvmFullObfuscationPerfTest {
         return sb.toString();
     }
 
+    private static String renderAblationReport(List<AblationRecord> records)
+        throws Exception {
+        StringBuilder sb = new StringBuilder(16384);
+        sb.append("{\n");
+        sb.append("  \"capturedAt\": ").append(json(Instant.now().toString())).append(",\n");
+        sb.append("  \"repeatCount\": ").append(ABLATION_REPEATS).append(",\n");
+        sb.append("  \"jdk\": {\n");
+        sb.append("    \"javaVersion\": ").append(json(System.getProperty("java.version"))).append(",\n");
+        sb.append("    \"javaVendor\": ").append(json(System.getProperty("java.vendor"))).append(",\n");
+        sb.append("    \"javaVmName\": ").append(json(System.getProperty("java.vm.name"))).append("\n");
+        sb.append("  },\n");
+        sb.append("  \"records\": [\n");
+        for (int i = 0; i < records.size(); i++) {
+            appendAblationRecord(sb, records.get(i), "    ");
+            if (i + 1 < records.size()) sb.append(',');
+            sb.append('\n');
+        }
+        sb.append("  ]\n");
+        sb.append("}\n");
+        return sb.toString();
+    }
+
     private static void appendRecord(StringBuilder sb, PerfRecord record, String indent)
         throws Exception {
         sb.append(indent).append("{\n");
@@ -400,6 +669,68 @@ class JvmFullObfuscationPerfTest {
         } else {
             sb.append('\n');
         }
+        sb.append(indent).append('}');
+    }
+
+    private static void appendAblationRecord(StringBuilder sb, AblationRecord record, String indent)
+        throws Exception {
+        long validRuns = record.runs().stream().filter(AblationRunRecord::valid).count();
+        sb.append(indent).append("{\n");
+        sb.append(indent).append("  \"fixture\": ").append(json(record.fixture().name())).append(",\n");
+        sb.append(indent).append("  \"variant\": ").append(json(record.variant())).append(",\n");
+        sb.append(indent).append("  \"inputJar\": ").append(json(record.inputJar().toString())).append(",\n");
+        sb.append(indent).append("  \"artifactJar\": ").append(json(record.artifactJar().toString())).append(",\n");
+        sb.append(indent).append("  \"config\": ");
+        appendNullableJson(sb, record.configPath() == null ? null : record.configPath().toString());
+        sb.append(",\n");
+        sb.append(indent).append("  \"inputBytes\": ").append(Files.size(record.inputJar())).append(",\n");
+        sb.append(indent).append("  \"artifactBytes\": ").append(Files.size(record.artifactJar())).append(",\n");
+        sb.append(indent).append("  \"validRunCount\": ").append(validRuns).append(",\n");
+        appendLongMap(sb, "validMedianMillis", record.validMedianMillis(), indent + "  ");
+        sb.append(",\n");
+        if (record.obfuscation() == null) {
+            sb.append(indent).append("  \"obfuscation\": null,\n");
+        } else {
+            sb.append(indent).append("  \"obfuscation\": {\n");
+            sb.append(indent).append("    \"durationMillis\": ")
+                .append(record.obfuscation().duration().toMillis()).append(",\n");
+            sb.append(indent).append("    \"stdout\": ")
+                .append(json(record.obfuscation().stdoutPath().toString())).append(",\n");
+            sb.append(indent).append("    \"stderr\": ")
+                .append(json(record.obfuscation().stderrPath().toString())).append("\n");
+            sb.append(indent).append("  },\n");
+        }
+        appendTopology(sb, record.topology(), indent + "  ");
+        sb.append(",\n");
+        sb.append(indent).append("  \"runs\": [\n");
+        for (int i = 0; i < record.runs().size(); i++) {
+            appendAblationRun(sb, record.runs().get(i), indent + "    ");
+            if (i + 1 < record.runs().size()) sb.append(',');
+            sb.append('\n');
+        }
+        sb.append(indent).append("  ]\n");
+        sb.append(indent).append('}');
+    }
+
+    private static void appendAblationRun(StringBuilder sb, AblationRunRecord run, String indent) {
+        sb.append(indent).append("{\n");
+        sb.append(indent).append("  \"index\": ").append(run.index()).append(",\n");
+        sb.append(indent).append("  \"valid\": ").append(run.valid()).append(",\n");
+        sb.append(indent).append("  \"invalidReason\": ");
+        appendNullableJson(sb, run.invalidReason());
+        sb.append(",\n");
+        sb.append(indent).append("  \"durationMillis\": ").append(run.result().duration().toMillis()).append(",\n");
+        sb.append(indent).append("  \"exitCode\": ").append(run.result().exitCode()).append(",\n");
+        sb.append(indent).append("  \"stdout\": ").append(json(run.result().stdoutPath().toString())).append(",\n");
+        sb.append(indent).append("  \"stderr\": ").append(json(run.result().stderrPath().toString())).append(",\n");
+        appendLongMap(sb, "timingMillis", run.timingMillis(), indent + "  ");
+        sb.append(",\n");
+        sb.append(indent).append("  \"timingLines\": [");
+        for (int i = 0; i < run.timingLines().size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(json(run.timingLines().get(i)));
+        }
+        sb.append("]\n");
         sb.append(indent).append('}');
     }
 
@@ -614,6 +945,14 @@ class JvmFullObfuscationPerfTest {
         sb.append(indent).append('}');
     }
 
+    private static void appendNullableJson(StringBuilder sb, String value) {
+        if (value == null) {
+            sb.append("null");
+        } else {
+            sb.append(json(value));
+        }
+    }
+
     private static String json(String value) {
         Objects.requireNonNull(value, "value");
         StringBuilder sb = new StringBuilder(value.length() + 2);
@@ -677,6 +1016,42 @@ class JvmFullObfuscationPerfTest {
         NativeObfuscationHelper.ObfuscationRunResult obfuscation,
         RunRecord originalRun,
         RunRecord fullObfRun
+    ) {}
+
+    private record AblationVariant(
+        String name,
+        String configText,
+        Path existingConfig
+    ) {
+        boolean obfuscates() {
+            return configText != null || existingConfig != null;
+        }
+    }
+
+    private record AblationRunRecord(
+        int index,
+        NativeObfuscationHelper.JarRunResult result,
+        boolean valid,
+        String invalidReason,
+        Map<String, Long> timingMillis,
+        List<String> timingLines
+    ) {}
+
+    private record AblationRecord(
+        Fixture fixture,
+        String variant,
+        Path inputJar,
+        Path artifactJar,
+        Path configPath,
+        NativeObfuscationHelper.ObfuscationRunResult obfuscation,
+        TopologyReport topology,
+        List<AblationRunRecord> runs,
+        Map<String, Long> validMedianMillis
+    ) {}
+
+    private record RunValidity(
+        boolean valid,
+        String reason
     ) {}
 
     private static final class TopologyBuilder {

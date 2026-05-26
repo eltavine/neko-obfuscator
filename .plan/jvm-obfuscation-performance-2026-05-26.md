@@ -4623,7 +4623,7 @@ Subtasks:
 
 ### P3 Add source-controlled JVM runtime ablation reporting
 
-Status: `[-]` plan being refined before implementation.
+Status: `[x]` implemented and validated as source-controlled evidence tooling.
 
 Scope:
 
@@ -4718,7 +4718,7 @@ Subtasks:
    source-limited, explains why P3 precedes more runtime helper work, preserves
    JVM obfuscation invariants, defines variants/fixtures/run validity/median
    rules, and has concrete validation and completion criteria.
-2. `[ ]` Implement and validate the source-controlled ablation report.
+2. `[x]` Implement and validate the source-controlled ablation report.
    Evidence requirement: Java diff stays inside
    `neko-test/src/test/java/dev/nekoobfuscator/test/JvmFullObfuscationPerfTest.java`;
    generated report contains the required variant and fixture rows; invalid
@@ -4732,6 +4732,29 @@ Subtasks:
    Completion criteria: validation passes, report shape satisfies the P3
    acceptance criteria, subagent implementation review passes, and only the
    test/report implementation plus matching plan update are committed.
+   Completed: implementation added a test/report-only ablation matrix to
+   `JvmFullObfuscationPerfTest` without changing runtime or transform sources.
+   The generated report at
+   `build/test-jvm-runtime-ablation/jvm-runtime-ablation-report.json` contains
+   `TEST` and `obfusjack` rows for `original`, `cff-only-stack`,
+   `full-no-indy`, `full-no-const-string`, and `full`, with three run records
+   per row, stdout/stderr paths, exit codes, validity, invalid reasons, raw
+   timing lines, valid medians, jar sizes, topology, helper descriptor counts,
+   and largest methods. All ten rows recorded `validRunCount=3`.
+
+   Fresh validation passed:
+   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`
+   completed with `BUILD SUCCESSFUL in 1m 9s` and `19 actionable tasks: 19
+   executed`. New P3 report medians included TEST `original Calc=10 ms`,
+   `cff-only-stack Calc=94 ms`, `full-no-indy Calc=120 ms`,
+   `full-no-const-string Calc=169 ms`, and `full Calc=175 ms`; obfusjack
+   `original Seq=2 ms`, `cff-only-stack Seq=290 ms`,
+   `full-no-indy Seq=304 ms`, `full-no-const-string Seq=295 ms`, and
+   `full Seq=301 ms`. `find build/test-jvm-runtime-ablation -type f -name
+   '*.stderr.log' -size +0 -print` returned no files; `rg` over the new P3
+   output found no verifier, linkage, fallback, skip, crash, `FAIL`, or
+   `Exception in thread` markers; and no fresh `hs_err_pid*.log` was newer than
+   the generated report.
 
 ## Review Status
 
