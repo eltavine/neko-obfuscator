@@ -4125,7 +4125,7 @@ Subtasks:
    Completed: subagent plan-intake review passed. Residual risk is that the
    helper may still fail to inline if caller budget dominates; PrintInlining
    inspection and the ten-run runtime gate remain required acceptance controls.
-2. `[ ]` Implement, validate, measure, and either accept or reject signed
+2. `[x]` Implement, validate, measure, and either accept or reject signed
    method-key mixing.
    Evidence requirement: source diff is limited to `methodKeyFromBlock`,
    generated method-key helper emission, and matching no-table method-key
@@ -4147,6 +4147,25 @@ Subtasks:
    and VThreads remain within accepted P2.2.10 observed spreads. If either
    target regresses, revert the source change, regenerate the accepted-source
    artifact, record rejection evidence, and commit only the rejection record.
+   Rejected: targeted JVM validation failed after the signed-mixing source
+   change. The failing Gradle report was intentionally overwritten by the
+   post-revert accepted-source regeneration, so the stable failure evidence is
+   the captured failure transcript from the targeted run:
+   `21 tests completed, 2 failed`; `JvmFullObfuscationPerfTest` failed with
+   `TEST full-obf run failed`, `StringIndexOutOfBoundsException: Range [0, -1)`
+   at `a.b.if`, and `expected: <0> but was: <1>`;
+   `JvmInvokeDynamicObfuscationIntegrationTest` failed with
+   `ExceptionInInitializerError` caused by
+   `StringIndexOutOfBoundsException: Range [0, -1)` in
+   `IndyReferenceShapes.__neko_indy_resolve`, also ending in
+   `expected: <0> but was: <1>`. This proves the signed method-key formula
+   broke protected string/indy key semantics before any runtime performance
+   gate. Source was reverted to the accepted zero-extension formula; scoped
+   `git diff --` on `CffMaterialTables.java`, `CffKeyStateEmitter.java`, and
+   `CffKeyTransferRewriter.java` is empty. Fresh accepted-source regeneration
+   with `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`
+   passed with `BUILD SUCCESSFUL in 14s` and `19 actionable tasks: 19
+   executed`. P2.2.15 must not be retried as signed method-key mixing.
 
 ### P3 Add source-controlled JVM runtime ablation reporting
 
