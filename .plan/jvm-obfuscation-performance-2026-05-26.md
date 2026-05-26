@@ -763,6 +763,74 @@ P1.2.2a rejection evidence:
   cost through the semantic shared-interpreter route, not through the rejected
   group-wrapper inline route.
 
+P1.2.2b execution split:
+
+1. P1.2.2b.1 first removes the remaining hot real-hit material decode helper
+   frame by caching the caller class-owned island material arrays inside each
+   existing island helper and inlining the exact live material-word decode
+   formula for the real-result word. This is a narrower semantic-preserving
+   prerequisite because the post-P1.2.1 JFR records `a.da.ua` island material
+   helper samples on the obfuscated `mmulSeq` stack, while the active runtime
+   path currently decodes only one live real-result word from the compressed
+   island material row.
+2. P1.2.2b.2 attempts the full semantic shared island interpreter only if
+   P1.2.2b.1 does not reach P1. The full interpreter must first consume the
+   remaining real/fake/poison/router material without exposing static material
+   seeds or weakening fake/poison coverage.
+
+P1.2.2b.1 scope:
+
+- Change only the generated island helper body emitted by
+  `createIslandDispatchHelper`.
+- Preserve the existing group helper, island helper count, dispatch token
+  switch, fake source router, fake bounce, poison path, compressed material
+  storage, runtime-source bucket selection, result router, hidden key ABI, and
+  `out[0..2]` layout.
+- Replace `emitCompressedIslandMaterialWordDecode -> __neko_cff_imat$` only
+  for the existing live-decoded real-result word with an inline copy of the
+  same live decode formula, using the same live `key`, `guard`, `path`,
+  `block`, source-adjusted cursor, class-owned `Object[]` carrier, island
+  material `int[]`, and class key words.
+- Do not decode static-mask material fields, add static seed constants, rewrite
+  fake/poison rows, change CFF block construction, or remove material rows.
+
+P1.2.2b.1 required evidence:
+
+- Post-P1.2.1 JFR already places `a.da.ua` under `a.a.fa(Object[], long)`,
+  proving the material decode helper is on the full-obfusjack `mmulSeq`
+  runtime path.
+- Source audit shows the current island helper calls
+  `emitCompressedIslandMaterialWordDecode` only for `realResultWordIndexes`
+  before `finishOutlinedDispatchReturnFromLocal`; fake and poison paths use
+  separate `emitMaterializedStepKeys` and bounce/poison emitters.
+- Source audit shows `installCompressedIslandMaterialHelper` decodes a word
+  from the class-owned island material entry with live `key`, `guard`, `path`,
+  `block`, source-adjusted cursor, word index, and `CLASS_KEY_WORDS_SLOT`.
+
+P1.2.2b.1 validation target:
+
+- Same targeted JVM command as P1.1.
+- Generated topology must show CFF row counts and helper coverage are unchanged
+  except for instruction counts expected from inlining and the expected
+  decrease in island-material helper call sites on the real-result path.
+- Bytecode/JFR inspection must show the real-result path no longer invokes the
+  island material helper from the hot full-obfusjack `mmulSeq` stack. If `Seq`
+  remains above `200 ms`, record the remaining hot CFF path before P1.2.2b.2.
+
+P1.2.2b.1 completion criteria:
+
+- Targeted JVM validation passes.
+- Common runtime validation commands complete and medians are recorded.
+- Full-obf obfusjack `Seq` improves from the P1.2.1 `327 ms` median or the
+  source change is reverted before proceeding.
+- Full-obf TEST `Calc` remains no worse than the original plan baseline
+  `198 ms`.
+- CFF dry-run row counts for `realRows`, `fakeRows`, `poisonRows`,
+  `liveDispatchTokenRows`, material rows, and missing-row counters do not show
+  reduced coverage or new blockers compared with the P1.2.1 artifact.
+- No forbidden runtime/log/marker scan hit is introduced.
+- Subagent implementation review passes before commit.
+
 P1.2.2b shared-interpreter invariant mapping, if P1.2.2a is insufficient:
 
 | Current per-island helper surface | Shared interpreter surface | Preserved invariant |
