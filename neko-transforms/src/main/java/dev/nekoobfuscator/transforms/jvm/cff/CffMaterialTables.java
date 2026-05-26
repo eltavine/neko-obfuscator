@@ -341,11 +341,25 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new InsnNode(Opcodes.AALOAD));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[J"));
         insns.add(new VarInsnNode(Opcodes.ASTORE, rowLocal));
-        emitTokenMaterialWordLoad(insns, rowLocal, indexLocal);
-        emitTokenMaterialClassMask(insns, materialLocal, rowLocal, indexLocal, guardLocal, pathLocal, blockLocal);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        int wordOffset = 0;
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, indexLocal, wordOffset++);
+        wordOffset = emitAlignedTokenMaterialClassMask(
+            insns,
+            materialLocal,
+            rowLocal,
+            indexLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            wordOffset
+        );
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, accumulatorLocal));
-        emitTokenMaterialObjectMask(
+        wordOffset = emitAlignedTokenMaterialObjectMask(
             insns,
             materialLocal,
             rowLocal,
@@ -361,17 +375,224 @@ abstract class CffMaterialTables extends CffClassSetup {
             nextEpochLocal,
             nextEncodedLocal,
             objectCellLocal,
-            currentMaskLocal
+            currentMaskLocal,
+            wordOffset
         );
         insns.add(new VarInsnNode(Opcodes.ILOAD, accumulatorLocal));
         insns.add(new InsnNode(Opcodes.IXOR));
-        emitTokenMaterialControlMask(insns, rowLocal, indexLocal, guardLocal, pathLocal, blockLocal);
+        wordOffset = emitAlignedTokenMaterialControlMask(
+            insns,
+            rowLocal,
+            indexLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            wordOffset
+        );
+        if (wordOffset != TOKEN_MATERIAL_ROW_WORDS) {
+            throw new IllegalStateException("CFF token material helper consumed " + wordOffset + " words");
+        }
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IRETURN));
         helper.maxLocals = 17;
         helper.maxStack = 24;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
+    }
+
+    private void emitAlignedTokenMaterialWordLoad(
+        InsnList insns,
+        int rowLocal,
+        int rowBaseLongLocal,
+        int wordOffset
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rowLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rowBaseLongLocal));
+        int longOffset = wordOffset / 2;
+        if (longOffset != 0) {
+            JvmPassBytecode.pushInt(insns, longOffset);
+            insns.add(new InsnNode(Opcodes.IADD));
+        }
+        insns.add(new InsnNode(Opcodes.LALOAD));
+        if ((wordOffset & 1) == 0) {
+            JvmPassBytecode.pushInt(insns, 32);
+            insns.add(new InsnNode(Opcodes.LUSHR));
+        }
+        insns.add(new InsnNode(Opcodes.L2I));
+    }
+
+    private int emitAlignedTokenMaterialClassMask(
+        InsnList insns,
+        int materialLocal,
+        int rowLocal,
+        int rowBaseLongLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int wordOffset
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
+        JvmPassBytecode.pushInt(insns, CLASS_KEY_WORDS_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, 63);
+        insns.add(new InsnNode(Opcodes.IAND));
+        emitDecodedClassKeyWordFromConstantSeal(insns, CLASS_KEY_WORD_SEAL);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        return wordOffset;
+    }
+
+    private int emitAlignedTokenMaterialObjectMask(
+        InsnList insns,
+        int materialLocal,
+        int rowLocal,
+        int rowBaseLongLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int indexLocal,
+        int packedLocal,
+        int epochLocal,
+        int encodedLocal,
+        int resultLocal,
+        int nextEpochLocal,
+        int nextEncodedLocal,
+        int cellLocal,
+        int currentMaskLocal,
+        int wordOffset
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, CLASS_KEY_TABLE_SIZE - 1);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/atomic/AtomicLong"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, cellLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cellLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "getPlain",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, packedLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, packedLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, epochLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, packedLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, encodedLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
+        emitCffObjectCellMask(insns);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, currentMaskLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, encodedLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, currentMaskLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, resultLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, nextEpochLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, encodedLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, currentMaskLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, nextEpochLocal));
+        emitCffObjectCellMask(insns);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, nextEncodedLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cellLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, nextEncodedLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, nextEpochLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/atomic/AtomicLong",
+            "setPlain",
+            "(J)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, resultLocal));
+        return wordOffset;
+    }
+
+    private int emitAlignedTokenMaterialControlMask(
+        InsnList insns,
+        int rowLocal,
+        int rowBaseLongLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int wordOffset
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitAlignedTokenMaterialWordLoad(insns, rowLocal, rowBaseLongLocal, wordOffset++);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        return wordOffset;
     }
 
     protected void installStepMaterialHelper(
