@@ -4169,7 +4169,7 @@ Subtasks:
 
 ### P2.2.16 Split key-transfer material helper for no-runtime-source cursors
 
-Status: `[ ]` planned; source edits not started.
+Status: `[x]` accepted after validation and measurement.
 
 Scope:
 
@@ -4335,7 +4335,7 @@ Subtasks:
    cursors are registered from the same mode, NONE rows are one-bucket,
    non-NONE stays on the existing runtime-source-aware helper, and the new
    helper remains within the existing generated CFF material-helper surface.
-2. `[ ]` Implement, validate, measure, and either accept or reject the
+2. `[x]` Implement, validate, measure, and either accept or reject the
    no-runtime-source key-transfer helper split.
    Evidence requirement: source diff is limited to CFF key-transfer helper
    naming/table metadata, helper installation, and callsite helper selection;
@@ -4362,6 +4362,56 @@ Subtasks:
    P2.2.10/P2.2.16 observed spreads. If either target regresses or targeted
    validation fails, revert the source change, regenerate the accepted-source
    artifact, record rejection evidence, and commit only the rejection record.
+   Accepted: source diff is limited to `CffSharedState.java`,
+   `CffClassSetup.java`, `CffMaterialTables.java`, and
+   `CffKeyTransferRewriter.java`. The implementation adds generated metadata
+   for a no-runtime-source key-transfer helper, installs that helper in the
+   existing CFF shared helper surface, and routes only
+   `runtimeSourceMode == KEY_TRANSFER_RUNTIME_SOURCE_NONE` callsites to it.
+   Non-NONE callsites keep the existing generic helper.
+
+   Validation:
+   - `./gradlew :neko-transforms:compileJava` passed with `BUILD SUCCESSFUL`.
+   - The required targeted JVM suite passed:
+     `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ObfuscationIntegrationTest --rerun-tasks`
+     completed with `BUILD SUCCESSFUL in 18s` and `19 actionable tasks: 19
+     executed`.
+   - Fresh bytecode inspection at
+     `build/jvm-runtime-perf/p2-2-16-after-test-a-a.javap.txt` shows the
+     generic key-transfer helper remains `a.a.l:(JIII[Ljava/lang/Object;II)J`
+     with runtime-source code, while the no-runtime-source helper is
+     `a.a.m:(JIII[Ljava/lang/Object;II)J`, has `131` JIT-reported bytecode
+     bytes, calls token helper `j` twice, calls ticket helper `h` once, and has
+     no `Thread`, `StackWalker`, `getStackTrace`, or runtime-source branch in
+     the helper body.
+   - Fresh full-jar routing scan at
+     `build/jvm-runtime-perf/p2-2-16-after-kxfer-callsite-modes.tsv` found the
+     same `457` key-transfer callsites and the same mode distribution:
+     `453` `NONE/NONE`, `4` `THREAD/THREAD`. All TEST `NONE/NONE` callsites
+     route to `a/a.m`; all TEST `THREAD/THREAD` callsites route to generic
+     `a/a.l`; obfusjack `NONE/NONE` callsites route to `a/da.wa`; obfusjack
+     `THREAD/THREAD` routes to generic `a/da.va`.
+   - Fresh PrintInlining at
+     `build/jvm-runtime-perf/p2-2-16-after-full-test-print-inlining.stdout.log`
+     shows the hot Calc callsites now invoke `a.a::m (131 bytes)` instead of
+     `a.a::l (1161 bytes)`. The helper is still not broadly inlined because
+     the callers are large, but the monolithic runtime-source helper is no
+     longer on the hot `NONE/NONE` callsites.
+   - Fresh ten-run gate at
+     `build/jvm-runtime-perf/repeats-p2-2-16-10x/runtime-medians.tsv` accepted
+     the implementation: full TEST `Calc` sorted values were
+     `168,168,169,170,171,172,175,175,177,182`, medians `171/172 ms`,
+     improving over fresh before-edit `178/179 ms` and accepted P2.2.10
+     `179/179 ms`; full obfusjack `Seq` sorted values were
+     `299,300,300,301,302,303,308,310,325,330`, medians `302/303 ms`,
+     improving over fresh before-edit `308/309 ms` and accepted P2.2.10
+     `307/309 ms`. Non-target medians were `Platform=73/75 ms`,
+     `Virtual=77/78 ms`, `Parallel=8/8 ms`, and `VThreads=8/8 ms`, within the
+     accepted P2.2.10/P2.2.16 observed spreads.
+   - Runtime/log scans for the ten-run output found no non-empty stderr files,
+     no fresh `hs_err` files, and no verifier/linkage/runtime/fallback/skip
+     markers after excluding the fixture's expected `Caught MyException: boom`
+     output.
 
 ### P3 Add source-controlled JVM runtime ablation reporting
 

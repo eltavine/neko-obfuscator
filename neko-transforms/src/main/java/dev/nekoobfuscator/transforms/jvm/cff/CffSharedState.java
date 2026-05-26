@@ -448,6 +448,9 @@ abstract class CffSharedState {
         String keyTransferMaterialHelperName,
         String keyTransferMaterialHelperOwner,
         boolean keyTransferMaterialHelperInterfaceOwner,
+        String keyTransferNoRuntimeMaterialHelperName,
+        String keyTransferNoRuntimeMaterialHelperOwner,
+        boolean keyTransferNoRuntimeMaterialHelperInterfaceOwner,
         String islandRuntimeSourceHelperName,
         String islandRuntimeSourceHelperOwner,
         boolean islandRuntimeSourceHelperInterfaceOwner,
@@ -503,6 +506,9 @@ abstract class CffSharedState {
         String keyTransferMaterialHelperOwner,
         String keyTransferMaterialHelperName,
         boolean keyTransferMaterialHelperInterfaceOwner,
+        String keyTransferNoRuntimeMaterialHelperOwner,
+        String keyTransferNoRuntimeMaterialHelperName,
+        boolean keyTransferNoRuntimeMaterialHelperInterfaceOwner,
         String stepMaterialHelperOwner,
         String stepMaterialHelperName,
         boolean stepMaterialHelperInterfaceOwner,
@@ -727,6 +733,15 @@ abstract class CffSharedState {
         String stackMixOwner,
         String stackMixName,
         boolean stackMixInterfaceOwner
+    );
+    protected abstract void installKeyTransferNoRuntimeMaterialHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access,
+        String tokenMaterialHelperOwner,
+        String tokenMaterialHelperName,
+        boolean tokenMaterialHelperInterfaceOwner
     );
     protected abstract void insnDecodeKeyTransferWord(
         InsnList insns,

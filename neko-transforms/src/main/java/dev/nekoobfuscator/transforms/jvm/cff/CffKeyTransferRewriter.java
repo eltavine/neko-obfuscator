@@ -908,12 +908,20 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
             deferTicket ? highCursor | KEY_TRANSFER_CURSOR_TICKET_DEFER_FLAG : highCursor
         );
         JvmPassBytecode.pushInt(insns, lowCursor);
+        String helperOwner = table.keyTransferMaterialHelperOwner();
+        String helperName = table.keyTransferMaterialHelperName();
+        boolean helperInterfaceOwner = table.keyTransferMaterialHelperInterfaceOwner();
+        if (runtimeSourceMode == KEY_TRANSFER_RUNTIME_SOURCE_NONE) {
+            helperOwner = table.keyTransferNoRuntimeMaterialHelperOwner();
+            helperName = table.keyTransferNoRuntimeMaterialHelperName();
+            helperInterfaceOwner = table.keyTransferNoRuntimeMaterialHelperInterfaceOwner();
+        }
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
-            table.keyTransferMaterialHelperOwner(),
-            table.keyTransferMaterialHelperName(),
+            helperOwner,
+            helperName,
             KEY_TRANSFER_MATERIAL_HELPER_DESC,
-            table.keyTransferMaterialHelperInterfaceOwner()
+            helperInterfaceOwner
         ));
     }
 

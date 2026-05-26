@@ -2021,6 +2021,9 @@ abstract class CffClassSetup extends CffSharedState {
             sharedHelpers.keyTransferMaterialHelperName(),
             sharedHelpers.keyTransferMaterialHelperOwner(),
             sharedHelpers.keyTransferMaterialHelperInterfaceOwner(),
+            sharedHelpers.keyTransferNoRuntimeMaterialHelperName(),
+            sharedHelpers.keyTransferNoRuntimeMaterialHelperOwner(),
+            sharedHelpers.keyTransferNoRuntimeMaterialHelperInterfaceOwner(),
             sharedHelpers.islandRuntimeSourceHelperName(),
             sharedHelpers.islandRuntimeSourceHelperOwner(),
             sharedHelpers.islandRuntimeSourceHelperInterfaceOwner(),
@@ -3800,6 +3803,11 @@ abstract class CffClassSetup extends CffSharedState {
             "__neko_cff_kxfer$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x4B58464552485031L), 36),
             KEY_TRANSFER_MATERIAL_HELPER_DESC
         );
+        String keyTransferNoRuntimeMaterialHelperName = uniqueMethodName(
+            clazz,
+            "__neko_cff_kxfer0$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x4B58464E48485031L), 36),
+            KEY_TRANSFER_MATERIAL_HELPER_DESC
+        );
         String stepMaterialHelperName = uniqueMethodName(
             clazz,
             "__neko_cff_step$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(seed, 0x5354455053484831L), 36),
@@ -3854,6 +3862,15 @@ abstract class CffClassSetup extends CffSharedState {
             stackMixHelperName,
             clazz.isInterface()
         );
+        installKeyTransferNoRuntimeMaterialHelper(
+            pctx,
+            clazz,
+            keyTransferNoRuntimeMaterialHelperName,
+            access,
+            clazz.name(),
+            tokenMaterialHelperName,
+            clazz.isInterface()
+        );
         installStepMaterialHelper(
             pctx,
             clazz,
@@ -3893,6 +3910,9 @@ abstract class CffClassSetup extends CffSharedState {
             clazz.isInterface(),
             clazz.name(),
             keyTransferMaterialHelperName,
+            clazz.isInterface(),
+            clazz.name(),
+            keyTransferNoRuntimeMaterialHelperName,
             clazz.isInterface(),
             clazz.name(),
             stepMaterialHelperName,

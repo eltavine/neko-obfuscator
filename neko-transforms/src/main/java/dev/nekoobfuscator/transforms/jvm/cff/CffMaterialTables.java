@@ -1565,6 +1565,124 @@ abstract class CffMaterialTables extends CffClassSetup {
         );
     }
 
+    protected void installKeyTransferNoRuntimeMaterialHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access,
+        String tokenMaterialHelperOwner,
+        String tokenMaterialHelperName,
+        boolean tokenMaterialHelperInterfaceOwner
+    ) {
+        MethodNode helper = new MethodNode(
+            access,
+            helperName,
+            KEY_TRANSFER_MATERIAL_HELPER_DESC,
+            null,
+            null
+        );
+        int keyLocal = 0;
+        int guardLocal = 2;
+        int pathLocal = 3;
+        int blockLocal = 4;
+        int materialLocal = 5;
+        int highCursorLocal = 6;
+        int lowCursorLocal = 7;
+        int highWordLocal = 8;
+        int ticketLocal = 9;
+        int ticketDeferLocal = 11;
+        InsnList insns = helper.instructions;
+        LabelNode threadLocalTicket = new LabelNode();
+        LabelNode ticketModeReady = new LabelNode();
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_TICKET_DEFER_FLAG);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, ticketDeferLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, highCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lowCursorLocal));
+        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lowCursorLocal));
+
+        emitKeyTransferMaterialDecodedWord(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            materialLocal,
+            highCursorLocal,
+            KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED,
+            tokenMaterialHelperOwner,
+            tokenMaterialHelperName,
+            tokenMaterialHelperInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, highWordLocal));
+        emitKeyTransferMaterialDecodedWord(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            materialLocal,
+            lowCursorLocal,
+            KEY_TRANSFER_MATERIAL_HIGH_METHOD_SEED,
+            tokenMaterialHelperOwner,
+            tokenMaterialHelperName,
+            tokenMaterialHelperInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highWordLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, materialLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, ticketLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, ticketDeferLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, threadLocalTicket));
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_DEFER_MODE);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, ticketModeReady));
+        insns.add(threadLocalTicket);
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_ISSUE_MODE);
+        insns.add(ticketModeReady);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new LdcInsnNode(Type.getObjectType(clazz.name())));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        CffClassIntegrityState classIntegrityState = pctx.getPassData(CLASS_INTEGRITY_STATE);
+        if (classIntegrityState == null) {
+            throw new IllegalStateException("CFF key-transfer ticket helper requires class-integrity state");
+        }
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            classIntegrityState.owner(),
+            classIntegrityState.helperName(),
+            CLASS_INTEGRITY_HELPER_DESC,
+            classIntegrityState.interfaceOwner()
+        ));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        helper.maxLocals = 12;
+        helper.maxStack = 24;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+        publishGeneratedHelperFlowKey(
+            pctx,
+            clazz.name(),
+            helperName,
+            KEY_TRANSFER_MATERIAL_HELPER_DESC,
+            keyLocal
+        );
+    }
+
     protected void insnDecodeKeyTransferWord(
         InsnList insns,
         int keyLocal,
