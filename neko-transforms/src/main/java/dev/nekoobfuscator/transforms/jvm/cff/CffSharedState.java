@@ -58,6 +58,15 @@ import org.slf4j.LoggerFactory;
  * Shared state, stable metadata API, and cross-split contracts for CFF.
  */
 abstract class CffSharedState {
+    protected static final class TransitionMaterialRowCursor {
+        final int local;
+        int offset;
+
+        TransitionMaterialRowCursor(int local) {
+            this.local = local;
+            this.offset = 0;
+        }
+    }
 
     public static final String ID = "controlFlowFlattening";
     protected static final Logger log = LoggerFactory.getLogger(ControlFlowFlatteningPass.class);
@@ -836,33 +845,38 @@ abstract class CffSharedState {
         int guardLocal,
         int pathLocal,
         int blockLocal,
-        int baseLocal
+        int baseLocal,
+        TransitionMaterialRowCursor rowCursor
     );
     protected abstract void emitTransitionMaterialMethodKeyFold(
         InsnList insns,
         int materialLocal,
         int rowLocal,
-        int keyLocal
+        int keyLocal,
+        TransitionMaterialRowCursor rowCursor
     );
     protected abstract void emitTransitionMaterialDecodedWord(
         InsnList insns,
         int materialLocal,
         int rowLocal,
         int baseLocal,
-        int word
+        int word,
+        TransitionMaterialRowCursor rowCursor
     );
     protected abstract void emitTransitionMaterialMaskFromBase(
         InsnList insns,
         int materialLocal,
         int rowLocal,
         int baseLocal,
-        int word
+        int word,
+        TransitionMaterialRowCursor rowCursor
     );
     protected abstract void emitTransitionMaterialWordLoad(
         InsnList insns,
         int materialLocal,
         int rowLocal,
-        int offset
+        int offset,
+        TransitionMaterialRowCursor rowCursor
     );
     protected abstract void emitTokenMaterialWordLoad(InsnList insns, int rowLocal, int cursorLocal);
     protected abstract void emitPackedMaterialWordLoad(InsnList insns);

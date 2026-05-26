@@ -706,7 +706,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         int guardLocal,
         int pathLocal,
         int blockLocal,
-        int baseLocal
+        int baseLocal,
+        TransitionMaterialRowCursor rowCursor
     ) {
         JvmPassBytecode.pushInt(insns, 0);
         emitClassKeyWordsLoad(insns, objectMaterialLocal);
@@ -717,19 +718,22 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_CLASS_INDEX
+            TRANSITION_MATERIAL_BASE_CLASS_INDEX,
+            rowCursor
         );
         emitTransitionMaterialWordLoad(
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_CLASS_BLOCK
+            TRANSITION_MATERIAL_BASE_CLASS_BLOCK,
+            rowCursor
         );
         emitTransitionMaterialWordLoad(
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_CLASS_DIGEST
+            TRANSITION_MATERIAL_BASE_CLASS_DIGEST,
+            rowCursor
         );
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
@@ -745,7 +749,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_PATH
+            TRANSITION_MATERIAL_BASE_PATH,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IADD));
@@ -755,7 +760,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_BLOCK
+            TRANSITION_MATERIAL_BASE_BLOCK,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -763,7 +769,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             insns,
             materialLocal,
             rowLocal,
-            keyLocal
+            keyLocal,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.DUP));
@@ -771,7 +778,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_SHIFT
+            TRANSITION_MATERIAL_BASE_SHIFT,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -782,7 +790,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         InsnList insns,
         int materialLocal,
         int rowLocal,
-        int keyLocal
+        int keyLocal,
+        TransitionMaterialRowCursor rowCursor
     ) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new InsnNode(Opcodes.L2I));
@@ -795,14 +804,16 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_METHOD_HIGH
+            TRANSITION_MATERIAL_BASE_METHOD_HIGH,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IXOR));
         emitTransitionMaterialWordLoad(
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_METHOD_ADD
+            TRANSITION_MATERIAL_BASE_METHOD_ADD,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.DUP));
@@ -810,7 +821,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             insns,
             materialLocal,
             rowLocal,
-            TRANSITION_MATERIAL_BASE_METHOD_SHIFT
+            TRANSITION_MATERIAL_BASE_METHOD_SHIFT,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -821,20 +833,23 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         int materialLocal,
         int rowLocal,
         int baseLocal,
-        int word
+        int word,
+        TransitionMaterialRowCursor rowCursor
     ) {
         emitTransitionMaterialWordLoad(
             insns,
             materialLocal,
             rowLocal,
-            transitionMaterialWordOffset(word, TRANSITION_MATERIAL_ENCRYPTED)
+            transitionMaterialWordOffset(word, TRANSITION_MATERIAL_ENCRYPTED),
+            rowCursor
         );
         emitTransitionMaterialMaskFromBase(
             insns,
             materialLocal,
             rowLocal,
             baseLocal,
-            word
+            word,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IXOR));
     }
@@ -844,21 +859,24 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         int materialLocal,
         int rowLocal,
         int baseLocal,
-        int word
+        int word,
+        TransitionMaterialRowCursor rowCursor
     ) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
         emitTransitionMaterialWordLoad(
             insns,
             materialLocal,
             rowLocal,
-            transitionMaterialWordOffset(word, TRANSITION_MATERIAL_MASK)
+            transitionMaterialWordOffset(word, TRANSITION_MATERIAL_MASK),
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IXOR));
         emitTransitionMaterialWordLoad(
             insns,
             materialLocal,
             rowLocal,
-            transitionMaterialWordOffset(word, TRANSITION_MATERIAL_ADD)
+            transitionMaterialWordOffset(word, TRANSITION_MATERIAL_ADD),
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.DUP));
@@ -866,7 +884,8 @@ abstract class CffIslandMaterial extends CffMaterialTables {
             insns,
             materialLocal,
             rowLocal,
-            transitionMaterialWordOffset(word, TRANSITION_MATERIAL_SHIFT)
+            transitionMaterialWordOffset(word, TRANSITION_MATERIAL_SHIFT),
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -876,12 +895,16 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         InsnList insns,
         int materialLocal,
         int rowLocal,
-        int offset
+        int offset,
+        TransitionMaterialRowCursor rowCursor
     ) {
         insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, rowLocal));
-        JvmPassBytecode.pushInt(insns, offset);
-        insns.add(new InsnNode(Opcodes.IADD));
+        int delta = offset - rowCursor.offset;
+        if (delta != 0) {
+            insns.add(new IincInsnNode(rowCursor.local, delta));
+            rowCursor.offset = offset;
+        }
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rowCursor.local));
         insns.add(new InsnNode(Opcodes.IALOAD));
     }
 

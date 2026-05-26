@@ -1229,6 +1229,8 @@ abstract class CffMaterialTables extends CffClassSetup {
         JvmPassBytecode.pushInt(insns, TRANSITION_MATERIAL_ROW_WORDS);
         insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new VarInsnNode(Opcodes.ISTORE, rowLocal));
+        TransitionMaterialRowCursor rowCursor =
+            new TransitionMaterialRowCursor(rowLocal);
         emitTransitionMaterialBase(
             insns,
             objectMaterialLocal,
@@ -1241,14 +1243,16 @@ abstract class CffMaterialTables extends CffClassSetup {
             guardLocal,
             pathLocal,
             blockLocal,
-            baseLocal
+            baseLocal,
+            rowCursor
         );
         emitTransitionMaterialDecodedWord(
             insns,
             materialLocal,
             rowLocal,
             baseLocal,
-            TRANSITION_MATERIAL_GUARD_WORD
+            TRANSITION_MATERIAL_GUARD_WORD,
+            rowCursor
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, guardLocal));
         emitTransitionMaterialDecodedWord(
@@ -1256,7 +1260,8 @@ abstract class CffMaterialTables extends CffClassSetup {
             materialLocal,
             rowLocal,
             baseLocal,
-            TRANSITION_MATERIAL_PATH_WORD
+            TRANSITION_MATERIAL_PATH_WORD,
+            rowCursor
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, pathLocal));
         emitTransitionMaterialDecodedWord(
@@ -1264,7 +1269,8 @@ abstract class CffMaterialTables extends CffClassSetup {
             materialLocal,
             rowLocal,
             baseLocal,
-            TRANSITION_MATERIAL_BLOCK_WORD
+            TRANSITION_MATERIAL_BLOCK_WORD,
+            rowCursor
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, blockLocal));
         emitTransitionMaterialDecodedWord(
@@ -1272,7 +1278,8 @@ abstract class CffMaterialTables extends CffClassSetup {
             materialLocal,
             rowLocal,
             baseLocal,
-            TRANSITION_MATERIAL_PC_WORD
+            TRANSITION_MATERIAL_PC_WORD,
+            rowCursor
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
         emitTransitionMaterialDecodedWord(
@@ -1280,7 +1287,8 @@ abstract class CffMaterialTables extends CffClassSetup {
             materialLocal,
             rowLocal,
             baseLocal,
-            TRANSITION_MATERIAL_METHOD_HIGH_WORD
+            TRANSITION_MATERIAL_METHOD_HIGH_WORD,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
@@ -1290,7 +1298,8 @@ abstract class CffMaterialTables extends CffClassSetup {
             materialLocal,
             rowLocal,
             baseLocal,
-            TRANSITION_MATERIAL_METHOD_LOW_WORD
+            TRANSITION_MATERIAL_METHOD_LOW_WORD,
+            rowCursor
         );
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
@@ -1302,7 +1311,8 @@ abstract class CffMaterialTables extends CffClassSetup {
             materialLocal,
             rowLocal,
             baseLocal,
-            TRANSITION_MATERIAL_DOMAIN_WORD
+            TRANSITION_MATERIAL_DOMAIN_WORD,
+            rowCursor
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, domainLocal));
         emitTransitionOutStores(
