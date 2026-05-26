@@ -4016,6 +4016,138 @@ P2.2.14 rejection evidence:
   not improve runtime; the added method-local reference/load shape regressed
   both TEST `Calc` and obfusjack `Seq`.
 
+### P2.2.15 Shrink method-key helper with signed state mixing
+
+Scope:
+
+- JVM runtime performance only. Do not change obfuscation-time work, native
+  code, invokedynamic linkage, CFF block coverage, CFF block boundaries,
+  hidden-key parameters, packed parameter carriers, or fallback behavior.
+- Change only the generated CFF method-key-from-state formula and its matching
+  static generator-side formula. The helper descriptor remains `(IIIIJJ)J`,
+  and callsites still pass live guard, path, block, pc token, masked method
+  salt, and salt mask.
+- Replace the current zero-extension of `pathKey` and `pcToken` with direct
+  signed `int` to `long` mixing in both runtime helper bytecode and
+  `methodKeyFromBlock`. Keep the guard high-word shift, block/method-salt
+  mixing, `METHOD_KEY_PC_MIX` multiplication, and nonzero guard.
+
+Required evidence:
+
+- P2.2.10 remains the accepted runtime baseline for source behavior:
+  full TEST `Calc=179/179 ms` and full obfusjack `Seq=307/309 ms` from
+  `build/jvm-runtime-perf/repeats-p2-2-10-10x/runtime-medians.tsv`.
+- P2.2.14 proved repeated material-carrier `GETSTATIC` removal is not an
+  acceptable bottleneck fix: reducing hot Calc carrier loads still regressed
+  TEST `Calc` to `190/190 ms` and obfusjack `Seq` to `312/312 ms`.
+- Fresh post-P2.2.14-revert TEST Calc 1ms JFR at
+  `build/jvm-runtime-perf/jfr/p2-2-15-before-test-calc-1ms.jfr`, with samples
+  recorded in
+  `build/jvm-runtime-perf/jfr/p2-2-15-before-test-calc-1ms-samples.txt`,
+  reported the Calc bodies as the dominant runtime path:
+  `a.u.l(Object[], long)=27`, `a.u.o(Object[], long)=16`,
+  `a.u.m(Object[], long)=9`, and `a.u.n(Object[], long)=3`.
+- Fresh post-P2.2.14-revert bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-15-before-test-a-u.javap.txt` shows `33`
+  method-key helper calls to `a.a.r:(IIIIJJ)J` in the Calc class.
+- Fresh post-P2.2.14-revert PrintInlining at
+  `build/jvm-runtime-perf/p2-2-15-before-full-test-print-inlining.stdout.log`
+  shows `a.a::r (43 bytes)` compiled separately, with many Calc callsites
+  reporting `callee is too large`; only a few hot callsites are inlined.
+- Fresh post-P2.2.14-revert helper bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-15-before-test-a-a.javap.txt` shows
+  `a.a.r:(IIIIJJ)J` is 43 bytecode bytes and spends two `ldc2_w
+  4294967295; land` mask sequences on zero-extending `pathKey` and `pcToken`
+  before mixing. Those masks are the only planned bytecode removal.
+- Source inspection shows `methodKeyFromBlock`, `installMethodKeyFromStateHelper`,
+  and the no-table `emitMethodKeyFromDecodedState` path all use the same
+  zero-extension formula today, so the runtime helper and generator-side
+  expected key can be changed together without changing any helper ABI.
+
+Rejected-route separation:
+
+- P2.2.3 rejected token helper packed-pair scratch caching. P2.2.15 does not
+  touch token helper internals, token row layout, token object-cell state, or
+  token material formulas.
+- P2.2.10 accepted transition-material row cursor walking. P2.2.15 does not
+  touch transition material rows, cursors, row-base arithmetic, or `out[]`.
+- P2.2.11 rejected transition-state carrier ABI changes. P2.2.15 does not
+  change helper descriptors, carriers, or packed state representation.
+- P2.2.12 rejected compressed-island effective cursor hoisting. P2.2.15 does
+  not touch island cursors, runtime-source cursor mode, or island material
+  formulas.
+- P2.2.13 rejected helper-local step mask-word caching. P2.2.15 does not
+  touch step-material helper internals or row-word loads.
+- P2.2.14 rejected per-method material carrier caching. P2.2.15 does not
+  introduce carrier locals, carrier load caching, or helper emission context.
+
+Invariant preservation:
+
+| Current method-key path | P2.2.15 method-key path | Preserved invariant |
+| --- | --- | --- |
+| helper descriptor `(IIIIJJ)J` receives guard/path/block/pc plus masked method salt and mask | unchanged | generated ABI and masked salt transfer stay unchanged |
+| runtime helper zero-extends path and pc before long mixing | runtime helper sign-extends path and pc before long mixing | live path and pc inputs still drive the method key |
+| `methodKeyFromBlock` computes the expected key with the same zero-extension formula as the helper | `methodKeyFromBlock` computes the expected key with the same signed-mixing formula as the helper | runtime key and generated expected key stay semantically linked |
+| helper applies `METHOD_KEY_PC_MIX` and nonzero guard | unchanged | pc token remains mixed and method key remains nonzero |
+| raw method salt is represented as two masked long constants at callsites | unchanged | raw static method key/salt is not exposed |
+
+No-weakening proof:
+
+- Java `int` to `long` sign extension is injective for the full 32-bit input
+  domain, so replacing `((long) x) & 0xFFFFFFFFL` with `(long) x` does not
+  introduce collisions among path or pc input states.
+- The low 32 bits of `(long) x` exactly equal the original `int` bit pattern;
+  the high 32 bits carry the sign bit instead of zeros. No path or pc bit is
+  dropped, removed from live flow, or recomputed from static metadata.
+- `METHOD_KEY_PC_MIX` remains applied to the signed pc contribution and its
+  current value is odd, so the multiplication remains a permutation modulo
+  `2^64`; it does not collapse the pc contribution.
+- Guard high-word shift, path contribution, block xor method-salt contribution,
+  callsite salt masking, and the nonzero-key guard remain present. The changed
+  expression is still driven by live decoded CFF state and masked method salt.
+- Runtime helper bytecode, no-table helper emission, and generator-side
+  `methodKeyFromBlock` are changed together. There is no descriptor-only,
+  static-seed, or fallback recomputation path.
+
+Subtasks:
+
+1. `[x]` Record and review the signed method-key mixing plan.
+   Evidence requirement: this P2.2.15 section, accepted P2.2.10 runtime
+   baseline, P2.2.14 rejected-route evidence, fresh post-P2.2.14-revert TEST
+   Calc JFR, fresh `a.u` method-key call count, fresh PrintInlining evidence
+   for `a.a::r (43 bytes)`, helper bytecode showing two zero-extension masks,
+   the no-weakening proof above, and source evidence that
+   runtime/helper/generator formulas can be changed together.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic,
+   evidence-backed, invariant-preserving, correctly separated from rejected
+   routes, and compliant before source edits.
+   Completed: subagent plan-intake review passed. Residual risk is that the
+   helper may still fail to inline if caller budget dominates; PrintInlining
+   inspection and the ten-run runtime gate remain required acceptance controls.
+2. `[ ]` Implement, validate, measure, and either accept or reject signed
+   method-key mixing.
+   Evidence requirement: source diff is limited to `methodKeyFromBlock`,
+   generated method-key helper emission, and matching no-table method-key
+   emission; helper descriptor remains `(IIIIJJ)J`; generated `a.a.r`
+   bytecode drops below the normal inline-size threshold while retaining the
+   masked salt inputs, `METHOD_KEY_PC_MIX`, and nonzero guard.
+   Validation target: the same targeted JVM command as P1.1, generated
+   bytecode inspection for `a.a.r`, PrintInlining inspection for method-key
+   helper callsites, stdout/stderr scan for verifier/linkage/runtime errors
+   and fallback/skip markers, `hs_err` scan in the repository tree, and a
+   fresh ten-run JVM runtime gate for full TEST and full obfusjack generated
+   jars.
+   Completion criteria: targeted JVM validation passes; generated helper
+   descriptor/topology is unchanged except for removal of the two path/pc
+   zero-extension mask sequences; PrintInlining no longer reports most
+   `a.a::r` Calc callsites as `callee is too large`; full TEST `Calc`
+   improves from accepted P2.2.10 `179/179 ms`; full obfusjack `Seq` does not
+   regress from accepted P2.2.10 `307/309 ms`; Platform, Virtual, Parallel,
+   and VThreads remain within accepted P2.2.10 observed spreads. If either
+   target regresses, revert the source change, regenerate the accepted-source
+   artifact, record rejection evidence, and commit only the rejection record.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
