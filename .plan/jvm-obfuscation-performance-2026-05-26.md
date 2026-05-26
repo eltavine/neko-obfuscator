@@ -4623,6 +4623,8 @@ Subtasks:
 
 ### P3 Add source-controlled JVM runtime ablation reporting
 
+Status: `[-]` plan being refined before implementation.
+
 Scope:
 
 - Convert the manual ablation matrix into a source-controlled test/report so
@@ -4631,11 +4633,54 @@ Scope:
 - Record per-run runtime timing rows, medians, output jar sizes, CFF topology,
   helper descriptor counts, largest methods, and invalid ablation failures.
 - Do not add obfuscation wall-clock or pass-time acceptance gates in this row.
+- Do not change any transform/runtime behavior, generated CFF/helper formulas,
+  helper descriptors, hidden-key propagation, packed carriers, CFF topology, or
+  benchmark fixtures.
+
+Variant matrix:
+
+| Variant | Artifact source | Purpose |
+| --- | --- | --- |
+| `original` | input jar, no obfuscation | stable lower-bound reference and fixture validity row |
+| `cff-only-stack` | generated config with renamer, keyDispatch, methodParameterObfuscation, CFF, and validationSinkHardening enabled; invokedynamic, constant obfuscation, and string obfuscation disabled | isolate CFF/key-update runtime from indy/const/string runtime surfaces |
+| `full-no-indy` | generated config matching full JVM obf except invokedynamic disabled | quantify the currently user-deprioritized indy surface against full JVM obf |
+| `full-no-const-string` | generated config matching full JVM obf except constant and string obfuscation disabled | quantify const/string interaction with CFF key updates |
+| `full` | existing `test-jars/full-jvm-obf.yml` behavior | acceptance comparison row for current full JVM obf artifacts |
+
+Fixtures:
+
+- `TEST` and `obfusjack` are required for the ablation report because they
+  expose the current P2/P1 runtime gates.
+- Other existing full-baseline fixtures may stay in the existing baseline
+  report, but are not required for this P3 ablation matrix.
+
+Run semantics:
+
+- Run each `TEST` and `obfusjack` variant at least three times inside the
+  report test so the report can write raw per-run rows and medians.
+- A run is valid only when the fixture exits with the expected code and its
+  expected completion markers are present. Invalid runs must be recorded with
+  `valid=false`, an explicit reason, stdout/stderr paths, and no median timing
+  contribution.
+- The report must include raw timing lines for every run, but median values
+  must be computed only from valid runs.
+- The report is evidence tooling. It must not introduce a new performance
+  threshold, skip behavior, fallback, or pass/fail outcome based on timing
+  speed.
 
 Required evidence before editing:
 
 - Existing manual ablation logs from `build/jvm-perf-ablation`.
 - Existing `JvmFullObfuscationPerfTest` reporting fields to reuse.
+- Fresh accepted-source runtime evidence from P2.2.18 current capture:
+  `build/jvm-runtime-perf/repeats-p2-2-18-current-10x/runtime-medians.tsv`
+  recorded full TEST `Calc=177/178 ms` and full obfusjack `Seq=303/304 ms`,
+  with empty 10x stderr logs.
+- Fresh accepted-source JFR/PrintInlining evidence shows the next runtime
+  helper optimization boundary is not yet proven: class-key helpers are already
+  hot-inlined, key-transfer ticket splitting regressed in P2.2.17, and the hot
+  transition/token helper surfaces overlap several rejected routes. P3 therefore
+  adds repeatable evidence capture instead of changing runtime code.
 
 Validation target:
 
@@ -4645,12 +4690,48 @@ Validation target:
 
 Completion criteria:
 
-- Report includes original, CFF-only-stack, full-no-indy,
-  full-no-const-string, and full JVM obf rows.
-- The report records invalid ablations as invalid instead of treating failures
-  as performance data.
+- Source diff is limited to `JvmFullObfuscationPerfTest` and this plan update.
+- Report includes `original`, `cff-only-stack`, `full-no-indy`,
+  `full-no-const-string`, and `full` rows for `TEST` and `obfusjack`.
+- Report records per-run stdout/stderr paths, exit codes, raw timing lines,
+  validity, invalid reasons, valid-run medians, input/output jar sizes,
+  topology, helper descriptor counts, and largest methods.
+- Invalid ablations are recorded as invalid instead of contributing to median
+  runtime values.
 - No runtime or transform behavior changes are included.
-- Subagent review passes before commit.
+- The Gradle validation target passes freshly.
+- Subagent implementation review passes before commit.
+
+Subtasks:
+
+1. `[x]` Record and review the P3 ablation-report implementation plan.
+   Evidence requirement: this P3 section, existing manual ablation artifacts,
+   current `JvmFullObfuscationPerfTest` reporting surface, fresh accepted-source
+   10x/JFR/PrintInlining evidence showing no proven runtime helper edit is
+   ready, and a source-limited implementation boundary.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms P3 is test-only, source-limited,
+   useful for future runtime evidence, does not weaken JVM obfuscation
+   invariants, and has clear validation/acceptance criteria before Java edits.
+   Completed: subagent plan-intake review passed after removing a trailing
+   whitespace blocker. The reviewer confirmed the P3 plan is test/report-only,
+   source-limited, explains why P3 precedes more runtime helper work, preserves
+   JVM obfuscation invariants, defines variants/fixtures/run validity/median
+   rules, and has concrete validation and completion criteria.
+2. `[ ]` Implement and validate the source-controlled ablation report.
+   Evidence requirement: Java diff stays inside
+   `neko-test/src/test/java/dev/nekoobfuscator/test/JvmFullObfuscationPerfTest.java`;
+   generated report contains the required variant and fixture rows; invalid
+   rows are represented explicitly; valid medians exclude invalid runs; topology
+   and helper counts are populated from generated jars; stdout/stderr paths are
+   recorded for every run.
+   Validation target: the Gradle command above, followed by inspecting the
+   generated ablation report JSON and checking for non-empty stderr or
+   unexpected verifier/linkage/runtime/fallback/skip markers in the new report
+   run logs.
+   Completion criteria: validation passes, report shape satisfies the P3
+   acceptance criteria, subagent implementation review passes, and only the
+   test/report implementation plus matching plan update are committed.
 
 ## Review Status
 
