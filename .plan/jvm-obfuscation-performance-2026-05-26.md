@@ -4167,6 +4167,202 @@ Subtasks:
    passed with `BUILD SUCCESSFUL in 14s` and `19 actionable tasks: 19
    executed`. P2.2.15 must not be retried as signed method-key mixing.
 
+### P2.2.16 Split key-transfer material helper for no-runtime-source cursors
+
+Status: `[ ]` planned; source edits not started.
+
+Scope:
+
+- JVM runtime performance only. Do not change obfuscation-time goals, native
+  code, invokedynamic linkage, CFF block coverage, CFF block boundaries,
+  hidden-key parameters, packed parameter carriers, token material formulas,
+  key-transfer row registration, class-integrity ticket semantics, or fallback
+  behavior.
+- Change only the generated CFF key-transfer material helper surface and the
+  generated callsite helper selection for key-transfer material. Keep
+  `KEY_TRANSFER_MATERIAL_HELPER_DESC` unchanged for the existing generic
+  runtime-source-aware helper.
+- Add a separate generated key-transfer material helper for the
+  `NONE/NONE` runtime-source mode pair. The new helper must decode the two
+  token-material words directly from the two cursor indexes and then issue or
+  defer the same class-integrity ticket. It must not emit the thread/stack
+  runtime-source branch, mode comparison, bucket selection, or StackWalker path
+  because `registerKeyTransferMaterialWord(..., NONE)` registers exactly one
+  bucket and `encodeKeyTransferMaterialCursor` leaves the mode bits clear.
+- Route a callsite to the new helper only when the source instruction's
+  `keyTransferRuntimeSourceMode(sourceInsn)` is
+  `KEY_TRANSFER_RUNTIME_SOURCE_NONE`. Route all other modes to the existing
+  generic helper unchanged. This keeps async/thread and stack-sensitive paths
+  on the current per-cursor runtime-source acquisition path.
+
+Required evidence:
+
+- Fresh accepted-source regeneration after the rejected P2.2.15 source revert
+  passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`
+  reported `BUILD SUCCESSFUL in 14s` with `19 actionable tasks: 19 executed`.
+- Fresh P2.2.16 before-edit ten-run baseline at
+  `build/jvm-runtime-perf/repeats-p2-2-16-before-10x/runtime-medians.tsv`
+  reported full TEST `Calc=178/179 ms` and full obfusjack `Seq=308/309 ms`.
+  Non-target full obfusjack medians were `Platform=74/77 ms`,
+  `Virtual=79/80 ms`, `Parallel=7/7 ms`, and `VThreads=8/8 ms`.
+  Stderr files were empty, an `hs_err` scan found no fresh crash logs, and a
+  runtime/log scan found no verifier/linkage/runtime/fallback/skip markers
+  after excluding the fixture's expected `Caught MyException: boom` output.
+- Fresh TEST Calc JFR at
+  `build/jvm-runtime-perf/jfr/p2-2-16-before-test-calc-1ms.jfr`, with samples
+  summarized in
+  `build/jvm-runtime-perf/jfr/p2-2-16-before-test-calc-1ms-samples.txt`,
+  reported the Calc bodies as the dominant runtime path:
+  `a.u.o(Object[], long)=18`, `a.u.l(Object[], long)=18`,
+  `a.u.m(Object[], long)=7`, `a.na.kf(...)=7`, and
+  `a.u.n(Object[], long)=1`.
+- Fresh PrintInlining at
+  `build/jvm-runtime-perf/p2-2-16-before-full-test-print-inlining.stdout.log`
+  reports the generated key-transfer helper `a.a::l (1161 bytes)` as
+  `callee is too large` at the hot `a.u.n` callsites and later as
+  `hot method too big` at bytecode offsets `1540`, `1584`, `1610`, `1657`,
+  `2056`, `2079`, `2452`, and `2475`.
+- Fresh helper bytecode at
+  `build/jvm-runtime-perf/p2-2-16-before-test-a-a.javap.txt` shows
+  `a.a.l:(JIII[Ljava/lang/Object;II)J` is the current key-transfer helper and
+  contains the runtime-source mode extraction, same-mode/split-mode branch,
+  thread identity/name hashing, stack runtime-source path, token helper calls,
+  method-key fold, and ticket helper call in one `1161`-byte method.
+- Fresh hot-class bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-16-before-test-a-u.javap.txt` shows the hot
+  `a.u.n` callsites invoke `a.a.l` eight times with encoded cursor pairs
+  `84/98`, `280/294`, `252/266`, `168/182`, `112/126`, `196/210`,
+  `140/154`, and `224/238`. All eight cursors have mode `NONE` after applying
+  the helper's existing ticket-mask semantics.
+- Fresh full-jar key-transfer callsite scan at
+  `build/jvm-runtime-perf/p2-2-16-before-kxfer-callsite-modes.normalized.tsv`
+  found `457` total key-transfer material callsites across current full TEST
+  and full obfusjack generated jars. `453` callsites are `NONE/NONE`, while
+  only `4` are `THREAD/THREAD` after stripping the ticket-defer high bit with
+  the same `0x7fffffff` mask used by the current helper. TEST contributes
+  `212` `NONE/NONE` and `3` `THREAD/THREAD` callsites; obfusjack contributes
+  `241` `NONE/NONE` and `1` `THREAD/THREAD` callsites.
+- Source inspection shows `keyTransferRuntimeSourceMode(sourceInsn)` computes a
+  single runtime-source mode per key-transfer source instruction, and both high
+  and low material cursors are registered with that same mode in
+  `CffKeyTransferRewriter`. Therefore a generated callsite can choose the
+  `NONE/NONE` helper using the already-computed mode without inspecting a
+  benchmark class or method.
+- Source inspection shows `registerKeyTransferMaterialWord` registers one
+  bucket for `KEY_TRANSFER_RUNTIME_SOURCE_NONE` and four buckets for non-NONE
+  modes. The planned `NONE/NONE` helper is valid only for the one-bucket
+  encoded cursor case and cannot be used for thread/stack cursor modes.
+
+Rejected-route separation:
+
+- P2.2.3 rejected token helper packed-pair scratch caching. P2.2.16 does not
+  change token helper internals, token row layout, token object-cell state,
+  token helper descriptor, or token material formulas.
+- P2.2.4 rejected key-transfer method-key fold hoisting. P2.2.16 does not
+  hoist or rewrite the method-key fold formula; it only avoids the
+  runtime-source mode machinery when the source mode is statically `NONE`.
+- P2.2.8 rejected direct decoded-output stores. P2.2.16 does not move
+  `out[]` stores or decoded result routing.
+- P2.2.10 accepted transition-material row cursor walking. P2.2.16 does not
+  touch transition-material helpers, transition rows, row cursors, or `out[]`.
+- P2.2.11 rejected transition-state carrier ABI changes. P2.2.16 does not
+  change the packed state carrier ABI or transition/step helper descriptors.
+- P2.2.12 rejected compressed-island effective cursor hoisting. P2.2.16 does
+  not touch compressed-island cursors, island runtime-source mode handling, or
+  island material formulas.
+- P2.2.13 rejected step material mask-word caching. P2.2.16 does not change
+  step-material helpers or mask-word caching.
+- P2.2.14 rejected per-method material carrier caching. P2.2.16 does not
+  introduce method-local carrier caching or repeated `GETSTATIC` removal.
+- P2.2.15 rejected signed method-key mixing. P2.2.16 does not change
+  method-key formula, signedness, masked salts, or invokedynamic/string key
+  semantics.
+
+Invariant preservation:
+
+| Current key-transfer path | P2.2.16 key-transfer path | Preserved invariant |
+| --- | --- | --- |
+| high and low cursors are registered from the same source instruction runtime-source mode | unchanged | cursor mode remains tied to the source instruction and generated row registration |
+| generic helper handles NONE, THREAD, STACK, and combined modes using runtime mode extraction and per-cursor source acquisition | unchanged for non-NONE modes | async/thread/stack-sensitive dynamic key flow remains live |
+| NONE cursor mode has exactly one token-material bucket and mode bits clear after ticket-mask stripping | callsite with mode NONE invokes a no-runtime-source helper that uses the cursor indexes directly | generated helper matches the row-registration invariant for NONE mode |
+| token helper decodes each high/low material word and method-key fold xors the live entry key into the decoded token | unchanged in both helpers | high/low key-transfer material stays driven by live guard/path/block/key inputs |
+| class-integrity ticket helper consumes the packed high/low transfer result and the defer/issue mode | unchanged | ticket issue/defer behavior and returned key value stay semantically linked |
+| non-NONE helper may call Thread/StackWalker-derived runtime-source code per cursor | unchanged | stack BCI-sensitive and thread-sensitive paths are not shared, skipped, or approximated |
+
+No-weakening proof:
+
+- The generated callsite already computes `runtimeSourceMode` before registering
+  high and low key-transfer cursors. Selecting a helper by that mode does not
+  add a new static seed, descriptor-only recomputation, or fallback path.
+- For `runtimeSourceMode == NONE`, the current generic helper executes the
+  mode-zero branch and stores `baseCursor` into each cursor local before token
+  decoding. The new helper emits only that mode-zero behavior and then runs the
+  same token decode, method-key fold, pack, and ticket helper sequence.
+- For all non-NONE modes, callsites continue to invoke the existing generic
+  helper. Thread and stack runtime-source bucket selection still mixes the live
+  method entry key, guard, path, block, current thread identity/name, and stack
+  material where applicable.
+- The planned change does not alter the encrypted token material rows, class
+  object table, hidden method-key parameter, CFF dispatcher state, CFF block
+  graph, invoke descriptors for original application methods, or protected
+  reflective/dynamic call paths.
+- The new helper is an additional generated CFF helper inside the existing
+  bootstrap/material surface. It is not a Java-side bridge, adapter, fallback,
+  or helper layer outside the planned transform surface.
+
+Subtasks:
+
+1. `[x]` Record and review the no-runtime-source key-transfer helper split
+   plan.
+   Evidence requirement: this P2.2.16 section, fresh post-revert Gradle
+   regeneration proof, fresh P2.2.16 before-edit ten-run baseline, fresh JFR,
+   fresh PrintInlining showing `a.a::l (1161 bytes)` too large at hot
+   callsites, fresh generated bytecode for `a.a.l` and hot `a.u.n`, full-jar
+   key-transfer mode distribution, source evidence for mode registration and
+   one-bucket NONE rows, rejected-route separation, invariant table, and
+   no-weakening proof.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic,
+   evidence-backed, invariant-preserving, correctly decomposed, separated from
+   rejected routes, and compliant before source edits.
+   Completed: initial plan-intake review failed because the validation target
+   only listed `JvmFullObfuscationPerfTest`; the plan was revised before any
+   source edits to require the full targeted JVM suite used by P1.1, including
+   invokedynamic, constants, strings, method-parameter, renamer, and integration
+   coverage. Re-review passed. The reviewer confirmed routing by
+   `keyTransferRuntimeSourceMode(sourceInsn) == NONE` is generic, high/low
+   cursors are registered from the same mode, NONE rows are one-bucket,
+   non-NONE stays on the existing runtime-source-aware helper, and the new
+   helper remains within the existing generated CFF material-helper surface.
+2. `[ ]` Implement, validate, measure, and either accept or reject the
+   no-runtime-source key-transfer helper split.
+   Evidence requirement: source diff is limited to CFF key-transfer helper
+   naming/table metadata, helper installation, and callsite helper selection;
+   non-NONE callsites still invoke the existing generic helper; NONE/NONE
+   callsites invoke the new helper; generated non-NONE helper bytecode remains
+   runtime-source-aware; generated NONE/NONE helper bytecode has no
+   Thread/StackWalker/runtime-source branch and still calls the token helper
+   twice plus the ticket helper once.
+   Validation target: the same targeted JVM command as P1.1,
+   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ObfuscationIntegrationTest --rerun-tasks`,
+   followed by generated bytecode inspection for key-transfer helper
+   descriptors and callsite routing, PrintInlining inspection for the new
+   helper and hot Calc callsites, stdout/stderr scan for verifier/linkage/runtime
+   errors and fallback/skip markers, repository `hs_err` scan, and a fresh
+   ten-run JVM runtime gate for full TEST and full obfusjack generated jars.
+   Completion criteria: targeted JVM validation passes; full-jar callsite mode
+   scan shows `NONE/NONE` callsites routed to the new helper and non-NONE
+   callsites still routed to the generic helper; generated helper topology does
+   not reduce CFF coverage or original application method obfuscation; full
+   TEST `Calc` improves from the fresh P2.2.16 before-edit `178/179 ms` and
+   accepted P2.2.10 `179/179 ms`; full obfusjack `Seq` does not regress from
+   fresh P2.2.16 before-edit `308/309 ms` or accepted P2.2.10 `307/309 ms`;
+   Platform, Virtual, Parallel, and VThreads remain within the accepted
+   P2.2.10/P2.2.16 observed spreads. If either target regresses or targeted
+   validation fails, revert the source change, regenerate the accepted-source
+   artifact, record rejection evidence, and commit only the rejection record.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
