@@ -2821,6 +2821,123 @@ P2.2.8 rejection evidence:
   because that fresh runtime gate regressed both full TEST `Calc` and
   obfusjack `Seq`.
 
+#### P2.2.9 Stream compressed-island material helper locals
+
+Status: `[-]` plan-intake passed. No source change has been made for this
+branch.
+
+Scope:
+
+- Optimize only the generic compressed CFF island material helper emitted by
+  `CffIslandMaterial.installCompressedIslandMaterialHelper`.
+- Keep the existing helper descriptor
+  `(JIII[Ljava/lang/Object;III)I`, island material table layout, cursor mode
+  encoding, runtime-source bucket adjustment, class-key mask formula,
+  material word identity, helper count, CFF block coverage, and callsite
+  rewriting unchanged.
+- Replace helper-local single-use staging for the island material entry array,
+  row words array, decoded material value, class-key words array, and final
+  mask with operand-stack streaming inside the helper. The helper still loads
+  the same `Object[]` island material slot, same `int[]` row selected by the
+  adjusted cursor, same `word` index, and same class-key word selected by the
+  computed mask.
+- Do not change `emitCffIslandRuntimeSourceCursorFromLocal`, do not specialize
+  or remove the cursor mode branch, do not change runtime-source acquisition,
+  do not change compressed island row registration/unpacking, do not change
+  transition/key-transfer/token helpers, and do not add fallback, skip,
+  helper-layer rescue, or original-bytecode behavior.
+
+Required evidence:
+
+- After reverting P2.2.8 and regenerating accepted-source artifacts, a fresh
+  obfusjack JFR run at
+  `build/jvm-runtime-perf/jfr/p2-2-8-revert-obfusjack-1ms.jfr` completed with
+  `Seq: 335 ms` and `=== All tests completed ===`; stdout/stderr are at
+  `build/jvm-runtime-perf/jfr/p2-2-8-revert-obfusjack-1ms.stdout.log` and
+  `build/jvm-runtime-perf/jfr/p2-2-8-revert-obfusjack-1ms.stderr.log`.
+- `jfr view hot-methods` on that fresh artifact showed
+  `a.da.za(long, int, int, int, Object[], int, int, int)` in the hot method
+  table with `11` samples. Filtering the execution samples at
+  `build/jvm-runtime-perf/jfr/p2-2-8-revert-obfusjack-1ms-samples.txt` to the
+  sequential matrix stack `a.a.o(...)` captured `35` Seq samples, including
+  `a.da.za(...)=11`, `a.da.ua(...)=17`, and `a.a.fa(...)=35`.
+- Fresh bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-8-revert-obfusjack-a-da.javap.txt` shows
+  `a.da.za:(JIII[Ljava/lang/Object;III)I` first adjusts the cursor, then
+  stores the island `Object[]` material entries into local `9`, stores the
+  selected `int[]` row into local `10`, stores `row[word]` into local `11`,
+  stores the computed mask into local `12`, stores class-key words into local
+  `13`, then reloads those locals only to compute `value ^ mask`.
+- Source inspection of `installCompressedIslandMaterialHelper` matches the
+  bytecode: `entriesLocal`, `wordsLocal`, `valueLocal`, `maskLocal`, and
+  `classWordsLocal` are helper-internal staging locals after cursor
+  adjustment. The material value and final mask are pure integer/array-read
+  expressions and no mutable object-cell, `AtomicLong`, key-transfer ticket,
+  or transition `out[]` side effect is present in this helper.
+- P1.7 rejected mandatory-thread cursor branch removal for compressed island
+  material. P2.2.9 does not alter cursor mode extraction, cursor masking, or
+  `emitCffIslandRuntimeSourceCursorFromLocal`; it keeps the current mode
+  branch and bucket formula unchanged.
+- P2.2.6 rejected carrying a token object-cell result across
+  `AtomicLong.setPlain(J)V`; P2.2.8 rejected moving transition `out[]` stores
+  ahead of later decoded material words. P2.2.9 does neither: it only streams
+  pure compressed-island helper array reads and integer masks before the
+  single `IRETURN`.
+
+Invariant preservation:
+
+| Current compressed-island helper | P2.2.9 compressed-island helper | Preserved invariant |
+| --- | --- | --- |
+| cursor mode is extracted, cursor index masked, and nonzero mode adjusts cursor with `source ^ (source >>> 16)` bucket bits | unchanged | P1.7 rejected cursor contract is not reused |
+| helper loads `material[CFF_ISLAND_MATERIAL_SLOT]`, selects `entries[cursor]`, casts to `int[]`, and reads `row[word]` | unchanged, without single-use `entries/words/value` locals | selected protected material word is unchanged |
+| mask uses live `key`, `guard`, `path`, `block`, adjusted cursor, word, class-key table, and constant seal | unchanged, without single-use `mask/classWords` locals | live key/state masking remains dynamic |
+| helper returns `value ^ mask` | unchanged | material decode result is unchanged |
+
+Subtasks:
+
+1. `[x]` Record and review the compressed-island local streaming plan.
+   Evidence requirement: this P2.2.9 section, fresh post-P2.2.8-revert JFR
+   evidence, generated `javap` evidence for `a.da.za`, source evidence for
+   `installCompressedIslandMaterialHelper`, and explicit non-duplication
+   against P1.7, P2.2.6, and P2.2.8.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic, evidence-backed,
+   invariant-preserving, and compliant before source edits begin.
+2. `[ ]` Implement, validate, and measure compressed-island local streaming.
+   Evidence requirement: source diff changes only compressed-island material
+   helper expression emission in `CffIslandMaterial`; generated bytecode for
+   `a.da.za` no longer stages locals solely for `entries`, `words`, `value`,
+   `mask`, or `classWords`, while descriptor, cursor branch, material slot,
+   class-key word seal, and return expression are unchanged.
+   Validation target: the same targeted JVM command as P1.1, followed by
+   generated compressed-island helper `javap` inspection, topology/helper
+   descriptor comparison, stdout/stderr scan for verifier/linkage errors and
+   fallback/skip markers, `hs_err` scan in the repository tree, and a fresh
+   ten-run JVM runtime gate for full TEST and full obfusjack generated jars.
+   Completion criteria: targeted JVM validation passes without verifier,
+   linkage, fallback, skip, or forbidden marker failures; full obfusjack `Seq`
+   improves from accepted P2.2.5 ten-run lower/upper median `312/312 ms`;
+   full TEST `Calc` does not regress from accepted P2.2.5 ten-run lower/upper
+   median `181/183 ms`; non-target Platform, Virtual, Parallel, and VThreads
+   remain within the accepted P2.2.5 runtime spread. If either target regresses,
+   revert the source change, regenerate the accepted-source artifact, record
+   rejection evidence, and commit only the rejection record.
+
+P2.2.9 plan-intake review:
+
+- Subagent plan-intake review passed. The review confirmed that only this plan
+  file is changed, the evidence is fresh and concrete, the scope is generic to
+  `CffIslandMaterial.installCompressedIslandMaterialHelper`, the branch does
+  not reuse P1.7/P2.2.6/P2.2.8 rejected shapes, and the validation target is
+  sufficient.
+- Required post-implementation checks from the review: descriptor
+  `a.da.za:(JIII[Ljava/lang/Object;III)I` unchanged; cursor mode extraction,
+  cursor mask, and runtime-source branch still present; no local staging solely
+  for `entries`, `words`, `value`, `mask`, or `classWords`; same material slot,
+  class-key seal, and `value ^ mask` return; targeted JVM suite passes; full
+  obfusjack `Seq` improves from `312/312 ms`; TEST `Calc` does not regress
+  from `181/183 ms`; no verifier/linkage/fallback/skip/`hs_err` hits.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
