@@ -3817,6 +3817,145 @@ P2.2.13 rejection evidence:
   the fresh runtime gate shows the extra locals/load shape regresses both
   TEST `Calc` and obfusjack `Seq`.
 
+### P2.2.14 Cache CFF material carrier reference per protected method
+
+Scope:
+
+- JVM runtime performance only. Do not change obfuscation-time work, native
+  code, invokedynamic linkage, helper descriptors, material row layout, hidden
+  key parameters, packed parameter carriers, CFF block coverage, or CFF block
+  boundaries.
+- Insert one generated method-local cache of the class-owned CFF material
+  carrier `Object[]` for each CFF-transformed application method that has an
+  active `CffClassKeyTable`.
+- Use the cached carrier only for original transformed-method callsites that
+  currently reload the same static carrier before token-material,
+  transition-material, step-material, key-transfer material, and compressed
+  island-material helper calls.
+- Generated helper methods that do not initialize their own carrier local must
+  keep their existing `GETSTATIC` carrier loads.
+
+Required evidence:
+
+- P2.2.10 remains the accepted runtime baseline for source behavior after the
+  rejected P2.2.11, P2.2.12, and P2.2.13 branches: full TEST
+  `Calc=179/179 ms` and full obfusjack `Seq=307/309 ms` from
+  `build/jvm-runtime-perf/repeats-p2-2-10-10x/runtime-medians.tsv`.
+- A fresh accepted-source before-edit 10x run from the regenerated current jar
+  under `build/jvm-runtime-perf/repeats-p2-2-14-before-10x` completed without
+  verifier/linkage/runtime failures. Its sorted target values were TEST
+  `Calc=178,179,180,180,181,183,185,193,200,225` with medians `181/183 ms`
+  and obfusjack `Seq=305,307,309,313,316,317,323,324,331,340` with medians
+  `316/317 ms`. This records current run-to-run noise; acceptance remains
+  measured against the stricter accepted P2.2.10 baseline.
+- Fresh TEST Calc 1ms JFR at
+  `build/jvm-runtime-perf/jfr/p2-2-13-current-test-calc-1ms.jfr` completed
+  with `Calc: 179ms` and reported the Calc bodies as the dominant runtime
+  path: `a.u.l(Object[], long)=30`, `a.u.m(Object[], long)=12`,
+  `a.u.o(Object[], long)=10`, and `a.u.n(Object[], long)=3`; `a.na.kf(...)=7`
+  remained secondary. This keeps the branch on key/material update code rather
+  than invokedynamic.
+- Fresh bytecode inspection at
+  `build/jvm-runtime-perf/p2-2-13-current-test-a-u.javap.txt` proves repeated
+  static material carrier loads in the hot Calc methods. The same generated
+  field `private static final Object[] b` is loaded `20` times in
+  `a.u.l(Object[], long)`, `21` times in `a.u.m(Object[], long)`, and `23`
+  times in `a.u.o(Object[], long)`. Those methods also contain repeated
+  token-material helper calls (`6`, `7`, and `10` respectively), while
+  generated transition/step/island/key-transfer callsites in the same class
+  load the same carrier immediately before their helper calls.
+- Source inspection shows `ensureClassKeyTable` creates the carrier field as
+  `ACC_STATIC | ACC_FINAL | ACC_SYNTHETIC`, and
+  `installClassKeyTableInit` performs the carrier `PUTSTATIC` in class
+  initialization before `table.initEnd()`.
+- Source inspection shows `protectedStartLabel` starts constructors only after
+  the required owner/super `<init>` call, starts generated table `<clinit>`
+  protection after both method-key init and table initialization, and starts
+  ordinary methods after method-key initialization. A carrier cache inserted
+  immediately before `protectedStart` therefore does not read the table before
+  class initialization has installed it and does not execute before a
+  constructor's required initialization call.
+
+Rejected-route separation:
+
+- P2.2.3 rejected token helper packed-pair scratch caching. P2.2.14 does not
+  change token helper internals, token row layout, token object-cell updates,
+  or token material formulas.
+- P2.2.10 accepted transition-material row cursor walking. P2.2.14 does not
+  change transition row cursors, row registration, row-base arithmetic, or
+  `out[]` layout.
+- P2.2.11 rejected transition-state `int[7]` carrier ABI changes. P2.2.14
+  does not change any helper descriptor, transition carrier descriptor, or
+  packed state representation.
+- P2.2.12 rejected compressed-island effective cursor hoisting. P2.2.14 does
+  not change compressed-island cursor calculation, runtime-source cursor mode,
+  or island material word decoding formulas.
+- P2.2.13 rejected helper-local step mask-word caching. P2.2.14 does not
+  introduce helper-local row-word caches, reduce helper `laload` sequences, or
+  change step-material decode masks.
+
+Invariant preservation:
+
+| Current carrier path | P2.2.14 carrier path | Preserved invariant |
+| --- | --- | --- |
+| each generated callsite executes `GETSTATIC owner.material : Object[]` immediately before helper invocation | a generated prologue executes the same `GETSTATIC` once after key/table/super-init safety point and stores the reference in a new local; callsites execute `ALOAD local` | helper receives the same class-owned carrier reference |
+| carrier field is static final and assigned by CFF table initialization | unchanged | no new mutable carrier source, fallback, or alternate table |
+| helper descriptors accept the carrier as the same `Object[]` argument | unchanged | JVM ABI and generated helper contracts stay unchanged |
+| token, transition, step, key-transfer, and island helpers consume live key/guard/path/block inputs plus carrier cursor/row material | unchanged | dynamic key propagation and keyed material selection stay live |
+| generated helper methods use their own frame/local set | unchanged unless a helper explicitly initializes its own cache | no invalid helper-local references to original-method locals |
+
+Subtasks:
+
+1. `[x]` Record and review the per-method material carrier cache plan.
+   Evidence requirement: this P2.2.14 section, accepted P2.2.10 runtime
+   baseline, fresh P2.2.14 before-edit 10x run, fresh TEST Calc JFR, fresh
+   `a.u` carrier-load bytecode counts, and source evidence for final carrier
+   field initialization plus constructor/`<clinit>` safe insertion points.
+   Validation target: subagent plan-intake review.
+   Completion criteria: subagent confirms the plan is generic,
+   evidence-backed, invariant-preserving, correctly separated from rejected
+   P2.2.3/P2.2.11/P2.2.12/P2.2.13 routes, and compliant before source edits.
+2. `[ ]` Implement, validate, measure, and either accept or reject per-method
+   material carrier caching.
+   Evidence requirement: source diff is limited to CFF emission and shared
+   signatures required to thread an optional material-carrier local through
+   original transformed-method helper callsites; generated helper descriptors
+   and row layouts stay unchanged; generated hot Calc bytecode shows one
+   generated carrier `GETSTATIC`/`ASTORE` at the safe insertion point and
+   helper callsites use `ALOAD` instead of repeated carrier `GETSTATIC`.
+   Validation target: the same targeted JVM command as P1.1, generated
+   bytecode inspection for hot TEST Calc methods and shared helpers,
+   stdout/stderr scan for verifier/linkage/runtime errors and fallback/skip
+   markers, `hs_err` scan in the repository tree, and a fresh ten-run JVM
+   runtime gate for full TEST and full obfusjack generated jars.
+   Completion criteria: targeted JVM validation passes; hot Calc repeated
+   carrier `GETSTATIC` counts decrease without changing helper descriptors or
+   CFF topology; full TEST `Calc` improves from accepted P2.2.10 `179/179 ms`;
+   full obfusjack `Seq` does not regress from accepted P2.2.10 `307/309 ms`;
+   Platform, Virtual, Parallel, and VThreads remain within accepted P2.2.10
+   observed spreads. If either target regresses, revert the source change,
+   regenerate the accepted-source artifact, record rejection evidence, and
+   commit only the rejection record.
+
+P2.2.14 plan-intake review:
+
+- Subagent plan-intake review passed. The review confirmed the plan is
+  evidence-backed, scoped to JVM runtime material/key-update callsites, and
+  generic: one per-method cache of the existing class-owned `Object[]`
+  carrier, with helper descriptors, row layouts, packed carriers, hidden keys,
+  CFF coverage, and live key inputs unchanged.
+- The review confirmed the constructor and `<clinit>` safety evidence:
+  `protectedStartLabel` places constructor protection after owner/super
+  `<init>` and `<clinit>` after both key initialization and table
+  initialization; `installClassKeyTableInit` performs the carrier `PUTSTATIC`
+  before `initEnd`.
+- The review confirmed rejected-route separation from P2.2.3, P2.2.11,
+  P2.2.12, and P2.2.13 is explicit and non-overlapping.
+- Required post-implementation checks from the review: generated bytecode must
+  have the planned shape, one safe `GETSTATIC`/`ASTORE` per protected method,
+  helper callsites using `ALOAD`, unchanged helper descriptors/topology, and
+  the ten-run gate against the P2.2.10 baseline.
+
 ### P3 Add source-controlled JVM runtime ablation reporting
 
 Scope:
