@@ -329,12 +329,10 @@ abstract class CffMaterialTables extends CffClassSetup {
         int objectIndexLocal = 7;
         int packedLocal = 8;
         int epochLocal = 10;
-        int encodedLocal = 11;
-        int objectResultLocal = 12;
-        int nextEpochLocal = 13;
-        int nextEncodedLocal = 14;
-        int objectCellLocal = 15;
-        int currentMaskLocal = 16;
+        int objectResultLocal = 11;
+        int nextEpochLocal = 12;
+        int objectCellLocal = 13;
+        int currentMaskLocal = 14;
         InsnList insns = helper.instructions;
         insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
         JvmPassBytecode.pushInt(insns, TOKEN_MATERIAL_WORDS_SLOT);
@@ -370,10 +368,8 @@ abstract class CffMaterialTables extends CffClassSetup {
             objectIndexLocal,
             packedLocal,
             epochLocal,
-            encodedLocal,
             objectResultLocal,
             nextEpochLocal,
-            nextEncodedLocal,
             objectCellLocal,
             currentMaskLocal,
             wordOffset
@@ -394,7 +390,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         }
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IRETURN));
-        helper.maxLocals = 17;
+        helper.maxLocals = 15;
         helper.maxStack = 24;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
@@ -469,10 +465,8 @@ abstract class CffMaterialTables extends CffClassSetup {
         int indexLocal,
         int packedLocal,
         int epochLocal,
-        int encodedLocal,
         int resultLocal,
         int nextEpochLocal,
-        int nextEncodedLocal,
         int cellLocal,
         int currentMaskLocal,
         int wordOffset
@@ -510,10 +504,8 @@ abstract class CffMaterialTables extends CffClassSetup {
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LUSHR));
         insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, encodedLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
         emitCffObjectCellMask(insns);
-        insns.add(new VarInsnNode(Opcodes.ILOAD, encodedLocal));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, currentMaskLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, currentMaskLocal));
