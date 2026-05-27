@@ -125,6 +125,7 @@ public class JvmConstantObfuscationIntegrationTest {
         assertPrimitiveArrayPayloadsEncrypted(outputJar);
         assertConstantLiveWordConsumesDataDigest(outputJar);
         assertProtectedIntegerDecodeMaterialIsDerived(outputJar);
+        assertProtectedLongDecodeMaterialIsDerived(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -310,6 +311,57 @@ public class JvmConstantObfuscationIntegrationTest {
             checkedDerivedWindows >= checkedDecodeSlices * 2,
             "protected integer decode material was not consistently live-derived"
         );
+    }
+
+    private void assertProtectedLongDecodeMaterialIsDerived(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("ConstantShapes");
+        MethodNode longs = null;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ("longs".equals(method.name) && method.desc.endsWith(")J")) {
+                longs = method;
+                break;
+            }
+        }
+        assertTrue(longs != null && longs.instructions != null, "constant fixture did not retain longs() method");
+
+        AbstractInsnNode[] insns = longs.instructions.toArray();
+        int checkedCompositions = 0;
+        for (int i = 0; i < insns.length; i++) {
+            if (insns[i].getOpcode() != Opcodes.LOR) continue;
+            int lowHelper = previousNumericIntHelperCall(insns, i, 96);
+            if (lowHelper < 0) continue;
+            int highHelper = previousNumericIntHelperCall(insns, lowHelper, 320);
+            if (highHelper < 0) continue;
+            if (!hasOpcode(insns, Opcodes.LSHL, highHelper, lowHelper)) continue;
+            if (!hasOpcode(insns, Opcodes.LAND, lowHelper, i + 1)) continue;
+            assertTrue(
+                isProtectedIntHelperCall(insns[highHelper]),
+                "protected long high word used legacy compact helper"
+            );
+            assertTrue(
+                isProtectedIntHelperCall(insns[lowHelper]),
+                "protected long low word used legacy compact helper"
+            );
+
+            ConstantDecodeProof highProof = previousConstantDecodeProof(insns, highHelper);
+            ConstantDecodeProof lowProof = previousConstantDecodeProof(insns, lowHelper);
+            assertTrue(
+                protectedCompactCallReceivesRuntimeDerivedMaterial(insns, highHelper, highProof),
+                "protected long high word was not live-derived"
+            );
+            assertTrue(
+                protectedCompactCallReceivesRuntimeDerivedMaterial(insns, lowHelper, lowProof),
+                "protected long low word was not live-derived"
+            );
+            assertTrue(
+                !containsLargeLongLdc(insns, highHelper, i + 1),
+                "protected long reconstruction retained a direct large long LdcInsnNode"
+            );
+            assertNoSelfCancelingDerivedNumericMaterial(insns, highHelper, i + 1);
+            checkedCompositions++;
+        }
+        assertTrue(checkedCompositions > 0, "constant fixture did not expose protected long compositions");
     }
 
     private boolean fixtureArrayPayload(int storeOpcode, long bits) {
@@ -528,6 +580,47 @@ public class JvmConstantObfuscationIntegrationTest {
     private boolean coveredByWindow(int index, List<DerivedMaterialWindow> windows) {
         for (DerivedMaterialWindow window : windows) {
             if (index >= window.startInclusive && index < window.endExclusive) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int previousNumericIntHelperCall(
+        AbstractInsnNode[] insns,
+        int fromExclusive,
+        int maxDistance
+    ) {
+        int start = Math.max(0, fromExclusive - maxDistance);
+        for (int i = fromExclusive - 1; i >= start; i--) {
+            if (isNumericIntHelperCall(insns[i])) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private boolean isNumericIntHelperCall(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+            && call.name.startsWith("__neko_num_i")
+            && "(III)I".equals(call.desc);
+    }
+
+    private boolean isProtectedIntHelperCall(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+            && call.name.startsWith("__neko_num_ip")
+            && "(III)I".equals(call.desc);
+    }
+
+    private boolean containsLargeLongLdc(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof LdcInsnNode ldc
+                && ldc.cst instanceof Long value
+                && (value > Short.MAX_VALUE || value < Short.MIN_VALUE)) {
                 return true;
             }
         }

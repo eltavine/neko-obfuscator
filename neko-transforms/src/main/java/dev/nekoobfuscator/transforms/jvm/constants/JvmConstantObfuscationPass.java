@@ -215,7 +215,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
 
         boolean compact = useCompactNumericDecode(mn, sites);
         String compactHelper = compact ? ensureIntDecodeHelper(pctx, clazz) : null;
-        String compactProtectedHelper = compact && hasProtectedIntSites(sites)
+        String compactProtectedHelper = compact && hasProtectedIntMaterialSites(sites)
             ? ensureProtectedIntDecodeHelper(pctx, clazz)
             : null;
         int transformed = 0;
@@ -312,6 +312,9 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             if (site.kind() == NumericKind.INT || site.kind() == NumericKind.IINC) {
                 protectedIntSites++;
                 estimatedGrowth += 260;
+            } else if (site.kind() == NumericKind.LONG) {
+                protectedIntSites += 2;
+                estimatedGrowth += 520;
             } else {
                 estimatedGrowth += site.kind() == NumericKind.LONG || site.kind() == NumericKind.DOUBLE ? 38 : 18;
             }
@@ -320,9 +323,13 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         return JvmCodeSizeEstimator.estimateMethodBytes(mn) + estimatedGrowth >= COMPACT_SIZE_PRESSURE;
     }
 
-    private boolean hasProtectedIntSites(List<NumericSite> sites) {
+    private boolean hasProtectedIntMaterialSites(List<NumericSite> sites) {
         for (NumericSite site : sites) {
-            if (site.kind() == NumericKind.INT || site.kind() == NumericKind.IINC) {
+            if (
+                site.kind() == NumericKind.INT ||
+                    site.kind() == NumericKind.IINC ||
+                    site.kind() == NumericKind.LONG
+            ) {
                 return true;
             }
         }
@@ -426,7 +433,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 compactProtectedHelper,
                 clazz
             );
-            case LONG -> emitDecodedLong(
+            case LONG -> emitDecodedProtectedLong(
                 insns,
                 longConstant(source),
                 siteSeed,
@@ -436,7 +443,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
-                compactHelper,
+                compactProtectedHelper,
                 clazz
             );
             case FLOAT -> {
@@ -698,6 +705,54 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         }
     }
 
+    private void emitDecodedProtectedLong(
+        InsnList insns,
+        long value,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int baseLocal,
+        int baseMultiplierLocal,
+        int baseInverseLocal,
+        int baseDataLocal,
+        String compactProtectedHelper,
+        L1Class clazz
+    ) {
+        emitDecodedProtectedInt(
+            insns,
+            (int) (value >>> 32),
+            siteSeed ^ 0x484947484B31L,
+            metadata,
+            state,
+            baseLocal,
+            baseMultiplierLocal,
+            baseInverseLocal,
+            baseDataLocal,
+            compactProtectedHelper,
+            clazz
+        );
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        emitDecodedProtectedInt(
+            insns,
+            (int) value,
+            siteSeed ^ 0x4C4F574B31L,
+            metadata,
+            state,
+            baseLocal,
+            baseMultiplierLocal,
+            baseInverseLocal,
+            baseDataLocal,
+            compactProtectedHelper,
+            clazz
+        );
+        insns.add(new InsnNode(Opcodes.I2L));
+        emitUnsignedLowWordMask(insns);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+    }
+
     private void emitDecodedLong(
         InsnList insns,
         long value,
@@ -772,6 +827,13 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private void emitUnsignedLowWordMask(InsnList insns) {
+        JvmPassBytecode.pushInt(insns, -1);
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
     }
 
     private int liveConstantBase(

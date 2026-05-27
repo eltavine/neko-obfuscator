@@ -460,7 +460,7 @@ For every implementation row below:
   material is derived from live CFF/data-local state plus fragments; unrelated
   static and long paths are not changed.
 
-### [ ] JSE-11: Migrate CFF-protected long constant decode material
+### [x] JSE-11: Migrate CFF-protected long constant decode material
 
 - Scope: migrate only CFF-protected long constant decode material in
   `JvmConstantObfuscationPass`, including high/low word reconstruction and
