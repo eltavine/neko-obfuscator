@@ -671,7 +671,7 @@ For every implementation row below:
   numeric material, introduces no fallback or skip path, and preserves the
   recorded residual diagnostic caveat.
 
-### [ ] JSE-14: Replace fixed string key material model
+### [x] JSE-14: Replace fixed string key material model
 
 - Scope: replace `StringKeyMaterial(long siteSeed, int epoch, int[] words)` and
   fixed `int[4]` generation with a per-site variable material model containing
@@ -680,7 +680,16 @@ For every implementation row below:
   data structures and tests to prove per-site independence.
 - Required evidence: source diff removes the fixed `int[4]` record contract;
   ASM test proves at least two string sites in the fixture receive distinct
-  layout/fingerprint material and no global seed can decode all sites.
+  layout/fingerprint material and no global seed can decode all sites. Baseline
+  source inspection before this row shows
+  `StringKeyMaterial(long siteSeed, int epoch, int[] words)` at
+  `JvmStringObfuscationPass.java:4212`, `stringKeyMaterial` allocating
+  `new int[4]` at `2827`, fixed word assignments at `2828`-`2831`, and fixed
+  logical word consumption through `keyMaterial.words()` in
+  `encodedStringKeyCell` and `stringKeyMixedWord`. Baseline generated fixture
+  inspection still shows fixed-length `bipush 11; newarray int` key cells for
+  the emitted string material; that emitted cell migration remains scoped to
+  JSE-15.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest`.
 - Static/ASM audit: add `assertStringSitesHaveIndependentMaterialLayouts`
@@ -688,6 +697,21 @@ For every implementation row below:
   `rg -n "StringKeyMaterial|int\\[4\\]|new int\\[4\\]|fingerprint|layout" neko-transforms/src/main/java/dev/nekoobfuscator/transforms/jvm/strings/JvmStringObfuscationPass.java neko-test/src/test/java/dev/nekoobfuscator/test/JvmStringObfuscationIntegrationTest.java`.
 - Completion criteria: string fixture passes; source no longer has a fixed
   `int[4]` key-material contract; emitted cell migration is left for JSE-15.
+  Fresh validation ran
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest`
+  successfully with `tests="2" skipped="0" failures="0" errors="0"` in
+  `TEST-dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest.xml`.
+  The source audit
+  `rg -n "StringKeyMaterial|int\\[4\\]|new int\\[4\\]" ...` returned no
+  matches. The broader layout/fingerprint audit now reports only the new
+  `StringSiteMaterial` layout/fingerprint model and the ASM test decoder;
+  `assertStringSitesHaveIndependentMaterialLayouts` decodes emitted key cells,
+  verifies at least two distinct `(layoutId,fingerprint)` pairs, and rejects any
+  observed site seed that can decode every material cell. The emitted fixed
+  `[I]` cell shape is intentionally still present for JSE-15. The required
+  implementation review returned PASS and confirmed no fixture-specific logic,
+  fallback, skip/rescue path, runtime helper layer, or reduced string/CFF
+  coverage was introduced.
 
 ### [ ] JSE-15: Replace string `[I` key-cell emission with variable carrier layout
 

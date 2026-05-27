@@ -67,6 +67,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private static final int STRING_KEY_CELL_PAYLOAD_SLOT = 8;
     private static final int STRING_KEY_CELL_CACHE_SLOT = 9;
     private static final int STRING_KEY_CELL_LENGTH = 10;
+    private static final int STRING_SELECTOR_LAYOUT_SHIFT = 8;
+    private static final int STRING_SELECTOR_LAYOUT_MASK = 0x3F;
+    private static final int STRING_SELECTOR_FINGERPRINT_SHIFT = 14;
+    private static final int STRING_SELECTOR_FINGERPRINT_MASK = 0x3FFFF;
     private static final long STRING_KEY_CELL_PAYLOAD_MASK = 0x5354525041594C44L;
     private static final long STRING_KEY_CELL_CACHE_MASK = 0x5354524341434845L;
     private static final long STRING_KEY_CELL_LENGTH_MASK = 0x5354524C454E3031L;
@@ -150,7 +154,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
 
             if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String value) {
                 long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal);
-                StringKeyMaterial keyMaterial = stringKeyMaterial(pctx, clazz, siteSeed);
+                StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed);
                 Algorithm algorithm = algorithmFor(ordinal, siteSeed, metadata, state, keyMaterial);
                 ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
                 byte[] encrypted = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
@@ -364,7 +368,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         boolean usesLoopCache = false;
         for (String value : externalStrings) {
             long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + externalized);
-            StringKeyMaterial keyMaterial = stringKeyMaterial(pctx, clazz, siteSeed);
+            StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed);
             Algorithm algorithm = algorithmFor(ordinal + externalized, siteSeed, metadata, state, keyMaterial);
             ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
             byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
@@ -532,7 +536,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             int local = nextLocal++;
             helper.maxLocals = nextLocal;
             long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + encrypted);
-            StringKeyMaterial keyMaterial = stringKeyMaterial(pctx, clazz, siteSeed);
+            StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed);
             Algorithm algorithm = algorithmFor(ordinal + encrypted, siteSeed, metadata, state, keyMaterial);
             ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
             byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
@@ -995,7 +999,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         long siteSeed,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state,
-        StringKeyMaterial keyMaterial
+        StringSiteMaterial keyMaterial
     ) {
         if ((ordinal & 1) == 0) return Algorithm.AES;
         int root = stringRoot(metadata, state, siteSeed, keyMaterial);
@@ -1011,7 +1015,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         long siteSeed,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state,
-        StringKeyMaterial keyMaterial
+        StringSiteMaterial keyMaterial
     ) {
         int selector = stringKeyMixedWord(
             liveStringWord(metadata, state, byteLayerSeed(siteSeed)),
@@ -1034,7 +1038,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffInstructionState state,
         Algorithm algorithm,
         ByteLayer byteLayer,
-        StringKeyMaterial keyMaterial
+        StringSiteMaterial keyMaterial
     ) {
         int root = stringRoot(metadata, state, siteSeed, keyMaterial);
         long streamFlow = stringStreamFlow(root);
@@ -2822,47 +2826,71 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.LOR));
     }
 
-    private StringKeyMaterial stringKeyMaterial(PipelineContext pctx, L1Class clazz, long siteSeed) {
+    private StringSiteMaterial stringSiteMaterial(PipelineContext pctx, L1Class clazz, long siteSeed) {
         long seed = JvmPassBytecode.mix(pctx.masterSeed() ^ 0x5354524B4D415431L, clazz.name().hashCode());
-        int[] words = new int[4];
-        words[0] = nonZeroInt(JvmPassBytecode.mix(seed ^ siteSeed, 0x5354524B4D415430L));
-        words[1] = nonZeroInt(JvmPassBytecode.mix(seed + siteSeed, 0x5354524B4D415431L));
-        words[2] = nonZeroInt(JvmPassBytecode.mix(seed ^ Long.rotateLeft(siteSeed, 17), 0x5354524B4D415432L));
-        words[3] = nonZeroInt(JvmPassBytecode.mix(seed + Long.rotateRight(siteSeed, 11), 0x5354524B4D415433L));
-        int epoch = nonZeroInt(JvmPassBytecode.mix(seed ^ Long.rotateLeft(siteSeed, 29), 0x5354524B45504F43L));
-        return new StringKeyMaterial(siteSeed, epoch, words);
+        int layoutId = 1 + (int) Long.remainderUnsigned(
+            JvmPassBytecode.mix(seed ^ siteSeed, 0x5354524C41594F55L),
+            STRING_SELECTOR_LAYOUT_MASK
+        );
+        int wordCount = 5 + (layoutId & 3);
+        List<Integer> words = new ArrayList<>(wordCount);
+        for (int i = 0; i < wordCount; i++) {
+            long wordSeed = JvmPassBytecode.mix(
+                seed ^ Long.rotateLeft(siteSeed, (i * 11 + layoutId) & 63),
+                0x5354524B4D415430L + i
+            );
+            words.add(nonZeroInt(wordSeed));
+        }
+        List<Integer> wordIndexes = shuffledStringWordIndexes(seed, siteSeed, layoutId, wordCount);
+        int epoch = nonZeroInt(JvmPassBytecode.mix(
+            seed ^ Long.rotateLeft(siteSeed, 29) ^ layoutId,
+            0x5354524B45504F43L
+        ));
+        int fingerprint = stringMaterialFingerprint(seed, siteSeed, layoutId, words, wordIndexes);
+        return new StringSiteMaterial(
+            siteSeed,
+            layoutId,
+            epoch,
+            fingerprint,
+            words,
+            wordIndexes,
+            StringPayloadMetadata.unbound(fingerprint)
+        );
     }
 
     private int[] encodedStringKeyCell(
-        StringKeyMaterial keyMaterial,
+        StringSiteMaterial keyMaterial,
         Algorithm algorithm,
         ByteLayer byteLayer,
         int payloadSlot,
         int cacheSlot,
         int encryptedLength
     ) {
+        keyMaterial = keyMaterial.withPayloadMetadata(payloadSlot, cacheSlot, encryptedLength);
         int[] cell = new int[11];
-        for (int i = 0; i < keyMaterial.words().length; i++) {
-            cell[i] = keyMaterial.words()[i] ^ stringKeyCellMask(keyMaterial.siteSeed(), i, keyMaterial.epoch());
+        for (int i = 0; i < 4; i++) {
+            cell[i] = keyMaterial.word(i) ^ stringKeyCellMask(keyMaterial.siteSeed(), i, keyMaterial.epoch());
         }
         cell[4] = keyMaterial.epoch();
         cell[5] = (int) (keyMaterial.siteSeed() >>> 32) ^ stringSiteTokenCellMask(keyMaterial.epoch(), 0);
         cell[6] = (int) keyMaterial.siteSeed() ^ stringSiteTokenCellMask(keyMaterial.epoch(), 1);
         int selector = (algorithm.ordinal() << 3)
             | (byteLayer.ordinal() << 1)
-            | ((keyMaterial.siteSeed() & 2L) != 0L ? 1 : 0);
+            | ((keyMaterial.siteSeed() & 2L) != 0L ? 1 : 0)
+            | keyMaterial.selectorMaterial();
         cell[7] = selector ^ stringTailSelectorCellMask(keyMaterial.epoch());
-        cell[STRING_KEY_CELL_PAYLOAD_SLOT] = payloadSlot ^ stringSiteMetadataCellMask(
+        StringPayloadMetadata payloadMetadata = keyMaterial.payloadMetadata();
+        cell[STRING_KEY_CELL_PAYLOAD_SLOT] = payloadMetadata.payloadSlot() ^ stringSiteMetadataCellMask(
             keyMaterial.siteSeed(),
             keyMaterial.epoch(),
             STRING_KEY_CELL_PAYLOAD_MASK
         );
-        cell[STRING_KEY_CELL_CACHE_SLOT] = cacheSlot ^ stringSiteMetadataCellMask(
+        cell[STRING_KEY_CELL_CACHE_SLOT] = payloadMetadata.cacheSlot() ^ stringSiteMetadataCellMask(
             keyMaterial.siteSeed(),
             keyMaterial.epoch(),
             STRING_KEY_CELL_CACHE_MASK
         );
-        cell[STRING_KEY_CELL_LENGTH] = encryptedLength ^ stringSiteMetadataCellMask(
+        cell[STRING_KEY_CELL_LENGTH] = payloadMetadata.encryptedLength() ^ stringSiteMetadataCellMask(
             keyMaterial.siteSeed(),
             keyMaterial.epoch(),
             STRING_KEY_CELL_LENGTH_MASK
@@ -2874,23 +2902,62 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state,
         long siteSeed,
-        StringKeyMaterial keyMaterial
+        StringSiteMaterial keyMaterial
     ) {
         return stringKeyMixedWord(liveStringWord(metadata, state, rootSeed(siteSeed)), siteSeed, keyMaterial);
     }
 
-    private int stringKeyMixedWord(int liveWord, long siteSeed, StringKeyMaterial keyMaterial) {
+    private int stringKeyMixedWord(int liveWord, long siteSeed, StringSiteMaterial keyMaterial) {
         if (keyMaterial == null) {
             return liveWord;
         }
-        int[] words = keyMaterial.words();
-        int x = liveWord ^ words[0];
-        x += (liveWord << shift(siteSeed, 7)) ^ words[1];
+        int x = liveWord ^ keyMaterial.word(0);
+        x += (liveWord << shift(siteSeed, 7)) ^ keyMaterial.word(1);
         x ^= x >>> shift(siteSeed, 17);
-        x *= words[2] | 1;
-        x += (liveWord >>> shift(siteSeed, 29)) ^ words[3];
+        x *= keyMaterial.word(2) | 1;
+        x += (liveWord >>> shift(siteSeed, 29)) ^ keyMaterial.word(3);
         x ^= x >>> shift(siteSeed, 5);
         return x;
+    }
+
+    private List<Integer> shuffledStringWordIndexes(long seed, long siteSeed, int layoutId, int wordCount) {
+        List<Integer> indexes = new ArrayList<>(wordCount);
+        for (int i = 0; i < wordCount; i++) {
+            indexes.add(i);
+        }
+        long shuffle = JvmPassBytecode.mix(seed ^ Long.rotateRight(siteSeed, 7), layoutId);
+        for (int i = 0; i < indexes.size(); i++) {
+            int remaining = indexes.size() - i;
+            int swap = i + (int) Long.remainderUnsigned(
+                JvmPassBytecode.mix(shuffle, i),
+                remaining
+            );
+            Collections.swap(indexes, i, swap);
+        }
+        if (
+            indexes.get(0) == 0 &&
+                indexes.get(1) == 1 &&
+                indexes.get(2) == 2 &&
+                indexes.get(3) == 3
+        ) {
+            Collections.rotate(indexes, 1);
+        }
+        return List.copyOf(indexes.subList(0, 4));
+    }
+
+    private int stringMaterialFingerprint(
+        long seed,
+        long siteSeed,
+        int layoutId,
+        List<Integer> words,
+        List<Integer> wordIndexes
+    ) {
+        long fp = JvmPassBytecode.mix(seed ^ Long.rotateLeft(siteSeed, 41), 0x5354524650524E54L ^ layoutId);
+        for (int index : wordIndexes) {
+            fp = JvmPassBytecode.mix(fp, words.get(index));
+        }
+        int encoded = (int) fp & STRING_SELECTOR_FINGERPRINT_MASK;
+        return encoded == 0 ? 1 : encoded;
     }
 
     private void emitStringKeyCellLoad(InsnList insns, StringSiteCache siteCache, int keyTableLocal) {
@@ -3181,7 +3248,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         long siteSeed,
         byte[] encrypted,
-        StringKeyMaterial keyMaterial,
+        StringSiteMaterial keyMaterial,
         Algorithm algorithm,
         ByteLayer byteLayer
     ) {
@@ -3197,7 +3264,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         StringKeyTable keyTable = ensureStringKeyTable(pctx, clazz, metadata);
         int payloadSlot = registerStringPayload(pctx, keyTable, encrypted);
         int cacheSlot = registerStringCacheSlot(pctx, keyTable);
-        int keySlot = registerStringKeyMaterial(
+        int keySlot = registerStringSiteMaterial(
             pctx,
             keyTable,
             keyMaterial,
@@ -3255,10 +3322,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
         return table;
     }
 
-    private int registerStringKeyMaterial(
+    private int registerStringSiteMaterial(
         PipelineContext pctx,
         StringKeyTable table,
-        StringKeyMaterial keyMaterial,
+        StringSiteMaterial keyMaterial,
         Algorithm algorithm,
         ByteLayer byteLayer,
         int payloadSlot,
@@ -4148,7 +4215,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         return 1 + (int) ((seed >>> base) & 30L);
     }
 
-    private int nonZeroInt(long value) {
+    private static int nonZeroInt(long value) {
         int v = (int) value;
         return v == 0 ? 0x3D6B2A4F : v;
     }
@@ -4209,7 +4276,72 @@ public final class JvmStringObfuscationPass implements TransformPass {
         }
     }
 
-    private record StringKeyMaterial(long siteSeed, int epoch, int[] words) {}
+    private record StringSiteMaterial(
+        long siteSeed,
+        int layoutId,
+        int epoch,
+        int fingerprint,
+        List<Integer> words,
+        List<Integer> wordIndexes,
+        StringPayloadMetadata payloadMetadata
+    ) {
+        private StringSiteMaterial {
+            if (layoutId <= 0 || layoutId > STRING_SELECTOR_LAYOUT_MASK) {
+                throw new IllegalArgumentException("invalid string material layout id");
+            }
+            if (fingerprint <= 0 || fingerprint > STRING_SELECTOR_FINGERPRINT_MASK) {
+                throw new IllegalArgumentException("invalid string material fingerprint");
+            }
+            if (words.size() < 4 || wordIndexes.size() != 4) {
+                throw new IllegalArgumentException("invalid string material word layout");
+            }
+            words = List.copyOf(words);
+            wordIndexes = List.copyOf(wordIndexes);
+            payloadMetadata = payloadMetadata == null
+                ? StringPayloadMetadata.unbound(fingerprint)
+                : payloadMetadata;
+        }
+
+        int word(int logicalIndex) {
+            return words.get(wordIndexes.get(logicalIndex));
+        }
+
+        int selectorMaterial() {
+            return ((layoutId & STRING_SELECTOR_LAYOUT_MASK) << STRING_SELECTOR_LAYOUT_SHIFT) |
+                ((fingerprint & STRING_SELECTOR_FINGERPRINT_MASK) << STRING_SELECTOR_FINGERPRINT_SHIFT);
+        }
+
+        StringSiteMaterial withPayloadMetadata(int payloadSlot, int cacheSlot, int encryptedLength) {
+            return new StringSiteMaterial(
+                siteSeed,
+                layoutId,
+                epoch,
+                fingerprint,
+                words,
+                wordIndexes,
+                new StringPayloadMetadata(
+                    payloadSlot,
+                    cacheSlot,
+                    encryptedLength,
+                    nonZeroInt(JvmPassBytecode.mix(
+                        fingerprint ^ encryptedLength,
+                        ((long) payloadSlot << 32) ^ (cacheSlot & 0xFFFFFFFFL)
+                    ))
+                )
+            );
+        }
+    }
+
+    private record StringPayloadMetadata(
+        int payloadSlot,
+        int cacheSlot,
+        int encryptedLength,
+        int fingerprint
+    ) {
+        static StringPayloadMetadata unbound(int fingerprint) {
+            return new StringPayloadMetadata(-1, -1, -1, fingerprint);
+        }
+    }
 
     private record StringKeyTable(
         String owner,

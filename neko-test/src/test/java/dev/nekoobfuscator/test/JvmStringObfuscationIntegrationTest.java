@@ -11,6 +11,7 @@ import dev.nekoobfuscator.core.jar.JarInput;
 import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -42,6 +43,17 @@ public class JvmStringObfuscationIntegrationTest {
     private static final int STRING_MATERIAL_SELECTOR_SLOT = 69;
     private static final int CLASS_KEY_WORDS_SLOT = 65;
     private static final int CLASS_KEY_WORDS_SELECTOR_SLOT = 73;
+    private static final int STRING_KEY_CELL_PAYLOAD_SLOT = 8;
+    private static final int STRING_KEY_CELL_CACHE_SLOT = 9;
+    private static final int STRING_KEY_CELL_LENGTH = 10;
+    private static final int STRING_LOGICAL_KEY_WORDS = 4;
+    private static final int STRING_SELECTOR_LAYOUT_SHIFT = 8;
+    private static final int STRING_SELECTOR_LAYOUT_MASK = 0x3F;
+    private static final int STRING_SELECTOR_FINGERPRINT_SHIFT = 14;
+    private static final int STRING_SELECTOR_FINGERPRINT_MASK = 0x3FFFF;
+    private static final long STRING_KEY_CELL_PAYLOAD_MASK = 0x5354525041594C44L;
+    private static final long STRING_KEY_CELL_CACHE_MASK = 0x5354524341434845L;
+    private static final long STRING_KEY_CELL_LENGTH_MASK = 0x5354524C454E3031L;
     private static final List<String> SECRET_STRINGS = List.of(
         "alpha-secret-cff-flow-17",
         "omega-flow-tail-23",
@@ -77,6 +89,7 @@ public class JvmStringObfuscationIntegrationTest {
         assertTrue(obfuscated.contains("STRING OBF OK"), obfuscated);
         assertPlaintextRemoved(outputJar);
         assertAesDesXorDecodeUsesCffState(outputJar);
+        assertStringSitesHaveIndependentMaterialLayouts(outputJar);
     }
 
     @Test
@@ -460,6 +473,183 @@ public class JvmStringObfuscationIntegrationTest {
         assertFalse(sawStringConcatFactoryRecipe, "concat recipe strings should be rewritten and encrypted");
     }
 
+    private void assertStringSitesHaveIndependentMaterialLayouts(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("StringShapes");
+        List<StringMaterialCell> cells = new ArrayList<>();
+        for (var method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            for (int[] rawCell : literalIntArrays(method.instructions.toArray())) {
+                StringMaterialCell decoded = decodeStringMaterialCell(rawCell);
+                if (decoded != null) {
+                    cells.add(decoded);
+                }
+            }
+        }
+        assertTrue(cells.size() >= 2, "string fixture should emit at least two string material cells");
+
+        List<String> layoutFingerprints = new ArrayList<>();
+        for (StringMaterialCell cell : cells) {
+            String pair = cell.layoutId() + ":" + cell.fingerprint();
+            if (!layoutFingerprints.contains(pair)) {
+                layoutFingerprints.add(pair);
+            }
+        }
+        assertTrue(
+            layoutFingerprints.size() >= 2,
+            "string sites should not share one layout/fingerprint pair: " + layoutFingerprints
+        );
+
+        boolean observedSeedDecodesEveryCell = false;
+        for (StringMaterialCell candidate : cells) {
+            boolean decodesEveryCell = true;
+            for (StringMaterialCell cell : cells) {
+                if (!decodesWords(cell.rawCell(), cell.words(), candidate.siteSeed(), cell.epoch())) {
+                    decodesEveryCell = false;
+                    break;
+                }
+            }
+            if (decodesEveryCell) {
+                observedSeedDecodesEveryCell = true;
+                break;
+            }
+        }
+        assertFalse(
+            observedSeedDecodesEveryCell,
+            "one observed string site seed decoded every material cell"
+        );
+    }
+
+    private List<int[]> literalIntArrays(AbstractInsnNode[] insns) {
+        List<int[]> arrays = new ArrayList<>();
+        for (int i = 0; i < insns.length; i++) {
+            Integer length = pushedIntValue(insns[i]);
+            if (length == null || length <= 0 || length > 256) continue;
+            int newArray = nextRealIndex(insns, i + 1, insns.length);
+            if (newArray < 0 ||
+                !(insns[newArray] instanceof IntInsnNode arrayType) ||
+                arrayType.getOpcode() != Opcodes.NEWARRAY ||
+                arrayType.operand != Opcodes.T_INT) {
+                continue;
+            }
+            int[] values = new int[length];
+            boolean ok = true;
+            int cursor = newArray + 1;
+            for (int entry = 0; entry < length; entry++) {
+                int dup = nextRealIndex(insns, cursor, insns.length);
+                int indexInsn = dup < 0 ? -1 : nextRealIndex(insns, dup + 1, insns.length);
+                int valueInsn = indexInsn < 0 ? -1 : nextRealIndex(insns, indexInsn + 1, insns.length);
+                int store = valueInsn < 0 ? -1 : nextRealIndex(insns, valueInsn + 1, insns.length);
+                Integer index = indexInsn < 0 ? null : pushedIntValue(insns[indexInsn]);
+                Integer value = valueInsn < 0 ? null : pushedIntValue(insns[valueInsn]);
+                if (dup < 0 ||
+                    insns[dup].getOpcode() != Opcodes.DUP ||
+                    index == null ||
+                    value == null ||
+                    index < 0 ||
+                    index >= length ||
+                    store < 0 ||
+                    insns[store].getOpcode() != Opcodes.IASTORE) {
+                    ok = false;
+                    break;
+                }
+                values[index] = value;
+                cursor = store + 1;
+            }
+            if (ok) {
+                arrays.add(values);
+                i = cursor;
+            }
+        }
+        return arrays;
+    }
+
+    private StringMaterialCell decodeStringMaterialCell(int[] rawCell) {
+        if (rawCell.length != 11) return null;
+        int epoch = rawCell[4];
+        long siteSeed = ((long) (rawCell[5] ^ stringSiteTokenCellMask(epoch, 0)) << 32) |
+            ((rawCell[6] ^ stringSiteTokenCellMask(epoch, 1)) & 0xFFFFFFFFL);
+        int selector = rawCell[7] ^ stringTailSelectorCellMask(epoch);
+        int layoutId = (selector >>> STRING_SELECTOR_LAYOUT_SHIFT) & STRING_SELECTOR_LAYOUT_MASK;
+        int fingerprint = (selector >>> STRING_SELECTOR_FINGERPRINT_SHIFT) &
+            STRING_SELECTOR_FINGERPRINT_MASK;
+        if (layoutId == 0 || fingerprint == 0) return null;
+        int payloadSlot = rawCell[STRING_KEY_CELL_PAYLOAD_SLOT] ^ stringSiteMetadataCellMask(
+            siteSeed,
+            epoch,
+            STRING_KEY_CELL_PAYLOAD_MASK
+        );
+        int cacheSlot = rawCell[STRING_KEY_CELL_CACHE_SLOT] ^ stringSiteMetadataCellMask(
+            siteSeed,
+            epoch,
+            STRING_KEY_CELL_CACHE_MASK
+        );
+        int encryptedLength = rawCell[STRING_KEY_CELL_LENGTH] ^ stringSiteMetadataCellMask(
+            siteSeed,
+            epoch,
+            STRING_KEY_CELL_LENGTH_MASK
+        );
+        if (payloadSlot < 0 || cacheSlot < 0 || encryptedLength <= 0 || encryptedLength > 4096) {
+            return null;
+        }
+        int[] words = decodedWords(rawCell, siteSeed, epoch);
+        return new StringMaterialCell(rawCell.clone(), siteSeed, epoch, layoutId, fingerprint, words);
+    }
+
+    private int[] decodedWords(int[] rawCell, long siteSeed, int epoch) {
+        int[] words = new int[STRING_LOGICAL_KEY_WORDS];
+        for (int i = 0; i < words.length; i++) {
+            words[i] = rawCell[i] ^ stringKeyCellMask(siteSeed, i, epoch);
+        }
+        return words;
+    }
+
+    private boolean decodesWords(int[] rawCell, int[] expectedWords, long siteSeed, int epoch) {
+        for (int i = 0; i < expectedWords.length; i++) {
+            if ((rawCell[i] ^ stringKeyCellMask(siteSeed, i, epoch)) != expectedWords[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private int stringKeyCellMask(long siteSeed, int wordIndex, int epoch) {
+        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D41534BL + wordIndex));
+        x ^= x >>> shift(siteSeed, 9 + wordIndex);
+        x *= nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D554C31L + wordIndex)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D46494EL + wordIndex));
+    }
+
+    private int stringSiteTokenCellMask(int epoch, int wordIndex) {
+        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(0x5354525349544531L, wordIndex));
+        x ^= x >>> (7 + wordIndex);
+        x *= nonZeroInt(JvmPassBytecode.mix(0x5354525349544532L, wordIndex)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(0x5354525349544533L, wordIndex));
+    }
+
+    private int stringTailSelectorCellMask(int epoch) {
+        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(0x53545253454C3131L, 0x5441494C53454CL));
+        x ^= x >>> 13;
+        x *= nonZeroInt(JvmPassBytecode.mix(0x53545253454C3132L, 0x5441494C53454CL)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(0x53545253454C3133L, 0x5441494C53454CL));
+    }
+
+    private int stringSiteMetadataCellMask(long siteSeed, int epoch, long maskSeed) {
+        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, maskSeed));
+        x ^= x >>> shift(siteSeed, 11);
+        x *= nonZeroInt(JvmPassBytecode.mix(siteSeed, maskSeed ^ 0x5354524D45544131L)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, maskSeed ^ 0x5354524D45544132L));
+    }
+
+    private int shift(long seed, int base) {
+        return 1 + (int) ((seed >>> base) & 30L);
+    }
+
+    private int nonZeroInt(long value) {
+        int v = (int) value;
+        return v == 0 ? 0x3D6B2A4F : v;
+    }
+
     private boolean stringTailCallReceivesDataDigest(AbstractInsnNode[] insns, int callIndex) {
         int start = Math.max(0, callIndex - 40);
         int intLoads = 0;
@@ -668,6 +858,29 @@ public class JvmStringObfuscationIntegrationTest {
             || insn instanceof IntInsnNode
             || (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer);
     }
+
+    private static Integer pushedIntValue(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) {
+            return opcode - Opcodes.ICONST_0;
+        }
+        if (insn instanceof IntInsnNode intInsn) {
+            return intInsn.operand;
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer intValue) {
+            return intValue;
+        }
+        return null;
+    }
+
+    private record StringMaterialCell(
+        int[] rawCell,
+        long siteSeed,
+        int epoch,
+        int layoutId,
+        int fingerprint,
+        int[] words
+    ) {}
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {
         Manifest manifest = new Manifest();
