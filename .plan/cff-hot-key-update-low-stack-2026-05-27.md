@@ -237,7 +237,7 @@ java -XX:-UsePerfData \
   discovered helper/callsites, the plan is distinct from P4.4 fallback removal
   alone, and HKU-2 is blocked until this HKU-1 plan update is committed.
 
-### [ ] HKU-2.1: Add generation-time raw-nonzero method-key state support
+### [x] HKU-2.1: Add generation-time raw-nonzero method-key state support
 
 - Scope: change only `CffBlockKeyState` construction support so every
   legitimate generated method-key state has a raw nonzero method key before
@@ -266,6 +266,52 @@ java -XX:-UsePerfData \
   - subagent implementation review passes;
   - commit contains only HKU-2.1 source changes and the matching update to this
     standalone plan before HKU-2.2 starts.
+- Implementation evidence before review:
+  - source diff is limited to
+    `CffKeyStateEmitter.java` and `CffKeyTransferRewriter.java`;
+  - diff stat is `58 insertions(+), 16 deletions(-)`;
+  - all three generated `new CffBlockKeyState` construction sites now derive
+    `methodSalt` through `adjustedMethodSaltForBlock(...)`;
+  - `rawMethodKeyFromBlock(...)` implements the invariant formula exactly, and
+    `methodKeyFromBlock(...)` still returns
+    `nonZeroLong(rawMethodKeyFromBlock(...))`;
+  - the generation-time adjustment only toggles `methodSalt` when the raw key
+    would be zero, then fails closed if the adjusted raw key is still zero;
+  - `git diff --check` passed for the two CFF source files.
+- Fresh validation evidence before review:
+  - targeted Gradle validation completed with `BUILD SUCCESSFUL in 1m 23s`
+    and `19 actionable tasks: 19 executed`;
+  - refreshed report
+    `build/test-jvm-runtime-ablation/jvm-runtime-ablation-report.json` was
+    captured at `2026-05-27T01:56:02.717884843Z`;
+  - fresh medians were TEST `cff-only-stack Calc=101 ms`, TEST
+    `full Calc=189 ms`, obfusjack `cff-only-stack Seq=305 ms`, and obfusjack
+    `full Seq=311 ms`;
+  - generated map lookup found method-key helper
+    `a/a.__neko_cff_mkey$1sldy51(IIIIJJ)J -> cb`;
+  - `build/jvm-runtime-perf/hku-2-1-bytecode/obfusjack-method-key-helper.javap.txt`
+    shows `a.da.cb(int,int,int,int,long,long)` still keeps descriptor
+    `(IIIIJJ)J`, has `stack=8`, `locals=8`, and still contains `dup2`,
+    `lcmp`, `ifne`, `pop2`, and the fixed fallback long, proving HKU-2.1 did
+    not change runtime helper bytecode shape;
+  - topology rows remain present: TEST `cff-only-stack` has
+    `transition=621`, `step=500`, `island=493`; TEST `full` has
+    `transition=621`, `step=490`, `island=493`; obfusjack `cff-only-stack` has
+    `transition=391`, `step=456`, `island=347`; obfusjack `full` has
+    `transition=391`, `step=441`, `island=347`;
+  - dry-run logs contain `54` TEST CFF dry-run rows per TEST variant and `36`
+    obfusjack CFF dry-run rows per obfusjack variant, with no nonzero
+    `missingFakeStepRows`, `missingPoisonStepRows`, `missingBounceRows`,
+    `missingFakeSourceKeyProofRows`, `semanticSwitchBlockedFakeRows`, or
+    `staticDispatchTokenRows` markers;
+  - stderr, marker, and repository-local `hs_err_pid*.log` scans found no
+    verifier/linkage/runtime/fallback/skip/crash markers.
+- Completion evidence: subagent implementation review passed. The reviewer
+  confirmed that HKU-2.1 is limited to generation-time state support, keeps
+  the runtime helper emitter/descriptor/material topology/callsite ABI
+  unchanged, preserves the raw formula and masked salt representation, uses a
+  hard fail instead of fallback if raw-nonzero adjustment cannot be proven, and
+  has enough fresh validation evidence to commit this subtask.
 
 ### [ ] HKU-2.2: Lower active-table method-key helper stack shape
 
