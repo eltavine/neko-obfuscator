@@ -764,7 +764,7 @@ For every implementation row below:
   key-cell `[I` pattern survives; no standalone key/material fields or helper
   fallbacks appear.
 
-### [ ] JSE-16: Apply derived numeric fragments to string material
+### [x] JSE-16: Apply derived numeric fragments to string material
 
 - Scope: migrate string material initialization, string site token material,
   string tail selector material, and protected string live-word salts to the
@@ -775,6 +775,14 @@ For every implementation row below:
 - Required evidence: ASM audit classifies string protected material and proves
   it is split/live-derived rather than emitted as single large `ldc` values;
   material reconstruction slices must load `metadata.dataLocal()`.
+- Fresh JSE-16 baseline evidence: after JSE-15, string key cells are variable
+  `Object[]`/boxed-`Long` packs, but
+  `JvmStringObfuscationPass.emitObjectArray` still emits `Integer` and `Long`
+  material with direct `JvmPassBytecode.pushInt/pushLong` before boxed
+  `valueOf`; `stringSiteTokenCellMask` and `stringTailSelectorCellMask` still
+  use epoch plus fixed direct constants only, while the shared tail already
+  carries hidden method key, guard/path/block/pc, `inputDataLocal`, and selected
+  class-key word paths that can prove live protected derivation.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Static/ASM audit: add `assertStringProtectedMaterialIsDerived` in
@@ -783,6 +791,33 @@ For every implementation row below:
   method-key fold, and a live selected class-key word before final material use;
   optional artifact inspection:
   `javap -J-XX:-UsePerfData -classpath build/tmp/neko-test-strings/string-shapes-obf.jar -c -v StringShapes | rg -n "ldc(_w|2_w)?[[:space:]]+#.*// (int|long)"`.
+- Implementation evidence: `StringKeyTable` initialization now uses a
+  transform-owned `__neko_strinit$` method so split material does not push the
+  host `<clinit>` over the JVM method-size limit; an earlier all-inline
+  fragment attempt failed full validation with `a/a.<clinit>()V`
+  `MethodTooLargeException` and estimates of 89299 bytes, then 73449 bytes
+  after compact long splitting. The retained implementation preserves the
+  string transform-owned initialization surface and leaves the host `<clinit>`
+  with only the generated init call.
+- Validation evidence: `git diff --check -- .plan/... JvmStringObfuscationPass.java
+  JvmStringObfuscationIntegrationTest.java` passed; the required combined
+  command
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`
+  passed. Latest XML shows `JvmStringObfuscationIntegrationTest`
+  `tests=2 failures=0 errors=0` and `JvmFullObfuscationPerfTest`
+  `tests=2 failures=0 errors=0`.
+- Static audit evidence: source grep for the old epoch-only token/selector
+  mask calls and direct `emitObjectArray` boxed `pushInt/pushLong` emitters has
+  no matches. `javap` on
+  `build/tmp/neko-test-strings/string-shapes-obf.jar` shows
+  `__neko_strinit$` material writes rebuild boxed `Long` values through
+  `i2l/lshl/lor` before `Long.valueOf`, while the focused ASM audit proves
+  string material cells are fragmented and the shared tail consumes
+  `inputDataLocal`, hidden method-key fold, descriptor-derived masks, and a
+  data-selected class-key word.
+- Subagent review `019e6ac3-c66a-7232-b2c4-a601c7ef8c10` returned PASS for
+  the three-file diff, scope discipline, descriptor/material formula
+  consistency, `__neko_strinit$` non-fallback shape, and validation evidence.
 - Completion criteria: string tests pass; string protected seed/material values
   are per-site and derived; no plaintext strings or standalone carriers appear.
 

@@ -2372,13 +2372,13 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int siteSeedLocal
     ) {
         emitRuntimeStringCellValueLoad(insns, keyCellLocal, descriptorLocal, 5);
-        emitRuntimeStringSiteTokenCellMask(insns, epochLocal, 0);
+        emitRuntimeStringSiteTokenCellMask(insns, descriptorLocal, epochLocal, 0);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LSHL));
         emitRuntimeStringCellValueLoad(insns, keyCellLocal, descriptorLocal, 6);
-        emitRuntimeStringSiteTokenCellMask(insns, epochLocal, 1);
+        emitRuntimeStringSiteTokenCellMask(insns, descriptorLocal, epochLocal, 1);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
@@ -2397,7 +2397,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int dataWordLocal
     ) {
         emitRuntimeStringCellValueLoad(insns, keyCellLocal, descriptorLocal, 7);
-        emitRuntimeStringTailSelectorCellMask(insns, epochLocal);
+        emitRuntimeStringTailSelectorCellMask(insns, descriptorLocal, epochLocal);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, selectorLocal));
     }
@@ -2552,18 +2552,18 @@ public final class JvmStringObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LUSHR));
         insns.add(new InsnNode(Opcodes.L2I));
-        emitRuntimeStringSiteTokenCellMask(insns, nextEpochLocal, 0);
+        emitRuntimeStringSiteTokenCellMask(insns, descriptorLocal, nextEpochLocal, 0);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, valueLocal));
         emitRuntimeStringCellValueStore(insns, keyCellLocal, descriptorLocal, 5, valueLocal);
         insns.add(new VarInsnNode(Opcodes.LLOAD, siteSeedLocal));
         insns.add(new InsnNode(Opcodes.L2I));
-        emitRuntimeStringSiteTokenCellMask(insns, nextEpochLocal, 1);
+        emitRuntimeStringSiteTokenCellMask(insns, descriptorLocal, nextEpochLocal, 1);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, valueLocal));
         emitRuntimeStringCellValueStore(insns, keyCellLocal, descriptorLocal, 6, valueLocal);
         insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
-        emitRuntimeStringTailSelectorCellMask(insns, nextEpochLocal);
+        emitRuntimeStringTailSelectorCellMask(insns, descriptorLocal, nextEpochLocal);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, valueLocal));
         emitRuntimeStringCellValueStore(insns, keyCellLocal, descriptorLocal, 7, valueLocal);
@@ -2681,31 +2681,66 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
-    private void emitRuntimeStringSiteTokenCellMask(InsnList insns, int epochLocal, int wordIndex) {
+    private void emitRuntimeStringSiteTokenCellMask(
+        InsnList insns,
+        int descriptorLocal,
+        int epochLocal,
+        int wordIndex
+    ) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x5354525349544531L, wordIndex)));
+        emitRuntimeStringDescriptorMaterial(insns, descriptorLocal, wordIndex, 0x5354525349544531L);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(insns, 7 + wordIndex);
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x5354525349544532L, wordIndex)) | 1);
+        emitRuntimeStringDescriptorMaterial(insns, descriptorLocal, wordIndex, 0x5354525349544532L);
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
         insns.add(new InsnNode(Opcodes.IMUL));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x5354525349544533L, wordIndex)));
+        emitRuntimeStringDescriptorMaterial(insns, descriptorLocal, wordIndex, 0x5354525349544533L);
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
-    private void emitRuntimeStringTailSelectorCellMask(InsnList insns, int epochLocal) {
+    private void emitRuntimeStringTailSelectorCellMask(InsnList insns, int descriptorLocal, int epochLocal) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, epochLocal));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x53545253454C3131L, 0x5441494C53454CL)));
+        emitRuntimeStringDescriptorMaterial(insns, descriptorLocal, 0x5441494C, 0x53545253454C3131L);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(insns, 13);
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x53545253454C3132L, 0x5441494C53454CL)) | 1);
+        emitRuntimeStringDescriptorMaterial(insns, descriptorLocal, 0x5441494C, 0x53545253454C3132L);
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
         insns.add(new InsnNode(Opcodes.IMUL));
-        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x53545253454C3133L, 0x5441494C53454CL)));
+        emitRuntimeStringDescriptorMaterial(insns, descriptorLocal, 0x5441494C, 0x53545253454C3133L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeStringDescriptorMaterial(
+        InsnList insns,
+        int descriptorLocal,
+        int ordinal,
+        long domain
+    ) {
+        int c1 = stringDescriptorMaterialWord(ordinal, domain, 0);
+        int c2 = stringDescriptorMaterialWord(ordinal, domain, 1);
+        int c3 = stringDescriptorMaterialWord(ordinal, domain, 2);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, descriptorLocal));
+        emitStaticIntFragmented(insns, c1);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, descriptorLocal));
+        JvmPassBytecode.pushInt(insns, stringDescriptorMaterialShift(ordinal, 0));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, stringDescriptorMaterialShift(ordinal, 1));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitStaticIntFragmented(insns, c2 | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitStaticIntFragmented(insns, c3);
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
@@ -3018,13 +3053,13 @@ public final class JvmStringObfuscationPass implements TransformPass {
             cell,
             descriptor,
             5,
-            (int) (keyMaterial.siteSeed() >>> 32) ^ stringSiteTokenCellMask(keyMaterial.epoch(), 0)
+            (int) (keyMaterial.siteSeed() >>> 32) ^ stringSiteTokenCellMask(descriptor, keyMaterial.epoch(), 0)
         );
         putStringKeyCellValue(
             cell,
             descriptor,
             6,
-            (int) keyMaterial.siteSeed() ^ stringSiteTokenCellMask(keyMaterial.epoch(), 1)
+            (int) keyMaterial.siteSeed() ^ stringSiteTokenCellMask(descriptor, keyMaterial.epoch(), 1)
         );
         int selector = (algorithm.ordinal() << 3)
             | (byteLayer.ordinal() << 1)
@@ -3034,7 +3069,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             cell,
             descriptor,
             7,
-            selector ^ stringTailSelectorCellMask(keyMaterial.epoch())
+            selector ^ stringTailSelectorCellMask(descriptor, keyMaterial.epoch())
         );
         StringPayloadMetadata payloadMetadata = keyMaterial.payloadMetadata();
         putStringKeyCellValue(
@@ -3163,18 +3198,34 @@ public final class JvmStringObfuscationPass implements TransformPass {
         return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D46494EL + wordIndex));
     }
 
-    private int stringSiteTokenCellMask(int epoch, int wordIndex) {
-        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(0x5354525349544531L, wordIndex));
+    private int stringSiteTokenCellMask(int descriptor, int epoch, int wordIndex) {
+        int x = epoch ^ stringDescriptorMaterial(descriptor, wordIndex, 0x5354525349544531L);
         x ^= x >>> (7 + wordIndex);
-        x *= nonZeroInt(JvmPassBytecode.mix(0x5354525349544532L, wordIndex)) | 1;
-        return x ^ nonZeroInt(JvmPassBytecode.mix(0x5354525349544533L, wordIndex));
+        x *= stringDescriptorMaterial(descriptor, wordIndex, 0x5354525349544532L) | 1;
+        return x ^ stringDescriptorMaterial(descriptor, wordIndex, 0x5354525349544533L);
     }
 
-    private int stringTailSelectorCellMask(int epoch) {
-        int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(0x53545253454C3131L, 0x5441494C53454CL));
+    private int stringTailSelectorCellMask(int descriptor, int epoch) {
+        int x = epoch ^ stringDescriptorMaterial(descriptor, 0x5441494C, 0x53545253454C3131L);
         x ^= x >>> 13;
-        x *= nonZeroInt(JvmPassBytecode.mix(0x53545253454C3132L, 0x5441494C53454CL)) | 1;
-        return x ^ nonZeroInt(JvmPassBytecode.mix(0x53545253454C3133L, 0x5441494C53454CL));
+        x *= stringDescriptorMaterial(descriptor, 0x5441494C, 0x53545253454C3132L) | 1;
+        return x ^ stringDescriptorMaterial(descriptor, 0x5441494C, 0x53545253454C3133L);
+    }
+
+    private int stringDescriptorMaterial(int descriptor, int ordinal, long domain) {
+        int x = descriptor ^ stringDescriptorMaterialWord(ordinal, domain, 0);
+        x += descriptor >>> stringDescriptorMaterialShift(ordinal, 0);
+        x ^= x >>> stringDescriptorMaterialShift(ordinal, 1);
+        x *= stringDescriptorMaterialWord(ordinal, domain, 1) | 1;
+        return x ^ stringDescriptorMaterialWord(ordinal, domain, 2);
+    }
+
+    private int stringDescriptorMaterialWord(int ordinal, long domain, int lane) {
+        return nonZeroInt(JvmPassBytecode.mix(domain ^ ordinal, 0x5354524445534331L + lane));
+    }
+
+    private int stringDescriptorMaterialShift(int ordinal, int lane) {
+        return 3 + ((ordinal + lane * 11) & 15);
     }
 
     private int stringSiteMetadataCellMask(long siteSeed, int epoch, long maskSeed) {
@@ -3370,11 +3421,21 @@ public final class JvmStringObfuscationPass implements TransformPass {
         if (existing != null) return existing;
 
         String fieldName = metadata.classKeyTable().objectFieldName();
-        boolean directClinit = true;
-        MethodNode helper = findOrCreateClassInit(clazz);
+        boolean directClinit = false;
+        boolean interfaceOwner = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
+        MethodNode clinit = findOrCreateClassInit(clazz);
+        MethodNode helper = createStringInitHelper(clazz, interfaceOwner);
         LabelNode initStart = new LabelNode();
         LabelNode initEnd = new LabelNode();
-        insertClassInitSegmentAfter(helper, metadata.classKeyTable().initEnd(), initStart, initEnd);
+        insertClassInitCallAfter(
+            clinit,
+            metadata.classKeyTable().initEnd(),
+            initStart,
+            initEnd,
+            clazz.name(),
+            helper.name,
+            interfaceOwner
+        );
 
         StringKeyTable table = new StringKeyTable(
             clazz.name(),
@@ -3390,6 +3451,20 @@ public final class JvmStringObfuscationPass implements TransformPass {
         tables.put(clazz.name(), table);
         clazz.markDirty();
         return table;
+    }
+
+    private MethodNode createStringInitHelper(L1Class clazz, boolean interfaceOwner) {
+        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+        access |= interfaceOwner ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
+        MethodNode helper = new MethodNode(
+            access,
+            uniqueMethodName(clazz, "__neko_strinit$"),
+            "()V",
+            null,
+            null
+        );
+        clazz.asmNode().methods.add(helper);
+        return helper;
     }
 
     private int registerStringSiteMaterial(
@@ -3540,7 +3615,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             insns.add(new InsnNode(Opcodes.DUP));
             JvmPassBytecode.pushInt(insns, i);
             if (value instanceof Integer intValue) {
-                JvmPassBytecode.pushInt(insns, intValue);
+                emitStaticIntFragmented(insns, intValue);
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Integer",
@@ -3549,7 +3624,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
                     false
                 ));
             } else if (value instanceof Long longValue) {
-                JvmPassBytecode.pushLong(insns, longValue);
+                emitStaticLongFragmented(insns, longValue);
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Long",
@@ -3562,6 +3637,44 @@ public final class JvmStringObfuscationPass implements TransformPass {
             }
             insns.add(new InsnNode(Opcodes.AASTORE));
         }
+    }
+
+    private void emitStaticLongFragmented(InsnList insns, long value) {
+        JvmPassBytecode.pushInt(insns, (int) (value >>> 32));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        JvmPassBytecode.pushInt(insns, (int) value);
+        insns.add(new InsnNode(Opcodes.I2L));
+        emitStaticUnsignedIntMask(insns);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private void emitStaticIntFragmented(InsnList insns, int value) {
+        emitStaticUnsignedShort(insns, value >>> 16);
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        emitStaticUnsignedShort(insns, value);
+        insns.add(new InsnNode(Opcodes.IOR));
+    }
+
+    private void emitStaticUnsignedShort(InsnList insns, int value) {
+        int word = value & 0xFFFF;
+        JvmPassBytecode.pushInt(insns, (short) word);
+        if (word > Short.MAX_VALUE) {
+            insns.add(new InsnNode(Opcodes.ICONST_M1));
+            JvmPassBytecode.pushInt(insns, 16);
+            insns.add(new InsnNode(Opcodes.IUSHR));
+            insns.add(new InsnNode(Opcodes.IAND));
+        }
+    }
+
+    private void emitStaticUnsignedIntMask(InsnList insns) {
+        insns.add(new InsnNode(Opcodes.ICONST_M1));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
     }
 
     private int stringMaterialTableFieldAccess(L1Class clazz) {
@@ -3652,6 +3765,38 @@ public final class JvmStringObfuscationPass implements TransformPass {
         InsnList segment = new InsnList();
         segment.add(start);
         segment.add(end);
+        clinit.instructions.insert(anchor, segment);
+    }
+
+    private void insertClassInitCallAfter(
+        MethodNode clinit,
+        LabelNode anchor,
+        LabelNode start,
+        LabelNode end,
+        String owner,
+        String name,
+        boolean interfaceOwner
+    ) {
+        InsnList segment = new InsnList();
+        segment.add(start);
+        segment.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            owner,
+            name,
+            "()V",
+            interfaceOwner
+        ));
+        segment.add(end);
+        if (anchor == null) {
+            AbstractInsnNode first = clinit.instructions.getFirst();
+            if (first == null) {
+                clinit.instructions.add(segment);
+                clinit.instructions.add(new InsnNode(Opcodes.RETURN));
+            } else {
+                clinit.instructions.insertBefore(first, segment);
+            }
+            return;
+        }
         clinit.instructions.insert(anchor, segment);
     }
 

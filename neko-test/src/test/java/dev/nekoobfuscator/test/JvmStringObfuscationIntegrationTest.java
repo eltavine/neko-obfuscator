@@ -95,6 +95,7 @@ public class JvmStringObfuscationIntegrationTest {
         assertAesDesXorDecodeUsesCffState(outputJar);
         assertStringSitesHaveIndependentMaterialLayouts(outputJar);
         assertStringKeyMaterialHasNoFixedIntArrayCell(outputJar);
+        assertStringProtectedMaterialIsDerived(outputJar);
     }
 
     @Test
@@ -548,6 +549,57 @@ public class JvmStringObfuscationIntegrationTest {
         assertEquals(0, fixedIntCells, "fixed int[11] string key material cell survived");
     }
 
+    private void assertStringProtectedMaterialIsDerived(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("StringShapes");
+        int materialCells = 0;
+        int fragmentedWrites = 0;
+        boolean sawTail = false;
+        for (var method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            for (LiteralObjectArray rawCell : literalIntegerObjectArrays(insns)) {
+                if (decodeStringMaterialCell(rawCell) == null) {
+                    continue;
+                }
+                materialCells++;
+                for (int i = 0; i < rawCell.values().length; i++) {
+                    if (!rawCell.written()[i] || !(rawCell.values()[i] instanceof Number)) {
+                        continue;
+                    }
+                    assertTrue(
+                        rawCell.fragmented()[i],
+                        "string material cell write used a direct boxed numeric constant at physical slot " + i
+                    );
+                    fragmentedWrites++;
+                }
+            }
+            if (!method.name.startsWith("__neko_strtail$")) {
+                continue;
+            }
+            sawTail = true;
+            assertTrue(
+                rootTransportConsumesDataWord(insns, 7, 0, insns.length),
+                "shared string tail should derive material from input dataLocal"
+            );
+            assertTrue(
+                methodKeyFoldStored(insns, 1, 3, 4, 5, 10),
+                "shared string tail should fold hidden method key with CFF guard/path/block locals"
+            );
+            assertTrue(
+                tailClassKeySelectionConsumesData(insns, 12),
+                "shared string tail should select a class-key word through data-derived state"
+            );
+            assertTrue(
+                tailDescriptorMaskConsumesDescriptor(insns, 44),
+                "shared string token/selector masks should derive constants from the key-cell descriptor"
+            );
+        }
+        assertTrue(materialCells >= 2, "string fixture should emit multiple derived string material cells");
+        assertTrue(fragmentedWrites >= materialCells * 2, "string material cells should use fragmented numeric writes");
+        assertTrue(sawTail, "string fixture should emit a shared string decode tail");
+    }
+
     private List<int[]> literalIntArrays(AbstractInsnNode[] insns) {
         List<int[]> arrays = new ArrayList<>();
         for (int i = 0; i < insns.length; i++) {
@@ -606,22 +658,23 @@ public class JvmStringObfuscationIntegrationTest {
             }
             Object[] values = new Object[length];
             boolean[] written = new boolean[length];
+            boolean[] fragmented = new boolean[length];
             boolean ok = true;
             int cursor = newArray + 1;
             int stores = 0;
             while (true) {
                 int dup = nextRealIndex(insns, cursor, insns.length);
                 int indexInsn = dup < 0 ? -1 : nextRealIndex(insns, dup + 1, insns.length);
-                int valueInsn = indexInsn < 0 ? -1 : nextRealIndex(insns, indexInsn + 1, insns.length);
-                int valueOf = valueInsn < 0 ? -1 : nextRealIndex(insns, valueInsn + 1, insns.length);
+                int valueStart = indexInsn < 0 ? -1 : nextRealIndex(insns, indexInsn + 1, insns.length);
+                int valueOf = valueStart < 0 ? -1 : nextBoxedNumberValueOfIndex(insns, valueStart, insns.length);
                 int store = valueOf < 0 ? -1 : nextRealIndex(insns, valueOf + 1, insns.length);
                 Integer index = indexInsn < 0 ? null : pushedIntValue(insns[indexInsn]);
-                Object value = boxedNumberValue(insns, valueInsn, valueOf);
+                BoxedNumberLiteral literal = boxedNumberValue(insns, valueStart, valueOf);
                 if (dup < 0 || insns[dup].getOpcode() != Opcodes.DUP) {
                     break;
                 }
                 if (index == null ||
-                    value == null ||
+                    literal == null ||
                     index < 0 ||
                     index >= length ||
                     valueOf < 0 ||
@@ -631,13 +684,14 @@ public class JvmStringObfuscationIntegrationTest {
                     ok = false;
                     break;
                 }
-                values[index] = value;
+                values[index] = literal.value();
                 written[index] = true;
+                fragmented[index] = literal.fragmented();
                 stores++;
                 cursor = store + 1;
             }
             if (ok && stores > 0) {
-                arrays.add(new LiteralObjectArray(values, written));
+                arrays.add(new LiteralObjectArray(values, written, fragmented));
                 i = cursor;
             }
         }
@@ -660,16 +714,123 @@ public class JvmStringObfuscationIntegrationTest {
             || ("java/lang/Long".equals(call.owner) && "(J)Ljava/lang/Long;".equals(call.desc));
     }
 
-    private Object boxedNumberValue(AbstractInsnNode[] insns, int valueInsn, int valueOf) {
-        if (valueInsn < 0 || valueOf < 0 || !(insns[valueOf] instanceof MethodInsnNode call)) return null;
+    private int nextBoxedNumberValueOfIndex(AbstractInsnNode[] insns, int fromInclusive, int limitExclusive) {
+        for (int i = fromInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() == Opcodes.AASTORE) {
+                return -1;
+            }
+            if (isBoxedNumberValueOf(insns[i])) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private BoxedNumberLiteral boxedNumberValue(AbstractInsnNode[] insns, int valueStart, int valueOf) {
+        if (valueStart < 0 || valueOf < 0 || !(insns[valueOf] instanceof MethodInsnNode call)) return null;
         if (call.getOpcode() != Opcodes.INVOKESTATIC || !"valueOf".equals(call.name)) return null;
+        NumericValue value = evaluateNumericExpression(insns, valueStart, valueOf);
+        if (value == null) return null;
         if ("java/lang/Integer".equals(call.owner) && "(I)Ljava/lang/Integer;".equals(call.desc)) {
-            return pushedIntValue(insns[valueInsn]);
+            if (value.kind() != NumericKind.INT) return null;
+            return new BoxedNumberLiteral((int) value.value(), value.fragmented());
         }
         if ("java/lang/Long".equals(call.owner) && "(J)Ljava/lang/Long;".equals(call.desc)) {
-            return pushedLongValue(insns[valueInsn]);
+            if (value.kind() != NumericKind.LONG) return null;
+            return new BoxedNumberLiteral(value.value(), value.fragmented());
         }
         return null;
+    }
+
+    private NumericValue evaluateNumericExpression(AbstractInsnNode[] insns, int startInclusive, int limitExclusive) {
+        List<NumericValue> stack = new ArrayList<>();
+        int realInsns = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            AbstractInsnNode insn = insns[i];
+            int opcode = insn.getOpcode();
+            if (opcode < 0) continue;
+            realInsns++;
+            Integer intValue = pushedIntValue(insn);
+            if (intValue != null) {
+                stack.add(new NumericValue(NumericKind.INT, intValue, false));
+                continue;
+            }
+            Long longValue = pushedLongValue(insn);
+            if (longValue != null) {
+                stack.add(new NumericValue(NumericKind.LONG, longValue, false));
+                continue;
+            }
+            NumericValue result = switch (opcode) {
+                case Opcodes.I2L -> {
+                    NumericValue value = popNumeric(stack, NumericKind.INT);
+                    yield value == null ? null : new NumericValue(NumericKind.LONG, (long) (int) value.value(), true);
+                }
+                case Opcodes.IADD, Opcodes.ISUB, Opcodes.IMUL, Opcodes.IAND, Opcodes.IOR, Opcodes.IXOR,
+                    Opcodes.ISHL, Opcodes.IUSHR -> evalIntBinary(stack, opcode);
+                case Opcodes.LADD, Opcodes.LSUB, Opcodes.LMUL, Opcodes.LAND, Opcodes.LOR, Opcodes.LXOR ->
+                    evalLongBinary(stack, opcode);
+                case Opcodes.LSHL, Opcodes.LUSHR -> evalLongShift(stack, opcode);
+                default -> null;
+            };
+            if (result == null) return null;
+            stack.add(result);
+        }
+        if (stack.size() != 1) return null;
+        NumericValue value = stack.get(0);
+        return new NumericValue(value.kind(), value.value(), value.fragmented() || realInsns > 1);
+    }
+
+    private NumericValue evalIntBinary(List<NumericValue> stack, int opcode) {
+        NumericValue right = popNumeric(stack, NumericKind.INT);
+        NumericValue left = popNumeric(stack, NumericKind.INT);
+        if (left == null || right == null) return null;
+        int a = (int) left.value();
+        int b = (int) right.value();
+        int out = switch (opcode) {
+            case Opcodes.IADD -> a + b;
+            case Opcodes.ISUB -> a - b;
+            case Opcodes.IMUL -> a * b;
+            case Opcodes.IAND -> a & b;
+            case Opcodes.IOR -> a | b;
+            case Opcodes.IXOR -> a ^ b;
+            case Opcodes.ISHL -> a << (b & 31);
+            case Opcodes.IUSHR -> a >>> (b & 31);
+            default -> throw new IllegalArgumentException("unexpected int opcode " + opcode);
+        };
+        return new NumericValue(NumericKind.INT, out, true);
+    }
+
+    private NumericValue evalLongBinary(List<NumericValue> stack, int opcode) {
+        NumericValue right = popNumeric(stack, NumericKind.LONG);
+        NumericValue left = popNumeric(stack, NumericKind.LONG);
+        if (left == null || right == null) return null;
+        long a = left.value();
+        long b = right.value();
+        long out = switch (opcode) {
+            case Opcodes.LADD -> a + b;
+            case Opcodes.LSUB -> a - b;
+            case Opcodes.LMUL -> a * b;
+            case Opcodes.LAND -> a & b;
+            case Opcodes.LOR -> a | b;
+            case Opcodes.LXOR -> a ^ b;
+            default -> throw new IllegalArgumentException("unexpected long opcode " + opcode);
+        };
+        return new NumericValue(NumericKind.LONG, out, true);
+    }
+
+    private NumericValue evalLongShift(List<NumericValue> stack, int opcode) {
+        NumericValue right = popNumeric(stack, NumericKind.INT);
+        NumericValue left = popNumeric(stack, NumericKind.LONG);
+        if (left == null || right == null) return null;
+        int shift = ((int) right.value()) & 63;
+        long out = opcode == Opcodes.LSHL ? left.value() << shift : left.value() >>> shift;
+        return new NumericValue(NumericKind.LONG, out, true);
+    }
+
+    private NumericValue popNumeric(List<NumericValue> stack, NumericKind kind) {
+        if (stack.isEmpty()) return null;
+        NumericValue value = stack.remove(stack.size() - 1);
+        return value.kind() == kind ? value : null;
     }
 
     private StringMaterialCell decodeStringMaterialCell(LiteralObjectArray rawCell) {
@@ -684,9 +845,9 @@ public class JvmStringObfuscationIntegrationTest {
         }
         int[] logicalValues = logicalStringCellValues(values, descriptor);
         int epoch = logicalValues[4];
-        long siteSeed = ((long) (logicalValues[5] ^ stringSiteTokenCellMask(epoch, 0)) << 32) |
-            ((logicalValues[6] ^ stringSiteTokenCellMask(epoch, 1)) & 0xFFFFFFFFL);
-        int selector = logicalValues[7] ^ stringTailSelectorCellMask(epoch);
+        long siteSeed = ((long) (logicalValues[5] ^ stringSiteTokenCellMask(descriptor, epoch, 0)) << 32) |
+            ((logicalValues[6] ^ stringSiteTokenCellMask(descriptor, epoch, 1)) & 0xFFFFFFFFL);
+        int selector = logicalValues[7] ^ stringTailSelectorCellMask(descriptor, epoch);
         int layoutId = (selector >>> STRING_SELECTOR_LAYOUT_SHIFT) & STRING_SELECTOR_LAYOUT_MASK;
         int fingerprint = (selector >>> STRING_SELECTOR_FINGERPRINT_SHIFT) &
             STRING_SELECTOR_FINGERPRINT_MASK;
@@ -715,9 +876,9 @@ public class JvmStringObfuscationIntegrationTest {
 
     private StringMaterialCell decodeFixedStringMaterialCell(int[] rawCell) {
         int epoch = rawCell[4];
-        long siteSeed = ((long) (rawCell[5] ^ stringSiteTokenCellMask(epoch, 0)) << 32) |
-            ((rawCell[6] ^ stringSiteTokenCellMask(epoch, 1)) & 0xFFFFFFFFL);
-        int selector = rawCell[7] ^ stringTailSelectorCellMask(epoch);
+        long siteSeed = ((long) (rawCell[5] ^ legacyStringSiteTokenCellMask(epoch, 0)) << 32) |
+            ((rawCell[6] ^ legacyStringSiteTokenCellMask(epoch, 1)) & 0xFFFFFFFFL);
+        int selector = rawCell[7] ^ legacyStringTailSelectorCellMask(epoch);
         int layoutId = (selector >>> STRING_SELECTOR_LAYOUT_SHIFT) & STRING_SELECTOR_LAYOUT_MASK;
         int fingerprint = (selector >>> STRING_SELECTOR_FINGERPRINT_SHIFT) &
             STRING_SELECTOR_FINGERPRINT_MASK;
@@ -797,14 +958,44 @@ public class JvmStringObfuscationIntegrationTest {
         return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354524B4D46494EL + wordIndex));
     }
 
-    private int stringSiteTokenCellMask(int epoch, int wordIndex) {
+    private int stringSiteTokenCellMask(int descriptor, int epoch, int wordIndex) {
+        int x = epoch ^ stringDescriptorMaterial(descriptor, wordIndex, 0x5354525349544531L);
+        x ^= x >>> (7 + wordIndex);
+        x *= stringDescriptorMaterial(descriptor, wordIndex, 0x5354525349544532L) | 1;
+        return x ^ stringDescriptorMaterial(descriptor, wordIndex, 0x5354525349544533L);
+    }
+
+    private int stringTailSelectorCellMask(int descriptor, int epoch) {
+        int x = epoch ^ stringDescriptorMaterial(descriptor, 0x5441494C, 0x53545253454C3131L);
+        x ^= x >>> 13;
+        x *= stringDescriptorMaterial(descriptor, 0x5441494C, 0x53545253454C3132L) | 1;
+        return x ^ stringDescriptorMaterial(descriptor, 0x5441494C, 0x53545253454C3133L);
+    }
+
+    private int stringDescriptorMaterial(int descriptor, int ordinal, long domain) {
+        int x = descriptor ^ stringDescriptorMaterialWord(ordinal, domain, 0);
+        x += descriptor >>> stringDescriptorMaterialShift(ordinal, 0);
+        x ^= x >>> stringDescriptorMaterialShift(ordinal, 1);
+        x *= stringDescriptorMaterialWord(ordinal, domain, 1) | 1;
+        return x ^ stringDescriptorMaterialWord(ordinal, domain, 2);
+    }
+
+    private int stringDescriptorMaterialWord(int ordinal, long domain, int lane) {
+        return nonZeroInt(JvmPassBytecode.mix(domain ^ ordinal, 0x5354524445534331L + lane));
+    }
+
+    private int stringDescriptorMaterialShift(int ordinal, int lane) {
+        return 3 + ((ordinal + lane * 11) & 15);
+    }
+
+    private int legacyStringSiteTokenCellMask(int epoch, int wordIndex) {
         int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(0x5354525349544531L, wordIndex));
         x ^= x >>> (7 + wordIndex);
         x *= nonZeroInt(JvmPassBytecode.mix(0x5354525349544532L, wordIndex)) | 1;
         return x ^ nonZeroInt(JvmPassBytecode.mix(0x5354525349544533L, wordIndex));
     }
 
-    private int stringTailSelectorCellMask(int epoch) {
+    private int legacyStringTailSelectorCellMask(int epoch) {
         int x = epoch ^ nonZeroInt(JvmPassBytecode.mix(0x53545253454C3131L, 0x5441494C53454CL));
         x ^= x >>> 13;
         x *= nonZeroInt(JvmPassBytecode.mix(0x53545253454C3132L, 0x5441494C53454CL)) | 1;
@@ -878,6 +1069,66 @@ public class JvmStringObfuscationIntegrationTest {
             }
         }
         return false;
+    }
+
+    private boolean methodKeyFoldStored(
+        AbstractInsnNode[] insns,
+        int methodKeyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int foldLocal
+    ) {
+        for (int i = 0; i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode store)
+                || store.getOpcode() != Opcodes.ISTORE
+                || store.var != foldLocal) {
+                continue;
+            }
+            int start = Math.max(0, i - 24);
+            if (longLoadCount(insns, methodKeyLocal, start, i) > 0
+                && varLoadCount(insns, guardLocal, start, i) > 0
+                && varLoadCount(insns, pathKeyLocal, start, i) > 0
+                && varLoadCount(insns, blockKeyLocal, start, i) > 0
+                && hasOpcode(insns, Opcodes.L2I, start, i)
+                && hasOpcode(insns, Opcodes.IXOR, start, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean tailClassKeySelectionConsumesData(AbstractInsnNode[] insns, int dataWordLocal) {
+        for (int i = 0; i < insns.length; i++) {
+            if (!pushesInt(insns[i], CLASS_KEY_WORDS_SELECTOR_SLOT)) {
+                continue;
+            }
+            int limit = Math.min(insns.length, i + 120);
+            if (varLoadCount(insns, dataWordLocal, i + 1, limit) == 0) continue;
+            if (!hasOpcode(insns, Opcodes.IALOAD, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.AALOAD, i + 1, limit)) continue;
+            if (!hasTypeCast(insns, "[I", i + 1, limit)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private boolean tailDescriptorMaskConsumesDescriptor(AbstractInsnNode[] insns, int descriptorLocal) {
+        int derivedSlices = 0;
+        for (int i = 0; i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ILOAD
+                || load.var != descriptorLocal) {
+                continue;
+            }
+            int limit = Math.min(insns.length, i + 48);
+            if (hasOpcode(insns, Opcodes.IXOR, i + 1, limit)
+                && hasOpcode(insns, Opcodes.IUSHR, i + 1, limit)
+                && hasOpcode(insns, Opcodes.IMUL, i + 1, limit)) {
+                derivedSlices++;
+            }
+        }
+        return derivedSlices >= 3;
     }
 
     private int dataBoundSelectorBranchCount(
@@ -981,6 +1232,17 @@ public class JvmStringObfuscationIntegrationTest {
         return false;
     }
 
+    private boolean hasTypeCast(AbstractInsnNode[] insns, String desc, int startInclusive, int limitExclusive) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof TypeInsnNode type
+                && type.getOpcode() == Opcodes.CHECKCAST
+                && desc.equals(type.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private int opcodeCount(AbstractInsnNode[] insns, int opcode, int startInclusive, int limitExclusive) {
         int count = 0;
         for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
@@ -1072,7 +1334,24 @@ public class JvmStringObfuscationIntegrationTest {
 
     private record LiteralObjectArray(
         Object[] values,
-        boolean[] written
+        boolean[] written,
+        boolean[] fragmented
+    ) {}
+
+    private enum NumericKind {
+        INT,
+        LONG
+    }
+
+    private record NumericValue(
+        NumericKind kind,
+        long value,
+        boolean fragmented
+    ) {}
+
+    private record BoxedNumberLiteral(
+        Object value,
+        boolean fragmented
     ) {}
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {
