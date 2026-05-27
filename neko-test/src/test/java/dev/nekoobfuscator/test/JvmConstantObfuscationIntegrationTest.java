@@ -14,6 +14,8 @@ import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -61,6 +63,7 @@ public class JvmConstantObfuscationIntegrationTest {
         assertNumericConstantValuesMovedToClinit(outputJar);
         assertFlowKeyDecodeUsed(outputJar);
         assertPrimitiveArrayPayloadsEncrypted(outputJar);
+        assertConstantLiveWordConsumesDataDigest(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -142,6 +145,44 @@ public class JvmConstantObfuscationIntegrationTest {
         }
     }
 
+    private void assertConstantLiveWordConsumesDataDigest(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("ConstantShapes");
+        int checkedBaseLoads = 0;
+        int checkedCompactCalls = 0;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null || method.instructions.size() == 0) continue;
+            if (method.name.startsWith("__neko_")) continue;
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            for (int i = 0; i < insns.length; i++) {
+                if (isCompactConstantDecodeCall(insns[i])) {
+                    assertTrue(
+                        compactCallReceivesDataBoundBase(insns, i),
+                        "compact constant decode call did not receive data-bound encoded base and multiplier in " +
+                            method.name + method.desc
+                    );
+                    checkedCompactCalls++;
+                }
+                if (!(insns[i] instanceof VarInsnNode load)
+                    || load.getOpcode() != Opcodes.ILOAD) {
+                    continue;
+                }
+                int dataLocal = constantDecodeDataLocal(insns, i, load.var);
+                if (dataLocal >= 0) {
+                    checkedBaseLoads++;
+                }
+            }
+        }
+        assertTrue(
+            checkedBaseLoads > 0,
+            "constant fixture did not expose protected numeric decode base loads"
+        );
+        assertTrue(
+            checkedCompactCalls > 0,
+            "constant fixture did not expose compact protected numeric decode calls"
+        );
+    }
+
     private boolean fixtureArrayPayload(int storeOpcode, long bits) {
         return switch (storeOpcode) {
             case Opcodes.BASTORE -> bits == -128L || bits == 0L || bits == 1L || bits == 127L;
@@ -220,6 +261,154 @@ public class JvmConstantObfuscationIntegrationTest {
             cursor = cursor.getPrevious();
         }
         return cursor;
+    }
+
+    private int constantDecodeDataLocal(AbstractInsnNode[] insns, int loadIndex, int baseLocal) {
+        int limit = Math.min(insns.length, loadIndex + 320);
+        for (int i = loadIndex + 1; i + 2 < limit; i++) {
+            if (!(insns[i] instanceof VarInsnNode baseStore)
+                || baseStore.getOpcode() != Opcodes.ISTORE
+                || baseStore.var != baseLocal) {
+                continue;
+            }
+            if (!(insns[i + 1] instanceof VarInsnNode dataLoad)
+                || dataLoad.getOpcode() != Opcodes.ILOAD
+                || dataLoad.var == baseLocal) {
+                continue;
+            }
+            if (!(insns[i + 2] instanceof VarInsnNode dataStore)
+                || dataStore.getOpcode() != Opcodes.ISTORE
+                || dataStore.var == baseLocal) {
+                continue;
+            }
+            int firstDataLoad = firstVarLoadIndex(
+                insns,
+                Opcodes.ILOAD,
+                dataLoad.var,
+                loadIndex + 1,
+                i + 1
+            );
+            if (firstDataLoad < 0 || !hasNonlinearMixAfter(insns, firstDataLoad + 1, i + 1)) {
+                continue;
+            }
+            if (!hasDecodeBoundary(insns, i + 3, limit)) {
+                continue;
+            }
+            return dataLoad.var;
+        }
+        return -1;
+    }
+
+    private boolean isConstantDecodeBoundary(AbstractInsnNode insn) {
+        if (isCompactConstantDecodeCall(insn)) {
+            return true;
+        }
+        return insn.getOpcode() == Opcodes.IXOR;
+    }
+
+    private boolean isCompactConstantDecodeCall(AbstractInsnNode insn) {
+        return insn instanceof MethodInsnNode call
+            && call.name.startsWith("__neko_num_i")
+            && "(IIII)I".equals(call.desc);
+    }
+
+    private boolean compactCallReceivesDataBoundBase(AbstractInsnNode[] insns, int callIndex) {
+        AbstractInsnNode multiplierLoadInsn = previousReal(insns[callIndex].getPrevious());
+        if (!(multiplierLoadInsn instanceof VarInsnNode multiplierLoad)
+            || multiplierLoad.getOpcode() != Opcodes.ILOAD) {
+            return false;
+        }
+        int start = Math.max(0, callIndex - 400);
+        for (int i = callIndex - 1; i >= start; i--) {
+            if (!(insns[i] instanceof VarInsnNode baseLoad)
+                || baseLoad.getOpcode() != Opcodes.ILOAD) {
+                continue;
+            }
+            int dataLocal = constantDecodeDataLocal(insns, i, baseLoad.var);
+            if (dataLocal < 0) continue;
+            if (localStoredAfterDataMix(insns, multiplierLoad.var, dataLocal, i + 1, callIndex)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasDecodeBoundary(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (isConstantDecodeBoundary(insns[i])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int firstVarLoadIndex(
+        AbstractInsnNode[] insns,
+        int opcode,
+        int local,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode var
+                && var.getOpcode() == opcode
+                && var.var == local) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private boolean localStoredAfterDataMix(
+        AbstractInsnNode[] insns,
+        int storedLocal,
+        int dataLocal,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        boolean sawData = false;
+        boolean sawNonlinearAfterData = false;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.ILOAD
+                && load.var == dataLocal) {
+                sawData = true;
+            }
+            if (sawData && isNonlinearIntMixOpcode(insns[i].getOpcode())) {
+                sawNonlinearAfterData = true;
+            }
+            if (sawData
+                && sawNonlinearAfterData
+                && insns[i] instanceof VarInsnNode store
+                && store.getOpcode() == Opcodes.ISTORE
+                && store.var == storedLocal) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasNonlinearMixAfter(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (isNonlinearIntMixOpcode(insns[i].getOpcode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isNonlinearIntMixOpcode(int opcode) {
+        return opcode == Opcodes.IMUL
+            || opcode == Opcodes.IUSHR
+            || opcode == Opcodes.IXOR;
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {

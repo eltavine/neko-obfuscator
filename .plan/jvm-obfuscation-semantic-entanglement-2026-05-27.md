@@ -309,23 +309,61 @@ For every implementation row below:
 - Completion criteria: focused CFF/key-transfer tests pass; dispatcher state is
   data-flow-bound and no self-canceling/static-key expression is introduced.
 
-### [ ] JSE-5: Bind constant live-word derivation to CFF data digest
+### [x] JSE-5: Bind constant live-base transport to CFF data digest
 
-- Scope: update only `JvmConstantObfuscationPass` live-word/base derivation so
-  CFF-protected constant decode masks consume `metadata.dataLocal()`. Do not
-  change string, indy, validation, or numeric literal emission yet.
-- Required evidence: source diff shows `liveConstantBase` and
-  `emitLiveConstantBase` load/use `dataLocal`; tests prove protected constant
-  decode slices consume that load before mask reconstruction.
+- Scope: update only `JvmConstantObfuscationPass` live-base cache/helper
+  transport so CFF-protected constant decode sites carry a
+  `metadata.dataLocal()`-encoded base representation and current data-derived
+  multiplier. Do not change string, indy, validation, or numeric literal
+  emission yet.
+- Required evidence: source diff shows `emitLiveConstantBase` stores a
+  data-digest-encoded base representation and every protected decode site
+  passes a current-`dataLocal`-encoded base into helper/inline mask
+  reconstruction. The encryption-side `liveConstantBase` remains the canonical
+  decoded-base model because the runtime data digest is not statically known
+  without changing literal material format. Tests prove protected constant
+  decode slices consume the current data load before helper/inline
+  reconstruction.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
 - Static/ASM audit: add `assertConstantLiveWordConsumesDataDigest`. Exact
-  predicate: every protected numeric decode replacement must contain an
-  `ILOAD metadata.dataLocal()` in the mask/base dependency slice before the
-  final value-reconstruction opcode, while structural immediates remain
-  classified separately.
+  predicate: protected numeric decode replacements must contain an
+  `ILOAD metadata.dataLocal()` feeding the encoded-base and multiplier
+  dependency slice before the helper call or final value-reconstruction opcode,
+  while structural immediates remain classified separately.
 - Completion criteria: constant fixture output is unchanged; constant decode
-  masks are data-flow-bound without changing literal material format.
+  base transport is data-flow-bound without changing literal material format.
+  Non-canceling constant mask semantics are deferred to JSE-5B because they
+  require runtime-derived numeric material rather than the original single
+  encrypted literal format.
+
+### [ ] JSE-5B: Bind constant masks through runtime-derived numeric material
+
+- Dependency reason: JSE-5 review proved that non-canceling current-data
+  binding is not possible while keeping the original single encrypted numeric
+  literal format; any correct constant value for arbitrary runtime data must
+  either cancel the data term or derive companion material at runtime. This row
+  therefore moves the original constant mask binding requirement behind the
+  numeric material split that was previously planned later.
+- Scope: update only `JvmConstantObfuscationPass` numeric material emission and
+  helper/inline reconstruction so data-derived material participates in the
+  final constant mask without an immediately removable
+  `m * inverse(m)` callsite-local pair. Do not change string, indy, or
+  validation passes.
+- Required evidence: source diff shows static encrypted numeric material is
+  split into multiple runtime-derived fragments, at least one fragment consumes
+  `metadata.dataLocal()` in the final mask/material slice, and no helper or
+  inline path immediately inverts the same data-derived multiplier introduced
+  at that callsite.
+- Validation command or runtime target:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
+- Static/ASM audit: extend `assertConstantLiveWordConsumesDataDigest` to reject
+  same-slice encode/decode cancellation and to prove every protected numeric
+  decode helper/inline site consumes `metadata.dataLocal()` in a final
+  value-reconstruction dependency slice.
+- Completion criteria: constant fixture output is unchanged; numeric literal
+  material is split into runtime-derived fragments; constant masks are
+  data-flow-bound without same-site multiplier cancellation.
 
 ### [ ] JSE-6: Bind string live-word derivation to CFF data digest
 
