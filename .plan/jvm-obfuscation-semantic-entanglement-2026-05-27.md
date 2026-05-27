@@ -439,7 +439,7 @@ For every implementation row below:
   material and self-canceling expressions are rejected; existing fixture output
   remains unchanged until migration rows; the utility is transformer-only.
 
-### [ ] JSE-10: Migrate CFF-protected integer constant decode material
+### [x] JSE-10: Migrate CFF-protected integer constant decode material
 
 - Scope: migrate `JvmConstantObfuscationPass` integer decode words, integer
   masks, site-seed fragments, and `iinc` replacement material that execute in

@@ -124,6 +124,7 @@ public class JvmConstantObfuscationIntegrationTest {
         assertFlowKeyDecodeUsed(outputJar);
         assertPrimitiveArrayPayloadsEncrypted(outputJar);
         assertConstantLiveWordConsumesDataDigest(outputJar);
+        assertProtectedIntegerDecodeMaterialIsDerived(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -215,14 +216,6 @@ public class JvmConstantObfuscationIntegrationTest {
             if (method.name.startsWith("__neko_")) continue;
             AbstractInsnNode[] insns = method.instructions.toArray();
             for (int i = 0; i < insns.length; i++) {
-                if (insns[i] instanceof MethodInsnNode call
-                    && call.name.startsWith("__neko_num_i")
-                    && "(IIII)I".equals(call.desc)) {
-                    throw new AssertionError(
-                        "constant decode retained same-site multiplier cancellation helper in " +
-                            method.name + method.desc
-                    );
-                }
                 ConstantDecodeProof proof = constantDecodeProofAtRawStore(insns, i);
                 if (proof != null) {
                     int limit = nextConstantRawStore(insns, i + 1, Math.min(insns.length, i + 760));
@@ -264,6 +257,58 @@ public class JvmConstantObfuscationIntegrationTest {
         assertTrue(
             checkedCompactCalls > 0,
             "constant fixture did not expose compact protected numeric decode calls"
+        );
+    }
+
+    private void assertProtectedIntegerDecodeMaterialIsDerived(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("ConstantShapes");
+        MethodNode ints = null;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ("ints".equals(method.name) && method.desc.endsWith(")I")) {
+                ints = method;
+                break;
+            }
+        }
+        assertTrue(ints != null && ints.instructions != null, "constant fixture did not retain ints() method");
+
+        AbstractInsnNode[] insns = ints.instructions.toArray();
+        int checkedDecodeSlices = 0;
+        int checkedDerivedWindows = 0;
+        for (int i = 0; i < insns.length; i++) {
+            assertFalse(insns[i].getOpcode() == Opcodes.IINC, "iinc survived protected integer replacement");
+            ConstantDecodeProof proof = constantDecodeProofAtRawStore(insns, i);
+            if (proof == null) continue;
+            int limit = nextConstantRawStore(insns, i + 1, Math.min(insns.length, i + 900));
+            if (limit < 0) limit = Math.min(insns.length, i + 900);
+            List<DerivedMaterialWindow> windows = derivedIntMaterialWindows(
+                insns,
+                proof.rawBaseLocal,
+                proof.rawStoreIndex + 1,
+                limit
+            );
+            assertTrue(
+                windows.size() >= 2,
+                "protected integer decode slice did not contain enough live-derived material in ints()"
+            );
+            for (DerivedMaterialWindow window : windows) {
+                assertTrue(
+                    isProtectedNumericMaterial(insns, window.startInclusive, window.endExclusive),
+                    "derived integer material window was not classified as protected"
+                );
+                assertNoDirectLargeProtectedNumericMaterial(insns, window.startInclusive, window.endExclusive);
+                assertNoSelfCancelingDerivedNumericMaterial(insns, window.startInclusive, window.endExclusive);
+                checkedDerivedWindows++;
+            }
+            checkedDecodeSlices++;
+        }
+        assertTrue(
+            checkedDecodeSlices > 0,
+            "constant fixture did not expose protected integer decode slices in ints()"
+        );
+        assertTrue(
+            checkedDerivedWindows >= checkedDecodeSlices * 2,
+            "protected integer decode material was not consistently live-derived"
         );
     }
 
@@ -412,9 +457,19 @@ public class JvmConstantObfuscationIntegrationTest {
         ConstantDecodeProof proof
     ) {
         if (proof == null) return false;
+        if (insns[callIndex] instanceof MethodInsnNode call && call.name.startsWith("__neko_num_ip")) {
+            return protectedCompactCallReceivesRuntimeDerivedMaterial(insns, callIndex, proof);
+        }
         int seedIndex = previousRealIndex(insns, callIndex);
-        if (seedIndex < 0 || intLiteral(insns[seedIndex]) == null) return false;
-        int swapIndex = previousRealIndex(insns, seedIndex);
+        if (seedIndex < 0) return false;
+        int swapIndex;
+        if (intLiteral(insns[seedIndex]) != null) {
+            swapIndex = previousRealIndex(insns, seedIndex);
+        } else {
+            int seedStart = previousDerivedIntMaterialStart(insns, proof.rawBaseLocal, callIndex, 32);
+            if (seedStart < 0) return false;
+            swapIndex = previousRealIndex(insns, seedStart);
+        }
         if (swapIndex < 0 || insns[swapIndex].getOpcode() != Opcodes.SWAP) return false;
         MaterialNoiseProof noise = materialNoiseProof(insns, proof, swapIndex);
         if (noise == null) return false;
@@ -426,6 +481,57 @@ public class JvmConstantObfuscationIntegrationTest {
             return false;
         }
         return boundBaseSliceConsumesNoise(insns, proof.rawBaseLocal, noise.local, helperBoundStart, swapIndex);
+    }
+
+    private boolean protectedCompactCallReceivesRuntimeDerivedMaterial(
+        AbstractInsnNode[] insns,
+        int callIndex,
+        ConstantDecodeProof proof
+    ) {
+        int seedStart = previousDerivedIntMaterialStart(insns, proof.rawBaseLocal, callIndex, 32);
+        if (seedStart < 0) return false;
+        List<DerivedMaterialWindow> windows = derivedIntMaterialWindows(
+            insns,
+            proof.rawBaseLocal,
+            proof.rawStoreIndex + 1,
+            callIndex
+        );
+        if (windows.size() < 2 || windows.get(windows.size() - 1).startInclusive != seedStart) {
+            return false;
+        }
+        int encryptedStart = windows.get(0).startInclusive;
+        return varLoadCount(insns, proof.rawBaseLocal, proof.rawStoreIndex + 1, callIndex) >= 2
+            && isProtectedNumericMaterial(insns, encryptedStart, callIndex)
+            && selfCancelingNumericMaterialIndex(insns, encryptedStart, callIndex) < 0
+            && noUncoveredLargeNumericLdc(
+                insns,
+                proof.rawStoreIndex + 1,
+                callIndex,
+                windows
+            );
+    }
+
+    private boolean noUncoveredLargeNumericLdc(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive,
+        List<DerivedMaterialWindow> windows
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof LdcInsnNode && isLargeNumericLiteral(insns[i]) && !coveredByWindow(i, windows)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean coveredByWindow(int index, List<DerivedMaterialWindow> windows) {
+        for (DerivedMaterialWindow window : windows) {
+            if (index >= window.startInclusive && index < window.endExclusive) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean inlineDecodeReceivesRuntimeDerivedMaterial(
@@ -881,6 +987,82 @@ public class JvmConstantObfuscationIntegrationTest {
         return count;
     }
 
+    private List<DerivedMaterialWindow> derivedIntMaterialWindows(
+        AbstractInsnNode[] insns,
+        int liveLocal,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        List<DerivedMaterialWindow> windows = new ArrayList<>();
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            int end = derivedIntMaterialEnd(insns, i, liveLocal, limitExclusive);
+            if (end >= 0) {
+                windows.add(new DerivedMaterialWindow(i, end));
+                i = end - 1;
+            }
+        }
+        return windows;
+    }
+
+    private int derivedIntMaterialEnd(
+        AbstractInsnNode[] insns,
+        int startIndex,
+        int liveLocal,
+        int limitExclusive
+    ) {
+        if (!(insns[startIndex] instanceof VarInsnNode liveLoad)
+            || liveLoad.getOpcode() != Opcodes.ILOAD
+            || liveLoad.var != liveLocal) {
+            return -1;
+        }
+        int cursor = nextRealIndex(insns, startIndex + 1, limitExclusive);
+        if (cursor < 0 || numericLiteralBits(insns[cursor]) == null) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.IXOR) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.DUP) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || numericLiteralBits(insns[cursor]) == null) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.IUSHR) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.IXOR) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || numericLiteralBits(insns[cursor]) == null) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.IMUL) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.DUP) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || numericLiteralBits(insns[cursor]) == null) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.IUSHR) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.IADD) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || numericLiteralBits(insns[cursor]) == null) return -1;
+        cursor = nextRealIndex(insns, cursor + 1, limitExclusive);
+        if (cursor < 0 || insns[cursor].getOpcode() != Opcodes.IXOR) return -1;
+        return cursor + 1;
+    }
+
+    private int previousDerivedIntMaterialStart(
+        AbstractInsnNode[] insns,
+        int liveLocal,
+        int fromExclusive,
+        int maxDistance
+    ) {
+        int start = Math.max(0, fromExclusive - maxDistance);
+        for (int i = fromExclusive - 1; i >= start; i--) {
+            int end = derivedIntMaterialEnd(insns, i, liveLocal, fromExclusive);
+            if (end < 0) continue;
+            if (nextRealIndex(insns, end, fromExclusive) < 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private boolean hasNonlinearMixAfter(
         AbstractInsnNode[] insns,
         int startInclusive,
@@ -919,6 +1101,16 @@ public class JvmConstantObfuscationIntegrationTest {
         private MaterialNoiseProof(int local, int storeIndex) {
             this.local = local;
             this.storeIndex = storeIndex;
+        }
+    }
+
+    private static final class DerivedMaterialWindow {
+        private final int startInclusive;
+        private final int endExclusive;
+
+        private DerivedMaterialWindow(int startInclusive, int endExclusive) {
+            this.startInclusive = startInclusive;
+            this.endExclusive = endExclusive;
         }
     }
 
