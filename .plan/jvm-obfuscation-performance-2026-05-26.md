@@ -5478,7 +5478,8 @@ Rejected implementation evidence:
 
 ### P4.4 Move method-key non-zero guarantee from runtime helper to generated states
 
-Status: `[-]` plan-intake passed; plan-only checkpoint pending.
+Status: `[x]` rejected after fresh implementation validation. Source changes
+were reverted.
 
 Scope:
 
@@ -5628,6 +5629,62 @@ P4.4 first plan-intake review:
   coverage of all three `CffBlockKeyState` construction sites, explicit
   rejected-route separation, bounded validation, and clear reject conditions.
   Implementation may start only after the plan-only checkpoint commit.
+- Plan-only checkpoint was committed as `beeecd2 plan p4.4 method key fallback
+  removal` before implementation.
+
+P4.4 implementation and rejection evidence:
+
+- Implemented exactly the planned generic route: moved the non-zero method-key
+  guarantee to generated `CffBlockKeyState` salt selection, removed the
+  runtime zero-check/fixed-long fallback from the active-table method-key helper
+  and the no-table inline method-key path, and kept the `(IIIIJJ)J` helper
+  descriptor and masked salt pair callsite ABI.
+- Compile proof passed:
+  `./gradlew :neko-transforms:compileJava` completed with `BUILD SUCCESSFUL`.
+- Targeted JVM validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ObfuscationIntegrationTest --rerun-tasks`
+  completed with `BUILD SUCCESSFUL in 1m 19s`.
+- Bytecode inspection at
+  `build/jvm-runtime-perf/p4-4-method-key-no-runtime-fallback-bytecode/obfusjack-a-da.javap.txt`
+  proved generated helper `a.da.cb(int,int,int,int,long,long)` kept descriptor
+  `(IIIIJJ)J` and shrank to `33 bytes`; its method body no longer contained
+  `lcmp` or the fixed fallback long.
+- Focused PrintInlining at
+  `build/jvm-runtime-perf/p4-4-method-key-no-runtime-fallback-print-inlining/obfusjack-focused-cb.filtered.log`
+  proved the old `callee is too large` rejection disappeared for `a.da::cb`,
+  but exposed a new blocker: most hot callsites still report
+  `a.da::cb (33 bytes)   callee uses too much stack`, with only a few
+  `inline (hot)` rows.
+- Fresh P4.4 after-edit 10x timings at
+  `build/jvm-runtime-perf/p4-4-method-key-no-runtime-fallback-10x/runtime-medians.tsv`
+  recorded full TEST `Calc=184/185 ms`, which improved from both comparison
+  rows (`186/186 ms` clean P5 and `190/190 ms` fresh P4.4 valid before-edit).
+- The same 10x timings recorded full obfusjack `Seq=315/315 ms`, worse than
+  both comparison rows (`309/312 ms` clean P5 and `312/313 ms` fresh P4.4
+  before-edit) and still above the user target `<=200 ms`.
+- The same 10x timings recorded full obfusjack `Platform=82/86 ms`,
+  `Virtual=85/85 ms`, `Parallel=8/8 ms`, and `VThreads=8/8 ms`.
+- Stderr files in the P4.4 10x output directory were empty, no
+  `hs_err_pid*.log` existed in that output directory, no root-level
+  `hs_err_pid*.log` was modified in the run window, and grep found no
+  `FAIL`, uncaught exception, fatal error, SIGSEGV, or SIGABRT marker.
+- Because P4.4 failed its full obfusjack `Seq` improvement requirement and the
+  P1 target, the source changes were rejected and reverted before any later
+  runtime change. Scoped source diff for
+  `neko-transforms/src/main/java/dev/nekoobfuscator/transforms/jvm/cff` is
+  empty after revert.
+- Accepted-source regeneration after the revert passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`
+  completed with `BUILD SUCCESSFUL in 1m 14s` and `19 actionable tasks: 19
+  executed`.
+- Do not retry the identical P4.4 route. Any later method-key route must use
+  the new measured blocker (`callee uses too much stack`) as its starting
+  evidence or choose another fresh key-update surface.
+- Subagent rejection review passed before the rejection-record commit. The
+  reviewer confirmed no P4.4 implementation remains staged, scoped CFF source
+  diff is empty, the rejection record is evidence-backed and fresh,
+  `git diff --check -- .plan/jvm-obfuscation-performance-2026-05-26.md` is
+  clean, and the rejection commit must be path-scoped to this plan file only.
 
 ## Review Status
 
