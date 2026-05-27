@@ -35,6 +35,7 @@ import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static final int INDY_MATERIAL_SLOT = 67;
@@ -48,8 +49,9 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static final String OLD_RESOLVER_DESC =
         "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/invoke/MutableCallSite;Ljava/lang/invoke/MethodType;" +
         "Ljava/lang/String;I[Ljava/lang/Object;)Ljava/lang/Object;";
-    private static final String FLOW_DESC = "(IIII[Ljava/lang/Object;IJ)J";
-    private static final String OLD_FLOW_DESC = "(IIII[Ljava/lang/Object;IJI)J";
+    private static final String FLOW_DESC = "(IIIII[Ljava/lang/Object;IJ)J";
+    private static final String OLD_FLOW_THIN_DESC = "(IIII[Ljava/lang/Object;IJ)J";
+    private static final String OLD_FLOW_STATE_DESC = "(IIII[Ljava/lang/Object;IJI)J";
 
     @Test
     void invokeDynamicObfuscatesCffKeyedMethodAndFieldReferences() throws Exception {
@@ -111,7 +113,10 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         boolean sawResolverBoxedEqualsGuard = false;
         boolean sawResolverGetTarget = false;
         boolean sawFlowThinDesc = false;
-        boolean sawFlowOldDesc = false;
+        boolean sawFlowOldThinDesc = false;
+        boolean sawFlowOldStateDesc = false;
+        boolean sawFlowHelperConsumesDataWord = false;
+        int checkedDataBoundFlowCalls = 0;
         boolean sawCacheField = false;
         boolean sawMixCall = false;
         int indySites = 0;
@@ -175,14 +180,18 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
             }
             if (method.name.startsWith("__neko_indy_flow")) {
                 sawFlowThinDesc |= FLOW_DESC.equals(method.desc);
-                sawFlowOldDesc |= OLD_FLOW_DESC.equals(method.desc);
+                sawFlowOldThinDesc |= OLD_FLOW_THIN_DESC.equals(method.desc);
+                sawFlowOldStateDesc |= OLD_FLOW_STATE_DESC.equals(method.desc);
+                sawFlowHelperConsumesDataWord |= flowHelperConsumesDataWord(method);
                 sawFlowHelperLoadsIndyMaterialSelectorSlot |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SELECTOR_SLOT);
                 sawFlowHelperDirectIndyMaterialSlotLoad |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SLOT);
                 sawFlowHelperLoadsClassKeySelectorSlot |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SELECTOR_SLOT);
                 sawFlowHelperDirectClassKeySlotLoad |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SLOT);
             }
             if (method.instructions == null || method.name.startsWith("__neko_")) continue;
-            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            for (int i = 0; i < insns.length; i++) {
+                AbstractInsnNode insn = insns[i];
                 if (insn instanceof InvokeDynamicInsnNode indy
                     && indy.bsm != null
                     && "IndyReferenceShapes".equals(indy.bsm.getOwner())) {
@@ -206,6 +215,17 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
                 }
                 if (insn instanceof MethodInsnNode call
                     && "IndyReferenceShapes".equals(call.owner)
+                    && call.name.startsWith("__neko_indy_flow")
+                    && FLOW_DESC.equals(call.desc)) {
+                    assertTrue(
+                        indyFlowCallReceivesDataDigest(insns, i),
+                        "indy flow helper call should receive a dataLocal-derived transport word in " +
+                            method.name + method.desc
+                    );
+                    checkedDataBoundFlowCalls++;
+                }
+                if (insn instanceof MethodInsnNode call
+                    && "IndyReferenceShapes".equals(call.owner)
                     && ("staticAdd".equals(call.name) || "privateMix".equals(call.name))) {
                     throw new AssertionError("direct method reference survived: " + call.name + call.desc);
                 }
@@ -220,14 +240,17 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         }
         assertTrue(sawIndy, "no invokeDynamic reference sites found");
         assertTrue(indySites > 1, "fixture should exercise multiple indy sites");
+        assertTrue(checkedDataBoundFlowCalls > 0, "indy replacement should pass dataLocal-derived flow transport material");
         assertEquals(1, bootstrapHelpers.size(), "indy sites should share one per-class bootstrap helper");
         for (var entry : helperCounts.entrySet()) {
             assertEquals(1, entry.getValue(), "indy helper should be per-class, not per-site: " + entry.getKey());
         }
         assertTrue(sawResolverNewDesc, "indy resolver should use the carrier-bound ABI");
         assertFalse(sawResolverOldDesc, "old indy resolver ABI without bound carrier should be absent");
-        assertTrue(sawFlowThinDesc, "indy flow helper should load per-site state from the protected flow table");
-        assertFalse(sawFlowOldDesc, "old indy flow helper ABI with call-site state token should be absent");
+        assertTrue(sawFlowThinDesc, "indy flow helper should accept dataLocal-derived transport material");
+        assertFalse(sawFlowOldThinDesc, "old indy flow helper ABI without data transport should be absent");
+        assertFalse(sawFlowOldStateDesc, "old indy flow helper ABI with call-site state token should be absent");
+        assertTrue(sawFlowHelperConsumesDataWord, "indy flow helper should consume dataLocal-derived material");
         assertFalse(sawCacheField, "indy cache should live in the CFF object carrier, not a separate ConcurrentHashMap field");
         assertTrue(sawResolverLoadsCacheSlot, "indy resolver should load cache from the CFF carrier slot");
         assertFalse(sawResolverGetsStaticCarrier, "indy resolver should not load the CFF carrier through GETSTATIC");
@@ -328,6 +351,85 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
             }
         }
         return sawToCharArray && sawStringFromChars;
+    }
+
+    private static boolean indyFlowCallReceivesDataDigest(AbstractInsnNode[] insns, int callIndex) {
+        int start = Math.max(0, callIndex - 260);
+        for (int i = start; i < callIndex; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ILOAD) {
+                continue;
+            }
+            int limit = Math.min(insns.length, i + 120);
+            if (varLoadCount(insns, load.var, i, callIndex) < 2) continue;
+            if (!hasOpcode(insns, Opcodes.LLOAD, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.IADD, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.IMUL, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.IUSHR, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.IXOR, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.IOR, i + 1, callIndex)) continue;
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean flowHelperConsumesDataWord(MethodNode method) {
+        if (method.instructions == null) return false;
+        AbstractInsnNode[] insns = method.instructions.toArray();
+        int dataWordLocal = 4;
+        int flowSlotLocal = 6;
+        int multiplierLocal = 28;
+        int inverseLocal = 29;
+        int firstDecodedStore = -1;
+        for (int i = 0; i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode store
+                && store.getOpcode() == Opcodes.ISTORE
+                && store.var == flowSlotLocal) {
+                firstDecodedStore = i;
+                break;
+            }
+        }
+        if (firstDecodedStore < 0) return false;
+        return varLoadCount(insns, dataWordLocal, 0, firstDecodedStore) > 0
+            && varStoreCount(insns, multiplierLocal, 0, firstDecodedStore) > 0
+            && varLoadCount(insns, multiplierLocal, 0, firstDecodedStore) > 0
+            && varStoreCount(insns, inverseLocal, 0, firstDecodedStore) > 0
+            && hasOpcode(insns, Opcodes.IOR, 0, firstDecodedStore)
+            && hasOpcode(insns, Opcodes.IMUL, 0, firstDecodedStore)
+            && hasOpcode(insns, Opcodes.IUSHR, 0, firstDecodedStore)
+            && hasOpcode(insns, Opcodes.IXOR, 0, firstDecodedStore)
+            && varLoadCount(insns, dataWordLocal, firstDecodedStore + 1, insns.length) >= 2;
+    }
+
+    private static boolean hasOpcode(AbstractInsnNode[] insns, int opcode, int startInclusive, int limitExclusive) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() == opcode) return true;
+        }
+        return false;
+    }
+
+    private static int varLoadCount(AbstractInsnNode[] insns, int local, int startInclusive, int limitExclusive) {
+        int count = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.ILOAD
+                && load.var == local) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static int varStoreCount(AbstractInsnNode[] insns, int local, int startInclusive, int limitExclusive) {
+        int count = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode store
+                && store.getOpcode() == Opcodes.ISTORE
+                && store.var == local) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {

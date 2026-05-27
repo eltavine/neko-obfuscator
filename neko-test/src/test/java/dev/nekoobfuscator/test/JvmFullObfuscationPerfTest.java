@@ -54,7 +54,7 @@ class JvmFullObfuscationPerfTest {
     );
 
     private static final String STRING_TAIL_DESC = "([Ljava/lang/Object;IJI)Ljava/lang/String;";
-    private static final String INDY_FLOW_DESC = "(IIII[Ljava/lang/Object;IJI)J";
+    private static final String INDY_FLOW_DESC = "(IIIII[Ljava/lang/Object;IJ)J";
     private static final String CFF_OUTLINED_DISPATCH_DESC = "(JIIIII[J)J";
     private static final String CFF_SHARED_GROUP_DISPATCH_DESC = "(JIIIIII[J)J";
     private static final String CFF_TRANSITION_MATERIAL_DESC = "(JIII[Ljava/lang/Object;II[J)J";
@@ -574,7 +574,7 @@ class JvmFullObfuscationPerfTest {
             "([Ljava/lang/Object;IJI)Ljava/lang/String;",
             "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;I[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
             "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/invoke/MutableCallSite;Ljava/lang/invoke/MethodType;Ljava/lang/String;I[Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
-            "(IIII[Ljava/lang/Object;IJI)J",
+            "(IIIII[Ljava/lang/Object;IJ)J",
             "(JJ)Z",
             "(IIIIJJ)J",
             "([IIIIIII)I",

@@ -383,7 +383,7 @@ For every implementation row below:
 - Completion criteria: string fixture passes; string live-word material is
   data-flow-bound and fixed key-cell layout remains unchanged for later rows.
 
-### [ ] JSE-7: Bind indy flow-word derivation to CFF data digest
+### [x] JSE-7: Bind indy flow-word derivation to CFF data digest
 
 - Scope: update only `JvmInvokeDynamicObfuscationPass` live indy flow word
   derivation and the existing flow helper ABI so each transformed indy callsite
