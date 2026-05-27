@@ -198,11 +198,13 @@ public class JvmStringObfuscationIntegrationTest {
         boolean sawConcatLoadsClassKeySelectorSlot = false;
         boolean sawConcatDirectClassKeySlotLoad = false;
         boolean sawLiveFlowTailCall = false;
+        boolean sawTailConsumesDataWord = false;
         boolean sawStringConcatFactoryRecipe = false;
         int siteHelperDoFinalCalls = 0;
         int tailDoFinalCalls = 0;
         int siteHelperTailCalls = 0;
         int oldSharedTailAbiCalls = 0;
+        int checkedStringDataTailCalls = 0;
         int siteHelperCount = 0;
         int sharedTailCount = 0;
         int getInstanceCalls = 0;
@@ -227,6 +229,7 @@ public class JvmStringObfuscationIntegrationTest {
         }
         for (var method : clazz.asmNode().methods) {
             if (method.instructions == null) continue;
+            AbstractInsnNode[] insns = method.instructions.toArray();
             boolean classInitPath = "<clinit>".equals(method.name)
                 || method.name.startsWith("__neko_strinit$")
                 || method.name.startsWith("__neko_strmat$")
@@ -257,6 +260,23 @@ public class JvmStringObfuscationIntegrationTest {
             if (stringDecodeTail) {
                 sawSharedStringDecodeTail = true;
                 sharedTailCount++;
+                if (tailSelectorDecodeConsumesDataWord(insns)) {
+                    sawTailConsumesDataWord = true;
+                }
+            }
+            for (int i = 0; i < insns.length; i++) {
+                if (insns[i] instanceof MethodInsnNode call
+                    && "StringShapes".equals(call.owner)
+                    && call.name.startsWith("__neko_strtail$")
+                    && "([Ljava/lang/Object;IJIIII)Ljava/lang/String;".equals(call.desc)) {
+                    sawLiveFlowTailCall = true;
+                    assertTrue(
+                        stringTailCallReceivesDataDigest(insns, i),
+                        "string tail call does not receive a dataLocal-derived live word in " +
+                            method.name + method.desc
+                    );
+                    checkedStringDataTailCalls++;
+                }
             }
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                 if (insn instanceof InvokeDynamicInsnNode indy
@@ -315,12 +335,6 @@ public class JvmStringObfuscationIntegrationTest {
                     && "StringShapes".equals(call.owner)
                     && call.name.startsWith("__neko_strtail$")
                     && "([Ljava/lang/Object;IJIII)Ljava/lang/String;".equals(call.desc)) {
-                    sawLiveFlowTailCall = true;
-                }
-                if (insn instanceof MethodInsnNode call
-                    && "StringShapes".equals(call.owner)
-                    && call.name.startsWith("__neko_strtail$")
-                    && "([Ljava/lang/Object;IJIIII)Ljava/lang/String;".equals(call.desc)) {
                     oldSharedTailAbiCalls++;
                 }
                 if (insn instanceof MethodInsnNode call
@@ -425,6 +439,8 @@ public class JvmStringObfuscationIntegrationTest {
         assertTrue(sawConcatLoadsClassKeySelectorSlot, "string concat helper should load class-key selector from the CFF object carrier");
         assertFalse(sawConcatDirectClassKeySlotLoad, "string concat helper should not directly load the fixed class-key slot");
         assertTrue(sawLiveFlowTailCall, "string shared tail calls should pass a live long flow key");
+        assertTrue(checkedStringDataTailCalls > 0, "string shared tail calls should pass dataLocal-derived material");
+        assertTrue(sawTailConsumesDataWord, "string shared tail should consume dataLocal-derived material");
         assertEquals(0, oldSharedTailAbiCalls, "string shared tail calls should not pass static payload/cache/length slots");
         assertTrue(sharedTailCount <= 1, "string shared tails should be selector-dispatched per class, not per algorithm/layer/order");
         assertEquals(0, siteHelperCount, "string decode should call shared tails directly instead of registering per-site wrappers");
@@ -439,6 +455,190 @@ public class JvmStringObfuscationIntegrationTest {
         assertFalse(sawSiteHelperKeyCellUpdate, "per-site string wrappers should pass key tables instead of owning key-cell updates");
         assertFalse(sawRotate, "string decode must not use rotate self-cancelling masks");
         assertFalse(sawStringConcatFactoryRecipe, "concat recipe strings should be rewritten and encrypted");
+    }
+
+    private boolean stringTailCallReceivesDataDigest(AbstractInsnNode[] insns, int callIndex) {
+        int selectorEnd = previousSelectorIand(insns, callIndex);
+        if (selectorEnd < 0) return false;
+        int dataLoad = nextRealIndex(insns, selectorEnd + 1, callIndex);
+        if (dataLoad < 0) return false;
+        if (!(insns[dataLoad] instanceof VarInsnNode load)
+            || load.getOpcode() != Opcodes.ILOAD) {
+            return false;
+        }
+        return hasOpcode(insns, Opcodes.IADD, dataLoad + 1, callIndex)
+            && hasOpcode(insns, Opcodes.IMUL, dataLoad + 1, callIndex)
+            && hasOpcode(insns, Opcodes.IUSHR, dataLoad + 1, callIndex)
+            && hasOpcode(insns, Opcodes.IXOR, dataLoad + 1, callIndex)
+            && hasOpcode(insns, Opcodes.LLOAD, dataLoad + 1, callIndex)
+            && varLoadCount(insns, load.var, dataLoad, callIndex) == 1
+            && varLoadCount(insns, load.var, Math.max(0, callIndex - 500), callIndex) >= 2
+            && rootTransportConsumesDataWord(insns, load.var, Math.max(0, callIndex - 500), dataLoad);
+    }
+
+    private boolean tailSelectorDecodeConsumesDataWord(AbstractInsnNode[] insns) {
+        int selectorLocal = 33;
+        int dataWordLocal = 7;
+        int siteSeedLocal = 17;
+        return dataBoundSelectorBranchCount(insns, selectorLocal, dataWordLocal, siteSeedLocal) >= 4
+            && plainSelectorBranchCount(insns, selectorLocal, dataWordLocal) == 0;
+    }
+
+    private boolean rootTransportConsumesDataWord(
+        AbstractInsnNode[] insns,
+        int dataLocal,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ILOAD
+                || load.var != dataLocal) {
+                continue;
+            }
+            int limit = Math.min(limitExclusive, i + 80);
+            if (hasOpcode(insns, Opcodes.IMUL, i + 1, limit)
+                && hasOpcode(insns, Opcodes.IUSHR, i + 1, limit)
+                && hasOpcode(insns, Opcodes.IOR, i + 1, limit)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private int dataBoundSelectorBranchCount(
+        AbstractInsnNode[] insns,
+        int selectorLocal,
+        int dataWordLocal,
+        int siteSeedLocal
+    ) {
+        int count = 0;
+        for (int i = 0; i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode selectorLoad)
+                || selectorLoad.getOpcode() != Opcodes.ILOAD
+                || selectorLoad.var != selectorLocal) {
+                continue;
+            }
+            int limit = Math.min(insns.length, i + 180);
+            if (varLoadCount(insns, dataWordLocal, i + 1, limit) == 0) continue;
+            if (longLoadCount(insns, siteSeedLocal, i + 1, limit) == 0) continue;
+            if (!hasOpcode(insns, Opcodes.IAND, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.IMUL, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.IUSHR, i + 1, limit)) continue;
+            if (!hasOpcode(insns, Opcodes.IXOR, i + 1, limit)) continue;
+            int selectorBranch = firstSelectorBranch(insns, i + 1, limit);
+            if (selectorBranch < 0) continue;
+            if (opcodeCount(insns, Opcodes.IOR, i + 1, selectorBranch) < 2) continue;
+            if (opcodeCount(insns, Opcodes.IMUL, i + 1, selectorBranch) < 2) continue;
+            if (selectorBranch >= 0) {
+                count++;
+                i = selectorBranch;
+            }
+        }
+        return count;
+    }
+
+    private int plainSelectorBranchCount(AbstractInsnNode[] insns, int selectorLocal, int dataWordLocal) {
+        int count = 0;
+        for (int i = 0; i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode selectorLoad)
+                || selectorLoad.getOpcode() != Opcodes.ILOAD
+                || selectorLoad.var != selectorLocal) {
+                continue;
+            }
+            int limit = Math.min(insns.length, i + 80);
+            if (varLoadCount(insns, dataWordLocal, i + 1, limit) != 0) continue;
+            if (firstSelectorBranch(insns, i + 1, limit) >= 0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int firstSelectorBranch(AbstractInsnNode[] insns, int startInclusive, int limitExclusive) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            int previous = previousRealIndex(insns, i);
+            if (previous < 0) continue;
+            if (insns[i].getOpcode() == Opcodes.IF_ICMPEQ
+                && (pushesInt(insns[previous], 1) || pushesInt(insns[previous], 2))) {
+                return i;
+            }
+            if (insns[i].getOpcode() == Opcodes.IFNE
+                && insns[previous].getOpcode() == Opcodes.IAND) {
+                return i;
+            }
+            if (insns[i].getOpcode() == Opcodes.IFEQ) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int previousSelectorIand(AbstractInsnNode[] insns, int callIndex) {
+        int start = Math.max(0, callIndex - 120);
+        for (int i = callIndex - 1; i >= start; i--) {
+            if (insns[i].getOpcode() != Opcodes.IAND) continue;
+            int previous = previousRealIndex(insns, i);
+            if (previous >= 0 && insns[previous].getOpcode() == Opcodes.ICONST_1) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int previousRealIndex(AbstractInsnNode[] insns, int fromExclusive) {
+        for (int i = fromExclusive - 1; i >= 0; i--) {
+            if (insns[i].getOpcode() >= 0) return i;
+        }
+        return -1;
+    }
+
+    private int nextRealIndex(AbstractInsnNode[] insns, int fromInclusive, int limitExclusive) {
+        for (int i = fromInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() >= 0) return i;
+        }
+        return -1;
+    }
+
+    private boolean hasOpcode(AbstractInsnNode[] insns, int opcode, int startInclusive, int limitExclusive) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() == opcode) return true;
+        }
+        return false;
+    }
+
+    private int opcodeCount(AbstractInsnNode[] insns, int opcode, int startInclusive, int limitExclusive) {
+        int count = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() == opcode) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int varLoadCount(AbstractInsnNode[] insns, int local, int startInclusive, int limitExclusive) {
+        int count = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.ILOAD
+                && load.var == local) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int longLoadCount(AbstractInsnNode[] insns, int local, int startInclusive, int limitExclusive) {
+        int count = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.LLOAD
+                && load.var == local) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static boolean pushesInt(AbstractInsnNode insn, int value) {

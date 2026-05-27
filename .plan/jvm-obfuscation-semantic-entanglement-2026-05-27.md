@@ -365,7 +365,7 @@ For every implementation row below:
   material is split into runtime-derived fragments; constant masks are
   data-flow-bound without same-site multiplier cancellation.
 
-### [ ] JSE-6: Bind string live-word derivation to CFF data digest
+### [x] JSE-6: Bind string live-word derivation to CFF data digest
 
 - Scope: update only `JvmStringObfuscationPass` live string word derivation and
   emitted live string word bytecode so protected string roots, selectors, and
