@@ -19,6 +19,7 @@ import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
@@ -65,12 +66,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ControlFlowFlatteningAlgebraicAuditTest {
-    private static final String VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJI)Z";
+    private static final String VALIDATION_HELPER_DESC = "(Ljava/lang/String;JI)J";
     private static final String OLD_VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJII)Z";
     private static final String VALIDATION_LENGTH_STAGE_DESC = "(Ljava/lang/String;I)I";
     private static final String VALIDATION_SEED_STAGE_DESC = "(JII)J";
     private static final String VALIDATION_CHAR_STAGE_DESC = "(Ljava/lang/String;JIII)J";
     private static final String VALIDATION_FINAL_STAGE_DESC = "(JJI)Z";
+    private static final String VALIDATION_FINAL_STAGE_INDY_DESC = "(JJIJJ)Z";
 
     @Test
     void symbolicAuditRecognizesSelfCancelingAndLinearKeyShapes() {
@@ -1164,6 +1166,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         transforms.put("keyDispatch", new TransformConfig(true, 1.0));
         transforms.put("controlFlowFlattening", new TransformConfig(true, 1.0));
         transforms.put("validationSinkHardening", new TransformConfig(true, 1.0));
+        transforms.put("invokeDynamic", new TransformConfig(true, 1.0));
         config.setTransforms(transforms);
         config.keyConfig().setMasterSeed(0x515EED51A11L);
 
@@ -1232,6 +1235,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertValidationLiveWordConsumesDataDigest(clazz);
         assertValidationSinkPredicateIsStaged(clazz);
         assertValidationSinkStagesUseCffDataDigest(clazz);
+        assertValidationFinalStageUsesInvokeDynamic(clazz);
         assertValidationSinkHelperHasNoPlainTarget(clazz, helperName);
         assertValidationSinkUsesFormulaVariants(clazz);
         assertValidationSinkHasNoStandaloneTargetCarriers(clazz);
@@ -1320,11 +1324,11 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             assertTrue(sawLength, "validation sink entry helper did not call length stage");
             assertTrue(sawSeed, "validation sink entry helper did not call seed stage");
             assertTrue(sawChar, "validation sink entry helper did not call char stage");
-            assertTrue(sawFinal, "validation sink entry helper did not call final stage");
+            assertFalse(sawFinal, "validation sink entry helper retained direct final stage");
         }
         assertTrue(entryHelpers >= 2, "validation sink fixture did not emit per-site entry helpers");
         assertTrue(
-            stageCalls.size() >= entryHelpers * 4,
+            stageCalls.size() >= entryHelpers * 3,
             "validation sink stages were not independently emitted per entry"
         );
     }
@@ -1385,6 +1389,65 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         return false;
+    }
+
+    private static void assertValidationFinalStageUsesInvokeDynamic(L1Class clazz) {
+        int checked = 0;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null || method.name.startsWith("__neko_")) continue;
+            boolean sawValidationEntry = false;
+            boolean sawIndyFinal = false;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof MethodInsnNode call
+                    && call.getOpcode() == Opcodes.INVOKESTATIC
+                    && "ValidationSinkShape".equals(call.owner)
+                    && call.name.startsWith("__neko_vsink")
+                    && VALIDATION_HELPER_DESC.equals(call.desc)) {
+                    sawValidationEntry = true;
+                }
+                if (insn instanceof MethodInsnNode call
+                    && call.getOpcode() == Opcodes.INVOKESTATIC
+                    && "ValidationSinkShape".equals(call.owner)
+                    && call.name.startsWith("__neko_vsend")
+                    && VALIDATION_FINAL_STAGE_DESC.equals(call.desc)) {
+                    throw new AssertionError("validation final stage remained direct invokestatic");
+                }
+                if (!(insn instanceof InvokeDynamicInsnNode indy)
+                    || !VALIDATION_FINAL_STAGE_INDY_DESC.equals(indy.desc)) {
+                    continue;
+                }
+                sawIndyFinal = true;
+                assertTrue(
+                    indy.bsm.getOwner().equals("ValidationSinkShape")
+                        && indy.bsm.getName().startsWith("__neko_indy_bsm"),
+                    "validation final stage did not use existing indy bootstrap"
+                );
+                assertValidationIndyArgsHideFinalStageMaterial(indy);
+            }
+            if (!sawValidationEntry) continue;
+            assertTrue(sawIndyFinal, "validation sink method did not route final stage through invokedynamic");
+            checked++;
+        }
+        assertTrue(checked >= 2, "validation sink fixture did not expose both indy-protected final stages");
+    }
+
+    private static void assertValidationIndyArgsHideFinalStageMaterial(InvokeDynamicInsnNode indy) {
+        boolean sawCarrierHandle = false;
+        for (Object arg : indy.bsmArgs) {
+            if (arg instanceof String text) {
+                assertFalse(text.contains("__neko_vsend"), "validation final indy exposed helper name");
+                assertFalse(text.contains(VALIDATION_FINAL_STAGE_DESC), "validation final indy exposed helper desc");
+                assertFalse(text.contains("swordfish-validated-flow"), "validation final indy exposed target text");
+                assertFalse(text.contains("swordfish-variant-two"), "validation final indy exposed variant target text");
+            }
+            if (arg instanceof org.objectweb.asm.Handle handle
+                && handle.getTag() == Opcodes.H_GETSTATIC
+                && "ValidationSinkShape".equals(handle.getOwner())
+                && "[Ljava/lang/Object;".equals(handle.getDesc())) {
+                sawCarrierHandle = true;
+            }
+        }
+        assertTrue(sawCarrierHandle, "validation final indy did not carry class-key material handle");
     }
 
     private static void assertValidationLiveWordConsumesDataDigest(L1Class clazz) {

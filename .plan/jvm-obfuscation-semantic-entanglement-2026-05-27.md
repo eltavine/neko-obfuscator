@@ -1041,7 +1041,7 @@ For every implementation row below:
   no plaintext target/`String.equals`, no fallback/original-bytecode rescue,
   and fresh validation.
 
-### [ ] JSE-22: Route validation final stage through existing indy surface
+### [x] JSE-22: Route validation final stage through existing indy surface
 
 - Scope: route the final validation stage through the existing invokeDynamic
   obfuscation surface and per-callsite material from JSE-17 through JSE-20. This
@@ -1050,6 +1050,14 @@ For every implementation row below:
 - Required evidence: transformed fixture contains an indy-protected validation
   final stage; bootstrap args contain no plaintext target or descriptor-only
   key material.
+- Fresh JSE-22 baseline evidence: `StandardJvmPasses` runs
+  `validationSinkHardening` before `invokeDynamic`, and the pipeline later runs
+  CFF/invokeDynamic hardening over generated helpers. However
+  `JvmInvokeDynamicObfuscationPass.siteSpec` currently rejects every generated
+  method name through `TransformGuards.isGeneratedName(call.name)`, so the
+  JSE-21 entry helper's `__neko_vsend* (JJI)Z` final-stage call remains a direct
+  generated `invokestatic` instead of using the existing indy bootstrap,
+  resolver, per-site material, and live cache-key path.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`.
 - Static/ASM audit: extend validation fixture audit with
@@ -1058,6 +1066,24 @@ For every implementation row below:
 - Completion criteria: validation and indy fixtures pass; validation final
   stage is not a single direct helper call and no forbidden helper/fallback
   path is introduced.
+- Completion evidence: validation entry helpers now return protected hash
+  material with descriptor `(Ljava/lang/String;JI)J`; the original CFF-bound
+  application method calls the final stage `(JJI)Z`, and that call is recorded
+  in existing CFF metadata before invokeDynamic runs. The indy pass admits only
+  same-class generated `__neko_vsend* (JJI)Z` calls through the generated-name
+  filter, so transformed output routes the final compare through the existing
+  `__neko_indy_bsm` bootstrap with hidden live-flow arguments.
+- Validation evidence: fresh command
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`
+  passed. XML shows `ControlFlowFlatteningAlgebraicAuditTest` tests=6,
+  failures=0, errors=0 and `JvmInvokeDynamicObfuscationIntegrationTest`
+  tests=1, failures=0, errors=0. Artifact audit shows
+  `__neko_vsink0$p:(Ljava/lang/String;JI)J` followed by invokedynamic
+  `(JJIJJ)Z`, and the same shape for variant 1.
+- Review evidence: JSE-22 subagent review PASS. It checked CFF metadata binding
+  for the final call, narrow generated-name filter admission, existing indy
+  bootstrap usage, hidden bootstrap material, no fallback/original-bytecode
+  rescue, and fresh validation.
 
 ### [ ] JSE-23: Full JVM semantic-entanglement acceptance
 

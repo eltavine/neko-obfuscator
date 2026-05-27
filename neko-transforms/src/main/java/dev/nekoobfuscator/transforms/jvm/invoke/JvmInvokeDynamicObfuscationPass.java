@@ -333,7 +333,11 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private SiteSpec siteSpec(PipelineContext pctx, L1Class caller, AbstractInsnNode insn) {
         if (insn instanceof MethodInsnNode call) {
             if ("<init>".equals(call.name) || "<clinit>".equals(call.name)) return null;
-            if (TransformGuards.isRuntimeClass(call.owner) || TransformGuards.isGeneratedName(call.name)) return null;
+            boolean generatedName = TransformGuards.isGeneratedName(call.name);
+            boolean generatedValidationFinalStage = isGeneratedValidationFinalStageCall(caller, call);
+            if (TransformGuards.isRuntimeClass(call.owner) || (generatedName && !generatedValidationFinalStage)) {
+                return null;
+            }
             if (isAnnotationElementCall(pctx, call)) return null;
             int kind = switch (call.getOpcode()) {
                 case Opcodes.INVOKEVIRTUAL -> KIND_INVOKEVIRTUAL;
@@ -361,6 +365,16 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             return new SiteSpec(kind, field.owner, field.name, "()" + field.desc, fieldIndyDescriptor(field, kind));
         }
         return null;
+    }
+
+    private boolean isGeneratedValidationFinalStageCall(
+        L1Class caller,
+        MethodInsnNode call
+    ) {
+        return call.getOpcode() == Opcodes.INVOKESTATIC
+            && call.owner.equals(caller.name())
+            && call.name.startsWith("__neko_vsend")
+            && "(JJI)Z".equals(call.desc);
     }
 
     private boolean isAnnotationElementCall(PipelineContext pctx, MethodInsnNode call) {

@@ -42,7 +42,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     private static final long TAG_MUL = 0x100000001B3L;
     private static final long TAG_ADD = 0x9E3779B97F4A7C15L;
     private static final long LIVE_MASK_LOW_DOMAIN = 0x5653484D41534B32L;
-    private static final String HELPER_DESC = "(Ljava/lang/String;JJI)Z";
+    private static final String HELPER_DESC = "(Ljava/lang/String;JI)J";
     private static final String LENGTH_STAGE_DESC = "(Ljava/lang/String;I)I";
     private static final String SEED_STAGE_DESC = "(JII)J";
     private static final String CHAR_STAGE_DESC = "(Ljava/lang/String;JIII)J";
@@ -302,7 +302,6 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         replacement.add(new VarInsnNode(Opcodes.LSTORE, expectedArgLocal));
         replacement.add(new VarInsnNode(Opcodes.ALOAD, receiverLocal));
         replacement.add(new VarInsnNode(Opcodes.LLOAD, seedArgLocal));
-        replacement.add(new VarInsnNode(Opcodes.LLOAD, expectedArgLocal));
         replacement.add(new VarInsnNode(Opcodes.ILOAD, dataWordArgLocal));
         replacement.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
@@ -311,6 +310,20 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
             HELPER_DESC,
             clazz.isInterface()
         ));
+        replacement.add(new VarInsnNode(Opcodes.LSTORE, seedArgLocal));
+        replacement.add(new VarInsnNode(Opcodes.LLOAD, seedArgLocal));
+        replacement.add(new VarInsnNode(Opcodes.LLOAD, expectedArgLocal));
+        replacement.add(new VarInsnNode(Opcodes.ILOAD, dataWordArgLocal));
+        MethodInsnNode finalCall = new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            clazz.name(),
+            stages.finish(),
+            FINAL_STAGE_DESC,
+            clazz.isInterface()
+        );
+        replacement.add(finalCall);
+        metadata.applicationInstructions().add(finalCall);
+        metadata.instructionStates().put(finalCall, state);
         JvmKeyDispatchPass.markGenerated(pctx, replacement);
         method.asmNode().instructions.insertBefore(anchor, replacement);
         method.asmNode().instructions.remove(anchor);
@@ -412,11 +425,10 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     private void emitHelperBody(InsnList insns, ValidationStages stages, String owner, boolean interfaceOwner) {
         int stringLocal = 0;
         int seedLocal = 1;
-        int expectedLocal = 3;
-        int dataWordLocal = 5;
-        int lengthLocal = 6;
-        int indexLocal = 7;
-        int hashLocal = 8;
+        int dataWordLocal = 3;
+        int lengthLocal = 4;
+        int indexLocal = 5;
+        int hashLocal = 6;
         LabelNode loop = new LabelNode();
         LabelNode done = new LabelNode();
 
@@ -454,11 +466,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
 
         insns.add(done);
         insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, expectedLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
-        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, stages.finish(),
-            FINAL_STAGE_DESC, interfaceOwner));
-        insns.add(new InsnNode(Opcodes.IRETURN));
+        insns.add(new InsnNode(Opcodes.LRETURN));
     }
 
     private void emitLengthStageBody(InsnList insns) {
