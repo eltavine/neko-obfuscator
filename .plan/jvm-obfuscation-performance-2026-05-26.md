@@ -5053,8 +5053,9 @@ Rejected implementation evidence:
 
 #### P4.2 Extend delta block-key updates to eligible non-handler inline transitions
 
-Status: `[-]` revised P2/TEST-biased candidate after first plan-intake review
-failed; re-review is required before any source edit.
+Status: `[x]` rejected after fresh implementation validation. Do not retry this
+delta-HUB/ALIAS inline transition-key update shape without new evidence that
+explains the TEST and obfusjack runtime regressions below.
 
 Scope:
 
@@ -5194,6 +5195,49 @@ P4.2 first plan-intake review:
   real block-exit and switch-tail transition callsites, records bytecode counts
   for TEST hot methods, and explicitly narrows P4.2 to a TEST/P2-biased
   candidate because obfusjack `y/x` do not contain the targeted decode shape.
+- Re-review passed. The reviewer confirmed the revised plan has a concrete
+  source invariant chain, narrowly scopes the implementation to
+  `useDeltaTransitionKeys` plus a role predicate, excludes
+  `HANDLER`/`FAKE`/`POISON`, records the TEST bytecode counts, honestly bounds
+  weak obfusjack hot-path coverage, and uses a 10x gate requiring TEST
+  improvement and no obfusjack regression.
+
+Rejected implementation evidence:
+
+- Implementation after plan-only checkpoint `0f03951` changed only
+  `CffDispatchEmitter.useDeltaTransitionKeys` plus a local role predicate:
+  `DIRECT_ISLAND` behavior was preserved, while `HUB`/`ALIAS_HUB` used
+  `emitDeltaBlockKeys` only for `FALLTHROUGH`, `GOTO`,
+  `CONDITIONAL_TRUE`, `CONDITIONAL_FALSE`, `SWITCH_CASE`, and
+  `SWITCH_DEFAULT`. `HANDLER`, `FAKE`, `POISON`, transition outliner calls,
+  transition-material helper rows, direct-island domain decode, `out[]`
+  layout, CFF block boundaries, and coverage were unchanged.
+- Fresh targeted JVM validation passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ObfuscationIntegrationTest --rerun-tasks`
+  completed with `BUILD SUCCESSFUL in 1m 19s` and `19 actionable tasks: 19
+  executed`.
+- Fresh 10x runtime gate at
+  `build/jvm-runtime-perf/p4-delta-hub-alias-10x/runtime-medians.tsv`
+  rejected the change: full TEST `Calc` sorted values were
+  `181,181,183,184,184,185,189,191,191,192`, with lower/upper medians
+  `184/185 ms`, regressing from the accepted current baseline `177/178 ms`;
+  full obfusjack `Seq` sorted values were
+  `306,310,310,311,312,312,314,314,325,325`, with lower/upper medians
+  `312/312 ms`, regressing from `303/304 ms`.
+- Non-target full obfusjack medians in the rejected run were
+  `Platform=79/81 ms`, `Virtual=87/87 ms`, `Parallel=8/8 ms`, and
+  `VThreads=8/8 ms`.
+- All P4.2 10x stderr logs under
+  `build/jvm-runtime-perf/p4-delta-hub-alias-10x/` were empty; runtime/log
+  scans found no verifier, linkage, fallback, skip, crash, `FAIL`,
+  `translated=0`, or native-compilation markers; and no fresh
+  `hs_err_pid*.log` appeared after the rejected runtime report.
+- The failed P4.2 source edit was reverted with `apply_patch`; scoped
+  `git diff -- neko-transforms/src/main/java/dev/nekoobfuscator/transforms/jvm/cff/CffDispatchEmitter.java`
+  is empty. Accepted-source regeneration after the revert passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`
+  completed with `BUILD SUCCESSFUL in 1m 14s` and `19 actionable tasks: 19
+  executed`. The remaining worktree change for P4.2 is this rejection record.
 
 ## Review Status
 
