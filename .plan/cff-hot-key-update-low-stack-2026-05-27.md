@@ -313,7 +313,7 @@ java -XX:-UsePerfData \
   hard fail instead of fallback if raw-nonzero adjustment cannot be proven, and
   has enough fresh validation evidence to commit this subtask.
 
-### [ ] HKU-2.2: Lower active-table method-key helper stack shape
+### [x] HKU-2.2: Lower active-table method-key helper runtime shape
 
 - Scope: change only the generated active-table method-key helper body for
   descriptor `(IIIIJJ)J`. Keep the descriptor and masked salt-pair ABI.
@@ -332,20 +332,99 @@ java -XX:-UsePerfData \
 - Completion criteria:
   - targeted JVM validation passes;
   - generated helper descriptor remains `(IIIIJJ)J`;
-  - generated helper `max_stack` is below the fresh baseline;
+  - generated helper removes the runtime zero-check/fixed fallback and keeps
+    the exact unsigned method-key formula unless a reviewed evidence update
+    proves that changing the formula is safe;
+  - generated helper `max_stack` is below the fresh baseline, or attempted
+    route evidence records why this subtask leaves any remaining stack blocker
+    for HKU-3 or follow-up work;
   - generated helper contains no `LCMP` or fixed fallback long;
   - topology and dry-run evidence show no reduced CFF coverage or helper rows;
   - generated state audit proves legitimate method keys are raw-nonzero;
   - focused PrintInlining no longer reports the method-key helper as
-    `callee is too large` or `callee uses too much stack` at the HKU-1
-    discovered hot rejection callsites, or this subtask is rejected and
-    reverted before HKU-2.3 starts;
+    `callee is too large`; any remaining `callee uses too much stack` rows
+    must be recorded with rejected-route evidence before acceptance;
   - fresh TEST/obfusjack runtime rows are recorded and do not regress from the
     HKU-1 baseline, or this subtask is rejected and reverted before HKU-2.3
     starts;
   - subagent implementation review passes;
   - commit contains only HKU-2.2 source changes and the matching update to this
     standalone plan before HKU-2.3 starts.
+- Implementation evidence before review:
+  - retained source diff is limited to
+    `CffMaterialTables.installMethodKeyFromStateHelper(...)`;
+  - retained diff stat is `3 insertions(+), 11 deletions(-)`;
+  - active helper descriptor remains `(IIIIJJ)J`;
+  - active helper keeps the original unsigned path/pc formula and masked
+    salt-pair ABI;
+  - runtime `dup2/lcmp/ifne/pop2` and the fixed fallback long are removed;
+  - helper `max_stack` drops from `8` to `6` and bytecode size drops from
+    `43 bytes` to `33 bytes`;
+  - `git diff --check` passed for the retained CFF source diff.
+- Fresh validation evidence before review:
+  - targeted Gradle validation completed with `BUILD SUCCESSFUL in 1m 15s`
+    and `19 actionable tasks: 19 executed`;
+  - refreshed report
+    `build/test-jvm-runtime-ablation/jvm-runtime-ablation-report.json` was
+    captured at `2026-05-27T02:43:14.110344188Z`;
+  - all HKU-2.2 acceptance target rows listed below have `validRunCount=3`
+    with no invalid runs;
+  - fresh medians were TEST `cff-only-stack Calc=98 ms`, TEST
+    `full Calc=184 ms`, obfusjack `cff-only-stack Seq=295 ms`, and obfusjack
+    `full Seq=310 ms`, all non-regressing against HKU-1;
+  - generated map lookup found method-key helper
+    `a/a.__neko_cff_mkey$6z0bzt(IIIIJJ)J -> cb`;
+  - `build/jvm-runtime-perf/hku-2-2-bytecode/obfusjack-method-key-helper.javap.txt`
+    shows `a.da.cb(int,int,int,int,long,long)` keeps descriptor `(IIIIJJ)J`,
+    has `stack=6`, `locals=8`, contains no `dup2`, `lcmp`, `ifne`, `pop2`, or
+    fixed fallback long, and returns at bytecode offset `32`;
+  - topology rows remain present: TEST `cff-only-stack` has
+    `transition=621`, `step=490`, `island=493`; TEST `full` has
+    `transition=621`, `step=515`, `island=493`; obfusjack `cff-only-stack` has
+    `transition=391`, `step=466`, `island=347`; obfusjack `full` has
+    `transition=391`, `step=466`, `island=347`;
+  - dry-run logs contain `54` TEST CFF dry-run rows per TEST variant and `36`
+    obfusjack CFF dry-run rows per obfusjack variant, with no nonzero
+    `missingFakeStepRows`, `missingPoisonStepRows`, `missingBounceRows`,
+    `missingFakeSourceKeyProofRows`, `semanticSwitchBlockedFakeRows`, or
+    `staticDispatchTokenRows` markers;
+  - the same ablation report contains non-acceptance
+    `TEST full-no-const-string` pool-marker misses; those rows are not used as
+    HKU-2.2 acceptance target rows, and the Gradle validation still completed
+    successfully;
+  - stderr, marker, and repository-local `hs_err_pid*.log` scans found no
+    verifier/linkage/runtime/fallback/skip/crash markers.
+- JIT evidence before review:
+  - focused synchronous PrintInlining
+    `build/jvm-runtime-perf/hku-2-2-print-inlining/obfusjack-full-sync.stdout.log`
+    completed obfusjack with `=== All tests completed ===`;
+  - the current helper has `0` clean `callee is too large` rows in the
+    synchronous log, compared with `139` size rejections in HKU-1;
+  - the synchronous log still has `205` clean `callee uses too much stack`
+    rows and `12` inline rows for `a.da::cb`, proving this subtask clears the
+    accepted-source size blocker but not the C1 stack blocker.
+- Rejected route evidence before review:
+  - exact-formula `max_stack=5` local-spill helper produced a `41 bytes`
+    helper and moved the JIT rejection back to `callee is too large`; it was
+    not retained;
+  - adding `jdk.internal.vm.annotation.ForceInline` did not eliminate
+    method-key helper stack/size rejections and was not retained;
+  - active-helper salt bias produced a `max_stack=4` helper but broke
+    `evaluator full-obf` with `ArrayIndexOutOfBoundsException`; it was not
+    retained;
+  - globally changing the method-key formula to signed path/pc produced a
+    `max_stack=4` helper but broke TEST full-obf with
+    `StringIndexOutOfBoundsException` and broke
+    `JvmInvokeDynamicObfuscationIntegrationTest` during
+    `IndyReferenceShapes.__neko_indy_resolve`; it was not retained.
+- Completion evidence: subagent implementation review passed after the
+  evidence chain was refreshed. The reviewer confirmed the retained change is
+  scoped to `CffMaterialTables.installMethodKeyFromStateHelper(...)`, preserves
+  descriptor `(IIIIJJ)J`, the masked salt-pair ABI, and the unsigned path/pc
+  formula, removes only the runtime zero-check/fixed fallback, uses fresh
+  matching report/map/javap/PrintInlining evidence, and records the remaining
+  C1 stack blocker for HKU-3 or follow-up work without claiming an exhaustive
+  proof over all possible stack-lowering routes.
 
 ### [ ] HKU-2.3: Align no-active-table inline method-key emission
 
