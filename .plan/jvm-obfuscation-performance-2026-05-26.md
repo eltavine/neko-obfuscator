@@ -5241,7 +5241,7 @@ Rejected implementation evidence:
 
 ### P4.3 Split token-material object-cell update out of the hot token helper
 
-Status: `[-]` plan-intake passed; plan-only checkpoint pending.
+Status: `[x]` rejected after implementation evidence; source/test changes reverted.
 
 Scope:
 
@@ -5424,6 +5424,57 @@ P4.3 first plan-intake review:
   helper ABI/topology, explicit rejected-route separation, and specific
   validation/completion criteria. Implementation may start only after the
   plan-only checkpoint commit.
+
+Rejected implementation evidence:
+
+- Plan-only checkpoint commit `6c532b6` was created before source edits.
+- The P4.3 implementation changed only the shared helper topology in
+  `CffSharedState`, `CffClassSetup`, and `CffMaterialTables`: it generated a
+  `__neko_cff_tobj$...` helper with descriptor
+  `([Ljava/lang/Object;[JIIII)I`, installed it before
+  `__neko_cff_tmat$...`, kept public token-material callsites at
+  `([Ljava/lang/Object;IIII)I`, and moved the existing object-cell
+  `AtomicLong.getPlain`/`setPlain` bytecode into the new helper. The generic
+  algebraic audit was temporarily extended to recognize the new helper
+  descriptor for validation.
+- The first targeted JVM validation run failed only because
+  `ControlFlowFlatteningAlgebraicAuditTest.updatesSidecarCell` filtered methods
+  by the old helper descriptors and therefore skipped the new object-cell
+  helper before inspecting its `AtomicLong` update. After extending that generic
+  audit descriptor set to include `([Ljava/lang/Object;[JIIII)I`, the same
+  targeted JVM validation suite passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ObfuscationIntegrationTest --rerun-tasks`
+  completed with `BUILD SUCCESSFUL in 1m 19s` and `19 actionable tasks: 19
+  executed`.
+- Fresh bytecode inspection at
+  `build/jvm-runtime-perf/p4-token-helper-split-bytecode/obfusjack-a-da.javap.txt`
+  proved the planned topology was generated: `a.da.ta` had descriptor
+  `(java.lang.Object[], long[], int, int, int, int)`, `a.da.ua` kept the public
+  token-material descriptor `(java.lang.Object[], int, int, int, int)`, and
+  `a.da.ua` invoked `a.da.ta` at bytecode offset `84` with descriptor
+  `([Ljava/lang/Object;[JIIII)I`.
+- Focused PrintInlining at
+  `build/jvm-runtime-perf/p4-token-helper-split-print-inlining/obfusjack-focused.stdout.log`
+  rejected P4.3 before the 10x runtime gate. The filtered evidence at
+  `build/jvm-runtime-perf/p4-token-helper-split-print-inlining/obfusjack-focused.filtered.log`
+  shows the caller-visible token-material helper `a.da.ua (131 bytes)` still
+  appears in hot `a.a.x`/`a.a.y` compilation contexts as `callee is too large`
+  at offsets including `181`, `214`, `356`, `373`, `501`, `533`, `804`,
+  `1072`, and many later hot-method callsites. This fails the P4.3 completion
+  criterion that the caller-visible token-material helper must no longer be
+  rejected as `callee is too large` in hot `a.a.x` and `a.a.y` contexts.
+- Because the explicit JIT completion criterion failed, P4.3 did not proceed to
+  the 10x runtime gate. Running the 10x gate after a failed precondition would
+  not make this implementation acceptable under the recorded plan.
+- The P4.3 source and audit-test edits were reverted with `apply_patch`.
+  Scoped diff for
+  `neko-transforms/src/main/java/dev/nekoobfuscator/transforms/jvm/cff` and
+  `neko-test/src/test/java/dev/nekoobfuscator/test/ControlFlowFlatteningAlgebraicAuditTest.java`
+  is empty.
+- Accepted-source regeneration after the revert passed:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --rerun-tasks`
+  completed with `BUILD SUCCESSFUL in 1m 14s` and `19 actionable tasks: 19
+  executed`.
 
 ## Review Status
 
