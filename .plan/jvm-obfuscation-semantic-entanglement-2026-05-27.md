@@ -217,7 +217,7 @@ For every implementation row below:
 
 ## Execution Rows
 
-### [-] JSE-0: Record and review this high-risk plan
+### [x] JSE-0: Record and review this high-risk plan
 
 - Scope: create this standalone plan, record the active-agent todo entries, run
   a plan-intake review, report the plan scope/order/tradeoffs, and commit only
@@ -231,7 +231,7 @@ For every implementation row below:
   plan report is sent, and a checkpoint commit contains only this plan file and
   any matching todo-only update.
 
-### [ ] JSE-1: Reserve and publish CFF data digest local
+### [-] JSE-1: Reserve and publish CFF data digest local
 
 - Scope: allocate one int `dataLocal` for each protected CFF method, publish it
   through `CffMethodMetadata`, and reserve it from runtime-variable
