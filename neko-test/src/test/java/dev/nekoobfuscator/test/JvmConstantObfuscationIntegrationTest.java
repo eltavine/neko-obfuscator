@@ -155,21 +155,45 @@ public class JvmConstantObfuscationIntegrationTest {
             if (method.name.startsWith("__neko_")) continue;
             AbstractInsnNode[] insns = method.instructions.toArray();
             for (int i = 0; i < insns.length; i++) {
-                if (isCompactConstantDecodeCall(insns[i])) {
+                if (insns[i] instanceof MethodInsnNode call
+                    && call.name.startsWith("__neko_num_i")
+                    && "(IIII)I".equals(call.desc)) {
+                    throw new AssertionError(
+                        "constant decode retained same-site multiplier cancellation helper in " +
+                            method.name + method.desc
+                    );
+                }
+                ConstantDecodeProof proof = constantDecodeProofAtRawStore(insns, i);
+                if (proof != null) {
+                    int limit = nextConstantRawStore(insns, i + 1, Math.min(insns.length, i + 760));
+                    if (limit < 0) limit = Math.min(insns.length, i + 760);
+                    int compactCall = firstCompactConstantDecodeCall(insns, i + 1, limit);
+                    if (compactCall >= 0) {
+                        assertTrue(
+                            compactCallReceivesRuntimeDerivedMaterial(insns, compactCall, proof),
+                            "compact constant decode call did not receive runtime-derived data material in " +
+                                method.name + method.desc
+                        );
+                        checkedCompactCalls++;
+                    } else {
+                        assertTrue(
+                            inlineDecodeReceivesRuntimeDerivedMaterial(insns, proof, limit),
+                            "inline constant decode did not consume runtime-derived data material in " +
+                                method.name + method.desc
+                        );
+                    }
+                    checkedBaseLoads++;
+                } else if (isCompactConstantDecodeCall(insns[i])) {
                     assertTrue(
-                        compactCallReceivesDataBoundBase(insns, i),
-                        "compact constant decode call did not receive data-bound encoded base and multiplier in " +
+                        compactCallReceivesRuntimeDerivedMaterial(
+                            insns,
+                            i,
+                            previousConstantDecodeProof(insns, i)
+                        ),
+                        "compact constant decode call did not receive runtime-derived data material in " +
                             method.name + method.desc
                     );
                     checkedCompactCalls++;
-                }
-                if (!(insns[i] instanceof VarInsnNode load)
-                    || load.getOpcode() != Opcodes.ILOAD) {
-                    continue;
-                }
-                int dataLocal = constantDecodeDataLocal(insns, i, load.var);
-                if (dataLocal >= 0) {
-                    checkedBaseLoads++;
                 }
             }
         }
@@ -263,133 +287,380 @@ public class JvmConstantObfuscationIntegrationTest {
         return cursor;
     }
 
-    private int constantDecodeDataLocal(AbstractInsnNode[] insns, int loadIndex, int baseLocal) {
-        int limit = Math.min(insns.length, loadIndex + 320);
-        for (int i = loadIndex + 1; i + 2 < limit; i++) {
-            if (!(insns[i] instanceof VarInsnNode baseStore)
-                || baseStore.getOpcode() != Opcodes.ISTORE
-                || baseStore.var != baseLocal) {
-                continue;
-            }
-            if (!(insns[i + 1] instanceof VarInsnNode dataLoad)
-                || dataLoad.getOpcode() != Opcodes.ILOAD
-                || dataLoad.var == baseLocal) {
-                continue;
-            }
-            if (!(insns[i + 2] instanceof VarInsnNode dataStore)
-                || dataStore.getOpcode() != Opcodes.ISTORE
-                || dataStore.var == baseLocal) {
-                continue;
-            }
-            int firstDataLoad = firstVarLoadIndex(
-                insns,
-                Opcodes.ILOAD,
-                dataLoad.var,
-                loadIndex + 1,
-                i + 1
-            );
-            if (firstDataLoad < 0 || !hasNonlinearMixAfter(insns, firstDataLoad + 1, i + 1)) {
-                continue;
-            }
-            if (!hasDecodeBoundary(insns, i + 3, limit)) {
-                continue;
-            }
-            return dataLoad.var;
+    private int previousRealIndex(AbstractInsnNode[] insns, int fromExclusive) {
+        for (int i = fromExclusive - 1; i >= 0; i--) {
+            if (insns[i].getOpcode() >= 0) return i;
         }
         return -1;
     }
 
-    private boolean isConstantDecodeBoundary(AbstractInsnNode insn) {
-        if (isCompactConstantDecodeCall(insn)) {
-            return true;
+    private int nextRealIndex(AbstractInsnNode[] insns, int fromInclusive, int limitExclusive) {
+        for (int i = fromInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() >= 0) return i;
         }
-        return insn.getOpcode() == Opcodes.IXOR;
+        return -1;
+    }
+
+    private ConstantDecodeProof constantDecodeProofAtRawStore(AbstractInsnNode[] insns, int rawStoreIndex) {
+        if (!(insns[rawStoreIndex] instanceof VarInsnNode rawStore)
+            || rawStore.getOpcode() != Opcodes.ISTORE) {
+            return null;
+        }
+        int dataStoreIndex = previousRealIndex(insns, rawStoreIndex);
+        if (dataStoreIndex < 0) return null;
+        if (!(insns[dataStoreIndex] instanceof VarInsnNode dataStore)
+            || dataStore.getOpcode() != Opcodes.ISTORE
+            || dataStore.var == rawStore.var) {
+            return null;
+        }
+        int dataLoadIndex = previousRealIndex(insns, dataStoreIndex);
+        if (dataLoadIndex < 0) return null;
+        if (!(insns[dataLoadIndex] instanceof VarInsnNode dataLoad)
+            || dataLoad.getOpcode() != Opcodes.ILOAD
+            || dataLoad.var == rawStore.var) {
+            return null;
+        }
+        int baseStoreIndex = previousRealIndex(insns, dataLoadIndex);
+        if (baseStoreIndex < 0) return null;
+        if (!(insns[baseStoreIndex] instanceof VarInsnNode baseStore)
+            || baseStore.getOpcode() != Opcodes.ISTORE
+            || baseStore.var == rawStore.var
+            || baseStore.var == dataLoad.var) {
+            return null;
+        }
+        int currentDataLoad = previousVarLoadIndex(
+            insns,
+            dataLoad.var,
+            Math.max(0, baseStoreIndex - 120),
+            baseStoreIndex
+        );
+        if (currentDataLoad < 0 || !hasNonlinearMixAfter(insns, currentDataLoad + 1, baseStoreIndex)) {
+            return null;
+        }
+        return new ConstantDecodeProof(rawStore.var, dataLoad.var, rawStoreIndex);
     }
 
     private boolean isCompactConstantDecodeCall(AbstractInsnNode insn) {
         return insn instanceof MethodInsnNode call
             && call.name.startsWith("__neko_num_i")
-            && "(IIII)I".equals(call.desc);
+            && "(III)I".equals(call.desc);
     }
 
-    private boolean compactCallReceivesDataBoundBase(AbstractInsnNode[] insns, int callIndex) {
-        AbstractInsnNode multiplierLoadInsn = previousReal(insns[callIndex].getPrevious());
-        if (!(multiplierLoadInsn instanceof VarInsnNode multiplierLoad)
-            || multiplierLoad.getOpcode() != Opcodes.ILOAD) {
+    private boolean compactCallReceivesRuntimeDerivedMaterial(
+        AbstractInsnNode[] insns,
+        int callIndex,
+        ConstantDecodeProof proof
+    ) {
+        if (proof == null) return false;
+        int seedIndex = previousRealIndex(insns, callIndex);
+        if (seedIndex < 0 || intLiteral(insns[seedIndex]) == null) return false;
+        int swapIndex = previousRealIndex(insns, seedIndex);
+        if (swapIndex < 0 || insns[swapIndex].getOpcode() != Opcodes.SWAP) return false;
+        MaterialNoiseProof noise = materialNoiseProof(insns, proof, swapIndex);
+        if (noise == null) return false;
+        int helperBoundStart = previousBoundBaseStart(insns, proof.rawBaseLocal, noise.local, swapIndex, 96);
+        if (helperBoundStart < 0) return false;
+        int materialEnd = previousRealIndex(insns, helperBoundStart);
+        if (materialEnd < 0 || insns[materialEnd].getOpcode() != Opcodes.IXOR) return false;
+        if (!materialSliceConsumesRuntimeBoundMask(insns, proof, noise, materialEnd)) {
             return false;
         }
-        int start = Math.max(0, callIndex - 400);
-        for (int i = callIndex - 1; i >= start; i--) {
-            if (!(insns[i] instanceof VarInsnNode baseLoad)
-                || baseLoad.getOpcode() != Opcodes.ILOAD) {
-                continue;
-            }
-            int dataLocal = constantDecodeDataLocal(insns, i, baseLoad.var);
-            if (dataLocal < 0) continue;
-            if (localStoredAfterDataMix(insns, multiplierLoad.var, dataLocal, i + 1, callIndex)) {
-                return true;
-            }
-        }
-        return false;
+        return boundBaseSliceConsumesNoise(insns, proof.rawBaseLocal, noise.local, helperBoundStart, swapIndex);
     }
 
-    private boolean hasDecodeBoundary(
+    private boolean inlineDecodeReceivesRuntimeDerivedMaterial(
+        AbstractInsnNode[] insns,
+        ConstantDecodeProof proof,
+        int limitExclusive
+    ) {
+        MaterialNoiseProof noise = materialNoiseProof(insns, proof, limitExclusive);
+        if (noise == null) return false;
+        List<Integer> boundStarts = boundBaseStarts(
+            insns,
+            proof.rawBaseLocal,
+            noise.local,
+            noise.storeIndex + 1,
+            limitExclusive
+        );
+        if (boundStarts.size() < 6) return false;
+        int materialEnd = previousRealIndex(insns, boundStarts.get(3));
+        if (materialEnd < 0 || insns[materialEnd].getOpcode() != Opcodes.IXOR) return false;
+        return materialSliceConsumesRuntimeBoundMask(insns, proof, noise, materialEnd)
+            && boundBaseSliceConsumesNoise(
+                insns,
+                proof.rawBaseLocal,
+                noise.local,
+                boundStarts.get(3),
+                boundStarts.get(4)
+            )
+            && boundBaseSliceConsumesNoise(
+                insns,
+                proof.rawBaseLocal,
+                noise.local,
+                boundStarts.get(4),
+                boundStarts.get(5)
+            )
+            && boundBaseSliceConsumesNoise(
+                insns,
+                proof.rawBaseLocal,
+                noise.local,
+                boundStarts.get(5),
+                limitExclusive
+            )
+            && hasOpcode(insns, Opcodes.ISUB, boundStarts.get(3), limitExclusive)
+            && hasOpcode(insns, Opcodes.IOR, boundStarts.get(3), limitExclusive)
+            && hasOpcode(insns, Opcodes.IXOR, boundStarts.get(5), limitExclusive);
+    }
+
+    private int firstCompactConstantDecodeCall(
         AbstractInsnNode[] insns,
         int startInclusive,
         int limitExclusive
     ) {
         for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
-            if (isConstantDecodeBoundary(insns[i])) {
+            if (isCompactConstantDecodeCall(insns[i])) return i;
+        }
+        return -1;
+    }
+
+    private ConstantDecodeProof previousConstantDecodeProof(AbstractInsnNode[] insns, int limitExclusive) {
+        int start = Math.max(0, limitExclusive - 760);
+        for (int i = limitExclusive - 1; i >= start; i--) {
+            ConstantDecodeProof proof = constantDecodeProofAtRawStore(insns, i);
+            if (proof != null) return proof;
+        }
+        return null;
+    }
+
+    private int nextConstantRawStore(AbstractInsnNode[] insns, int startInclusive, int limitExclusive) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (constantDecodeProofAtRawStore(insns, i) != null) return i;
+        }
+        return -1;
+    }
+
+    private boolean hasOpcode(
+        AbstractInsnNode[] insns,
+        int opcode,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() == opcode) {
                 return true;
             }
         }
         return false;
     }
 
-    private int firstVarLoadIndex(
+    private int previousVarLoadIndex(
         AbstractInsnNode[] insns,
-        int opcode,
         int local,
         int startInclusive,
         int limitExclusive
     ) {
-        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
-            if (insns[i] instanceof VarInsnNode var
-                && var.getOpcode() == opcode
-                && var.var == local) {
+        for (int i = limitExclusive - 1; i >= startInclusive && i >= 0; i--) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.ILOAD
+                && load.var == local) {
                 return i;
             }
         }
         return -1;
     }
 
-    private boolean localStoredAfterDataMix(
+    private MaterialNoiseProof materialNoiseProof(
         AbstractInsnNode[] insns,
-        int storedLocal,
-        int dataLocal,
-        int startInclusive,
+        ConstantDecodeProof proof,
         int limitExclusive
     ) {
+        int limit = Math.min(insns.length, limitExclusive);
+        for (int i = proof.rawStoreIndex + 1; i < limit; i++) {
+            if (!(insns[i] instanceof VarInsnNode store) || store.getOpcode() != Opcodes.ISTORE) {
+                continue;
+            }
+            if (store.var == proof.rawBaseLocal || store.var == proof.dataLocal) {
+                continue;
+            }
+            if (storeHasNonlinearSpecificDataInput(
+                insns,
+                proof.rawStoreIndex + 1,
+                i,
+                store.var,
+                proof.dataLocal
+            )) {
+                return new MaterialNoiseProof(store.var, i);
+            }
+        }
+        return null;
+    }
+
+    private boolean storeHasNonlinearSpecificDataInput(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int storeIndex,
+        int storedLocal,
+        int dataLocal
+    ) {
         boolean sawData = false;
-        boolean sawNonlinearAfterData = false;
-        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+        boolean sawMul = false;
+        boolean sawShift = false;
+        boolean sawXor = false;
+        for (int i = startInclusive; i < storeIndex; i++) {
             if (insns[i] instanceof VarInsnNode load
                 && load.getOpcode() == Opcodes.ILOAD
                 && load.var == dataLocal) {
                 sawData = true;
             }
-            if (sawData && isNonlinearIntMixOpcode(insns[i].getOpcode())) {
-                sawNonlinearAfterData = true;
-            }
-            if (sawData
-                && sawNonlinearAfterData
-                && insns[i] instanceof VarInsnNode store
-                && store.getOpcode() == Opcodes.ISTORE
-                && store.var == storedLocal) {
-                return true;
+            if (!sawData) continue;
+            if (insns[i].getOpcode() == Opcodes.IMUL) {
+                sawMul = true;
+            } else if (insns[i].getOpcode() == Opcodes.IUSHR) {
+                sawShift = true;
+            } else if (insns[i].getOpcode() == Opcodes.IXOR) {
+                sawXor = true;
             }
         }
-        return false;
+        return sawData && sawMul && sawShift && sawXor
+            && insns[storeIndex] instanceof VarInsnNode store
+            && store.var == storedLocal;
+    }
+
+    private boolean materialSliceConsumesRuntimeBoundMask(
+        AbstractInsnNode[] insns,
+        ConstantDecodeProof proof,
+        MaterialNoiseProof noise,
+        int materialEnd
+    ) {
+        int materialBoundStart = previousBoundBaseStart(
+            insns,
+            proof.rawBaseLocal,
+            noise.local,
+            materialEnd,
+            260
+        );
+        if (materialBoundStart <= noise.storeIndex) return false;
+        return varLoadCount(insns, proof.rawBaseLocal, noise.storeIndex + 1, materialBoundStart) >= 1
+            && boundBaseSliceConsumesNoise(insns, proof.rawBaseLocal, noise.local, materialBoundStart, materialEnd)
+            && intLiteralCount(insns, noise.storeIndex + 1, materialEnd + 1) >= 10
+            && hasOpcode(insns, Opcodes.IADD, noise.storeIndex + 1, materialEnd + 1)
+            && hasOpcode(insns, Opcodes.IMUL, noise.storeIndex + 1, materialEnd + 1)
+            && hasOpcode(insns, Opcodes.IXOR, noise.storeIndex + 1, materialEnd + 1);
+    }
+
+    private int firstBoundBaseStart(
+        AbstractInsnNode[] insns,
+        int rawBaseLocal,
+        int noiseLocal,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (isBoundBaseStart(insns, i, rawBaseLocal, noiseLocal, limitExclusive)) return i;
+        }
+        return -1;
+    }
+
+    private List<Integer> boundBaseStarts(
+        AbstractInsnNode[] insns,
+        int rawBaseLocal,
+        int noiseLocal,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        List<Integer> starts = new ArrayList<>();
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (isBoundBaseStart(insns, i, rawBaseLocal, noiseLocal, limitExclusive)) {
+                starts.add(i);
+            }
+        }
+        return starts;
+    }
+
+    private int previousBoundBaseStart(
+        AbstractInsnNode[] insns,
+        int rawBaseLocal,
+        int noiseLocal,
+        int fromExclusive,
+        int maxDistance
+    ) {
+        int start = Math.max(0, fromExclusive - maxDistance);
+        for (int i = fromExclusive - 1; i >= start; i--) {
+            if (isBoundBaseStart(insns, i, rawBaseLocal, noiseLocal, fromExclusive)) return i;
+        }
+        return -1;
+    }
+
+    private boolean isBoundBaseStart(
+        AbstractInsnNode[] insns,
+        int index,
+        int rawBaseLocal,
+        int noiseLocal,
+        int limitExclusive
+    ) {
+        if (!(insns[index] instanceof VarInsnNode rawLoad)
+            || rawLoad.getOpcode() != Opcodes.ILOAD
+            || rawLoad.var != rawBaseLocal) {
+            return false;
+        }
+        int next = nextRealIndex(insns, index + 1, limitExclusive);
+        if (next < 0) return false;
+        if (!(insns[next] instanceof VarInsnNode noiseLoad)
+            || noiseLoad.getOpcode() != Opcodes.ILOAD
+            || noiseLoad.var != noiseLocal) {
+            return false;
+        }
+        int localLimit = Math.min(limitExclusive, index + 42);
+        return hasOpcode(insns, Opcodes.IMUL, next + 1, localLimit)
+            && hasOpcode(insns, Opcodes.IUSHR, next + 1, localLimit)
+            && hasOpcode(insns, Opcodes.IADD, next + 1, localLimit)
+            && hasOpcode(insns, Opcodes.IXOR, next + 1, localLimit)
+            && varLoadCount(insns, noiseLocal, index, localLimit) >= 2;
+    }
+
+    private boolean boundBaseSliceConsumesNoise(
+        AbstractInsnNode[] insns,
+        int rawBaseLocal,
+        int noiseLocal,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        return isBoundBaseStart(insns, startInclusive, rawBaseLocal, noiseLocal, limitExclusive)
+            && varLoadCount(insns, noiseLocal, startInclusive, limitExclusive) >= 2
+            && hasOpcode(insns, Opcodes.IMUL, startInclusive, limitExclusive)
+            && hasOpcode(insns, Opcodes.IUSHR, startInclusive, limitExclusive)
+            && hasOpcode(insns, Opcodes.IXOR, startInclusive, limitExclusive);
+    }
+
+    private int varLoadCount(
+        AbstractInsnNode[] insns,
+        int local,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        int count = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.ILOAD
+                && load.var == local) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private int intLiteralCount(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        int count = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (intLiteral(insns[i]) != null) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private boolean hasNonlinearMixAfter(
@@ -409,6 +680,28 @@ public class JvmConstantObfuscationIntegrationTest {
         return opcode == Opcodes.IMUL
             || opcode == Opcodes.IUSHR
             || opcode == Opcodes.IXOR;
+    }
+
+    private static final class ConstantDecodeProof {
+        private final int rawBaseLocal;
+        private final int dataLocal;
+        private final int rawStoreIndex;
+
+        private ConstantDecodeProof(int rawBaseLocal, int dataLocal, int rawStoreIndex) {
+            this.rawBaseLocal = rawBaseLocal;
+            this.dataLocal = dataLocal;
+            this.rawStoreIndex = rawStoreIndex;
+        }
+    }
+
+    private static final class MaterialNoiseProof {
+        private final int local;
+        private final int storeIndex;
+
+        private MaterialNoiseProof(int local, int storeIndex) {
+            this.local = local;
+            this.storeIndex = storeIndex;
+        }
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {

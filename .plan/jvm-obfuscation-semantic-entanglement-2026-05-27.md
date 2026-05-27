@@ -337,7 +337,7 @@ For every implementation row below:
   require runtime-derived numeric material rather than the original single
   encrypted literal format.
 
-### [ ] JSE-5B: Bind constant masks through runtime-derived numeric material
+### [x] JSE-5B: Bind constant masks through runtime-derived numeric material
 
 - Dependency reason: JSE-5 review proved that non-canceling current-data
   binding is not possible while keeping the original single encrypted numeric

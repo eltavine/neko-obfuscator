@@ -51,6 +51,19 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     private static final int SITE_MIX_B = 0x2C9277B5;
     private static final int SITE_MIX_C = 0x7FEB352D;
     private static final int SITE_MIX_D = 0x846CA68B;
+    private static final int MATERIAL_WORD_A = 0x5B6D8F21;
+    private static final int MATERIAL_WORD_B = 0x17A43C59;
+    private static final int MATERIAL_WORD_C = 0x6D22B975;
+    private static final int MATERIAL_WORD_D = 0x31C4AE07;
+    private static final int MATERIAL_ADD_A = 0x24D37B91;
+    private static final int MATERIAL_ADD_B = 0x7139E65D;
+    private static final int MATERIAL_ADD_C = 0x49C11F33;
+    private static final int MATERIAL_ADD_D = 0x5E8A6C2B;
+    private static final int MATERIAL_XOR_A = 0x3A95D74F;
+    private static final int MATERIAL_XOR_B = 0x66E51B29;
+    private static final int MATERIAL_XOR_C = 0x1F2D4B87;
+    private static final int MATERIAL_XOR_D = 0x7C03A1D5;
+    private static final int MATERIAL_ROTATE = 9;
 
     @Override
     public String id() {
@@ -483,7 +496,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int expectedMask = constantMaskFromBase(liveConstantBase(metadata, state), (int) siteSeed);
         int encrypted = value ^ expectedMask;
         if (compactHelper != null) {
-            emitEncodedLiveConstantBaseForMask(
+            emitDecodedLiveConstantBaseForMask(
                 insns,
                 metadata,
                 state,
@@ -492,29 +505,49 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseInverseLocal,
                 baseDataLocal
             );
-            JvmPassBytecode.pushInt(insns, encrypted);
+            insns.add(new VarInsnNode(Opcodes.ISTORE, baseMultiplierLocal));
+            emitConstantMaterialNoise(insns, siteSeed, metadata, state);
+            insns.add(new VarInsnNode(Opcodes.ISTORE, baseInverseLocal));
+            emitRuntimeDerivedEncryptedInt(
+                insns,
+                encrypted,
+                siteSeed,
+                state,
+                baseMultiplierLocal,
+                baseInverseLocal
+            );
+            emitRuntimeBoundConstantBase(insns, siteSeed, state, baseMultiplierLocal, baseInverseLocal);
+            insns.add(new InsnNode(Opcodes.SWAP));
             JvmPassBytecode.pushInt(insns, (int) siteSeed);
-            insns.add(new VarInsnNode(Opcodes.ILOAD, baseMultiplierLocal));
             insns.add(new MethodInsnNode(
                 Opcodes.INVOKESTATIC,
                 clazz.name(),
                 compactHelper,
-                "(IIII)I",
+                "(III)I",
                 clazz.isInterface()
             ));
         } else {
-            JvmPassBytecode.pushInt(insns, encrypted);
-            emitSiteMaskFromBase(
+            emitDecodedLiveConstantBaseForMask(
                 insns,
                 metadata,
                 state,
                 baseLocal,
                 baseMultiplierLocal,
                 baseInverseLocal,
-                baseDataLocal,
-                (int) siteSeed
+                baseDataLocal
             );
-            insns.add(new InsnNode(Opcodes.IXOR));
+            insns.add(new VarInsnNode(Opcodes.ISTORE, baseMultiplierLocal));
+            emitConstantMaterialNoise(insns, siteSeed, metadata, state);
+            insns.add(new VarInsnNode(Opcodes.ISTORE, baseInverseLocal));
+            emitRuntimeDerivedEncryptedInt(
+                insns,
+                encrypted,
+                siteSeed,
+                state,
+                baseMultiplierLocal,
+                baseInverseLocal
+            );
+            emitRuntimeMaterialDecode(insns, siteSeed, state, baseMultiplierLocal, baseInverseLocal);
         }
     }
 
@@ -700,27 +733,10 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IMUL));
     }
 
-    private void emitSiteMaskFromBase(
+    private void emitSiteMaskFromTop(
         InsnList insns,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state,
-        int baseLocal,
-        int baseMultiplierLocal,
-        int baseInverseLocal,
-        int baseDataLocal,
         int seed
     ) {
-        emitEncodedLiveConstantBaseForMask(
-            insns,
-            metadata,
-            state,
-            baseLocal,
-            baseMultiplierLocal,
-            baseInverseLocal,
-            baseDataLocal
-        );
-        emitOddIntInverse(insns, baseMultiplierLocal, baseInverseLocal);
-        insns.add(new InsnNode(Opcodes.IMUL));
         JvmPassBytecode.pushInt(insns, seed ^ SITE_MIX_A);
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.DUP));
@@ -733,7 +749,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
-    private void emitEncodedLiveConstantBaseForMask(
+    private void emitDecodedLiveConstantBaseForMask(
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state,
@@ -747,14 +763,251 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ISTORE, baseMultiplierLocal));
         emitOddIntInverse(insns, baseMultiplierLocal, baseInverseLocal);
         insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
         emitConstantBaseDataMultiplier(insns, metadata, state);
-        insns.add(new VarInsnNode(Opcodes.ISTORE, baseMultiplierLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, baseMultiplierLocal));
         insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new VarInsnNode(Opcodes.ISTORE, baseLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
         insns.add(new VarInsnNode(Opcodes.ISTORE, baseDataLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
+    }
+
+    private void emitRuntimeDerivedEncryptedInt(
+        InsnList insns,
+        int encrypted,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int rawBaseLocal,
+        int noiseLocal
+    ) {
+        emitSplitEncryptedInt(insns, encrypted, siteSeed);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rawBaseLocal));
+        emitSiteMaskFromTop(insns, (int) siteSeed);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeBoundConstantBase(insns, siteSeed, state, rawBaseLocal, noiseLocal);
+        emitInlineMaterialWordFromTop(
+            insns,
+            (int) siteSeed,
+            MATERIAL_WORD_A,
+            MATERIAL_WORD_B,
+            MATERIAL_WORD_C,
+            MATERIAL_WORD_D,
+            13
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRotateLeftTop(insns, MATERIAL_ROTATE);
+        emitRuntimeBoundConstantBase(insns, siteSeed, state, rawBaseLocal, noiseLocal);
+        emitInlineMaterialWordFromTop(
+            insns,
+            (int) siteSeed,
+            MATERIAL_ADD_A,
+            MATERIAL_ADD_B,
+            MATERIAL_ADD_C,
+            MATERIAL_ADD_D,
+            17
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        emitRuntimeBoundConstantBase(insns, siteSeed, state, rawBaseLocal, noiseLocal);
+        emitInlineMaterialWordFromTop(
+            insns,
+            (int) siteSeed,
+            MATERIAL_XOR_A,
+            MATERIAL_XOR_B,
+            MATERIAL_XOR_C,
+            MATERIAL_XOR_D,
+            11
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitSplitEncryptedInt(InsnList insns, int encrypted, long siteSeed) {
+        int xorFragment = (int) JvmPassBytecode.mix(siteSeed, 0x434F4E5354465841L);
+        int addTarget = encrypted ^ xorFragment;
+        int addFragmentA = (int) JvmPassBytecode.mix(siteSeed, 0x434F4E5354464141L);
+        int addFragmentB = addTarget - addFragmentA;
+        JvmPassBytecode.pushInt(insns, addFragmentA);
+        JvmPassBytecode.pushInt(insns, addFragmentB);
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, xorFragment);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeBoundConstantBase(
+        InsnList insns,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int rawBaseLocal,
+        int noiseLocal
+    ) {
+        long seed = JvmPassBytecode.mix(
+            siteSeed ^ state.methodSalt(),
+            ((long) state.blockIndex() << 32) ^ state.state()
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rawBaseLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, noiseLocal));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E5354424E41L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 3));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E5354424E42L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, noiseLocal));
+        JvmPassBytecode.pushInt(insns, shift(seed, 17));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E5354424E43L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRuntimeMaterialDecode(
+        InsnList insns,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int rawBaseLocal,
+        int noiseLocal
+    ) {
+        emitRuntimeBoundConstantBase(insns, siteSeed, state, rawBaseLocal, noiseLocal);
+        emitInlineMaterialWordFromTop(
+            insns,
+            (int) siteSeed,
+            MATERIAL_XOR_A,
+            MATERIAL_XOR_B,
+            MATERIAL_XOR_C,
+            MATERIAL_XOR_D,
+            11
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeBoundConstantBase(insns, siteSeed, state, rawBaseLocal, noiseLocal);
+        emitInlineMaterialWordFromTop(
+            insns,
+            (int) siteSeed,
+            MATERIAL_ADD_A,
+            MATERIAL_ADD_B,
+            MATERIAL_ADD_C,
+            MATERIAL_ADD_D,
+            17
+        );
+        insns.add(new InsnNode(Opcodes.ISUB));
+        emitRotateRightTop(insns, MATERIAL_ROTATE);
+        emitRuntimeBoundConstantBase(insns, siteSeed, state, rawBaseLocal, noiseLocal);
+        emitInlineMaterialWordFromTop(
+            insns,
+            (int) siteSeed,
+            MATERIAL_WORD_A,
+            MATERIAL_WORD_B,
+            MATERIAL_WORD_C,
+            MATERIAL_WORD_D,
+            13
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitInlineMaterialWordFromTop(
+        InsnList insns,
+        int seed,
+        int mixA,
+        int mixB,
+        int mixC,
+        int mixD,
+        int shift
+    ) {
+        JvmPassBytecode.pushInt(insns, seed ^ mixA);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, (seed ^ mixB) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, seed * mixC + mixD);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitHelperMaterialWordFromTop(
+        InsnList insns,
+        int seedLocal,
+        int mixA,
+        int mixB,
+        int mixC,
+        int mixD,
+        int shift
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, seedLocal));
+        JvmPassBytecode.pushInt(insns, mixA);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, seedLocal));
+        JvmPassBytecode.pushInt(insns, mixB);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, seedLocal));
+        JvmPassBytecode.pushInt(insns, mixC);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, mixD);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRotateLeftTop(InsnList insns, int distance) {
+        int shift = distance & 31;
+        if (shift == 0) return;
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        insns.add(new InsnNode(Opcodes.SWAP));
+        JvmPassBytecode.pushInt(insns, 32 - shift);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IOR));
+    }
+
+    private void emitRotateRightTop(InsnList insns, int distance) {
+        int shift = distance & 31;
+        if (shift == 0) return;
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.SWAP));
+        JvmPassBytecode.pushInt(insns, 32 - shift);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        insns.add(new InsnNode(Opcodes.IOR));
+    }
+
+    private void emitConstantMaterialNoise(
+        InsnList insns,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        long seed = JvmPassBytecode.mix(siteSeed, state.methodSalt() ^ state.state());
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E53544D4E41L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 9));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E53544D4E42L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E53544D4E43L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 23));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
+        insns.add(new InsnNode(Opcodes.IXOR));
     }
 
     private void emitConstantBaseDataMultiplier(
@@ -851,13 +1104,11 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         String name = uniqueMethodName(clazz, "__neko_num_i");
         int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         access |= (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0 ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
-        MethodNode helper = new MethodNode(access, name, "(IIII)I", null, null);
-        emitHelperSiteMask(helper.instructions);
-        helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, 1));
-        helper.instructions.add(new InsnNode(Opcodes.IXOR));
+        MethodNode helper = new MethodNode(access, name, "(III)I", null, null);
+        emitHelperMaterialDecode(helper.instructions);
         helper.instructions.add(new InsnNode(Opcodes.IRETURN));
-        helper.maxLocals = 6;
-        helper.maxStack = 6;
+        helper.maxLocals = 4;
+        helper.maxStack = 8;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
         clazz.markDirty();
@@ -865,36 +1116,41 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         return name;
     }
 
-    private void emitHelperSiteMask(InsnList insns) {
-        int xLocal = 4;
+    private void emitHelperMaterialDecode(InsnList insns) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 1));
         insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
-        emitOddIntInverse(insns, 3, 5);
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 2));
-        JvmPassBytecode.pushInt(insns, SITE_MIX_A);
+        emitHelperMaterialWordFromTop(
+            insns,
+            2,
+            MATERIAL_XOR_A,
+            MATERIAL_XOR_B,
+            MATERIAL_XOR_C,
+            MATERIAL_XOR_D,
+            11
+        );
         insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
-        JvmPassBytecode.pushInt(insns, 16);
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 2));
-        JvmPassBytecode.pushInt(insns, SITE_MIX_B);
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new InsnNode(Opcodes.ICONST_1));
-        insns.add(new InsnNode(Opcodes.IOR));
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 2));
-        JvmPassBytecode.pushInt(insns, SITE_MIX_C);
-        insns.add(new InsnNode(Opcodes.IMUL));
-        JvmPassBytecode.pushInt(insns, SITE_MIX_D);
-        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        emitHelperMaterialWordFromTop(
+            insns,
+            2,
+            MATERIAL_ADD_A,
+            MATERIAL_ADD_B,
+            MATERIAL_ADD_C,
+            MATERIAL_ADD_D,
+            17
+        );
+        insns.add(new InsnNode(Opcodes.ISUB));
+        emitRotateRightTop(insns, MATERIAL_ROTATE);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        emitHelperMaterialWordFromTop(
+            insns,
+            2,
+            MATERIAL_WORD_A,
+            MATERIAL_WORD_B,
+            MATERIAL_WORD_C,
+            MATERIAL_WORD_D,
+            13
+        );
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
