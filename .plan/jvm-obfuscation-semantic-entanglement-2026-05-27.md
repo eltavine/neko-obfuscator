@@ -612,7 +612,7 @@ For every implementation row below:
   checking the current diff, validation evidence, `JarOutput.java` cleanliness,
   and the recorded `TEST/full-no-const-string` residual diagnostic caveat.
 
-### [ ] JSE-13: Migrate static numeric material
+### [x] JSE-13: Migrate static numeric material
 
 - Scope: migrate static numeric decode material that has no CFF metadata,
   including moved `ConstantValue` initialization. Static paths must use multiple
@@ -620,6 +620,21 @@ For every implementation row below:
   direct `ldc`; they must not claim live CFF binding where no CFF state exists.
 - Required evidence: ASM audit proves static numeric material no longer appears
   as one large direct constant and does not use descriptor-only recomputation.
+  Baseline artifact inspection on
+  `build/tmp/neko-test-constants/constant-shapes-obf.jar` before this row
+  showed the moved static assignments still using direct large material in
+  `<clinit>`, including `STATIC_INT` at bytecode offsets `5828`/`5831`,
+  `STATIC_LONG` at `5838`/`5841`/`5849`/`5852` plus a direct
+  `4294967295l` mask at `5857`, `STATIC_FLOAT` at `5865`/`5868`, and
+  `STATIC_DOUBLE` at `5878`/`5881`/`5889`/`5892` plus the same direct long
+  mask at `5897`. During validation, `full-no-indy` exposed a separate
+  generic ordering invariant: `a/e` maps to
+  `pack/tests/basics/cross/Inte`, an interface with no fields, and
+  `moveNumericConstantValues` required a CFF class key table before proving the
+  class contained any static numeric `ConstantValue`. The repair keeps the hard
+  CFF-table requirement for real static numeric material, but first filters the
+  actual numeric fields and returns immediately for classes without that
+  material.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Static/ASM audit: `JvmConstantObfuscationIntegrationTest` must run
@@ -629,7 +644,32 @@ For every implementation row below:
   `javap -J-XX:-UsePerfData -classpath build/tmp/neko-test-constants/constant-shapes-obf.jar -c -v ConstantShapes | rg -n "ldc(_w|2_w)?[[:space:]]+#.*// (int|long)"`.
 - Completion criteria: constant and full-JVM tests pass; protected constants
   remain live-derived, static constants are split, and no plaintext numeric
-  payload or helper fallback is introduced.
+  payload or helper fallback is introduced. Fresh validation ran
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest`
+  successfully, then ran
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`
+  successfully with `tests="2" skipped="0" failures="0" errors="0"` in
+  `TEST-dev.nekoobfuscator.test.JvmFullObfuscationPerfTest.xml`. The full-JVM
+  performance report captured at `2026-05-27T17:28:15.099909314Z` records
+  `TEST` output bytes `1160842`, `TEST` largest method
+  `a/ta.e([Ljava/lang/Object;)V estimatedBytes=61816`, and helper descriptor
+  counts still including protected numeric helper surfaces
+  `([IIIIIIJ)V=106`, `([IIII)I=115`, and `([IIII)J=3`. The ablation report
+  captured at `2026-05-27T17:29:50.123574060Z` records `TEST/full` as
+  `validRunCount=3`, `Calc` median `329 ms`, and `obfusjack/full` as
+  `validRunCount=3`; the diagnostic `TEST/full-no-const-string` row still has
+  the pre-existing one-run missing `Test 1.6: Pool PASS` marker and is not used
+  to claim every diagnostic row is 3/3. Direct static-window inspection of the
+  regenerated constant fixture shows `STATIC_INT`, `STATIC_LONG`,
+  `STATIC_FLOAT`, and `STATIC_DOUBLE` assigned at offsets `5928`, `6147`,
+  `6254`, and `6475`; each window loads the class `Object[]` carrier, selects
+  the class key-word slot, casts to `[I`, performs `IALOAD`, and reassembles
+  split `sipush` fragments with `ISHL`/`IAND`/`IOR`. Long/double windows use
+  `iconst_m1; i2l; bipush 32; lushr` rather than direct `4294967295l`. The
+  required implementation review returned PASS and confirmed the production
+  diff is generic, keeps the missing-table hard failure for actual static
+  numeric material, introduces no fallback or skip path, and preserves the
+  recorded residual diagnostic caveat.
 
 ### [ ] JSE-14: Replace fixed string key material model
 

@@ -109,6 +109,10 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         if (!(ctx instanceof PipelineContext pctx)) return;
         lowerStringConstantValuesForStringPass(pctx);
         prepareClassKeyTables(pctx);
+        L1Class clazz = pctx.currentL1Class();
+        if (clazz != null && hasStaticNumericConstantValue(clazz)) {
+            ensureClassKeyTable(pctx, clazz);
+        }
     }
 
     @Override

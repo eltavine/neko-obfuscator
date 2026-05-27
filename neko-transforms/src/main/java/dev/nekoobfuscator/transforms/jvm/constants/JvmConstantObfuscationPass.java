@@ -84,6 +84,10 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     private static final long DERIVED_INT_NOISE_A = 0x44494E544E4F4953L;
     private static final long DERIVED_INT_NOISE_B = 0x44494E544E4F4954L;
     private static final long DERIVED_INT_NOISE_C = 0x44494E544E4F4955L;
+    private static final long STATIC_NUMERIC_INDEX = 0x53544E554D494458L;
+    private static final long STATIC_NUMERIC_XOR = 0x53544E554D584F52L;
+    private static final long STATIC_NUMERIC_MUL = 0x53544E554D4D554CL;
+    private static final long STATIC_NUMERIC_ADD = 0x53544E554D414444L;
     private static final int COMPACT_HELPER_WORD_A = 0x56A3C49D;
     private static final int COMPACT_HELPER_WORD_B = 0x2D7E8B65;
     private static final int COMPACT_HELPER_WORD_C = 0x6B31A8F7;
@@ -595,9 +599,23 @@ public final class JvmConstantObfuscationPass implements TransformPass {
 
     private int moveNumericConstantValues(PipelineContext pctx, L1Class clazz) {
         if (clazz.asmNode().fields == null) return 0;
-        int moved = 0;
+        List<FieldNode> numericFields = new ArrayList<>();
         for (FieldNode field : clazz.asmNode().fields) {
-            if (field.value == null || !isNumericConstantValue(field)) continue;
+            if (field.value != null && isNumericConstantValue(field)) {
+                numericFields.add(field);
+            }
+        }
+        if (numericFields.isEmpty()) return 0;
+        ControlFlowFlatteningPass.CffClassKeyTable classKeyTable =
+            ControlFlowFlatteningPass.classKeyTable(pctx, clazz.name());
+        if (classKeyTable == null) {
+            throw new IllegalStateException(
+                "constantObfuscation requires CFF class key table for static numeric material in " +
+                    clazz.name()
+            );
+        }
+        int moved = 0;
+        for (FieldNode field : numericFields) {
             Object value = field.value;
             field.value = null;
             MethodNode clinit = findOrCreateClassInit(clazz);
@@ -606,7 +624,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 pctx.masterSeed() ^ 0x434F4E535456414CL,
                 (clazz.name() + "." + field.name + field.desc).hashCode()
             );
-            emitFieldValue(assignment, value, field.desc, seed);
+            emitFieldValue(assignment, value, field.desc, seed, classKeyTable);
             assignment.add(new FieldInsnNode(Opcodes.PUTSTATIC, clazz.name(), field.name, field.desc));
             JvmKeyDispatchPass.markGenerated(pctx, assignment);
             AbstractInsnNode returnInsn = firstReturn(clinit);
@@ -630,11 +648,22 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         };
     }
 
-    private void emitFieldValue(InsnList insns, Object value, String desc, long seed) {
+    private void emitFieldValue(
+        InsnList insns,
+        Object value,
+        String desc,
+        long seed,
+        ControlFlowFlatteningPass.CffClassKeyTable classKeyTable
+    ) {
         switch (desc) {
-            case "J" -> emitStaticDecodedLong(insns, ((Number) value).longValue(), seed);
+            case "J" -> emitStaticDecodedLong(insns, ((Number) value).longValue(), seed, classKeyTable);
             case "F" -> {
-                emitStaticDecodedInt(insns, Float.floatToRawIntBits(((Number) value).floatValue()), seed);
+                emitStaticDecodedInt(
+                    insns,
+                    Float.floatToRawIntBits(((Number) value).floatValue()),
+                    seed,
+                    classKeyTable
+                );
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Float",
@@ -644,7 +673,12 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 ));
             }
             case "D" -> {
-                emitStaticDecodedLong(insns, Double.doubleToRawLongBits(((Number) value).doubleValue()), seed);
+                emitStaticDecodedLong(
+                    insns,
+                    Double.doubleToRawLongBits(((Number) value).doubleValue()),
+                    seed,
+                    classKeyTable
+                );
                 insns.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
                     "java/lang/Double",
@@ -653,7 +687,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     false
                 ));
             }
-            default -> emitStaticDecodedInt(insns, ((Number) value).intValue(), seed);
+            default -> emitStaticDecodedInt(insns, ((Number) value).intValue(), seed, classKeyTable);
         }
     }
 
@@ -2805,23 +2839,112 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         return 1 + (int) ((seed >>> base) & 30L);
     }
 
-    private void emitStaticDecodedInt(InsnList insns, int value, long seed) {
-        int mask = nonZeroInt(JvmPassBytecode.mix(seed, 0x5354415449434B31L));
-        JvmPassBytecode.pushInt(insns, value ^ mask);
-        JvmPassBytecode.pushInt(insns, mask);
+    private void emitStaticDecodedInt(
+        InsnList insns,
+        int value,
+        long seed,
+        ControlFlowFlatteningPass.CffClassKeyTable classKeyTable
+    ) {
+        int material = staticCarrierDerivedWord(classKeyTable, seed);
+        emitStaticCarrierDerivedWord(insns, classKeyTable, seed);
+        emitStaticIntFragmented(insns, value ^ material);
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
-    private void emitStaticDecodedLong(InsnList insns, long value, long seed) {
-        emitStaticDecodedInt(insns, (int) (value >>> 32), seed ^ 0x484947484B31L);
+    private void emitStaticDecodedLong(
+        InsnList insns,
+        long value,
+        long seed,
+        ControlFlowFlatteningPass.CffClassKeyTable classKeyTable
+    ) {
+        emitStaticDecodedInt(insns, (int) (value >>> 32), seed ^ 0x484947484B31L, classKeyTable);
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LSHL));
-        emitStaticDecodedInt(insns, (int) value, seed ^ 0x4C4F574B31L);
+        emitStaticDecodedInt(insns, (int) value, seed ^ 0x4C4F574B31L, classKeyTable);
         insns.add(new InsnNode(Opcodes.I2L));
-        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        JvmPassBytecode.pushInt(insns, -1);
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
+    }
+
+    private void emitStaticCarrierDerivedWord(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffClassKeyTable classKeyTable,
+        long seed
+    ) {
+        emitStaticClassKeyWord(insns, classKeyTable, staticClassKeyIndex(classKeyTable, seed));
+        emitStaticWordMix(insns, seed);
+    }
+
+    private int staticCarrierDerivedWord(
+        ControlFlowFlatteningPass.CffClassKeyTable classKeyTable,
+        long seed
+    ) {
+        int x = classKeyTable.values()[staticClassKeyIndex(classKeyTable, seed)];
+        x ^= nonZeroInt(JvmPassBytecode.mix(seed, STATIC_NUMERIC_XOR));
+        x ^= x >>> shift(seed, 5);
+        x *= nonZeroInt(JvmPassBytecode.mix(seed, STATIC_NUMERIC_MUL)) | 1;
+        x += nonZeroInt(JvmPassBytecode.mix(seed, STATIC_NUMERIC_ADD));
+        x ^= x >>> shift(seed, 19);
+        return x;
+    }
+
+    private int staticClassKeyIndex(ControlFlowFlatteningPass.CffClassKeyTable classKeyTable, long seed) {
+        return (int) JvmPassBytecode.mix(seed, STATIC_NUMERIC_INDEX) &
+            (classKeyTable.values().length - 1);
+    }
+
+    private void emitStaticClassKeyWord(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffClassKeyTable classKeyTable,
+        int index
+    ) {
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            classKeyTable.owner(),
+            classKeyTable.objectFieldName(),
+            "[Ljava/lang/Object;"
+        ));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        JvmPassBytecode.pushInt(insns, index);
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        emitStaticIntFragmented(insns, ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitStaticWordMix(InsnList insns, long seed) {
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(seed, STATIC_NUMERIC_XOR)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 5));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(seed, STATIC_NUMERIC_MUL)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(seed, STATIC_NUMERIC_ADD)));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 19));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitStaticIntFragmented(InsnList insns, int value) {
+        JvmPassBytecode.pushInt(insns, (short) (value >>> 16));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        JvmPassBytecode.pushInt(insns, (short) value);
+        JvmPassBytecode.pushInt(insns, -1);
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IOR));
     }
 
     private ArrayConstantSite primitiveArrayConstantSite(

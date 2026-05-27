@@ -330,7 +330,7 @@ abstract class CffClassSetup extends CffSharedState {
         if (existing != null) return existing;
         TreeMap<String, L1Class> candidates = new TreeMap<>();
         for (L1Class clazz : pctx.classMap().values()) {
-            if (hasApplicationCode(pctx, clazz)) {
+            if (hasApplicationCode(pctx, clazz) || hasStaticNumericConstantValue(clazz)) {
                 candidates.put(clazz.name(), clazz);
             }
         }
@@ -385,6 +385,20 @@ abstract class CffClassSetup extends CffSharedState {
         CffClassIntegrityOrderMetadata created = new CffClassIntegrityOrderMetadata(ordered, classes);
         pctx.putPassData(CLASS_INTEGRITY_ORDER_METADATA, created);
         return created;
+    }
+
+    protected boolean hasStaticNumericConstantValue(L1Class clazz) {
+        if (clazz.asmNode().fields == null) return false;
+        for (FieldNode field : clazz.asmNode().fields) {
+            if ((field.access & Opcodes.ACC_STATIC) == 0 || !(field.value instanceof Number)) continue;
+            if (switch (field.desc) {
+                case "B", "C", "S", "I", "J", "F", "D" -> true;
+                default -> false;
+            }) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void addCallerBeforeReferencedDependencies(
@@ -4110,6 +4124,12 @@ abstract class CffClassSetup extends CffSharedState {
             ctx.putPassData(METHOD_METADATA, metadata);
         }
         return metadata;
+    }
+
+    @SuppressWarnings("unchecked")
+    public static CffClassKeyTable classKeyTable(TransformContext ctx, String owner) {
+        Map<String, CffClassKeyTable> tables = ctx.getPassData(CLASS_KEY_TABLES);
+        return tables == null ? null : tables.get(owner);
     }
 
     protected void publishMethodMetadata(

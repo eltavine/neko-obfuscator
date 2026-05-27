@@ -11,6 +11,7 @@ import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.InsnList;
@@ -18,6 +19,7 @@ import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.io.FileOutputStream;
@@ -123,6 +125,7 @@ public class JvmConstantObfuscationIntegrationTest {
         assertEquals(original, obfuscated);
         assertTrue(obfuscated.contains("CONSTANT SHAPES OK"), obfuscated);
         assertNumericConstantValuesMovedToClinit(outputJar);
+        assertStaticNumericMaterialIsFragmented(outputJar);
         assertFlowKeyDecodeUsed(outputJar);
         assertPrimitiveArrayPayloadsEncrypted(outputJar);
         assertConstantLiveWordConsumesDataDigest(outputJar);
@@ -156,6 +159,49 @@ public class JvmConstantObfuscationIntegrationTest {
                 assertEquals(null, field.value, "numeric ConstantValue remained on field " + field.name);
             }
         }
+    }
+
+    private void assertStaticNumericMaterialIsFragmented(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("ConstantShapes");
+        MethodNode clinit = null;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ("<clinit>".equals(method.name)) {
+                clinit = method;
+                break;
+            }
+        }
+        assertTrue(clinit != null && clinit.instructions != null, "constant fixture did not retain <clinit>");
+
+        AbstractInsnNode[] insns = clinit.instructions.toArray();
+        int checked = 0;
+        for (int i = 0; i < insns.length; i++) {
+            if (!(insns[i] instanceof FieldInsnNode put) ||
+                put.getOpcode() != Opcodes.PUTSTATIC ||
+                !"ConstantShapes".equals(put.owner) ||
+                !put.name.startsWith("STATIC_")) {
+                continue;
+            }
+            int start = previousStaticCarrierLoad(insns, i, 260);
+            assertTrue(start >= 0, "static numeric material did not load class carrier for " + put.name);
+            assertFalse(
+                hasDirectLargeStaticNumericMaterial(insns, start, i + 1),
+                "static numeric material retained direct large ldc for " + put.name
+            );
+            assertTrue(hasOpcode(insns, Opcodes.AALOAD, start, i), "static numeric material did not select carrier slot for " + put.name);
+            assertTrue(hasIntArrayCast(insns, start, i), "static numeric material did not cast carrier slot to [I for " + put.name);
+            assertTrue(hasOpcode(insns, Opcodes.IALOAD, start, i), "static numeric material did not read class key word for " + put.name);
+            assertTrue(hasOpcode(insns, Opcodes.ISHL, start, i), "static numeric material did not assemble high fragments for " + put.name);
+            assertTrue(hasOpcode(insns, Opcodes.IAND, start, i), "static numeric material did not mask low fragments for " + put.name);
+            assertTrue(hasOpcode(insns, Opcodes.IOR, start, i), "static numeric material did not rejoin fragments for " + put.name);
+            if ("J".equals(put.desc) || "D".equals(put.desc)) {
+                assertTrue(hasOpcode(insns, Opcodes.LSHL, start, i), "static long material did not shift high word for " + put.name);
+                assertTrue(hasOpcode(insns, Opcodes.LAND, start, i), "static long material did not mask low word for " + put.name);
+                assertTrue(hasOpcode(insns, Opcodes.LOR, start, i), "static long material did not join words for " + put.name);
+            }
+            checked++;
+        }
+        assertEquals(4, checked, "constant fixture did not check every static numeric field");
     }
 
     private void assertFlowKeyDecodeUsed(Path jar) throws Exception {
@@ -527,6 +573,48 @@ public class JvmConstantObfuscationIntegrationTest {
             return Double.doubleToRawLongBits(value);
         }
         return null;
+    }
+
+    private int previousStaticCarrierLoad(AbstractInsnNode[] insns, int fromExclusive, int maxDistance) {
+        int start = Math.max(0, fromExclusive - maxDistance);
+        int result = -1;
+        for (int i = start; i < fromExclusive; i++) {
+            if (insns[i] instanceof FieldInsnNode get &&
+                get.getOpcode() == Opcodes.GETSTATIC &&
+                "ConstantShapes".equals(get.owner) &&
+                "[Ljava/lang/Object;".equals(get.desc)) {
+                result = result < 0 ? i : result;
+            }
+        }
+        return result;
+    }
+
+    private boolean hasIntArrayCast(AbstractInsnNode[] insns, int startInclusive, int limitExclusive) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof TypeInsnNode cast &&
+                cast.getOpcode() == Opcodes.CHECKCAST &&
+                "[I".equals(cast.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasDirectLargeStaticNumericMaterial(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (!(insns[i] instanceof LdcInsnNode ldc) || !(ldc.cst instanceof Number value)) continue;
+            if (value instanceof Integer intValue &&
+                intValue >= Short.MIN_VALUE &&
+                intValue <= Short.MAX_VALUE) {
+                continue;
+            }
+            return true;
+        }
+        return false;
     }
 
     private AbstractInsnNode previousReal(AbstractInsnNode insn) {
