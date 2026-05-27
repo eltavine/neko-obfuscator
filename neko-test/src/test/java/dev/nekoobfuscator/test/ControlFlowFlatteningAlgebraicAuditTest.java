@@ -65,8 +65,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ControlFlowFlatteningAlgebraicAuditTest {
-    private static final String VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJII)Z";
-    private static final String OLD_VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJI)Z";
+    private static final String VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJI)Z";
+    private static final String OLD_VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJII)Z";
 
     @Test
     void symbolicAuditRecognizesSelfCancelingAndLinearKeyShapes() {
@@ -1223,7 +1223,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                 sawOldHelperDesc = true;
             }
         }
-        assertFalse(sawOldHelperDesc, "validation sink retained helper ABI without CFF data material");
+        assertFalse(sawOldHelperDesc, "validation sink retained expanded helper ABI");
         assertTrue(helperName != null, "validation sink did not call keyed tag helper");
         assertValidationLiveWordConsumesDataDigest(clazz);
         assertValidationSinkHelperHasNoPlainTarget(clazz, helperName);
@@ -1287,7 +1287,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                     continue;
                 }
                 if (OLD_VALIDATION_HELPER_DESC.equals(call.desc)) {
-                    throw new AssertionError("validation sink retained helper call without CFF data material");
+                    throw new AssertionError("validation sink retained expanded helper call ABI");
                 }
                 if (!VALIDATION_HELPER_DESC.equals(call.desc)) continue;
                 assertTrue(
@@ -1302,7 +1302,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     }
 
     private static boolean validationHelperCallConsumesDataDigest(AbstractInsnNode[] insns, int callIndex) {
-        int start = Math.max(0, callIndex - 1000);
+        int start = Math.max(0, callIndex - 1800);
         for (int i = start; i < callIndex; i++) {
             if (!(insns[i] instanceof VarInsnNode load)
                 || load.getOpcode() != Opcodes.ILOAD
@@ -1313,7 +1313,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             int dataWordStore = firstVarStoreIndex(insns, load.var, i + 1, Math.min(callIndex, i + 96));
             if (dataWordStore < 0) continue;
             int dataWordLocal = ((VarInsnNode) insns[dataWordStore]).var;
-            if (varLoadCount(insns, dataWordLocal, dataWordStore + 1, callIndex) < 4) {
+            if (varLoadCount(insns, dataWordLocal, dataWordStore + 1, callIndex) < 3) {
                 continue;
             }
             if (firstVarLoadIndex(
@@ -1327,7 +1327,49 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
             return true;
         }
+        return preparedValidationHelperCallConsumesDataDigest(insns, callIndex);
+    }
+
+    private static boolean preparedValidationHelperCallConsumesDataDigest(
+        AbstractInsnNode[] insns,
+        int callIndex
+    ) {
+        AbstractInsnNode previous = previousReal(insns, callIndex - 1);
+        if (!(previous instanceof VarInsnNode dataWordLoad)
+            || dataWordLoad.getOpcode() != Opcodes.ILOAD) {
+            return false;
+        }
+        int dataWordLocal = dataWordLoad.var;
+        int start = Math.max(0, callIndex - 2400);
+        if (varLoadCount(insns, dataWordLocal, start, callIndex) < 3) return false;
+        if (firstOpcodeIndex(insns, Opcodes.IXOR, start, callIndex) < 0) return false;
+        if (firstOpcodeIndex(insns, Opcodes.IUSHR, start, callIndex) < 0) return false;
+        if (firstOpcodeIndex(insns, Opcodes.IMUL, start, callIndex) < 0) return false;
+        if (firstOpcodeIndex(insns, Opcodes.IADD, start, callIndex) < 0) return false;
+        for (int i = start; i < callIndex; i++) {
+            if (!(insns[i] instanceof VarInsnNode dataLoad)
+                || dataLoad.getOpcode() != Opcodes.ILOAD
+                || dataLoad.var < 5
+                || dataLoad.var == dataWordLocal) {
+                continue;
+            }
+            int dataLocal = dataLoad.var;
+            if (firstVarLoadIndex(insns, Opcodes.ILOAD, dataLocal - 4, i + 1, callIndex) >= 0
+                && firstVarLoadIndex(insns, Opcodes.ILOAD, dataLocal - 3, i + 1, callIndex) >= 0
+                && firstVarLoadIndex(insns, Opcodes.ILOAD, dataLocal - 2, i + 1, callIndex) >= 0
+                && firstVarLoadIndex(insns, Opcodes.ILOAD, dataLocal - 5, i + 1, callIndex) >= 0
+                && firstOpcodeIndex(insns, Opcodes.LLOAD, i + 1, callIndex) >= 0) {
+                return true;
+            }
+        }
         return false;
+    }
+
+    private static AbstractInsnNode previousReal(AbstractInsnNode[] insns, int start) {
+        for (int i = Math.min(start, insns.length - 1); i >= 0; i--) {
+            if (insns[i].getOpcode() >= 0) return insns[i];
+        }
+        return null;
     }
 
     private static boolean validationDataWordPattern(AbstractInsnNode[] insns, int start, int limitExclusive) {

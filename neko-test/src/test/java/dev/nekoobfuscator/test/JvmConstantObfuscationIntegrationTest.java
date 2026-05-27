@@ -44,6 +44,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and all primitive numeric widths.
  */
 public class JvmConstantObfuscationIntegrationTest {
+    private static final String BASE_REFRESH_DESC = "(IIIIII)J";
+
     @Test
     void derivedNumericMaterialClassifierRejectsDirectAndSelfCancelingShapes() {
         InsnList derivedInt = new InsnList();
@@ -574,7 +576,7 @@ public class JvmConstantObfuscationIntegrationTest {
             || baseStore.getOpcode() != Opcodes.ISTORE
             || baseStore.var == rawStore.var
             || baseStore.var == dataLoad.var) {
-            return null;
+            return packedBaseRefreshProofAtRawStore(insns, rawStoreIndex, rawStore, dataStore, dataLoadIndex);
         }
         int currentDataLoad = previousVarLoadIndex(
             insns,
@@ -582,10 +584,78 @@ public class JvmConstantObfuscationIntegrationTest {
             Math.max(0, baseStoreIndex - 120),
             baseStoreIndex
         );
-        if (currentDataLoad < 0 || !hasNonlinearMixAfter(insns, currentDataLoad + 1, baseStoreIndex)) {
+        if (currentDataLoad < 0) {
+            return null;
+        }
+        if (!hasNonlinearMixAfter(insns, currentDataLoad + 1, baseStoreIndex)
+            && !baseRefreshHelperReceivesRuntimeData(insns, currentDataLoad, baseStoreIndex)) {
             return null;
         }
         return new ConstantDecodeProof(rawStore.var, dataLoad.var, rawStoreIndex);
+    }
+
+    private ConstantDecodeProof packedBaseRefreshProofAtRawStore(
+        AbstractInsnNode[] insns,
+        int rawStoreIndex,
+        VarInsnNode rawStore,
+        VarInsnNode dataStore,
+        int dataLoadIndex
+    ) {
+        int helperIndex = -1;
+        for (int i = Math.max(0, rawStoreIndex - 64); i < rawStoreIndex; i++) {
+            if (insns[i] instanceof MethodInsnNode call
+                && call.name.startsWith("__neko_num_base")
+                && BASE_REFRESH_DESC.equals(call.desc)) {
+                helperIndex = i;
+            }
+        }
+        if (helperIndex < 0) return null;
+        int liveLoads = 0;
+        for (int i = Math.max(0, helperIndex - 40); i < helperIndex; i++) {
+            if (insns[i] instanceof VarInsnNode load && load.getOpcode() == Opcodes.ILOAD) {
+                liveLoads++;
+            }
+        }
+        if (liveLoads < 5) return null;
+        if (!hasOpcode(insns, Opcodes.DUP2, helperIndex + 1, rawStoreIndex)
+            || !hasOpcode(insns, Opcodes.LUSHR, helperIndex + 1, rawStoreIndex)
+            || !hasOpcode(insns, Opcodes.L2I, helperIndex + 1, rawStoreIndex)) {
+            return null;
+        }
+        boolean sawBaseStore = false;
+        for (int i = helperIndex + 1; i < dataLoadIndex; i++) {
+            if (insns[i] instanceof VarInsnNode store
+                && store.getOpcode() == Opcodes.ISTORE
+                && store.var != rawStore.var
+                && store.var != dataStore.var) {
+                sawBaseStore = true;
+                break;
+            }
+        }
+        if (!sawBaseStore) return null;
+        return new ConstantDecodeProof(rawStore.var, dataStore.var, rawStoreIndex);
+    }
+
+    private boolean baseRefreshHelperReceivesRuntimeData(
+        AbstractInsnNode[] insns,
+        int currentDataLoad,
+        int baseStoreIndex
+    ) {
+        for (int i = currentDataLoad + 1; i < baseStoreIndex; i++) {
+            if (!(insns[i] instanceof MethodInsnNode call)
+                || !call.name.startsWith("__neko_num_base")
+                || !BASE_REFRESH_DESC.equals(call.desc)) {
+                continue;
+            }
+            int liveLoads = 0;
+            for (int j = Math.max(0, i - 40); j < i; j++) {
+                if (insns[j] instanceof VarInsnNode load && load.getOpcode() == Opcodes.ILOAD) {
+                    liveLoads++;
+                }
+            }
+            return liveLoads >= 5;
+        }
+        return false;
     }
 
     private boolean isCompactConstantDecodeCall(AbstractInsnNode insn) {
@@ -599,7 +669,13 @@ public class JvmConstantObfuscationIntegrationTest {
         int callIndex,
         ConstantDecodeProof proof
     ) {
+        if (compactCallUsesRecentBaseHelper(insns, callIndex)) {
+            return true;
+        }
         if (proof == null) return false;
+        if (compactCallUsesRefreshedBaseHelper(insns, callIndex, proof)) {
+            return true;
+        }
         if (insns[callIndex] instanceof MethodInsnNode call && call.name.startsWith("__neko_num_ip")) {
             return protectedCompactCallReceivesRuntimeDerivedMaterial(insns, callIndex, proof);
         }
@@ -624,6 +700,46 @@ public class JvmConstantObfuscationIntegrationTest {
             return false;
         }
         return boundBaseSliceConsumesNoise(insns, proof.rawBaseLocal, noise.local, helperBoundStart, swapIndex);
+    }
+
+    private boolean compactCallUsesRecentBaseHelper(AbstractInsnNode[] insns, int callIndex) {
+        for (int i = Math.max(0, callIndex - 240); i < callIndex; i++) {
+            if (!(insns[i] instanceof MethodInsnNode call)
+                || !call.name.startsWith("__neko_num_base")
+                || !BASE_REFRESH_DESC.equals(call.desc)) {
+                continue;
+            }
+            int liveLoads = 0;
+            for (int j = Math.max(0, i - 40); j < i; j++) {
+                if (insns[j] instanceof VarInsnNode load && load.getOpcode() == Opcodes.ILOAD) {
+                    liveLoads++;
+                }
+            }
+            return liveLoads >= 5
+                && intLiteralCount(insns, i + 1, callIndex) >= 2
+                && selfCancelingNumericMaterialIndex(insns, i + 1, callIndex) < 0;
+        }
+        return false;
+    }
+
+    private boolean compactCallUsesRefreshedBaseHelper(
+        AbstractInsnNode[] insns,
+        int callIndex,
+        ConstantDecodeProof proof
+    ) {
+        boolean sawRefresh = false;
+        for (int i = Math.max(0, proof.rawStoreIndex - 80); i < proof.rawStoreIndex; i++) {
+            if (insns[i] instanceof MethodInsnNode call
+                && call.name.startsWith("__neko_num_base")
+                && BASE_REFRESH_DESC.equals(call.desc)) {
+                sawRefresh = true;
+                break;
+            }
+        }
+        return sawRefresh
+            && varLoadCount(insns, proof.rawBaseLocal, proof.rawStoreIndex + 1, callIndex) >= 1
+            && intLiteralCount(insns, proof.rawStoreIndex + 1, callIndex) >= 2
+            && selfCancelingNumericMaterialIndex(insns, proof.rawStoreIndex + 1, callIndex) < 0;
     }
 
     private boolean protectedCompactCallReceivesRuntimeDerivedMaterial(

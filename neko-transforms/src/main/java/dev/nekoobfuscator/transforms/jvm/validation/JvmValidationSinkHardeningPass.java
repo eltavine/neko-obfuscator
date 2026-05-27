@@ -12,6 +12,7 @@ import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -36,11 +37,12 @@ import org.objectweb.asm.tree.VarInsnNode;
 public final class JvmValidationSinkHardeningPass implements TransformPass {
     public static final String ID = "validationSinkHardening";
     private static final String HELPERS = "validationSinkHardening.helpers";
+    private static final String PLACEHOLDERS = "validationSinkHardening.placeholders";
     private static final String VARIANT_COUNTERS = "validationSinkHardening.variantCounters";
     private static final long TAG_MUL = 0x100000001B3L;
     private static final long TAG_ADD = 0x9E3779B97F4A7C15L;
     private static final long LIVE_MASK_LOW_DOMAIN = 0x5653484D41534B32L;
-    private static final String HELPER_DESC = "(Ljava/lang/String;JJII)Z";
+    private static final String HELPER_DESC = "(Ljava/lang/String;JJI)Z";
     private static final int VARIANT_COUNT = 2;
 
     @Override
@@ -75,16 +77,129 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     @Override
     public void transformMethod(TransformContext ctx) {
         if (!(ctx instanceof PipelineContext pctx)) return;
-        L1Class clazz = pctx.currentL1Class();
-        L1Method method = pctx.currentL1Method();
-        if (clazz == null || method == null || !method.hasCode()) return;
-        if (TransformGuards.isRuntimeClass(clazz)) return;
-        if (TransformGuards.isGeneratedMethod(method)) return;
+        hardenPreparedPlaceholders(pctx, pctx.currentL1Class(), pctx.currentL1Method());
+        hardenMethod(pctx, pctx.currentL1Class(), pctx.currentL1Method());
+    }
+
+    public static boolean preparePlaceholders(PipelineContext pctx, L1Class clazz, L1Method method) {
+        return new JvmValidationSinkHardeningPass().preparePlaceholdersInternal(pctx, clazz, method);
+    }
+
+    public static boolean hardenPreparedPlaceholders(PipelineContext pctx, L1Class clazz, L1Method method) {
+        return new JvmValidationSinkHardeningPass().hardenPreparedPlaceholdersInternal(pctx, clazz, method);
+    }
+
+    public static boolean hardenMethod(PipelineContext pctx, L1Class clazz, L1Method method) {
+        return new JvmValidationSinkHardeningPass().hardenMethodInternal(pctx, clazz, method);
+    }
+
+    private boolean preparePlaceholdersInternal(PipelineContext pctx, L1Class clazz, L1Method method) {
+        if (clazz == null || method == null || !method.hasCode()) return false;
+        if (TransformGuards.isRuntimeClass(clazz)) return false;
+        if (TransformGuards.isGeneratedMethod(method)) return false;
+
+        MethodNode mn = method.asmNode();
+        int transformed = 0;
+        Map<MethodInsnNode, ValidationPlaceholder> placeholders = placeholders(pctx);
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (!isStringEquals(insn)) continue;
+            AbstractInsnNode previous = previousReal(insn.getPrevious());
+            if (!(previous instanceof LdcInsnNode ldc) || !(ldc.cst instanceof String target)) continue;
+            MethodInsnNode placeholder = new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                "java/util/Objects",
+                "nonNull",
+                "(Ljava/lang/Object;)Z",
+                false
+            );
+            mn.instructions.insertBefore(previous, placeholder);
+            mn.instructions.remove(previous);
+            mn.instructions.remove(insn);
+            placeholders.put(placeholder, new ValidationPlaceholder(target, transformed++));
+        }
+        if (transformed == 0) return false;
+        clazz.markDirty();
+        pctx.invalidate(method);
+        return true;
+    }
+
+    private boolean hardenPreparedPlaceholdersInternal(PipelineContext pctx, L1Class clazz, L1Method method) {
+        Map<MethodInsnNode, ValidationPlaceholder> placeholders = placeholders(pctx);
+        if (placeholders.isEmpty()) return false;
+        if (clazz == null || method == null || !method.hasCode()) return false;
+        if (TransformGuards.isRuntimeClass(clazz)) return false;
+        if (TransformGuards.isGeneratedMethod(method)) return false;
 
         String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
         ControlFlowFlatteningPass.CffMethodMetadata metadata =
             ControlFlowFlatteningPass.methodMetadata(pctx).get(methodKey);
-        if (metadata == null || metadata.classKeyTable() == null) return;
+        if (metadata == null || metadata.classKeyTable() == null) return false;
+
+        MethodNode mn = method.asmNode();
+        int transformed = 0;
+        int receiverLocal = -1;
+        int liveMaskHighLocal = -1;
+        int seedArgLocal = -1;
+        int expectedArgLocal = -1;
+        int dataWordArgLocal = -1;
+        for (AbstractInsnNode insn : mn.instructions.toArray()) {
+            if (!(insn instanceof MethodInsnNode placeholderCall)) continue;
+            ValidationPlaceholder placeholder = placeholders.get(placeholderCall);
+            if (placeholder == null) continue;
+            if (!metadata.applicationInstructions().contains(placeholderCall)) {
+                throw new IllegalStateException(
+                    "validationSinkHardening placeholder lost CFF application state for " + methodKey
+                );
+            }
+            ControlFlowFlatteningPass.CffInstructionState state =
+                metadata.instructionStates().get(placeholderCall);
+            if (state == null) {
+                throw new IllegalStateException(
+                    "validationSinkHardening cannot bind placeholder CFF state for " + methodKey
+                );
+            }
+            if (liveMaskHighLocal < 0) {
+                receiverLocal = mn.maxLocals++;
+                liveMaskHighLocal = mn.maxLocals++;
+                seedArgLocal = mn.maxLocals;
+                mn.maxLocals += 2;
+                expectedArgLocal = mn.maxLocals;
+                mn.maxLocals += 2;
+                dataWordArgLocal = mn.maxLocals++;
+            }
+            long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, placeholder.ordinal());
+            insertReplacement(
+                pctx,
+                clazz,
+                method,
+                metadata,
+                state,
+                placeholder.target(),
+                siteSeed,
+                placeholderCall,
+                receiverLocal,
+                liveMaskHighLocal,
+                seedArgLocal,
+                expectedArgLocal,
+                dataWordArgLocal
+            );
+            placeholders.remove(placeholderCall);
+            transformed++;
+        }
+        if (transformed == 0) return false;
+        markCoverage(pctx, clazz, method, transformed);
+        return true;
+    }
+
+    private boolean hardenMethodInternal(PipelineContext pctx, L1Class clazz, L1Method method) {
+        if (clazz == null || method == null || !method.hasCode()) return false;
+        if (TransformGuards.isRuntimeClass(clazz)) return false;
+        if (TransformGuards.isGeneratedMethod(method)) return false;
+
+        String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
+        ControlFlowFlatteningPass.CffMethodMetadata metadata =
+            ControlFlowFlatteningPass.methodMetadata(pctx).get(methodKey);
+        if (metadata == null || metadata.classKeyTable() == null) return false;
 
         MethodNode mn = method.asmNode();
         int transformed = 0;
@@ -93,7 +208,6 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         int liveMaskHighLocal = -1;
         int seedArgLocal = -1;
         int expectedArgLocal = -1;
-        int lengthArgLocal = -1;
         int dataWordArgLocal = -1;
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!isStringEquals(insn)) continue;
@@ -115,9 +229,6 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
             }
             int siteOrdinal = ordinal++;
             long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, siteOrdinal);
-            int variant = nextVariant(pctx, clazz);
-            String helperName = ensureHelper(pctx, clazz, variant);
-            long seedValue = tagSeed(target, siteSeed, variant);
             if (liveMaskHighLocal < 0) {
                 receiverLocal = mn.maxLocals++;
                 liveMaskHighLocal = mn.maxLocals++;
@@ -125,55 +236,101 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
                 mn.maxLocals += 2;
                 expectedArgLocal = mn.maxLocals;
                 mn.maxLocals += 2;
-                lengthArgLocal = mn.maxLocals++;
                 dataWordArgLocal = mn.maxLocals++;
             }
-            InsnList replacement = new InsnList();
-            replacement.add(new VarInsnNode(Opcodes.ASTORE, receiverLocal));
-            emitValidationDataWord(replacement, metadata, state, siteSeed);
-            replacement.add(new VarInsnNode(Opcodes.ISTORE, dataWordArgLocal));
-            emitDecodedLong(replacement, metadata, state, siteSeed, liveMaskHighLocal, dataWordArgLocal,
-                0x5653485345454431L,
-                seedValue);
-            replacement.add(new VarInsnNode(Opcodes.LSTORE, seedArgLocal));
-            emitDecodedLong(replacement, metadata, state, siteSeed, liveMaskHighLocal, dataWordArgLocal,
-                0x5653485441473031L,
-                tag(target, seedValue, variant));
-            replacement.add(new VarInsnNode(Opcodes.LSTORE, expectedArgLocal));
-            emitDecodedInt(replacement, metadata, state, siteSeed, liveMaskHighLocal, dataWordArgLocal,
-                0x5653484C454E3031L,
-                target.length());
-            replacement.add(new VarInsnNode(Opcodes.ISTORE, lengthArgLocal));
-            replacement.add(new VarInsnNode(Opcodes.ALOAD, receiverLocal));
-            replacement.add(new VarInsnNode(Opcodes.LLOAD, seedArgLocal));
-            replacement.add(new VarInsnNode(Opcodes.LLOAD, expectedArgLocal));
-            replacement.add(new VarInsnNode(Opcodes.ILOAD, lengthArgLocal));
-            replacement.add(new VarInsnNode(Opcodes.ILOAD, dataWordArgLocal));
-            replacement.add(new MethodInsnNode(
-                Opcodes.INVOKESTATIC,
-                clazz.name(),
-                helperName,
-                HELPER_DESC,
-                clazz.isInterface()
-            ));
-            mn.instructions.insertBefore(previous, replacement);
+            insertReplacement(
+                pctx,
+                clazz,
+                method,
+                metadata,
+                state,
+                target,
+                siteSeed,
+                insn,
+                receiverLocal,
+                liveMaskHighLocal,
+                seedArgLocal,
+                expectedArgLocal,
+                dataWordArgLocal
+            );
             mn.instructions.remove(previous);
-            mn.instructions.remove(insn);
             transformed++;
         }
 
         if (transformed > 0) {
-            mn.maxStack = Math.max(mn.maxStack, 24);
-            clazz.markDirty();
-            pctx.invalidate(method);
-            JvmObfuscationCoverage.get(ctx).full(
-                id(),
-                clazz.name(),
-                method.name(),
-                method.descriptor(),
-                "cff-keyed-string-validation-sinks-" + transformed
-            );
+            markCoverage(pctx, clazz, method, transformed);
+            return true;
         }
+        return false;
+    }
+
+    private void insertReplacement(
+        PipelineContext pctx,
+        L1Class clazz,
+        L1Method method,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        String target,
+        long siteSeed,
+        AbstractInsnNode anchor,
+        int receiverLocal,
+        int liveMaskHighLocal,
+        int seedArgLocal,
+        int expectedArgLocal,
+        int dataWordArgLocal
+    ) {
+        int variant = nextVariant(pctx, clazz);
+        String helperName = ensureHelper(pctx, clazz, variant);
+        long seedValue = tagSeed(target, siteSeed, variant);
+        InsnList replacement = new InsnList();
+        replacement.add(new VarInsnNode(Opcodes.ASTORE, receiverLocal));
+        emitValidationDataWord(replacement, metadata, state, siteSeed);
+        replacement.add(new VarInsnNode(Opcodes.ISTORE, dataWordArgLocal));
+        emitDecodedLong(replacement, metadata, state, siteSeed, liveMaskHighLocal, dataWordArgLocal,
+            0x5653485345454431L,
+            seedValue);
+        replacement.add(new VarInsnNode(Opcodes.LSTORE, seedArgLocal));
+        emitDecodedLong(replacement, metadata, state, siteSeed, liveMaskHighLocal, dataWordArgLocal,
+            0x5653485441473031L,
+            tag(target, seedValue, variant));
+        replacement.add(new VarInsnNode(Opcodes.LSTORE, expectedArgLocal));
+        replacement.add(new VarInsnNode(Opcodes.ALOAD, receiverLocal));
+        replacement.add(new VarInsnNode(Opcodes.LLOAD, seedArgLocal));
+        replacement.add(new VarInsnNode(Opcodes.LLOAD, expectedArgLocal));
+        replacement.add(new VarInsnNode(Opcodes.ILOAD, dataWordArgLocal));
+        replacement.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            clazz.name(),
+            helperName,
+            HELPER_DESC,
+            clazz.isInterface()
+        ));
+        JvmKeyDispatchPass.markGenerated(pctx, replacement);
+        method.asmNode().instructions.insertBefore(anchor, replacement);
+        method.asmNode().instructions.remove(anchor);
+        method.asmNode().maxStack = Math.max(method.asmNode().maxStack, 24);
+        clazz.markDirty();
+        pctx.invalidate(method);
+    }
+
+    private void markCoverage(PipelineContext pctx, L1Class clazz, L1Method method, int transformed) {
+        JvmObfuscationCoverage.get(pctx).full(
+            ID,
+            clazz.name(),
+            method.name(),
+            method.descriptor(),
+            "cff-keyed-string-validation-sinks-" + transformed
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<MethodInsnNode, ValidationPlaceholder> placeholders(PipelineContext pctx) {
+        Map<MethodInsnNode, ValidationPlaceholder> placeholders = pctx.getPassData(PLACEHOLDERS);
+        if (placeholders == null) {
+            placeholders = new IdentityHashMap<>();
+            pctx.putPassData(PLACEHOLDERS, placeholders);
+        }
+        return placeholders;
     }
 
     private boolean isStringEquals(AbstractInsnNode insn) {
@@ -220,19 +377,17 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         int stringLocal = 0;
         int seedLocal = 1;
         int expectedLocal = 3;
-        int lengthLocal = 5;
-        int dataWordLocal = 6;
+        int dataWordLocal = 5;
+        int lengthLocal = 6;
         int indexLocal = 7;
         int hashLocal = 8;
         int charLocal = 10;
-        LabelNode lengthOk = new LabelNode();
         LabelNode loop = new LabelNode();
         LabelNode done = new LabelNode();
         LabelNode match = new LabelNode();
 
         emitDecodeLongArgument(insns, seedLocal, dataWordLocal, 0x5653485345454431L);
         emitDecodeLongArgument(insns, expectedLocal, dataWordLocal, 0x5653485441473031L);
-        emitDecodeIntArgument(insns, lengthLocal, dataWordLocal, 0x5653484C454E3031L);
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
         insns.add(new MethodInsnNode(
@@ -242,12 +397,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
             "()I",
             false
         ));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
-        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, lengthOk));
-        insns.add(new InsnNode(Opcodes.ICONST_0));
-        insns.add(new InsnNode(Opcodes.IRETURN));
-
-        insns.add(lengthOk);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lengthLocal));
         emitInitialHash(insns, seedLocal, lengthLocal, variant);
         insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
         insns.add(new InsnNode(Opcodes.ICONST_0));
@@ -397,7 +547,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         long domain
     ) {
         int wordA = liveWord(metadata, state, siteSeed, domain);
-        int wordB = liveWord(metadata, state, siteSeed, domain ^ LIVE_MASK_LOW_DOMAIN);
+        int wordB = wordA ^ nonZeroInt(JvmPassBytecode.mix(siteSeed ^ domain, LIVE_MASK_LOW_DOMAIN));
         return ((long) wordA << 32) ^ (wordB & 0xFFFFFFFFL);
     }
 
@@ -434,8 +584,16 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         long domain
     ) {
         emitLiveWord(insns, metadata, state, siteSeed, dataWordLocal, domain);
+        insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ISTORE, liveMaskHighLocal));
-        emitLiveWord(insns, metadata, state, siteSeed, dataWordLocal, domain ^ LIVE_MASK_LOW_DOMAIN);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
+        emitValidationDataMaskFromTop(insns, domain);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(siteSeed ^ domain, LIVE_MASK_LOW_DOMAIN)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
+        emitValidationDataMaskFromTop(insns, domain ^ LIVE_MASK_LOW_DOMAIN);
+        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
@@ -544,6 +702,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IADD));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5653484441544134L)) | 1);
         insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(insns, shift(seed, 19));
         insns.add(new InsnNode(Opcodes.IUSHR));
@@ -723,4 +882,6 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     private long nonZeroLong(long value) {
         return value == 0L ? 0x5653484C4F4E4731L : value;
     }
+
+    private record ValidationPlaceholder(String target, int ordinal) {}
 }

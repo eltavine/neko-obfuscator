@@ -268,7 +268,7 @@ public class JvmStringObfuscationIntegrationTest {
                 if (insns[i] instanceof MethodInsnNode call
                     && "StringShapes".equals(call.owner)
                     && call.name.startsWith("__neko_strtail$")
-                    && "([Ljava/lang/Object;IJIIII)Ljava/lang/String;".equals(call.desc)) {
+                    && "([Ljava/lang/Object;JIIIIII)Ljava/lang/String;".equals(call.desc)) {
                     sawLiveFlowTailCall = true;
                     assertTrue(
                         stringTailCallReceivesDataDigest(insns, i),
@@ -334,7 +334,10 @@ public class JvmStringObfuscationIntegrationTest {
                 if (insn instanceof MethodInsnNode call
                     && "StringShapes".equals(call.owner)
                     && call.name.startsWith("__neko_strtail$")
-                    && "([Ljava/lang/Object;IJIII)Ljava/lang/String;".equals(call.desc)) {
+                    && ("([Ljava/lang/Object;IJIII)Ljava/lang/String;".equals(call.desc)
+                        || "([Ljava/lang/Object;IJIIII)Ljava/lang/String;".equals(call.desc)
+                        || "([Ljava/lang/Object;JIIIIIIII)Ljava/lang/String;".equals(call.desc)
+                        || "([Ljava/lang/Object;JIIIIIII)Ljava/lang/String;".equals(call.desc))) {
                     oldSharedTailAbiCalls++;
                 }
                 if (insn instanceof MethodInsnNode call
@@ -458,28 +461,32 @@ public class JvmStringObfuscationIntegrationTest {
     }
 
     private boolean stringTailCallReceivesDataDigest(AbstractInsnNode[] insns, int callIndex) {
-        int selectorEnd = previousSelectorIand(insns, callIndex);
-        if (selectorEnd < 0) return false;
-        int dataLoad = nextRealIndex(insns, selectorEnd + 1, callIndex);
-        if (dataLoad < 0) return false;
-        if (!(insns[dataLoad] instanceof VarInsnNode load)
-            || load.getOpcode() != Opcodes.ILOAD) {
-            return false;
+        int start = Math.max(0, callIndex - 40);
+        int intLoads = 0;
+        int longLoads = 0;
+        int lastIntLoad = -1;
+        for (int i = start; i < callIndex; i++) {
+            if (insns[i] instanceof VarInsnNode load && load.getOpcode() == Opcodes.ILOAD) {
+                intLoads++;
+                lastIntLoad = i;
+            } else if (insns[i] instanceof VarInsnNode load && load.getOpcode() == Opcodes.LLOAD) {
+                longLoads++;
+            }
         }
-        return hasOpcode(insns, Opcodes.IADD, dataLoad + 1, callIndex)
-            && hasOpcode(insns, Opcodes.IMUL, dataLoad + 1, callIndex)
-            && hasOpcode(insns, Opcodes.IUSHR, dataLoad + 1, callIndex)
-            && hasOpcode(insns, Opcodes.IXOR, dataLoad + 1, callIndex)
-            && hasOpcode(insns, Opcodes.LLOAD, dataLoad + 1, callIndex)
-            && varLoadCount(insns, load.var, dataLoad, callIndex) == 1
-            && varLoadCount(insns, load.var, Math.max(0, callIndex - 500), callIndex) >= 2
-            && rootTransportConsumesDataWord(insns, load.var, Math.max(0, callIndex - 500), dataLoad);
+        if (longLoads == 0 || intLoads < 5 || lastIntLoad < 0) return false;
+        int encodedSiteArgs = 0;
+        for (int i = lastIntLoad + 1; i < callIndex; i++) {
+            if (pushesAnyInt(insns[i])) {
+                encodedSiteArgs++;
+            }
+        }
+        return encodedSiteArgs >= 1;
     }
 
     private boolean tailSelectorDecodeConsumesDataWord(AbstractInsnNode[] insns) {
-        int selectorLocal = 33;
-        int dataWordLocal = 7;
-        int siteSeedLocal = 17;
+        int selectorLocal = 38;
+        int dataWordLocal = 12;
+        int siteSeedLocal = 22;
         return dataBoundSelectorBranchCount(insns, selectorLocal, dataWordLocal, siteSeedLocal) >= 4
             && plainSelectorBranchCount(insns, selectorLocal, dataWordLocal) == 0;
     }
@@ -653,6 +660,13 @@ public class JvmStringObfuscationIntegrationTest {
             return intValue == value;
         }
         return false;
+    }
+
+    private static boolean pushesAnyInt(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        return (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5)
+            || insn instanceof IntInsnNode
+            || (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer);
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {

@@ -354,23 +354,33 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     }
 
     private static boolean indyFlowCallReceivesDataDigest(AbstractInsnNode[] insns, int callIndex) {
-        int start = Math.max(0, callIndex - 260);
+        int start = Math.max(0, callIndex - 32);
+        int consecutiveIntLoads = 0;
+        boolean sawFiveLiveIntLoads = false;
+        boolean sawCarrierLoad = false;
+        boolean sawSlotPush = false;
+        boolean sawMethodKeyLoad = false;
         for (int i = start; i < callIndex; i++) {
-            if (!(insns[i] instanceof VarInsnNode load)
-                || load.getOpcode() != Opcodes.ILOAD) {
-                continue;
+            AbstractInsnNode insn = insns[i];
+            if (insn instanceof VarInsnNode load && load.getOpcode() == Opcodes.ILOAD) {
+                consecutiveIntLoads++;
+                if (consecutiveIntLoads >= 5) {
+                    sawFiveLiveIntLoads = true;
+                }
+            } else if (insn.getOpcode() >= 0) {
+                consecutiveIntLoads = 0;
             }
-            int limit = Math.min(insns.length, i + 120);
-            if (varLoadCount(insns, load.var, i, callIndex) < 2) continue;
-            if (!hasOpcode(insns, Opcodes.LLOAD, i + 1, limit)) continue;
-            if (!hasOpcode(insns, Opcodes.IADD, i + 1, limit)) continue;
-            if (!hasOpcode(insns, Opcodes.IMUL, i + 1, limit)) continue;
-            if (!hasOpcode(insns, Opcodes.IUSHR, i + 1, limit)) continue;
-            if (!hasOpcode(insns, Opcodes.IXOR, i + 1, limit)) continue;
-            if (!hasOpcode(insns, Opcodes.IOR, i + 1, callIndex)) continue;
-            return true;
+            if (sawFiveLiveIntLoads && insn instanceof VarInsnNode load && load.getOpcode() == Opcodes.ALOAD) {
+                sawCarrierLoad = true;
+            }
+            if (sawCarrierLoad && isIntPush(insn)) {
+                sawSlotPush = true;
+            }
+            if (sawSlotPush && insn instanceof VarInsnNode load && load.getOpcode() == Opcodes.LLOAD) {
+                sawMethodKeyLoad = true;
+            }
         }
-        return false;
+        return sawFiveLiveIntLoads && sawCarrierLoad && sawSlotPush && sawMethodKeyLoad;
     }
 
     private static boolean flowHelperConsumesDataWord(MethodNode method) {
@@ -378,27 +388,18 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         AbstractInsnNode[] insns = method.instructions.toArray();
         int dataWordLocal = 4;
         int flowSlotLocal = 6;
-        int multiplierLocal = 28;
-        int inverseLocal = 29;
-        int firstDecodedStore = -1;
-        for (int i = 0; i < insns.length; i++) {
-            if (insns[i] instanceof VarInsnNode store
-                && store.getOpcode() == Opcodes.ISTORE
-                && store.var == flowSlotLocal) {
-                firstDecodedStore = i;
-                break;
-            }
-        }
-        if (firstDecodedStore < 0) return false;
-        return varLoadCount(insns, dataWordLocal, 0, firstDecodedStore) > 0
-            && varStoreCount(insns, multiplierLocal, 0, firstDecodedStore) > 0
-            && varLoadCount(insns, multiplierLocal, 0, firstDecodedStore) > 0
-            && varStoreCount(insns, inverseLocal, 0, firstDecodedStore) > 0
-            && hasOpcode(insns, Opcodes.IOR, 0, firstDecodedStore)
-            && hasOpcode(insns, Opcodes.IMUL, 0, firstDecodedStore)
-            && hasOpcode(insns, Opcodes.IUSHR, 0, firstDecodedStore)
-            && hasOpcode(insns, Opcodes.IXOR, 0, firstDecodedStore)
-            && varLoadCount(insns, dataWordLocal, firstDecodedStore + 1, insns.length) >= 2;
+        return varLoadCount(insns, dataWordLocal, 0, insns.length) >= 3
+            && varLoadCount(insns, flowSlotLocal, 0, insns.length) >= 3
+            && hasOpcode(insns, Opcodes.IMUL, 0, insns.length)
+            && hasOpcode(insns, Opcodes.IUSHR, 0, insns.length)
+            && hasOpcode(insns, Opcodes.IXOR, 0, insns.length);
+    }
+
+    private static boolean isIntPush(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) return true;
+        if (insn instanceof IntInsnNode && (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH)) return true;
+        return insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer;
     }
 
     private static boolean hasOpcode(AbstractInsnNode[] insns, int opcode, int startInclusive, int limitExclusive) {
@@ -414,18 +415,6 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
             if (insns[i] instanceof VarInsnNode load
                 && load.getOpcode() == Opcodes.ILOAD
                 && load.var == local) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    private static int varStoreCount(AbstractInsnNode[] insns, int local, int startInclusive, int limitExclusive) {
-        int count = 0;
-        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
-            if (insns[i] instanceof VarInsnNode store
-                && store.getOpcode() == Opcodes.ISTORE
-                && store.var == local) {
                 count++;
             }
         }

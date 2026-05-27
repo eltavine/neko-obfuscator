@@ -2470,12 +2470,9 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
         insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
         insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pcLocal()));
-        emitIndyDataWord(insns, metadata, state, 0x494E445944415441L);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
         insns.add(new VarInsnNode(Opcodes.ALOAD, indyMaterialLocal));
         JvmPassBytecode.pushInt(insns, flowSaltSlot);
-        emitIndyDataWord(insns, metadata, state, 0x494E445944415441L);
-        emitIndyFlowSlotTransportMultiplierFromTop(insns);
-        insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
@@ -2519,98 +2516,6 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(done);
     }
 
-    private void emitIndyDataWord(
-        InsnList insns,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state,
-        long seed
-    ) {
-        long mixedSeed = JvmPassBytecode.mix(seed, state.methodSalt() ^ state.state());
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
-        JvmPassBytecode.pushInt(insns, seededIndyInt(mixedSeed, 0x494E445944415431L));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, shift(mixedSeed, 7));
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
-        JvmPassBytecode.pushInt(insns, seededIndyInt(mixedSeed, 0x494E445944415432L));
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
-        insns.add(new InsnNode(Opcodes.L2I));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pcLocal()));
-        JvmPassBytecode.pushInt(insns, seededIndyInt(mixedSeed, 0x494E445944415433L));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, shift(mixedSeed, 19));
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IADD));
-        JvmPassBytecode.pushInt(insns, seededIndyInt(mixedSeed, 0x494E445944415434L));
-        insns.add(new InsnNode(Opcodes.IXOR));
-    }
-
-    private void emitIndyFlowSlotTransportMultiplierFromTop(InsnList insns) {
-        JvmPassBytecode.pushInt(insns, seededIndyInt(0x494E445946534C54L, 0x44415441534C5431L));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, 11);
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(insns, seededIndyInt(0x494E445946534C55L, 0x44415441534C5432L));
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new InsnNode(Opcodes.DUP));
-        JvmPassBytecode.pushInt(insns, 17);
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IADD));
-        JvmPassBytecode.pushInt(insns, seededIndyInt(0x494E445946534C56L, 0x44415441534C5433L));
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new InsnNode(Opcodes.ICONST_1));
-        insns.add(new InsnNode(Opcodes.IOR));
-    }
-
-    private void emitRuntimeDecodeIndyFlowSlot(
-        InsnList insns,
-        int dataWordLocal,
-        int flowSlotLocal,
-        int multiplierLocal,
-        int inverseLocal
-    ) {
-        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
-        emitIndyFlowSlotTransportMultiplierFromTop(insns);
-        insns.add(new VarInsnNode(Opcodes.ISTORE, multiplierLocal));
-        emitOddIntInverse(insns, multiplierLocal, inverseLocal);
-        insns.add(new VarInsnNode(Opcodes.ILOAD, flowSlotLocal));
-        insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, flowSlotLocal));
-    }
-
-    private void emitOddIntInverse(
-        InsnList insns,
-        int multiplierLocal,
-        int inverseLocal
-    ) {
-        insns.add(new VarInsnNode(Opcodes.ILOAD, multiplierLocal));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, inverseLocal));
-        for (int i = 0; i < 5; i++) {
-            insns.add(new VarInsnNode(Opcodes.ILOAD, inverseLocal));
-            JvmPassBytecode.pushInt(insns, 2);
-            insns.add(new VarInsnNode(Opcodes.ILOAD, multiplierLocal));
-            insns.add(new VarInsnNode(Opcodes.ILOAD, inverseLocal));
-            insns.add(new InsnNode(Opcodes.IMUL));
-            insns.add(new InsnNode(Opcodes.ISUB));
-            insns.add(new InsnNode(Opcodes.IMUL));
-            insns.add(new VarInsnNode(Opcodes.ISTORE, inverseLocal));
-        }
-        insns.add(new VarInsnNode(Opcodes.ILOAD, inverseLocal));
-    }
-
     private MethodNode emitFlow(
         String name,
         int classKeyMask,
@@ -2641,16 +2546,6 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         int threadLocal = 25;
         int stackLocal = 26;
         int stackLenLocal = 27;
-        int flowSlotMultiplierLocal = 28;
-        int flowSlotInverseLocal = 29;
-
-        emitRuntimeDecodeIndyFlowSlot(
-            insns,
-            FLOW_HELPER_DATA_WORD_LOCAL,
-            flowSlotLocal,
-            flowSlotMultiplierLocal,
-            flowSlotInverseLocal
-        );
 
         insns.add(new VarInsnNode(Opcodes.ILOAD, flowSlotLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, FLOW_HELPER_METHOD_KEY_LOCAL));

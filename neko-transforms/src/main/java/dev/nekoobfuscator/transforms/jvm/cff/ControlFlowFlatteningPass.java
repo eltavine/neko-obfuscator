@@ -19,6 +19,7 @@ import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import dev.nekoobfuscator.transforms.jvm.strings.JvmStringObfuscationPass;
 import dev.nekoobfuscator.transforms.jvm.constants.JvmConstantObfuscationPass;
 import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
+import dev.nekoobfuscator.transforms.jvm.validation.JvmValidationSinkHardeningPass;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -178,6 +179,10 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         }
         installClassIntegrityEntryTicketConsume(pctx, clazz, mn, protectedStart, keyLocal, methodSeed);
 
+        boolean validationSinkEnabled = pctx.config().isTransformEnabled(JvmValidationSinkHardeningPass.ID);
+        if (validationSinkEnabled) {
+            JvmValidationSinkHardeningPass.preparePlaceholders(pctx, clazz, method);
+        }
         Set<LabelNode> injectedReflectionLeaders = rewriteInjectedMemberReflection(pctx, mn);
         List<ProtectedTryCatch> protectedTryCatches =
             captureProtectedTryCatches(mn);
@@ -326,6 +331,9 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             keyStateByLabel,
             activeKeyTable
         );
+        if (validationSinkEnabled) {
+            JvmValidationSinkHardeningPass.hardenPreparedPlaceholders(pctx, clazz, method);
+        }
         installPrimitiveDataDigestUpdates(
             pctx,
             mn,
