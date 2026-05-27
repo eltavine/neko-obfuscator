@@ -866,7 +866,7 @@ For every implementation row below:
 - Completion criteria: indy fixture passes; shared helper names may remain, but
   fixed global material layout and single recoverable seed table do not.
 
-### [ ] JSE-18: Derive indy resolver seed material per callsite
+### [x] JSE-18: Derive indy resolver seed material per callsite
 
 - Scope: migrate only indy resolver seed/salt reconstruction to per-callsite
   derived material. Required live sources are the flow word returned by the
@@ -876,6 +876,30 @@ For every implementation row below:
 - Required evidence: ASM audit proves resolver seed reconstruction loads
   flow/token material, epoch, helper key, and layout fingerprint before seed
   use; no raw two-long resolver cell or direct large seed/salt `ldc` remains.
+- Fresh JSE-18 baseline evidence: after JSE-17, resolver material is laid out
+  per site, but `indyResolverMaterialCell` still encodes `siteSeed` and `salt`
+  with masks derived only from resolver slot, descriptor/fingerprint, and
+  epoch. `emitResolverSeedPairLoad` reads the final flow word into
+  `RESOLVER_FLOW_LOCAL` before seed reconstruction, but the seed/salt masks do
+  not load that flow word or the callsite helper method key before storing
+  `seedLocal` and `saltLocal`.
+- Completion evidence: indy callsites now append two hidden long arguments:
+  live helper method key followed by the final flow word. Resolver loads
+  `args[length - 1]` as flow and `args[length - 2]` as helper key before seed
+  reconstruction; resolver seed/salt masks include epoch, slot, descriptor,
+  flow, descriptor fingerprint, and helper key. Target adaptation drops both
+  hidden longs while the guard still binds the final flow word.
+- Validation evidence: `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest` passed
+  after isolating the salt dependency slice; JUnit XML reports `tests="1"
+  failures="0" errors="0"`. Source audit for
+  `appendLong\\(|new long\\[\\] \\{siteSeed|new long\\[\\] \\{salt|new
+  long\\[\\] \\{siteSeed, salt|indyResolverSeedMask\\([^\\n]*epoch, 0x|
+  emitResolverSeedMask\\([^\\n]*epochLocal, 0x` returned no matches.
+- Review evidence: first JSE-18 review failed because the salt proof included
+  the earlier seed slice. After changing the salt slice to start at
+  `seedStore + 1`, second review `019e6ae1-b37c-76d1-801d-0fe333cbfbf4`
+  returned PASS with no required fixes.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`.
 - Static/ASM audit: add `assertIndyResolverSeedsArePerSiteDerived`. Exact

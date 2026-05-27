@@ -191,12 +191,12 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                 indyMaterialInit.add(new VarInsnNode(Opcodes.ASTORE, indyMaterialLocal));
             }
             int flowSaltSlot = registerIndyFlowSalt(pctx, flowTable, state.methodSalt(), siteSeed, state.state());
-            int resolverSeedSlot = registerIndyResolverSeed(pctx, flowTable, siteSeed, salt);
+            int resolverSeedSlot = registerIndyResolverSeed(pctx, flowTable, siteSeed, salt, flow, state.methodKey());
 
             boolean interfaceOwner = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
             InvokeDynamicInsnNode indy = new InvokeDynamicInsnNode(
                 indyName(siteSeed, spec.kind()),
-                appendLong(spec.indyDesc()),
+                appendIndyHiddenArgs(spec.indyDesc()),
                 new Handle(
                     Opcodes.H_INVOKESTATIC,
                     helpers.bootstrapOwner(),
@@ -222,6 +222,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                 flowCacheInit.add(new InsnNode(Opcodes.LCONST_0));
                 flowCacheInit.add(new VarInsnNode(Opcodes.LSTORE, flowCacheLocal));
                 hasFlowCacheInit = true;
+                replacement.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
                 emitCachedLiveIndyWord(
                     replacement,
                     clazz.name(),
@@ -234,6 +235,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                     flowSaltSlot
                 );
             } else {
+                replacement.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
                 emitLiveIndyWord(
                     replacement,
                     clazz.name(),
@@ -420,12 +422,13 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         return owner.startsWith("[") ? Type.getType(owner) : Type.getObjectType(owner);
     }
 
-    private String appendLong(String desc) {
+    private String appendIndyHiddenArgs(String desc) {
         Type method = Type.getMethodType(desc);
         Type[] args = method.getArgumentTypes();
-        Type[] out = new Type[args.length + 1];
+        Type[] out = new Type[args.length + 2];
         System.arraycopy(args, 0, out, 0, args.length);
         out[args.length] = Type.LONG_TYPE;
+        out[args.length + 1] = Type.LONG_TYPE;
         return Type.getMethodDescriptor(method.getReturnType(), out);
     }
 
@@ -753,10 +756,12 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         PipelineContext pctx,
         IndyFlowTable table,
         long siteSeed,
-        long salt
+        long salt,
+        long flow,
+        long helperKey
     ) {
         int slot = table.resolverCells().size();
-        table.resolverCells().add(indyResolverMaterialCell(table, slot, siteSeed, salt));
+        table.resolverCells().add(indyResolverMaterialCell(table, slot, siteSeed, salt, flow, helperKey));
         rebuildIndyFlowTableInit(pctx, table);
         return slot;
     }
@@ -765,7 +770,9 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         IndyFlowTable table,
         int slot,
         long siteSeed,
-        long salt
+        long salt,
+        long flow,
+        long helperKey
     ) {
         long layoutSeed = JvmPassBytecode.mix(
             siteSeed ^ Long.rotateLeft(salt, 23),
@@ -784,13 +791,13 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             encoded,
             descriptor,
             INDY_RESOLVER_SEED_LOGICAL,
-            siteSeed ^ indyResolverSeedMask(slot, descriptor, epoch, 0x494E445952534545L)
+            siteSeed ^ indyResolverSeedMask(slot, descriptor, epoch, flow, helperKey, 0x494E445952534545L)
         );
         putIndyMaterialCellValue(
             encoded,
             descriptor,
             INDY_RESOLVER_SALT_LOGICAL,
-            salt ^ indyResolverSeedMask(slot, descriptor, epoch, 0x494E44595253414CL)
+            salt ^ indyResolverSeedMask(slot, descriptor, epoch, flow, helperKey, 0x494E44595253414CL)
         );
         return new IndyResolverMaterialCell(descriptor, encoded);
     }
@@ -803,10 +810,17 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     }
 
 
-    private long indyResolverSeedMask(int slot, long descriptor, long epoch, long tag) {
+    private long indyResolverSeedMask(
+        int slot,
+        long descriptor,
+        long epoch,
+        long flow,
+        long helperKey,
+        long tag
+    ) {
         return JvmPassBytecode.mix(
-            epoch ^ (((long) slot) << 32) ^ tag ^ descriptor,
-            tag ^ 0x494E4459524D4153L ^ slot ^ indyMaterialFingerprint(descriptor)
+            epoch ^ (((long) slot) << 32) ^ tag ^ descriptor ^ flow,
+            tag ^ 0x494E4459524D4153L ^ slot ^ indyMaterialFingerprint(descriptor) ^ helperKey
         );
     }
 
@@ -1635,6 +1649,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         int missHandleLocal = 48;
         int testHandleLocal = 49;
         int resolverDescriptorLocal = 50;
+        int resolverHelperKeyLocal = 52;
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
         insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
@@ -1643,6 +1658,13 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
         loadLongArrayArg(insns, argsLocal, indexLocal);
         insns.add(new VarInsnNode(Opcodes.LSTORE, flowLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        JvmPassBytecode.pushInt(insns, 2);
+        insns.add(new InsnNode(Opcodes.ISUB));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+        loadLongArrayArg(insns, argsLocal, indexLocal);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, resolverHelperKeyLocal));
         emitResolverSeedPairLoad(
             insns,
             carrierLocal,
@@ -1651,6 +1673,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             resolverIndexLocal,
             resolverDescriptorLocal,
             resolverEpochLocal,
+            flowLocal,
+            resolverHelperKeyLocal,
             seedLocal,
             saltLocal
         );
@@ -1803,7 +1827,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ALOAD, resultLocal));
         insns.add(new InsnNode(Opcodes.ARETURN));
         mn.maxStack = 16;
-        mn.maxLocals = 52;
+        mn.maxLocals = 54;
         return mn;
     }
 
@@ -1954,10 +1978,14 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, METHOD_HANDLE, "type",
             "()Ljava/lang/invoke/MethodType;", false));
         insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, METHOD_TYPE, "parameterCount", "()I", false));
-        JvmPassBytecode.pushInt(insns, 1);
+        JvmPassBytecode.pushInt(insns, 2);
         insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, CLASS));
         insns.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new FieldInsnNode(Opcodes.GETSTATIC, LONG, "TYPE", "Ljava/lang/Class;"));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 1);
         insns.add(new FieldInsnNode(Opcodes.GETSTATIC, LONG, "TYPE", "Ljava/lang/Class;"));
         insns.add(new InsnNode(Opcodes.AASTORE));
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, METHOD_HANDLES, "dropArguments",
@@ -2360,6 +2388,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         int indexLocal,
         int descriptorLocal,
         int epochLocal,
+        int flowLocal,
+        int helperKeyLocal,
         int seedLocal,
         int saltLocal
     ) {
@@ -2389,11 +2419,11 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         emitIndyMaterialCellValueLoad(insns, slabLocal, descriptorLocal, INDY_RESOLVER_EPOCH_LOGICAL);
         insns.add(new VarInsnNode(Opcodes.LSTORE, epochLocal));
         emitIndyMaterialCellValueLoad(insns, slabLocal, descriptorLocal, INDY_RESOLVER_SEED_LOGICAL);
-        emitResolverSeedMask(insns, slotLocal, descriptorLocal, epochLocal, 0x494E445952534545L);
+        emitResolverSeedMask(insns, slotLocal, descriptorLocal, epochLocal, flowLocal, helperKeyLocal, 0x494E445952534545L);
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LSTORE, seedLocal));
         emitIndyMaterialCellValueLoad(insns, slabLocal, descriptorLocal, INDY_RESOLVER_SALT_LOGICAL);
-        emitResolverSeedMask(insns, slotLocal, descriptorLocal, epochLocal, 0x494E44595253414CL);
+        emitResolverSeedMask(insns, slotLocal, descriptorLocal, epochLocal, flowLocal, helperKeyLocal, 0x494E44595253414CL);
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LSTORE, saltLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, slotLocal));
@@ -2408,12 +2438,13 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         int descriptorLocal,
         int epochLocal,
         int nextEpochLocal,
+        int seedFlowLocal,
+        int helperKeyLocal,
         int seedLocal,
         int saltLocal,
-        int tokenLocal,
-        int flowLocal
+        int tokenLocal
     ) {
-        emitResolverSeedNextEpoch(insns, slotLocal, descriptorLocal, epochLocal, tokenLocal, flowLocal);
+        emitResolverSeedNextEpoch(insns, slotLocal, descriptorLocal, epochLocal, tokenLocal, seedFlowLocal);
         insns.add(new VarInsnNode(Opcodes.LSTORE, nextEpochLocal));
         emitResolverSeedCellStore(
             insns,
@@ -2422,6 +2453,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             INDY_RESOLVER_SEED_LOGICAL,
             slotLocal,
             nextEpochLocal,
+            seedFlowLocal,
+            helperKeyLocal,
             seedLocal,
             0x494E445952534545L
         );
@@ -2432,6 +2465,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             INDY_RESOLVER_SALT_LOGICAL,
             slotLocal,
             nextEpochLocal,
+            seedFlowLocal,
+            helperKeyLocal,
             saltLocal,
             0x494E44595253414CL
         );
@@ -2451,6 +2486,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         int slotLocal,
         int descriptorLocal,
         int epochLocal,
+        int flowLocal,
+        int helperKeyLocal,
         long tag
     ) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, epochLocal));
@@ -2463,11 +2500,15 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LLOAD, descriptorLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, tag ^ 0x494E4459524D4153L);
         insns.add(new VarInsnNode(Opcodes.ILOAD, slotLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
         emitIndyDescriptorFingerprint(insns, descriptorLocal);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
         emitInlineMix(insns);
     }
@@ -2505,13 +2546,15 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         int logicalIndex,
         int slotLocal,
         int epochLocal,
+        int flowLocal,
+        int helperKeyLocal,
         int valueLocal,
         long tag
     ) {
         insns.add(new VarInsnNode(Opcodes.ALOAD, slabLocal));
         emitIndyMaterialPhysicalIndex(insns, descriptorLocal, logicalIndex);
         insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
-        emitResolverSeedMask(insns, slotLocal, descriptorLocal, epochLocal, tag);
+        emitResolverSeedMask(insns, slotLocal, descriptorLocal, epochLocal, flowLocal, helperKeyLocal, tag);
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new InsnNode(Opcodes.LASTORE));
     }

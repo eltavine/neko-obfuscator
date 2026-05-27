@@ -28,6 +28,7 @@ import java.util.jar.Manifest;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
@@ -59,6 +60,12 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static final long INDY_CELL_BYTE_MASK = 0xFFL;
     private static final int FLOW_SLOT_LOCAL = 6;
     private static final int RESOLVER_SLOT_LOCAL = 4;
+    private static final int RESOLVER_FLOW_LOCAL = 12;
+    private static final int RESOLVER_EPOCH_LOCAL = 39;
+    private static final int RESOLVER_SEED_LOCAL = 43;
+    private static final int RESOLVER_SALT_LOCAL = 45;
+    private static final int RESOLVER_DESCRIPTOR_LOCAL = 50;
+    private static final int RESOLVER_HELPER_KEY_LOCAL = 52;
 
     @Test
     void invokeDynamicObfuscatesCffKeyedMethodAndFieldReferences() throws Exception {
@@ -82,6 +89,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertTrue(obfuscated.contains("INDY REF OK"), obfuscated);
         assertReferenceSitesUseInvokeDynamic(outputJar);
         assertIndySitesHaveIndependentMaterialLayouts(outputJar);
+        assertIndyResolverSeedsArePerSiteDerived(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -329,6 +337,84 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         );
     }
 
+    private void assertIndyResolverSeedsArePerSiteDerived(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        var clazz = input.classMap().get("IndyReferenceShapes");
+        MethodNode resolverHelper = null;
+        for (var method : clazz.asmNode().methods) {
+            if (method.name.startsWith("__neko_indy_resolve")) {
+                resolverHelper = method;
+                break;
+            }
+        }
+        assertTrue(resolverHelper != null, "resolver helper missing");
+        AbstractInsnNode[] insns = resolverHelper.instructions.toArray();
+        int firstDecode = firstCall(insns, "java/lang/String", "toCharArray", "()[C");
+        int seedStore = firstVarStore(insns, Opcodes.LSTORE, RESOLVER_SEED_LOCAL, 0);
+        int saltStore = firstVarStore(insns, Opcodes.LSTORE, RESOLVER_SALT_LOCAL, seedStore + 1);
+        int firstSeedUse = firstVarLoad(insns, Opcodes.LLOAD, RESOLVER_SEED_LOCAL, seedStore + 1);
+        int firstSaltUse = firstVarLoad(insns, Opcodes.LLOAD, RESOLVER_SALT_LOCAL, saltStore + 1);
+
+        assertTrue(firstDecode > 0, "resolver payload decode missing");
+        assertTrue(seedStore > 0 && seedStore < firstDecode, "seed should be reconstructed before payload decode");
+        assertTrue(saltStore > seedStore && saltStore < firstDecode, "salt should be reconstructed before payload decode");
+        assertTrue(firstSeedUse > seedStore, "seed should be used after reconstruction");
+        assertTrue(firstSaltUse > saltStore, "salt should be used after reconstruction");
+        assertResolverSeedSlice(insns, 0, seedStore, "seed");
+        assertResolverSeedSlice(insns, seedStore + 1, saltStore, "salt");
+        assertTrue(
+            hiddenIndyArgumentsAreMethodKeyAndFlow(clazz.asmNode().methods),
+            "indy callsites should pass live method key before the final flow guard word"
+        );
+    }
+
+    private static void assertResolverSeedSlice(AbstractInsnNode[] insns, int start, int limit, String label) {
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_FLOW_LOCAL, start, limit),
+            label + " reconstruction should load the final flow word"
+        );
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_EPOCH_LOCAL, start, limit),
+            label + " reconstruction should load resolver epoch"
+        );
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_HELPER_KEY_LOCAL, start, limit),
+            label + " reconstruction should load the hidden helper method key"
+        );
+        assertTrue(
+            sliceContainsDescriptorFingerprint(insns, start, limit),
+            label + " reconstruction should load the layout fingerprint"
+        );
+    }
+
+    private static boolean hiddenIndyArgumentsAreMethodKeyAndFlow(List<MethodNode> methods) {
+        int checked = 0;
+        for (MethodNode method : methods) {
+            if (method.instructions == null || method.name.startsWith("__neko_")) continue;
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            for (int i = 0; i < insns.length; i++) {
+                if (!(insns[i] instanceof InvokeDynamicInsnNode indy)
+                    || indy.bsm == null
+                    || !"IndyReferenceShapes".equals(indy.bsm.getOwner())) {
+                    continue;
+                }
+                Type[] args = Type.getArgumentTypes(indy.desc);
+                if (args.length < 2
+                    || args[args.length - 2].getSort() != Type.LONG
+                    || args[args.length - 1].getSort() != Type.LONG) {
+                    return false;
+                }
+                int flowCall = previousFlowHelperCall(insns, i);
+                if (flowCall < 0) return false;
+                if (!sliceContainsOpcodeVarLoad(insns, Opcodes.LLOAD, Math.max(0, flowCall - 48), flowCall)) {
+                    return false;
+                }
+                checked++;
+            }
+        }
+        return checked > 0;
+    }
+
     private static boolean methodLoadsMaterialSlot(MethodNode method, int slot) {
         if (method.instructions == null) return false;
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
@@ -430,6 +516,70 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
             }
         }
         return false;
+    }
+
+    private static boolean sliceContainsVarLoad(
+        AbstractInsnNode[] insns,
+        int opcode,
+        int local,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load && load.getOpcode() == opcode && load.var == local) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean sliceContainsOpcodeVarLoad(
+        AbstractInsnNode[] insns,
+        int opcode,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load && load.getOpcode() == opcode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean sliceContainsDescriptorFingerprint(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.LLOAD
+                || load.var != RESOLVER_DESCRIPTOR_LOCAL) {
+                continue;
+            }
+            int shiftIndex = nextInstructionIndex(insns, i + 1);
+            int ushrIndex = nextInstructionIndex(insns, shiftIndex + 1);
+            if (shiftIndex >= 0
+                && ushrIndex >= 0
+                && Integer.valueOf(32).equals(pushedIntValue(insns[shiftIndex]))
+                && insns[ushrIndex].getOpcode() == Opcodes.LUSHR) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int previousFlowHelperCall(AbstractInsnNode[] insns, int index) {
+        for (int i = index - 1; i >= 0 && i >= index - 96; i--) {
+            if (insns[i] instanceof MethodInsnNode call
+                && "IndyReferenceShapes".equals(call.owner)
+                && call.name.startsWith("__neko_indy_flow")
+                && FLOW_DESC.equals(call.desc)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static boolean methodGetsStatic(MethodNode method, String desc) {
@@ -571,6 +721,36 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
             return value;
         }
         return null;
+    }
+
+    private static int firstCall(AbstractInsnNode[] insns, String owner, String name, String desc) {
+        for (int i = 0; i < insns.length; i++) {
+            if (insns[i] instanceof MethodInsnNode call
+                && owner.equals(call.owner)
+                && name.equals(call.name)
+                && desc.equals(call.desc)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int firstVarStore(AbstractInsnNode[] insns, int opcode, int local, int startInclusive) {
+        for (int i = Math.max(0, startInclusive); i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode store && store.getOpcode() == opcode && store.var == local) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int firstVarLoad(AbstractInsnNode[] insns, int opcode, int local, int startInclusive) {
+        for (int i = Math.max(0, startInclusive); i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load && load.getOpcode() == opcode && load.var == local) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static int nextInstructionIndex(AbstractInsnNode[] insns, int start) {
