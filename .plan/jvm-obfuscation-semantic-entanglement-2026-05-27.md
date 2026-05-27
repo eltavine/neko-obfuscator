@@ -948,7 +948,7 @@ For every implementation row below:
 - Completion criteria: indy fixture passes; one payload/callsite cannot decode
   another callsite with the same recovered seed.
 
-### [ ] JSE-20: Derive indy flow fingerprints and cache keys per callsite
+### [x] JSE-20: Derive indy flow fingerprints and cache keys per callsite
 
 - Scope: migrate only indy flow fingerprint updates and cache-key derivation
   salts. Required live sources are dynamic flow word, token, resolver seed
@@ -959,6 +959,19 @@ For every implementation row below:
 - Required evidence: ASM audit proves each callsite has independent payload and
   cache-key material and no old mix-helper ABI, plaintext member reference, or
   standalone cache field appears.
+- Fresh JSE-20 baseline evidence: after JSE-19, payload material is per-site
+  and fingerprint-bound, but `emitLiveCacheKey` derives cache keys only from
+  token, flow, seed, salt, and the obfuscated indy name hash. It does not load
+  the resolver material fingerprint, `MethodType`, or guarded call-site/target
+  identity material before cache lookup or before `MutableCallSite.setTarget`.
+- Fresh JSE-20 size-repair evidence: the first full validation after the JSE-20
+  cache-key change failed while writing the regenerated full-obfuscation jar.
+  The test XML records `MethodTooLargeException: Method too large:
+  a/a.<clinit>()V`; the CFF finalizer estimate for that generated class
+  initializer is 69923 bytes. The changed path is the generic indy material
+  initialization path added for per-site resolver/flow cells, so the repair is
+  to move indy material table initialization into a transform-owned same-class
+  static init method and leave `<clinit>` with only the invocation.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Static/ASM audit: add `assertIndyPayloadAndCacheMaterialIsPerSite`
@@ -970,6 +983,20 @@ For every implementation row below:
   `javap -J-XX:-UsePerfData -classpath build/tmp/neko-test-indy-reference/indy-reference-shapes-obf.jar -c -v IndyReferenceShapes | rg -n "(__neko_indy_bsm|__neko_indy_flow|BootstrapMethods|REF_invokeStatic IndyReferenceShapes\\.__neko_indy_bsm|REF_getStatic IndyReferenceShapes\\..*:\\[Ljava/lang/Object;|ldc(_w|2_w)?[[:space:]]+#.*// (int|long))"`.
 - Completion criteria: indy and full-JVM tests pass; cache remains in the class
   carrier; per-site material cannot be globally recovered from one site.
+- Completion evidence: production code now derives the live cache key from
+  dynamic token/flow, resolver seed/salt, per-site resolver descriptor
+  fingerprint, `MethodType` hash/arity, and `MutableCallSite` identity before
+  both `ConcurrentHashMap.get` and `MutableCallSite.setTarget`. Indy material
+  table initialization now lives in a same-class synthetic static init method,
+  leaving `<clinit>` with only the transform-owned call.
+- Validation evidence: fresh command
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`
+  passed. XML shows `JvmInvokeDynamicObfuscationIntegrationTest` tests=1,
+  failures=0, errors=0 and `JvmFullObfuscationPerfTest` tests=2, failures=0,
+  errors=0.
+- Review evidence: JSE-20 subagent review PASS. It checked cache lookup and
+  `MutableCallSite.setTarget` binding, same-class indy init migration, no
+  fallback/helper-class/bridge layer, fresh validation, and plan evidence.
 
 ### [ ] JSE-21: Split validation sink predicate into staged helpers
 

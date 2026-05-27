@@ -53,6 +53,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static final String FLOW_DESC = "(IIIII[Ljava/lang/Object;IJ)J";
     private static final String OLD_FLOW_THIN_DESC = "(IIII[Ljava/lang/Object;IJ)J";
     private static final String OLD_FLOW_STATE_DESC = "(IIII[Ljava/lang/Object;IJI)J";
+    private static final String CONCURRENT_HASH_MAP = "java/util/concurrent/ConcurrentHashMap";
     private static final int INDY_CELL_SPAN_SHIFT = 0;
     private static final int INDY_CELL_STRIDE_SHIFT = 8;
     private static final int INDY_CELL_OFFSET_SHIFT = 16;
@@ -62,10 +63,13 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static final int RESOLVER_SLOT_LOCAL = 4;
     private static final int RESOLVER_FLOW_LOCAL = 12;
     private static final int RESOLVER_EPOCH_LOCAL = 39;
+    private static final int RESOLVER_CACHE_KEY_LOCAL = 21;
     private static final int RESOLVER_SEED_LOCAL = 43;
     private static final int RESOLVER_SALT_LOCAL = 45;
     private static final int RESOLVER_DESCRIPTOR_LOCAL = 50;
     private static final int RESOLVER_HELPER_KEY_LOCAL = 52;
+    private static final int RESOLVER_METHOD_TYPE_LOCAL = 2;
+    private static final int RESOLVER_CALL_SITE_LOCAL = 1;
 
     @Test
     void invokeDynamicObfuscatesCffKeyedMethodAndFieldReferences() throws Exception {
@@ -91,6 +95,8 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertIndySitesHaveIndependentMaterialLayouts(outputJar);
         assertIndyResolverSeedsArePerSiteDerived(outputJar);
         assertIndyPayloadMasksArePerSiteDerived(outputJar);
+        assertIndyPayloadAndCacheMaterialIsPerSite(outputJar);
+        assertIndyProtectedMaterialIsDerived(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -399,6 +405,45 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         );
     }
 
+    private void assertIndyPayloadAndCacheMaterialIsPerSite(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        var clazz = input.classMap().get("IndyReferenceShapes");
+        MethodNode resolverHelper = resolverHelper(clazz.asmNode().methods);
+        AbstractInsnNode[] insns = resolverHelper.instructions.toArray();
+        int cacheLookup = firstCall(insns, CONCURRENT_HASH_MAP, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
+        int firstCacheKeyStore = firstVarStore(insns, Opcodes.ASTORE, RESOLVER_CACHE_KEY_LOCAL, 0);
+        assertTrue(firstCacheKeyStore > 0 && firstCacheKeyStore < cacheLookup, "cache key should be built before map lookup");
+        assertCacheKeyMaterialSlice(insns, cacheKeyMaterialStart(insns, firstCacheKeyStore), firstCacheKeyStore);
+
+        int setTarget = firstCall(insns, "java/lang/invoke/MutableCallSite", "setTarget", "(Ljava/lang/invoke/MethodHandle;)V");
+        int guardedCacheKeyStore = previousVarStore(insns, Opcodes.ASTORE, RESOLVER_CACHE_KEY_LOCAL, setTarget);
+        assertTrue(guardedCacheKeyStore > cacheLookup && guardedCacheKeyStore < setTarget,
+            "guarded target install should refresh the same derived cache key before setTarget");
+        assertCacheKeyMaterialSlice(insns, cacheKeyMaterialStart(insns, guardedCacheKeyStore), guardedCacheKeyStore);
+    }
+
+    private void assertIndyProtectedMaterialIsDerived(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        var clazz = input.classMap().get("IndyReferenceShapes");
+        MethodNode resolverHelper = resolverHelper(clazz.asmNode().methods);
+        AbstractInsnNode[] insns = resolverHelper.instructions.toArray();
+        int firstCacheKeyStore = firstVarStore(insns, Opcodes.ASTORE, RESOLVER_CACHE_KEY_LOCAL, 0);
+        int start = cacheKeyMaterialStart(insns, firstCacheKeyStore);
+        assertFalse(
+            sliceContainsStringNameHash(insns, start, firstCacheKeyStore),
+            "cache key should not fall back to obfuscated indy-name hash material only"
+        );
+    }
+
+    private static MethodNode resolverHelper(List<MethodNode> methods) {
+        for (var method : methods) {
+            if (method.name.startsWith("__neko_indy_resolve")) {
+                return method;
+            }
+        }
+        throw new AssertionError("resolver helper missing");
+    }
+
     private static void assertResolverSeedSlice(AbstractInsnNode[] insns, int start, int limit, String label) {
         assertTrue(
             sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_FLOW_LOCAL, start, limit),
@@ -438,6 +483,38 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertTrue(
             sliceContainsIndexStrideMix(insns, start, limit),
             "payload mask should multiply the character index by CHAR_STRIDE before mixing"
+        );
+    }
+
+    private static void assertCacheKeyMaterialSlice(AbstractInsnNode[] insns, int start, int limit) {
+        assertTrue(start >= 0 && start < limit, "cache key material slice missing");
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, 10, start, limit),
+            "cache key should load dynamic token"
+        );
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_FLOW_LOCAL, start, limit),
+            "cache key should load dynamic flow"
+        );
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_SEED_LOCAL, start, limit),
+            "cache key should load resolver seed material"
+        );
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_SALT_LOCAL, start, limit),
+            "cache key should load resolver salt material"
+        );
+        assertTrue(
+            sliceContainsDescriptorFingerprint(insns, start, limit),
+            "cache key should load per-site layout fingerprint"
+        );
+        assertTrue(
+            sliceContainsMethodTypeMaterial(insns, start, limit),
+            "cache key should load MethodType material"
+        );
+        assertTrue(
+            sliceContainsCallSiteIdentity(insns, start, limit),
+            "cache key should load guarded call-site identity material"
         );
     }
 
@@ -654,6 +731,92 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         return false;
     }
 
+    private static boolean sliceContainsMethodTypeMaterial(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        boolean sawHash = false;
+        boolean sawParameterCount = false;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ALOAD
+                || load.var != RESOLVER_METHOD_TYPE_LOCAL) {
+                continue;
+            }
+            int callIndex = nextInstructionIndex(insns, i + 1);
+            if (callIndex < 0 || !(insns[callIndex] instanceof MethodInsnNode call)) continue;
+            sawHash |= call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/lang/Object".equals(call.owner)
+                && "hashCode".equals(call.name)
+                && "()I".equals(call.desc);
+            sawParameterCount |= call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/lang/invoke/MethodType".equals(call.owner)
+                && "parameterCount".equals(call.name)
+                && "()I".equals(call.desc);
+        }
+        return sawHash && sawParameterCount;
+    }
+
+    private static boolean sliceContainsCallSiteIdentity(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ALOAD
+                || load.var != RESOLVER_CALL_SITE_LOCAL) {
+                continue;
+            }
+            int callIndex = nextInstructionIndex(insns, i + 1);
+            if (callIndex >= 0
+                && insns[callIndex] instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKESTATIC
+                && "java/lang/System".equals(call.owner)
+                && "identityHashCode".equals(call.name)
+                && "(Ljava/lang/Object;)I".equals(call.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean sliceContainsStringNameHash(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ALOAD
+                || load.var != 3) {
+                continue;
+            }
+            int callIndex = nextInstructionIndex(insns, i + 1);
+            if (callIndex >= 0
+                && insns[callIndex] instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                && "java/lang/String".equals(call.owner)
+                && "hashCode".equals(call.name)
+                && "()I".equals(call.desc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int cacheKeyMaterialStart(AbstractInsnNode[] insns, int cacheKeyStore) {
+        for (int i = cacheKeyStore - 1; i >= 0; i--) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.LLOAD
+                && load.var == 10) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private static int maskSequenceStart(AbstractInsnNode[] insns, int maskStore) {
         for (int i = maskStore - 1; i >= 0; i--) {
             if (insns[i] instanceof VarInsnNode load
@@ -842,6 +1005,15 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static int firstVarLoad(AbstractInsnNode[] insns, int opcode, int local, int startInclusive) {
         for (int i = Math.max(0, startInclusive); i < insns.length; i++) {
             if (insns[i] instanceof VarInsnNode load && load.getOpcode() == opcode && load.var == local) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int previousVarStore(AbstractInsnNode[] insns, int opcode, int local, int beforeExclusive) {
+        for (int i = Math.min(beforeExclusive - 1, insns.length - 1); i >= 0; i--) {
+            if (insns[i] instanceof VarInsnNode store && store.getOpcode() == opcode && store.var == local) {
                 return i;
             }
         }
