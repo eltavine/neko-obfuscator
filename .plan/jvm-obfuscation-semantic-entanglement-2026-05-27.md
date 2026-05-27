@@ -713,7 +713,7 @@ For every implementation row below:
   fallback, skip/rescue path, runtime helper layer, or reduced string/CFF
   coverage was introduced.
 
-### [ ] JSE-15: Replace string `[I` key-cell emission with variable carrier layout
+### [x] JSE-15: Replace string `[I` key-cell emission with variable carrier layout
 
 - Scope: migrate string key material storage from fixed emitted `int[11]`
   cells to variable per-site layouts inside the existing class `Object[]`
@@ -722,12 +722,44 @@ For every implementation row below:
   remain.
 - Required evidence: transformed string fixture has no `[I` key-cell casts or
   `newarray int` for string material; any remaining `[I` casts are classified
-  as class-key or unrelated structural arrays by the ASM audit.
+  as class-key or unrelated structural arrays by the ASM audit. Baseline source
+  inspection before this row shows the fixed `[I` contract in
+  `emitRuntimeStringKeyCellLoad`, fixed logical cell reads and updates in
+  `emitRuntimeStringSiteSeedLoad`, `emitRuntimeStringTailSelectorLoad`,
+  `emitRuntimeDecodedStringKeyWord`, `emitRuntimeStringKeyCellUpdate`, and
+  `emitRuntimeStringSiteMetadata*`, plus fixed emitted `int[11]` cells from
+  `encodedStringKeyCell` and `emitIntArray`. Baseline fixture inspection on
+  `build/tmp/neko-test-strings/string-shapes-obf.jar` shows repeated
+  `checkcast #... // class "[I"`, `bipush 11`, and `newarray int` entries
+  around string material and `__neko_strtail$`. First JSE-15 full-validation
+  attempt with all 33 physical `Object[]` slots eagerly boxed failed during
+  `test21.jar` full obfuscation in `ControlFlowFlatteningPass.finalizeOutput`:
+  `JarOutput.previewClassBytes` reported `MethodTooLargeException` for
+  `a/a.<clinit>()V`, with CFF estimate `estimatedCodeBytes=92631`
+  (`build/test-jvm-full-obf-perf/test21-obf.obfuscate.stdout.log`). The repair
+  therefore keeps the variable `Object[]` key-cell contract but packs required
+  logical int cells into descriptor-selected boxed long pairs, avoiding both
+  the old fixed `[I` shape and class initialization growth from every unused
+  physical slot.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Static/ASM audit: add `assertStringKeyMaterialHasNoFixedIntArrayCell`
   in `JvmStringObfuscationIntegrationTest`; optional artifact inspection:
   `javap -J-XX:-UsePerfData -classpath build/tmp/neko-test-strings/string-shapes-obf.jar -c -v StringShapes | rg -n "(checkcast[[:space:]]+#.*\"\\[I\"|newarray[[:space:]]+int|__neko_strtail)"`.
+- Fresh validation evidence: `git diff --check -- .plan/jvm-obfuscation-semantic-entanglement-2026-05-27.md neko-transforms/src/main/java/dev/nekoobfuscator/transforms/jvm/strings/JvmStringObfuscationPass.java neko-test/src/test/java/dev/nekoobfuscator/test/JvmStringObfuscationIntegrationTest.java`
+  passed; `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest`
+  passed; `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`
+  passed with XML `tests=2`, `failures=0`, `errors=0`, `time=130.76`.
+  Source grep for the old `StringKeyMaterial`, `int[4]`, fixed key-cell
+  helper, and `emitIntArray` shapes found no production matches. `javap` on
+  `build/tmp/neko-test-strings/string-shapes-obf.jar` shows string material
+  key cells loaded as `checkcast "[Ljava/lang/Object;"`, descriptor-selected
+  `Number.longValue()` packs, and `Long.valueOf` updates; remaining
+  `checkcast "[I"` sites in `__neko_strtail$` are the
+  `STRING_MATERIAL_SELECTOR_SLOT` selector or CFF class-key arrays, not string
+  key cells. Subagent review `019e6aa3-577e-72d1-923d-bea4c43de746` returned
+  PASS for the three-file diff, evidence freshness, descriptor/pack read/write
+  stack shape, remaining `[I` classification, and no fallback or CFF downgrade.
 - Completion criteria: plaintext strings remain absent; no fixed string
   key-cell `[I` pattern survives; no standalone key/material fields or helper
   fallbacks appear.

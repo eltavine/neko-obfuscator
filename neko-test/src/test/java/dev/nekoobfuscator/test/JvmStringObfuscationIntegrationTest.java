@@ -47,6 +47,10 @@ public class JvmStringObfuscationIntegrationTest {
     private static final int STRING_KEY_CELL_CACHE_SLOT = 9;
     private static final int STRING_KEY_CELL_LENGTH = 10;
     private static final int STRING_LOGICAL_KEY_WORDS = 4;
+    private static final int STRING_KEY_CELL_DESCRIPTOR_SLOT = 0;
+    private static final int STRING_KEY_CELL_PHYSICAL_MASK = 31;
+    private static final int STRING_KEY_CELL_PHYSICAL_LENGTH = STRING_KEY_CELL_PHYSICAL_MASK + 2;
+    private static final int STRING_KEY_CELL_OFFSET_SHIFT = 5;
     private static final int STRING_SELECTOR_LAYOUT_SHIFT = 8;
     private static final int STRING_SELECTOR_LAYOUT_MASK = 0x3F;
     private static final int STRING_SELECTOR_FINGERPRINT_SHIFT = 14;
@@ -90,6 +94,7 @@ public class JvmStringObfuscationIntegrationTest {
         assertPlaintextRemoved(outputJar);
         assertAesDesXorDecodeUsesCffState(outputJar);
         assertStringSitesHaveIndependentMaterialLayouts(outputJar);
+        assertStringKeyMaterialHasNoFixedIntArrayCell(outputJar);
     }
 
     @Test
@@ -386,7 +391,7 @@ public class JvmStringObfuscationIntegrationTest {
                 if (insn.getOpcode() == Opcodes.IXOR) {
                     sawXor = true;
                 }
-                if (stringDecodeTail && insn.getOpcode() == Opcodes.IASTORE) {
+                if (stringDecodeTail && storesBoxedNumber(insn)) {
                     sawKeyCellUpdate = true;
                 }
                 if (stringDecodeTail
@@ -413,7 +418,7 @@ public class JvmStringObfuscationIntegrationTest {
                     && insn.getNext().getOpcode() == Opcodes.AALOAD) {
                     sawConcatDirectClassKeySlotLoad = true;
                 }
-                if (stringDecodeHelper && insn.getOpcode() == Opcodes.IASTORE) {
+                if (stringDecodeHelper && storesBoxedNumber(insn)) {
                     sawSiteHelperKeyCellUpdate = true;
                 }
                 if (insn.getOpcode() == Opcodes.LCMP) {
@@ -479,7 +484,7 @@ public class JvmStringObfuscationIntegrationTest {
         List<StringMaterialCell> cells = new ArrayList<>();
         for (var method : clazz.asmNode().methods) {
             if (method.instructions == null) continue;
-            for (int[] rawCell : literalIntArrays(method.instructions.toArray())) {
+            for (LiteralObjectArray rawCell : literalIntegerObjectArrays(method.instructions.toArray())) {
                 StringMaterialCell decoded = decodeStringMaterialCell(rawCell);
                 if (decoded != null) {
                     cells.add(decoded);
@@ -518,6 +523,29 @@ public class JvmStringObfuscationIntegrationTest {
             observedSeedDecodesEveryCell,
             "one observed string site seed decoded every material cell"
         );
+    }
+
+    private void assertStringKeyMaterialHasNoFixedIntArrayCell(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("StringShapes");
+        int variableCells = 0;
+        int fixedIntCells = 0;
+        for (var method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            for (LiteralObjectArray rawCell : literalIntegerObjectArrays(insns)) {
+                if (decodeStringMaterialCell(rawCell) != null) {
+                    variableCells++;
+                }
+            }
+            for (int[] rawCell : literalIntArrays(insns)) {
+                if (rawCell.length == 11 && decodeFixedStringMaterialCell(rawCell) != null) {
+                    fixedIntCells++;
+                }
+            }
+        }
+        assertTrue(variableCells >= 2, "string material should be emitted as variable Object[] cells");
+        assertEquals(0, fixedIntCells, "fixed int[11] string key material cell survived");
     }
 
     private List<int[]> literalIntArrays(AbstractInsnNode[] insns) {
@@ -564,8 +592,128 @@ public class JvmStringObfuscationIntegrationTest {
         return arrays;
     }
 
-    private StringMaterialCell decodeStringMaterialCell(int[] rawCell) {
-        if (rawCell.length != 11) return null;
+    private List<LiteralObjectArray> literalIntegerObjectArrays(AbstractInsnNode[] insns) {
+        List<LiteralObjectArray> arrays = new ArrayList<>();
+        for (int i = 0; i < insns.length; i++) {
+            Integer length = pushedIntValue(insns[i]);
+            if (length == null || length <= 0 || length > 256) continue;
+            int newArray = nextRealIndex(insns, i + 1, insns.length);
+            if (newArray < 0 ||
+                !(insns[newArray] instanceof TypeInsnNode arrayType) ||
+                arrayType.getOpcode() != Opcodes.ANEWARRAY ||
+                !"java/lang/Object".equals(arrayType.desc)) {
+                continue;
+            }
+            Object[] values = new Object[length];
+            boolean[] written = new boolean[length];
+            boolean ok = true;
+            int cursor = newArray + 1;
+            int stores = 0;
+            while (true) {
+                int dup = nextRealIndex(insns, cursor, insns.length);
+                int indexInsn = dup < 0 ? -1 : nextRealIndex(insns, dup + 1, insns.length);
+                int valueInsn = indexInsn < 0 ? -1 : nextRealIndex(insns, indexInsn + 1, insns.length);
+                int valueOf = valueInsn < 0 ? -1 : nextRealIndex(insns, valueInsn + 1, insns.length);
+                int store = valueOf < 0 ? -1 : nextRealIndex(insns, valueOf + 1, insns.length);
+                Integer index = indexInsn < 0 ? null : pushedIntValue(insns[indexInsn]);
+                Object value = boxedNumberValue(insns, valueInsn, valueOf);
+                if (dup < 0 || insns[dup].getOpcode() != Opcodes.DUP) {
+                    break;
+                }
+                if (index == null ||
+                    value == null ||
+                    index < 0 ||
+                    index >= length ||
+                    valueOf < 0 ||
+                    !isBoxedNumberValueOf(insns[valueOf]) ||
+                    store < 0 ||
+                    insns[store].getOpcode() != Opcodes.AASTORE) {
+                    ok = false;
+                    break;
+                }
+                values[index] = value;
+                written[index] = true;
+                stores++;
+                cursor = store + 1;
+            }
+            if (ok && stores > 0) {
+                arrays.add(new LiteralObjectArray(values, written));
+                i = cursor;
+            }
+        }
+        return arrays;
+    }
+
+    private boolean storesBoxedNumber(AbstractInsnNode insn) {
+        if (!isBoxedNumberValueOf(insn)) return false;
+        AbstractInsnNode cursor = insn.getNext();
+        while (cursor != null && cursor.getOpcode() < 0) {
+            cursor = cursor.getNext();
+        }
+        return cursor != null && cursor.getOpcode() == Opcodes.AASTORE;
+    }
+
+    private boolean isBoxedNumberValueOf(AbstractInsnNode insn) {
+        if (!(insn instanceof MethodInsnNode call)) return false;
+        if (call.getOpcode() != Opcodes.INVOKESTATIC || !"valueOf".equals(call.name)) return false;
+        return ("java/lang/Integer".equals(call.owner) && "(I)Ljava/lang/Integer;".equals(call.desc))
+            || ("java/lang/Long".equals(call.owner) && "(J)Ljava/lang/Long;".equals(call.desc));
+    }
+
+    private Object boxedNumberValue(AbstractInsnNode[] insns, int valueInsn, int valueOf) {
+        if (valueInsn < 0 || valueOf < 0 || !(insns[valueOf] instanceof MethodInsnNode call)) return null;
+        if (call.getOpcode() != Opcodes.INVOKESTATIC || !"valueOf".equals(call.name)) return null;
+        if ("java/lang/Integer".equals(call.owner) && "(I)Ljava/lang/Integer;".equals(call.desc)) {
+            return pushedIntValue(insns[valueInsn]);
+        }
+        if ("java/lang/Long".equals(call.owner) && "(J)Ljava/lang/Long;".equals(call.desc)) {
+            return pushedLongValue(insns[valueInsn]);
+        }
+        return null;
+    }
+
+    private StringMaterialCell decodeStringMaterialCell(LiteralObjectArray rawCell) {
+        Object[] values = rawCell.values();
+        if (values.length != STRING_KEY_CELL_PHYSICAL_LENGTH) return null;
+        if (!rawCell.written()[STRING_KEY_CELL_DESCRIPTOR_SLOT]) return null;
+        if (!(values[STRING_KEY_CELL_DESCRIPTOR_SLOT] instanceof Integer descriptor)) return null;
+        for (int logicalIndex = 0; logicalIndex <= STRING_KEY_CELL_LENGTH; logicalIndex++) {
+            if (!rawCell.written()[stringKeyCellPackPhysicalIndex(descriptor, logicalIndex)]) {
+                return null;
+            }
+        }
+        int[] logicalValues = logicalStringCellValues(values, descriptor);
+        int epoch = logicalValues[4];
+        long siteSeed = ((long) (logicalValues[5] ^ stringSiteTokenCellMask(epoch, 0)) << 32) |
+            ((logicalValues[6] ^ stringSiteTokenCellMask(epoch, 1)) & 0xFFFFFFFFL);
+        int selector = logicalValues[7] ^ stringTailSelectorCellMask(epoch);
+        int layoutId = (selector >>> STRING_SELECTOR_LAYOUT_SHIFT) & STRING_SELECTOR_LAYOUT_MASK;
+        int fingerprint = (selector >>> STRING_SELECTOR_FINGERPRINT_SHIFT) &
+            STRING_SELECTOR_FINGERPRINT_MASK;
+        if (layoutId == 0 || fingerprint == 0) return null;
+        int payloadSlot = logicalValues[STRING_KEY_CELL_PAYLOAD_SLOT] ^ stringSiteMetadataCellMask(
+            siteSeed,
+            epoch,
+            STRING_KEY_CELL_PAYLOAD_MASK
+        );
+        int cacheSlot = logicalValues[STRING_KEY_CELL_CACHE_SLOT] ^ stringSiteMetadataCellMask(
+            siteSeed,
+            epoch,
+            STRING_KEY_CELL_CACHE_MASK
+        );
+        int encryptedLength = logicalValues[STRING_KEY_CELL_LENGTH] ^ stringSiteMetadataCellMask(
+            siteSeed,
+            epoch,
+            STRING_KEY_CELL_LENGTH_MASK
+        );
+        if (payloadSlot < 0 || cacheSlot < 0 || encryptedLength <= 0 || encryptedLength > 4096) {
+            return null;
+        }
+        int[] words = decodedWords(logicalValues, siteSeed, epoch);
+        return new StringMaterialCell(logicalValues, siteSeed, epoch, layoutId, fingerprint, words);
+    }
+
+    private StringMaterialCell decodeFixedStringMaterialCell(int[] rawCell) {
         int epoch = rawCell[4];
         long siteSeed = ((long) (rawCell[5] ^ stringSiteTokenCellMask(epoch, 0)) << 32) |
             ((rawCell[6] ^ stringSiteTokenCellMask(epoch, 1)) & 0xFFFFFFFFL);
@@ -592,7 +740,10 @@ public class JvmStringObfuscationIntegrationTest {
         if (payloadSlot < 0 || cacheSlot < 0 || encryptedLength <= 0 || encryptedLength > 4096) {
             return null;
         }
-        int[] words = decodedWords(rawCell, siteSeed, epoch);
+        int[] words = new int[STRING_LOGICAL_KEY_WORDS];
+        for (int i = 0; i < words.length; i++) {
+            words[i] = rawCell[i] ^ stringKeyCellMask(siteSeed, i, epoch);
+        }
         return new StringMaterialCell(rawCell.clone(), siteSeed, epoch, layoutId, fingerprint, words);
     }
 
@@ -611,6 +762,32 @@ public class JvmStringObfuscationIntegrationTest {
             }
         }
         return true;
+    }
+
+    private int[] logicalStringCellValues(Object[] rawCell, int descriptor) {
+        int[] values = new int[STRING_KEY_CELL_LENGTH + 1];
+        for (int i = 0; i < values.length; i++) {
+            values[i] = logicalCellValue(rawCell, descriptor, i);
+        }
+        return values;
+    }
+
+    private int logicalCellValue(Object[] rawCell, int descriptor, int logicalIndex) {
+        Object value = rawCell[stringKeyCellPackPhysicalIndex(descriptor, logicalIndex)];
+        if (!(value instanceof Number number)) {
+            throw new IllegalArgumentException("missing numeric string cell pack");
+        }
+        long packed = number.longValue();
+        if ((logicalIndex & 1) != 0) {
+            packed >>>= 32;
+        }
+        return (int) packed;
+    }
+
+    private int stringKeyCellPackPhysicalIndex(int descriptor, int logicalIndex) {
+        int stride = (descriptor & STRING_KEY_CELL_PHYSICAL_MASK) | 1;
+        int offset = (descriptor >>> STRING_KEY_CELL_OFFSET_SHIFT) & STRING_KEY_CELL_PHYSICAL_MASK;
+        return 1 + (((logicalIndex >>> 1) * stride + offset) & STRING_KEY_CELL_PHYSICAL_MASK);
     }
 
     private int stringKeyCellMask(long siteSeed, int wordIndex, int epoch) {
@@ -873,6 +1050,17 @@ public class JvmStringObfuscationIntegrationTest {
         return null;
     }
 
+    private static Long pushedLongValue(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode == Opcodes.LCONST_0 || opcode == Opcodes.LCONST_1) {
+            return (long) (opcode - Opcodes.LCONST_0);
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Long longValue) {
+            return longValue;
+        }
+        return null;
+    }
+
     private record StringMaterialCell(
         int[] rawCell,
         long siteSeed,
@@ -880,6 +1068,11 @@ public class JvmStringObfuscationIntegrationTest {
         int layoutId,
         int fingerprint,
         int[] words
+    ) {}
+
+    private record LiteralObjectArray(
+        Object[] values,
+        boolean[] written
     ) {}
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {
