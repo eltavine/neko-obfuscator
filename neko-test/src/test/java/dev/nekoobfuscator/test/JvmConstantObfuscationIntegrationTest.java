@@ -126,6 +126,7 @@ public class JvmConstantObfuscationIntegrationTest {
         assertConstantLiveWordConsumesDataDigest(outputJar);
         assertProtectedIntegerDecodeMaterialIsDerived(outputJar);
         assertProtectedLongDecodeMaterialIsDerived(outputJar);
+        assertProtectedFloatingDecodeMaterialIsDerived(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -364,6 +365,85 @@ public class JvmConstantObfuscationIntegrationTest {
         assertTrue(checkedCompositions > 0, "constant fixture did not expose protected long compositions");
     }
 
+    private void assertProtectedFloatingDecodeMaterialIsDerived(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("ConstantShapes");
+        MethodNode floats = null;
+        MethodNode doubles = null;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ("floats".equals(method.name) && method.desc.endsWith(")F")) {
+                floats = method;
+            } else if ("doubles".equals(method.name) && method.desc.endsWith(")D")) {
+                doubles = method;
+            }
+        }
+        assertTrue(floats != null && floats.instructions != null, "constant fixture did not retain floats() method");
+        assertTrue(doubles != null && doubles.instructions != null, "constant fixture did not retain doubles() method");
+
+        AbstractInsnNode[] floatInsns = floats.instructions.toArray();
+        int checkedFloats = 0;
+        for (int i = 0; i < floatInsns.length; i++) {
+            if (!(floatInsns[i] instanceof MethodInsnNode call)
+                || !"java/lang/Float".equals(call.owner)
+                || !"intBitsToFloat".equals(call.name)) {
+                continue;
+            }
+            int helper = previousNumericIntHelperCall(floatInsns, i, 128);
+            if (helper < 0) continue;
+            assertTrue(isProtectedIntHelperCall(floatInsns[helper]), "float raw bits used legacy compact helper");
+            assertTrue(
+                protectedCompactCallReceivesRuntimeDerivedMaterial(
+                    floatInsns,
+                    helper,
+                    previousConstantDecodeProof(floatInsns, helper)
+                ),
+                "protected float raw bits were not live-derived"
+            );
+            checkedFloats++;
+        }
+        assertTrue(checkedFloats > 0, "constant fixture did not expose protected float raw-bit decodes");
+
+        AbstractInsnNode[] doubleInsns = doubles.instructions.toArray();
+        int checkedDoubles = 0;
+        for (int i = 0; i < doubleInsns.length; i++) {
+            if (!(doubleInsns[i] instanceof MethodInsnNode call)
+                || !"java/lang/Double".equals(call.owner)
+                || !"longBitsToDouble".equals(call.name)) {
+                continue;
+            }
+            int lor = previousOpcodeIndex(doubleInsns, i, Opcodes.LOR, 32);
+            if (lor < 0) continue;
+            int lowHelper = previousNumericIntHelperCall(doubleInsns, lor, 96);
+            if (lowHelper < 0) continue;
+            int highHelper = previousNumericIntHelperCall(doubleInsns, lowHelper, 320);
+            if (highHelper < 0) continue;
+            assertTrue(isProtectedIntHelperCall(doubleInsns[highHelper]), "double high raw word used legacy helper");
+            assertTrue(isProtectedIntHelperCall(doubleInsns[lowHelper]), "double low raw word used legacy helper");
+            assertTrue(
+                protectedCompactCallReceivesRuntimeDerivedMaterial(
+                    doubleInsns,
+                    highHelper,
+                    previousConstantDecodeProof(doubleInsns, highHelper)
+                ),
+                "protected double high raw word was not live-derived"
+            );
+            assertTrue(
+                protectedCompactCallReceivesRuntimeDerivedMaterial(
+                    doubleInsns,
+                    lowHelper,
+                    previousConstantDecodeProof(doubleInsns, lowHelper)
+                ),
+                "protected double low raw word was not live-derived"
+            );
+            assertTrue(
+                !containsLargeLongLdc(doubleInsns, highHelper, i + 1),
+                "protected double raw-bit reconstruction retained a direct large long LdcInsnNode"
+            );
+            checkedDoubles++;
+        }
+        assertTrue(checkedDoubles > 0, "constant fixture did not expose protected double raw-bit decodes");
+    }
+
     private boolean fixtureArrayPayload(int storeOpcode, long bits) {
         return switch (storeOpcode) {
             case Opcodes.BASTORE -> bits == -128L || bits == 0L || bits == 1L || bits == 127L;
@@ -594,6 +674,21 @@ public class JvmConstantObfuscationIntegrationTest {
         int start = Math.max(0, fromExclusive - maxDistance);
         for (int i = fromExclusive - 1; i >= start; i--) {
             if (isNumericIntHelperCall(insns[i])) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private int previousOpcodeIndex(
+        AbstractInsnNode[] insns,
+        int fromExclusive,
+        int opcode,
+        int maxDistance
+    ) {
+        int start = Math.max(0, fromExclusive - maxDistance);
+        for (int i = fromExclusive - 1; i >= start; i--) {
+            if (insns[i].getOpcode() == opcode) {
                 return i;
             }
         }

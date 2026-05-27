@@ -479,7 +479,7 @@ For every implementation row below:
 - Completion criteria: constant fixture output is unchanged; protected long
   material is live-derived and no static numeric path changes.
 
-### [ ] JSE-12: Migrate CFF-protected float/double decode material
+### [x] JSE-12: Migrate CFF-protected float/double decode material
 
 - Scope: migrate only CFF-protected float and double raw-bit decode material in
   `JvmConstantObfuscationPass`. Integer/long and static material are outside

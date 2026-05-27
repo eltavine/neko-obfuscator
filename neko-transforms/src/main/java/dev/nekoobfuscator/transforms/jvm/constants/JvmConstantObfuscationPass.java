@@ -309,14 +309,18 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int estimatedGrowth = 0;
         int protectedIntSites = 0;
         for (NumericSite site : sites) {
-            if (site.kind() == NumericKind.INT || site.kind() == NumericKind.IINC) {
+            if (
+                site.kind() == NumericKind.INT ||
+                    site.kind() == NumericKind.IINC ||
+                    site.kind() == NumericKind.FLOAT
+            ) {
                 protectedIntSites++;
                 estimatedGrowth += 260;
-            } else if (site.kind() == NumericKind.LONG) {
+            } else if (site.kind() == NumericKind.LONG || site.kind() == NumericKind.DOUBLE) {
                 protectedIntSites += 2;
                 estimatedGrowth += 520;
             } else {
-                estimatedGrowth += site.kind() == NumericKind.LONG || site.kind() == NumericKind.DOUBLE ? 38 : 18;
+                estimatedGrowth += 18;
             }
         }
         if (protectedIntSites >= 4) return true;
@@ -328,7 +332,9 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             if (
                 site.kind() == NumericKind.INT ||
                     site.kind() == NumericKind.IINC ||
-                    site.kind() == NumericKind.LONG
+                    site.kind() == NumericKind.LONG ||
+                    site.kind() == NumericKind.FLOAT ||
+                    site.kind() == NumericKind.DOUBLE
             ) {
                 return true;
             }
@@ -447,7 +453,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 clazz
             );
             case FLOAT -> {
-                emitDecodedInt(
+                emitDecodedProtectedInt(
                     insns,
                     Float.floatToRawIntBits(floatConstant(source)),
                     siteSeed,
@@ -457,7 +463,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
-                    compactHelper,
+                    compactProtectedHelper,
                     clazz
                 );
                 insns.add(new MethodInsnNode(
@@ -469,7 +475,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 ));
             }
             case DOUBLE -> {
-                emitDecodedLong(
+                emitDecodedProtectedLong(
                     insns,
                     Double.doubleToRawLongBits(doubleConstant(source)),
                     siteSeed,
@@ -479,7 +485,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
-                    compactHelper,
+                    compactProtectedHelper,
                     clazz
                 );
                 insns.add(new MethodInsnNode(
