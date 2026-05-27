@@ -821,7 +821,7 @@ For every implementation row below:
 - Completion criteria: string tests pass; string protected seed/material values
   are per-site and derived; no plaintext strings or standalone carriers appear.
 
-### [ ] JSE-17: Diversify indy flow/resolver material layout
+### [x] JSE-17: Diversify indy flow/resolver material layout
 
 - Scope: replace fixed-stride indy flow/resolver `long[]` cell layout with
   per-site variable layout descriptors, independent epoch/fingerprint, shuffled
@@ -831,6 +831,30 @@ For every implementation row below:
   indexing contract, no fixed resolver stride of `3`, no `new long[] {methodSalt,
   siteSeed, stateToken}` or `new long[] {siteSeed, salt}` source shape, and at
   least two indy sites have distinct layout ids and fingerprints.
+- Fresh JSE-17 baseline evidence: after JSE-16, current source still defines
+  `FLOW_SALT_CELL_STRIDE = 4`; `registerIndyFlowSalt` records
+  `new long[] {methodSalt, siteSeed, stateToken}`; `registerIndyResolverSeed`
+  records `new long[] {siteSeed, salt}`; `rebuildIndyFlowTableInit` emits flat
+  `long[]` material using `table.cells().size() * FLOW_SALT_CELL_STRIDE` and
+  `table.resolverCells().size() * 3`; runtime flow helper multiplies
+  `flowSlotLocal` by the fixed stride and resolver seed load multiplies
+  `slotLocal` by `3`.
+- Completion evidence: production code now stores indy flow and resolver
+  material as per-site `Object[]` entries containing descriptor-bearing
+  `long[]` cells. Runtime flow and resolver helpers load the descriptor and
+  compute the physical cell slot from span/stride/offset bytes before each
+  seed/epoch/state read or write; mask derivation includes descriptor
+  fingerprint material.
+- Validation evidence: `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest` passed;
+  JUnit XML reports `tests="1" failures="0" errors="0"`. Source audit for
+  `FLOW_SALT_CELL_STRIDE|resolverCells\\(\\).*new long\\[\\]|new long\\[\\]
+  \\{siteSeed|new long\\[\\] \\{methodSalt` returned no matches, while
+  `layout|fingerprint` audit shows descriptor construction and the
+  `assertIndySitesHaveIndependentMaterialLayouts` ASM predicate.
+- Review evidence: JSE-17 subagent review `019e6ad3-a62f-7e31-a482-72b5bf170220`
+  returned PASS with no required fixes; it checked runtime index symmetry,
+  build/runtime mask parity, test predicate strength, and scope compliance.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`.
 - Static/ASM audit: add `assertIndySitesHaveIndependentMaterialLayouts`

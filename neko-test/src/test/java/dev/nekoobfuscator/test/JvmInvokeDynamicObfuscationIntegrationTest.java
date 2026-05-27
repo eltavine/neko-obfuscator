@@ -52,6 +52,13 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static final String FLOW_DESC = "(IIIII[Ljava/lang/Object;IJ)J";
     private static final String OLD_FLOW_THIN_DESC = "(IIII[Ljava/lang/Object;IJ)J";
     private static final String OLD_FLOW_STATE_DESC = "(IIII[Ljava/lang/Object;IJI)J";
+    private static final int INDY_CELL_SPAN_SHIFT = 0;
+    private static final int INDY_CELL_STRIDE_SHIFT = 8;
+    private static final int INDY_CELL_OFFSET_SHIFT = 16;
+    private static final int INDY_CELL_LAYOUT_SHIFT = 24;
+    private static final long INDY_CELL_BYTE_MASK = 0xFFL;
+    private static final int FLOW_SLOT_LOCAL = 6;
+    private static final int RESOLVER_SLOT_LOCAL = 4;
 
     @Test
     void invokeDynamicObfuscatesCffKeyedMethodAndFieldReferences() throws Exception {
@@ -74,6 +81,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertEquals(original, obfuscated);
         assertTrue(obfuscated.contains("INDY REF OK"), obfuscated);
         assertReferenceSitesUseInvokeDynamic(outputJar);
+        assertIndySitesHaveIndependentMaterialLayouts(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -269,6 +277,58 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertTrue(sawLongLongDescriptor, "indy reference sites should carry keyed long arguments");
     }
 
+    private void assertIndySitesHaveIndependentMaterialLayouts(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        var clazz = input.classMap().get("IndyReferenceShapes");
+        int indySites = 0;
+        MethodNode flowHelper = null;
+        MethodNode resolverHelper = null;
+        Set<String> layoutFingerprints = new LinkedHashSet<>();
+        int materialCells = 0;
+        for (var method : clazz.asmNode().methods) {
+            if (method.name.startsWith("__neko_indy_flow")) {
+                flowHelper = method;
+            }
+            if (method.name.startsWith("__neko_indy_resolve")) {
+                resolverHelper = method;
+            }
+            for (long[] cell : literalLongArrays(method)) {
+                if (!isIndyMaterialCell(cell)) continue;
+                long descriptor = cell[0];
+                int layoutId = descriptorByte(descriptor, INDY_CELL_LAYOUT_SHIFT);
+                long fingerprint = descriptor >>> 32;
+                layoutFingerprints.add(layoutId + ":" + Long.toUnsignedString(fingerprint));
+                materialCells++;
+            }
+            if (method.instructions == null || method.name.startsWith("__neko_")) continue;
+            for (AbstractInsnNode insn : method.instructions.toArray()) {
+                if (insn instanceof InvokeDynamicInsnNode indy
+                    && indy.bsm != null
+                    && "IndyReferenceShapes".equals(indy.bsm.getOwner())) {
+                    indySites++;
+                }
+            }
+        }
+        assertTrue(indySites > 1, "fixture should exercise multiple indy sites");
+        assertTrue(materialCells >= indySites, "indy material should be emitted as per-site cells");
+        assertTrue(
+            layoutFingerprints.size() >= indySites,
+            "indy sites should not share one recoverable layout/fingerprint: " + layoutFingerprints
+        );
+        assertTrue(flowHelper != null, "flow helper missing");
+        assertTrue(resolverHelper != null, "resolver helper missing");
+        assertTrue(methodUsesVariableIndyMaterialIndex(flowHelper), "flow helper should derive material indexes from descriptors");
+        assertTrue(methodUsesVariableIndyMaterialIndex(resolverHelper), "resolver helper should derive material indexes from descriptors");
+        assertFalse(
+            fixedSlotStrideMultiply(flowHelper, FLOW_SLOT_LOCAL, 4),
+            "flow helper should not index flow material with one global stride"
+        );
+        assertFalse(
+            fixedSlotStrideMultiply(resolverHelper, RESOLVER_SLOT_LOCAL, 3),
+            "resolver helper should not index resolver material with one global stride"
+        );
+    }
+
     private static boolean methodLoadsMaterialSlot(MethodNode method, int slot) {
         if (method.instructions == null) return false;
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
@@ -276,6 +336,96 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
                 && intInsn.operand == slot
                 && insn.getNext() != null
                 && insn.getNext().getOpcode() == Opcodes.AALOAD) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<long[]> literalLongArrays(MethodNode method) {
+        List<long[]> arrays = new ArrayList<>();
+        if (method.instructions == null) return arrays;
+        AbstractInsnNode[] insns = method.instructions.toArray();
+        for (int i = 0; i < insns.length; i++) {
+            Integer length = pushedIntValue(insns[i]);
+            if (length == null || length < 0) continue;
+            int newArray = nextInstructionIndex(insns, i + 1);
+            if (newArray < 0
+                || !(insns[newArray] instanceof IntInsnNode intInsn)
+                || intInsn.getOpcode() != Opcodes.NEWARRAY
+                || intInsn.operand != Opcodes.T_LONG) {
+                continue;
+            }
+            long[] values = new long[length];
+            boolean[] seen = new boolean[length];
+            int cursor = nextInstructionIndex(insns, newArray + 1);
+            int writes = 0;
+            while (writes < length && cursor >= 0 && insns[cursor].getOpcode() == Opcodes.DUP) {
+                int indexInsn = nextInstructionIndex(insns, cursor + 1);
+                int valueInsn = nextInstructionIndex(insns, indexInsn + 1);
+                int storeInsn = nextInstructionIndex(insns, valueInsn + 1);
+                if (indexInsn < 0 || valueInsn < 0 || storeInsn < 0) break;
+                Integer index = pushedIntValue(insns[indexInsn]);
+                Long value = pushedLongValue(insns[valueInsn]);
+                if (index == null || value == null || insns[storeInsn].getOpcode() != Opcodes.LASTORE) break;
+                if (index < 0 || index >= length || seen[index]) break;
+                values[index] = value;
+                seen[index] = true;
+                writes++;
+                cursor = nextInstructionIndex(insns, storeInsn + 1);
+            }
+            if (writes == length) {
+                arrays.add(values);
+            }
+        }
+        return arrays;
+    }
+
+    private static boolean isIndyMaterialCell(long[] cell) {
+        if (cell.length < 7) return false;
+        long descriptor = cell[0];
+        int span = descriptorByte(descriptor, INDY_CELL_SPAN_SHIFT);
+        int stride = descriptorByte(descriptor, INDY_CELL_STRIDE_SHIFT);
+        int offset = descriptorByte(descriptor, INDY_CELL_OFFSET_SHIFT);
+        int layoutId = descriptorByte(descriptor, INDY_CELL_LAYOUT_SHIFT);
+        long fingerprint = descriptor >>> 32;
+        if (span != cell.length - 1 || stride <= 0 || stride >= span || offset >= span) return false;
+        if (layoutId == 0 || layoutId > 0x7E || fingerprint == 0L) return false;
+        Set<Integer> physical = new LinkedHashSet<>();
+        for (int logical = 0; logical < 3; logical++) {
+            int index = 1 + Math.floorMod(logical * stride + offset, span);
+            if (index <= 0 || index >= cell.length || !physical.add(index)) return false;
+        }
+        return true;
+    }
+
+    private static int descriptorByte(long descriptor, int shift) {
+        return (int) ((descriptor >>> shift) & INDY_CELL_BYTE_MASK);
+    }
+
+    private static boolean methodUsesVariableIndyMaterialIndex(MethodNode method) {
+        if (method.instructions == null) return false;
+        AbstractInsnNode[] insns = method.instructions.toArray();
+        return hasOpcode(insns, Opcodes.IREM, 0, insns.length)
+            && hasOpcode(insns, Opcodes.LUSHR, 0, insns.length)
+            && hasOpcode(insns, Opcodes.LALOAD, 0, insns.length);
+    }
+
+    private static boolean fixedSlotStrideMultiply(MethodNode method, int slotLocal, int stride) {
+        if (method.instructions == null) return false;
+        AbstractInsnNode[] insns = method.instructions.toArray();
+        for (int i = 0; i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ILOAD
+                || load.var != slotLocal) {
+                continue;
+            }
+            int strideInsn = nextInstructionIndex(insns, i + 1);
+            int multiplyInsn = nextInstructionIndex(insns, strideInsn + 1);
+            if (strideInsn >= 0
+                && multiplyInsn >= 0
+                && Integer.valueOf(stride).equals(pushedIntValue(insns[strideInsn]))
+                && insns[multiplyInsn].getOpcode() == Opcodes.IMUL) {
                 return true;
             }
         }
@@ -396,10 +546,38 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     }
 
     private static boolean isIntPush(AbstractInsnNode insn) {
+        return pushedIntValue(insn) != null;
+    }
+
+    private static Integer pushedIntValue(AbstractInsnNode insn) {
         int opcode = insn.getOpcode();
-        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) return true;
-        if (insn instanceof IntInsnNode && (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH)) return true;
-        return insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer;
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) {
+            return opcode - Opcodes.ICONST_0;
+        }
+        if (insn instanceof IntInsnNode intInsn && (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH)) {
+            return intInsn.operand;
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer value) {
+            return value;
+        }
+        return null;
+    }
+
+    private static Long pushedLongValue(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (opcode == Opcodes.LCONST_0) return 0L;
+        if (opcode == Opcodes.LCONST_1) return 1L;
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Long value) {
+            return value;
+        }
+        return null;
+    }
+
+    private static int nextInstructionIndex(AbstractInsnNode[] insns, int start) {
+        for (int i = Math.max(0, start); i < insns.length; i++) {
+            if (insns[i].getOpcode() >= 0) return i;
+        }
+        return -1;
     }
 
     private static boolean hasOpcode(AbstractInsnNode[] insns, int opcode, int startInclusive, int limitExclusive) {
