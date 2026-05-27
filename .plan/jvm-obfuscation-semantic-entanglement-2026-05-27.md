@@ -496,6 +496,33 @@ For every implementation row below:
 - Completion criteria: constant fixture output is unchanged; protected
   float/double material is live-derived.
 
+### [-] JSE-12C: Restore full-JVM size gate after protected numeric material
+
+- Dependency reason: JSE-13 validation exposed that the full-JVM performance
+  gate fails at the already-committed JSE-12 checkpoint `78cd76e` before any
+  static numeric material migration. The failure is therefore a prerequisite
+  for later numeric material work rather than a JSE-13 static-material issue.
+- Scope: reduce protected numeric material size in `JvmConstantObfuscationPass`
+  without weakening original application coverage, CFF block semantics, live
+  data binding, or derived material requirements. Prefer compact same-class
+  generated helper shapes already owned by the constant transform. Do not
+  change static `<clinit>` material, string material, indy material, native
+  paths, CFF block construction, or unrelated worktree files.
+- Required evidence: source diff shows only constant protected numeric
+  material/helper sizing changes and tests; full-JVM failure evidence includes
+  `JvmFullObfuscationPerfTest` failing at JSE-12 with
+  `a/ca.a([Ljava/lang/Object;)V estimatedCodeBytes=89303`, proving the blocker
+  predates JSE-13.
+- Validation command or runtime target:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
+- Static/ASM audit: existing constant numeric material audits must still prove
+  protected int/iinc/long/float/double material uses `__neko_num_ip` and
+  live-derived callsite material; full-JVM structural audit must complete
+  without CFF finalizer size/frame failure.
+- Completion criteria: focused constant tests and full-JVM perf tests pass;
+  generated helper hardening does not leave legacy protected numeric helper
+  paths; no coverage skip, fallback, or original-bytecode rescue is introduced.
+
 ### [ ] JSE-13: Migrate static numeric material
 
 - Scope: migrate static numeric decode material that has no CFF metadata,
