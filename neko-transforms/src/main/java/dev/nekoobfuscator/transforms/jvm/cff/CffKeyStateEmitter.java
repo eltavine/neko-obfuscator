@@ -547,7 +547,6 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
             ));
             return;
         }
-        LabelNode nonZero = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
@@ -557,11 +556,11 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
-        insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, methodSalt ^ saltMask);
         JvmPassBytecode.pushLong(insns, saltMask);
         insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new InsnNode(Opcodes.LADD));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
@@ -571,13 +570,6 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         JvmPassBytecode.pushLong(insns, METHOD_KEY_PC_MIX);
         insns.add(new InsnNode(Opcodes.LMUL));
         insns.add(new InsnNode(Opcodes.LXOR));
-        insns.add(new InsnNode(Opcodes.DUP2));
-        insns.add(new InsnNode(Opcodes.LCONST_0));
-        insns.add(new InsnNode(Opcodes.LCMP));
-        insns.add(new JumpInsnNode(Opcodes.IFNE, nonZero));
-        insns.add(new InsnNode(Opcodes.POP2));
-        JvmPassBytecode.pushLong(insns, 0xD1B54A32D192ED03L);
-        insns.add(nonZero);
     }
 
     protected long methodKeyLongMask(CffBlockKeyState keyState, long seed) {

@@ -426,7 +426,7 @@ java -XX:-UsePerfData \
   C1 stack blocker for HKU-3 or follow-up work without claiming an exhaustive
   proof over all possible stack-lowering routes.
 
-### [ ] HKU-2.3: Align no-active-table inline method-key emission
+### [x] HKU-2.3: Align no-active-table inline method-key emission
 
 - Scope: change only the no-active-table inline method-key emitter so it uses
   the same raw-nonzero generated-state invariant and lower-stack formula shape.
@@ -436,18 +436,76 @@ java -XX:-UsePerfData \
   - source diff limited to no-active-table method-key emission and shared
     method-key emitter helpers;
   - active-table helper descriptor and callsites remain unchanged after HKU-2.2;
-  - no CFF row/material/helper topology changes.
+  - active-table helper descriptor/count topology remains unchanged. Exact
+    transition/step/island material call-count equality across fresh regenerated
+    artifacts is not a valid invariant for this subtask because existing CFF
+    seed paths include `System.identityHashCode(label)` in selector/result
+    token generation; record fresh material counts and reject zero/missing
+    coverage instead of treating cross-regeneration count drift as direct
+    source-change evidence.
 - Validation command: same targeted JVM validation command as HKU-2.2.
 - Completion criteria:
   - targeted JVM validation passes;
   - no-table emitted bytecode contains no runtime zero-check/fixed fallback;
-  - active-table generated helper and topology remain unchanged from HKU-2.2;
+  - active-table generated helper descriptor and bytecode shape remain unchanged
+    from HKU-2.2, with one accepted `(IIIIJJ)J` helper per selected artifact;
   - generated state audit remains raw-nonzero;
   - fresh TEST/obfusjack runtime rows are recorded and do not regress from the
     post-HKU-2.2 accepted baseline;
   - subagent implementation review passes;
   - commit contains only HKU-2.3 source changes and the matching update to this
     standalone plan before HKU-3 starts.
+
+- Implementation evidence:
+  - source diff is limited to
+    `CffKeyStateEmitter.emitMethodKeyFromDecodedState(...)` no-active-table
+    inline emission: the `DUP2`/`LCONST_0`/`LCMP`/`IFNE`/`POP2` runtime
+    fallback block was removed and the salt/block expression was reordered to
+    match the accepted active helper shape. The active-table invocation branch
+    remains unchanged.
+  - targeted validation command passed with `BUILD SUCCESSFUL in 1m 18s`,
+    executing the CFF algebraic audit, strong entry seed regression,
+    full-obfuscation perf ablation, invokedynamic, constant, string, method
+    parameter, renamer, and obfuscation integration tests.
+  - fresh ablation report
+    `build/test-jvm-runtime-ablation/jvm-runtime-ablation-report.json` captured
+    at `2026-05-27T02:53:32.150417122Z`, `repeatCount=3`, selected rows all
+    `validRunCount=3` with no invalid runs:
+    - TEST `cff-only-stack`: Calc median `94 ms`, material calls
+      transition=`621`, step=`497`, island=`493`;
+    - TEST `full`: Calc median `183 ms`, material calls transition=`621`,
+      step=`500`, island=`493`;
+    - obfusjack `cff-only-stack`: Seq median `292 ms`, Platform `68 ms`,
+      Virtual `77 ms`, Parallel `7 ms`, VThreads `7 ms`, material calls
+      transition=`391`, step=`462`, island=`347`;
+    - obfusjack `full`: Seq median `312 ms`, Platform `94 ms`,
+      Virtual `77 ms`, Parallel `8 ms`, VThreads `8 ms`, material calls
+      transition=`391`, step=`449`, island=`347`.
+  - selected topology rows retain exactly one accepted method-key helper
+    descriptor `(IIIIJJ)J`; current map shows
+    `METHOD a/a.__neko_cff_mkey$nwu5on(IIIIJJ)J -> cb`.
+  - current active helper bytecode from
+    `build/jvm-runtime-perf/hku-2-3-bytecode/obfusjack-method-key-helper.javap.txt`
+    remains descriptor `(IIIIJJ)J`, `stack=6`, `locals=8`, `args_size=6`,
+    `lreturn` at offset `32`, with no `dup2`, `lconst_0`, `lcmp`, `ifne`,
+    `pop2`, or fixed fallback long. Diff against HKU-2.2 shows only the
+    constant-pool index of the existing `METHOD_KEY_PC_MIX` literal changed.
+  - repo-local no-active-table ASM probe directly invoked
+    `emitMethodKeyFromDecodedState(...)` with `activeKeyTable == null` and
+    emitted 23 instructions:
+    `dup2=0`, `lcmp=0`, `ifne=0`, `pop2=0`, `fixedFallback=0`.
+  - marker scan of `build/test-jvm-runtime-ablation` found no fallback,
+    skip-on-error, original-bytecode, `translated=0`, SIGSEGV/SIGABRT,
+    verifier, or linkage markers. Test XML rows for the nine targeted classes
+    show `failures="0"` and `errors="0"`.
+- Completion evidence: subagent implementation review passed. The reviewer
+  confirmed the diff is limited to the no-active-table inline method-key
+  branch, the active-table `(IIIIJJ)J` helper branch remains unchanged, the
+  no-active emitter no longer emits the runtime zero-check/fixed fallback, the
+  fresh validation evidence matches the current source, the material-count
+  evidence adjustment is supported by existing `System.identityHashCode(label)`
+  seed paths, the old performance plan has no diff, and the intended commit
+  contains only this standalone plan plus `CffKeyStateEmitter.java`.
 
 ### [ ] HKU-3: Prove JIT and runtime effect, then accept or reject
 
