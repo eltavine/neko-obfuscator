@@ -324,6 +324,14 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             keyStateByLabel,
             activeKeyTable
         );
+        installPrimitiveDataDigestUpdates(
+            pctx,
+            mn,
+            blocks,
+            keyLocal,
+            dataLocal,
+            salt
+        );
 
         for (int i = 0; i < blocks.size(); i++) {
             Block block = blocks.get(i);
@@ -432,6 +440,401 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             return SyntheticNoiseBudget.PRESSURE;
         }
         return SyntheticNoiseBudget.NORMAL;
+    }
+
+    private void installPrimitiveDataDigestUpdates(
+        PipelineContext pctx,
+        MethodNode mn,
+        List<Block> blocks,
+        int keyLocal,
+        int dataLocal,
+        long salt
+    ) {
+        List<DataDigestObservation> observations = new ArrayList<>();
+        int ordinal = 0;
+        for (Block block : blocks) {
+            for (
+                AbstractInsnNode insn = block.label();
+                insn != null && insn != block.endExclusive();
+                insn = insn.getNext()
+            ) {
+                if (insn.getOpcode() < 0 || JvmKeyDispatchPass.isGeneratedNode(pctx, insn)) {
+                    continue;
+                }
+                DataDigestObservation observation = primitiveDataDigestObservation(
+                    insn,
+                    keyLocal,
+                    ordinal++,
+                    salt
+                );
+                if (observation != null) {
+                    observations.add(observation);
+                }
+            }
+        }
+        int budget = primitiveDataDigestObservationBudget(blocks);
+        List<DataDigestObservation> selected = selectPrimitiveDataDigestObservations(observations, budget);
+        if (selected.isEmpty()) return;
+        int digestScratchLocal = mn.maxLocals;
+        int digestMixLocal = digestScratchLocal + 2;
+        mn.maxLocals = Math.max(mn.maxLocals, digestMixLocal + 1);
+        for (DataDigestObservation observation : selected) {
+            InsnList update = emitPrimitiveDataDigestUpdate(
+                observation.kind(),
+                dataLocal,
+                observation.seed(),
+                observation.local(),
+                digestScratchLocal,
+                digestMixLocal
+            );
+            JvmKeyDispatchPass.markGenerated(pctx, update);
+            if (observation.after()) {
+                mn.instructions.insert(observation.anchor(), update);
+            } else {
+                mn.instructions.insertBefore(observation.anchor(), update);
+            }
+        }
+        mn.maxStack = Math.max(mn.maxStack + 6, 10);
+    }
+
+    private DataDigestObservation primitiveDataDigestObservation(
+        AbstractInsnNode insn,
+        int keyLocal,
+        int ordinal,
+        long salt
+    ) {
+        PrimitiveDigestKind kind = primitiveDigestKind(insn, keyLocal);
+        if (kind == null) return null;
+        if (beforeReferenceArrayConstructionStore(insn)) return null;
+        if (insideReferenceArrayStoreSlice(insn)) return null;
+        if (insideObjectArrayFieldReferenceStoreSlice(insn)) return null;
+        boolean after = digestObservationAfter(insn);
+        long seed = JvmPassBytecode.mix(
+            salt ^ 0x44415441464C4F57L,
+            (long) ordinal << 32 ^ insn.getOpcode() ^ kind.ordinal()
+        );
+        return new DataDigestObservation(insn, after, kind, digestObservationLocal(insn), seed);
+    }
+
+    private int digestObservationLocal(AbstractInsnNode insn) {
+        return insn instanceof IincInsnNode iinc ? iinc.var : -1;
+    }
+
+    private boolean insideReferenceArrayStoreSlice(AbstractInsnNode insn) {
+        if (!hasForwardReferenceArrayStore(insn)) return false;
+        return hasBackwardReferenceArrayCarrier(insn);
+    }
+
+    private boolean beforeReferenceArrayConstructionStore(AbstractInsnNode insn) {
+        int seen = 0;
+        for (AbstractInsnNode scan = insn.getNext(); scan != null && seen < 32; scan = scan.getNext()) {
+            int opcode = scan.getOpcode();
+            if (opcode < 0) continue;
+            seen++;
+            if (scan instanceof TypeInsnNode type && type.getOpcode() == Opcodes.ANEWARRAY) {
+                return referenceArrayConstructionFeedsStore(type);
+            }
+            if (endsLinearStackSlice(opcode)) return false;
+        }
+        return false;
+    }
+
+    private boolean referenceArrayConstructionFeedsStore(AbstractInsnNode arrayInsn) {
+        int seen = 0;
+        for (AbstractInsnNode scan = arrayInsn.getNext(); scan != null && seen < 160; scan = scan.getNext()) {
+            int opcode = scan.getOpcode();
+            if (opcode < 0) continue;
+            seen++;
+            if (opcode == Opcodes.AASTORE) return true;
+            if (endsLinearStackSlice(opcode)) return false;
+        }
+        return false;
+    }
+
+    private boolean insideObjectArrayFieldReferenceStoreSlice(AbstractInsnNode insn) {
+        if (!hasForwardReferenceArrayStore(insn)) return false;
+        return hasBackwardObjectArrayFieldLoad(insn);
+    }
+
+    private boolean hasForwardReferenceArrayStore(AbstractInsnNode insn) {
+        int seen = 0;
+        for (AbstractInsnNode scan = insn.getNext(); scan != null && seen < 160; scan = scan.getNext()) {
+            int opcode = scan.getOpcode();
+            if (opcode < 0) continue;
+            seen++;
+            if (opcode == Opcodes.AASTORE) return true;
+            if (endsLinearStackSlice(opcode)) return false;
+        }
+        return false;
+    }
+
+    private boolean hasBackwardReferenceArrayCarrier(AbstractInsnNode insn) {
+        int seen = 0;
+        for (AbstractInsnNode scan = insn.getPrevious(); scan != null && seen < 160; scan = scan.getPrevious()) {
+            int opcode = scan.getOpcode();
+            if (opcode < 0) continue;
+            seen++;
+            if (opcode == Opcodes.AASTORE) return false;
+            if (opcode == Opcodes.DUP || opcode == Opcodes.ALOAD) return true;
+            if (endsLinearStackSlice(opcode)) return false;
+        }
+        return false;
+    }
+
+    private boolean hasBackwardObjectArrayFieldLoad(AbstractInsnNode insn) {
+        int seen = 0;
+        for (AbstractInsnNode scan = insn.getPrevious(); scan != null && seen < 160; scan = scan.getPrevious()) {
+            int opcode = scan.getOpcode();
+            if (opcode < 0) continue;
+            seen++;
+            if (opcode == Opcodes.AASTORE) return false;
+            if (scan instanceof FieldInsnNode field
+                && field.getOpcode() == Opcodes.GETSTATIC
+                && "[Ljava/lang/Object;".equals(field.desc)) {
+                return true;
+            }
+            if (endsLinearStackSlice(opcode)) return false;
+        }
+        return false;
+    }
+
+    private boolean endsLinearStackSlice(int opcode) {
+        return opcode == Opcodes.ATHROW
+            || opcode == Opcodes.RET
+            || (opcode >= Opcodes.IRETURN && opcode <= Opcodes.RETURN)
+            || (opcode >= Opcodes.IFEQ && opcode <= Opcodes.JSR)
+            || opcode == Opcodes.TABLESWITCH
+            || opcode == Opcodes.LOOKUPSWITCH;
+    }
+
+    private PrimitiveDigestKind primitiveDigestKind(AbstractInsnNode insn, int keyLocal) {
+        int opcode = insn.getOpcode();
+        if (insn instanceof IincInsnNode iinc) {
+            return overlapsKeyLocal(new LocalShape(iinc.var, LocalKind.INT), keyLocal)
+                ? null
+                : PrimitiveDigestKind.INT;
+        }
+        if (insn instanceof VarInsnNode var) {
+            LocalKind localKind = localKind(var.getOpcode());
+            if (localKind == null || localKind == LocalKind.REF) return null;
+            if (overlapsKeyLocal(new LocalShape(var.var, localKind), keyLocal)) return null;
+            return switch (var.getOpcode()) {
+                case Opcodes.ILOAD, Opcodes.ISTORE -> PrimitiveDigestKind.INT;
+                case Opcodes.LLOAD, Opcodes.LSTORE -> PrimitiveDigestKind.LONG;
+                case Opcodes.FLOAD, Opcodes.FSTORE -> PrimitiveDigestKind.FLOAT;
+                case Opcodes.DLOAD, Opcodes.DSTORE -> PrimitiveDigestKind.DOUBLE;
+                default -> null;
+            };
+        }
+        if (insn instanceof LdcInsnNode ldc) {
+            Object cst = ldc.cst;
+            if (cst instanceof Integer) return PrimitiveDigestKind.INT;
+            if (cst instanceof Long) return PrimitiveDigestKind.LONG;
+            if (cst instanceof Float) return PrimitiveDigestKind.FLOAT;
+            if (cst instanceof Double) return PrimitiveDigestKind.DOUBLE;
+            return null;
+        }
+        if (insn instanceof IntInsnNode) {
+            return switch (opcode) {
+                case Opcodes.BIPUSH, Opcodes.SIPUSH -> PrimitiveDigestKind.INT;
+                default -> null;
+            };
+        }
+        return switch (opcode) {
+            case Opcodes.ICONST_M1,
+                Opcodes.ICONST_0,
+                Opcodes.ICONST_1,
+                Opcodes.ICONST_2,
+                Opcodes.ICONST_3,
+                Opcodes.ICONST_4,
+                Opcodes.ICONST_5,
+                Opcodes.IADD,
+                Opcodes.ISUB,
+                Opcodes.IMUL,
+                Opcodes.IDIV,
+                Opcodes.IREM,
+                Opcodes.IAND,
+                Opcodes.IOR,
+                Opcodes.IXOR,
+                Opcodes.ISHL,
+                Opcodes.ISHR,
+                Opcodes.IUSHR,
+                Opcodes.INEG,
+                Opcodes.IALOAD,
+                Opcodes.BALOAD,
+                Opcodes.CALOAD,
+                Opcodes.SALOAD,
+                Opcodes.IASTORE,
+                Opcodes.BASTORE,
+                Opcodes.CASTORE,
+                Opcodes.SASTORE -> PrimitiveDigestKind.INT;
+            case Opcodes.LCONST_0,
+                Opcodes.LCONST_1,
+                Opcodes.LADD,
+                Opcodes.LSUB,
+                Opcodes.LMUL,
+                Opcodes.LDIV,
+                Opcodes.LREM,
+                Opcodes.LAND,
+                Opcodes.LOR,
+                Opcodes.LXOR,
+                Opcodes.LSHL,
+                Opcodes.LSHR,
+                Opcodes.LUSHR,
+                Opcodes.LNEG,
+                Opcodes.LALOAD,
+                Opcodes.LASTORE -> PrimitiveDigestKind.LONG;
+            case Opcodes.FCONST_0,
+                Opcodes.FCONST_1,
+                Opcodes.FCONST_2,
+                Opcodes.FADD,
+                Opcodes.FSUB,
+                Opcodes.FMUL,
+                Opcodes.FDIV,
+                Opcodes.FREM,
+                Opcodes.FNEG,
+                Opcodes.FALOAD,
+                Opcodes.FASTORE -> PrimitiveDigestKind.FLOAT;
+            case Opcodes.DCONST_0,
+                Opcodes.DCONST_1,
+                Opcodes.DADD,
+                Opcodes.DSUB,
+                Opcodes.DMUL,
+                Opcodes.DDIV,
+                Opcodes.DREM,
+                Opcodes.DNEG,
+                Opcodes.DALOAD,
+                Opcodes.DASTORE -> PrimitiveDigestKind.DOUBLE;
+            default -> null;
+        };
+    }
+
+    private boolean digestObservationAfter(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (insn instanceof IincInsnNode) return true;
+        return switch (opcode) {
+            case Opcodes.ISTORE,
+                Opcodes.LSTORE,
+                Opcodes.FSTORE,
+                Opcodes.DSTORE,
+                Opcodes.IASTORE,
+                Opcodes.LASTORE,
+                Opcodes.FASTORE,
+                Opcodes.DASTORE,
+                Opcodes.BASTORE,
+                Opcodes.CASTORE,
+                Opcodes.SASTORE -> false;
+            default -> true;
+        };
+    }
+
+    private int primitiveDataDigestObservationBudget(List<Block> blocks) {
+        return Math.max(12, Math.min(96, blocks.size() * 3));
+    }
+
+    private List<DataDigestObservation> selectPrimitiveDataDigestObservations(
+        List<DataDigestObservation> observations,
+        int budget
+    ) {
+        if (observations.size() <= budget) return observations;
+        List<DataDigestObservation> selected = new ArrayList<>(budget);
+        for (int i = 0; i < budget; i++) {
+            int index = (int) (((long) i * observations.size()) / budget);
+            selected.add(observations.get(index));
+        }
+        return selected;
+    }
+
+    private InsnList emitPrimitiveDataDigestUpdate(
+        PrimitiveDigestKind kind,
+        int dataLocal,
+        long seed,
+        int local,
+        int scratchLocal,
+        int mixLocal
+    ) {
+        InsnList update = new InsnList();
+        if (local >= 0) {
+            update.add(new VarInsnNode(Opcodes.ILOAD, local));
+        } else {
+            switch (kind) {
+                case INT -> {
+                    update.add(new VarInsnNode(Opcodes.ISTORE, scratchLocal));
+                    update.add(new VarInsnNode(Opcodes.ILOAD, scratchLocal));
+                }
+                case LONG -> {
+                    update.add(new VarInsnNode(Opcodes.LSTORE, scratchLocal));
+                    update.add(new VarInsnNode(Opcodes.LLOAD, scratchLocal));
+                    update.add(new MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        "java/lang/Long",
+                        "hashCode",
+                        "(J)I",
+                        false
+                    ));
+                }
+                case FLOAT -> {
+                    update.add(new VarInsnNode(Opcodes.FSTORE, scratchLocal));
+                    update.add(new VarInsnNode(Opcodes.FLOAD, scratchLocal));
+                    update.add(new MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        "java/lang/Float",
+                        "floatToRawIntBits",
+                        "(F)I",
+                        false
+                    ));
+                }
+                case DOUBLE -> {
+                    update.add(new VarInsnNode(Opcodes.DSTORE, scratchLocal));
+                    update.add(new VarInsnNode(Opcodes.DLOAD, scratchLocal));
+                    update.add(new MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        "java/lang/Double",
+                        "hashCode",
+                        "(D)I",
+                        false
+                    ));
+                }
+            }
+        }
+        emitFoldPrimitiveDataDigestValue(update, dataLocal, seed, mixLocal);
+        if (local < 0) {
+            switch (kind) {
+                case INT -> update.add(new VarInsnNode(Opcodes.ILOAD, scratchLocal));
+                case LONG -> update.add(new VarInsnNode(Opcodes.LLOAD, scratchLocal));
+                case FLOAT -> update.add(new VarInsnNode(Opcodes.FLOAD, scratchLocal));
+                case DOUBLE -> update.add(new VarInsnNode(Opcodes.DLOAD, scratchLocal));
+            }
+        }
+        return update;
+    }
+
+    private void emitFoldPrimitiveDataDigestValue(
+        InsnList insns,
+        int dataLocal,
+        long seed,
+        int mixLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        insns.add(new InsnNode(Opcodes.SWAP));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4449474D554C31L)) | 1
+        );
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, mixLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, mixLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, mixLocal));
+        JvmPassBytecode.pushInt(insns, shift(seed, 11));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x44494746494E31L))
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dataLocal));
     }
 
     private int splitMixedVerifierLocalShapes(String owner, MethodNode mn, LabelNode protectedStart, int keyLocal) {
@@ -879,4 +1282,19 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
     private record LocalShape(int var, LocalKind kind) {}
 
     private record StackEffect(int consumed, int pushed) {}
+
+    private enum PrimitiveDigestKind {
+        INT,
+        LONG,
+        FLOAT,
+        DOUBLE
+    }
+
+    private record DataDigestObservation(
+        AbstractInsnNode anchor,
+        boolean after,
+        PrimitiveDigestKind kind,
+        int local,
+        long seed
+    ) {}
 }

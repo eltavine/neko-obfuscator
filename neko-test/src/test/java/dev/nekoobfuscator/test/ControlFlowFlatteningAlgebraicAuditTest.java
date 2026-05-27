@@ -110,6 +110,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
         assertCffDataDigestInitializedFromEntryData(outputJar);
+        assertCffDataDigestUpdatedFromPrimitiveFlow(outputJar);
 
         List<Finding> findings = auditJar(outputJar);
         assertFalse(
@@ -713,6 +714,46 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
 
     private static void assertCffDataDigestInitializedFromEntryData(Path jar)
         throws Exception {
+        CffEntryDigestProof proof = cffEntryDigestProof(cffAuditValueMethod(jar));
+        assertTrue(proof.digestLocal() >= 0, "CFF entry digest local was not identified");
+    }
+
+    private static void assertCffDataDigestUpdatedFromPrimitiveFlow(Path jar)
+        throws Exception {
+        MethodNode value = cffAuditValueMethod(jar);
+        CffEntryDigestProof proof = cffEntryDigestProof(value);
+        AbstractInsnNode[] insns = value.instructions.toArray();
+        boolean sawPrimitiveFlowUpdate = false;
+        for (int i = proof.firstBranch() + 1; i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ILOAD
+                || !proof.intArgLocals().contains(load.var)) {
+                continue;
+            }
+            boolean sawNonlinearMix = false;
+            for (int j = i + 1; j < insns.length && j < i + 28; j++) {
+                int opcode = insns[j].getOpcode();
+                sawNonlinearMix |= opcode == Opcodes.IMUL
+                    || opcode == Opcodes.IUSHR
+                    || opcode == Opcodes.IXOR;
+                if (insns[j] instanceof VarInsnNode store
+                    && store.getOpcode() == Opcodes.ISTORE
+                    && store.var == proof.digestLocal()
+                    && sawNonlinearMix) {
+                    sawPrimitiveFlowUpdate = true;
+                    break;
+                }
+            }
+            if (sawPrimitiveFlowUpdate) break;
+        }
+        assertTrue(
+            sawPrimitiveFlowUpdate,
+            "CFF data digest was not updated from primitive argument flow after dispatch"
+        );
+    }
+
+    private static MethodNode cffAuditValueMethod(Path jar)
+        throws Exception {
         JarInput input = new JarInput(jar);
         L1Class clazz = input.classMap().get("CffAuditShapes");
         assertTrue(clazz != null, "missing CFF audit fixture class");
@@ -726,7 +767,10 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         assertTrue(value != null, "missing transformed CFF value method");
+        return value;
+    }
 
+    private static CffEntryDigestProof cffEntryDigestProof(MethodNode value) {
         Type[] args = Type.getArgumentTypes(value.desc);
         List<Integer> intArgLocals = new ArrayList<>();
         int keyLocal = -1;
@@ -764,18 +808,24 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                 earlierStores.add(var.var);
             }
         }
-        boolean sawDigestStore = false;
+        int digestLocal = -1;
         for (int i = allEntryDataSeen + 1; i < firstBranch; i++) {
             if (insns[i] instanceof VarInsnNode var
                 && var.getOpcode() == Opcodes.ISTORE
                 && earlierStores.contains(var.var)) {
-                sawDigestStore = true;
+                digestLocal = var.var;
                 break;
             }
         }
         assertTrue(
-            sawDigestStore,
+            digestLocal >= 0,
             "CFF entry digest did not store a protected local after reading entry data"
+        );
+        return new CffEntryDigestProof(
+            firstBranch,
+            digestLocal,
+            List.copyOf(intArgLocals),
+            keyLocal
         );
     }
 
@@ -1671,6 +1721,13 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             return key != 0L || out0 != 0L || out1 != 0L;
         }
     }
+
+    record CffEntryDigestProof(
+        int firstBranch,
+        int digestLocal,
+        List<Integer> intArgLocals,
+        int keyLocal
+    ) {}
 
     private static final class StackUnderflow extends RuntimeException {}
 }

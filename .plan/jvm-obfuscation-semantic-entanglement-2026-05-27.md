@@ -269,7 +269,7 @@ For every implementation row below:
   method-entry data contributes to `dataLocal`, and no dispatcher consumer is
   added before later update/mix rows.
 
-### [ ] JSE-3: Update CFF data digest from primitive data-flow observations
+### [x] JSE-3: Update CFF data digest from primitive data-flow observations
 
 - Scope: add stack-neutral `dataLocal` update snippets at generic
   verifier-safe primitive observation points selected from CFF-protected
