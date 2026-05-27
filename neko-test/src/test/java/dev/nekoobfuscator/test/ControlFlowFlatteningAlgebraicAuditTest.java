@@ -67,6 +67,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class ControlFlowFlatteningAlgebraicAuditTest {
     private static final String VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJI)Z";
     private static final String OLD_VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJII)Z";
+    private static final String VALIDATION_LENGTH_STAGE_DESC = "(Ljava/lang/String;I)I";
+    private static final String VALIDATION_SEED_STAGE_DESC = "(JII)J";
+    private static final String VALIDATION_CHAR_STAGE_DESC = "(Ljava/lang/String;JIII)J";
+    private static final String VALIDATION_FINAL_STAGE_DESC = "(JJI)Z";
 
     @Test
     void symbolicAuditRecognizesSelfCancelingAndLinearKeyShapes() {
@@ -1226,6 +1230,8 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertFalse(sawOldHelperDesc, "validation sink retained expanded helper ABI");
         assertTrue(helperName != null, "validation sink did not call keyed tag helper");
         assertValidationLiveWordConsumesDataDigest(clazz);
+        assertValidationSinkPredicateIsStaged(clazz);
+        assertValidationSinkStagesUseCffDataDigest(clazz);
         assertValidationSinkHelperHasNoPlainTarget(clazz, helperName);
         assertValidationSinkUsesFormulaVariants(clazz);
         assertValidationSinkHasNoStandaloneTargetCarriers(clazz);
@@ -1273,6 +1279,112 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         }
         assertTrue(sawVariantZero, "validation sink did not emit formula variant 0 helper");
         assertTrue(sawVariantOne, "validation sink did not emit formula variant 1 helper");
+    }
+
+    private static void assertValidationSinkPredicateIsStaged(L1Class clazz) {
+        int entryHelpers = 0;
+        Set<String> stageCalls = new LinkedHashSet<>();
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!VALIDATION_HELPER_DESC.equals(method.desc) || !method.name.startsWith("__neko_vsink")) continue;
+            entryHelpers++;
+            boolean sawLength = false;
+            boolean sawSeed = false;
+            boolean sawChar = false;
+            boolean sawFinal = false;
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn.getOpcode() == Opcodes.LCMP) {
+                    throw new AssertionError("validation sink entry helper retained final compare");
+                }
+                if (insn instanceof MethodInsnNode call
+                    && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                    && "java/lang/String".equals(call.owner)
+                    && ("length".equals(call.name) || "charAt".equals(call.name))) {
+                    throw new AssertionError("validation sink entry helper retained String predicate operation");
+                }
+                if (!(insn instanceof MethodInsnNode call)
+                    || call.getOpcode() != Opcodes.INVOKESTATIC
+                    || !"ValidationSinkShape".equals(call.owner)) {
+                    continue;
+                }
+                sawLength |= VALIDATION_LENGTH_STAGE_DESC.equals(call.desc);
+                sawSeed |= VALIDATION_SEED_STAGE_DESC.equals(call.desc);
+                sawChar |= VALIDATION_CHAR_STAGE_DESC.equals(call.desc);
+                sawFinal |= VALIDATION_FINAL_STAGE_DESC.equals(call.desc);
+                if (isValidationStageDesc(call.desc)) {
+                    assertTrue(
+                        stageCalls.add(call.name + call.desc),
+                        "validation sink stage helper was reused across entries: " + call.name + call.desc
+                    );
+                }
+            }
+            assertTrue(sawLength, "validation sink entry helper did not call length stage");
+            assertTrue(sawSeed, "validation sink entry helper did not call seed stage");
+            assertTrue(sawChar, "validation sink entry helper did not call char stage");
+            assertTrue(sawFinal, "validation sink entry helper did not call final stage");
+        }
+        assertTrue(entryHelpers >= 2, "validation sink fixture did not emit per-site entry helpers");
+        assertTrue(
+            stageCalls.size() >= entryHelpers * 4,
+            "validation sink stages were not independently emitted per entry"
+        );
+    }
+
+    private static void assertValidationSinkStagesUseCffDataDigest(L1Class clazz) {
+        Map<String, Integer> stageCounts = new HashMap<>();
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!isValidationStageDesc(method.desc)) continue;
+            int dataWordLocal = validationStageDataWordLocal(method.desc);
+            assertTrue(
+                stageLoadsDataWord(method, dataWordLocal),
+                "validation sink stage did not consume data word: " + method.name + method.desc
+            );
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof LdcInsnNode ldc
+                    && ("swordfish-validated-flow".equals(ldc.cst) || "swordfish-variant-two".equals(ldc.cst))) {
+                    throw new AssertionError("validation sink stage retained plaintext target");
+                }
+                if (insn instanceof MethodInsnNode call
+                    && call.getOpcode() == Opcodes.INVOKEVIRTUAL
+                    && "java/lang/String".equals(call.owner)
+                    && "equals".equals(call.name)
+                    && "(Ljava/lang/Object;)Z".equals(call.desc)) {
+                    throw new AssertionError("validation sink stage retained String.equals compare");
+                }
+            }
+            stageCounts.merge(method.desc, 1, Integer::sum);
+        }
+        assertTrue(stageCounts.getOrDefault(VALIDATION_LENGTH_STAGE_DESC, 0) >= 2,
+            "validation sink did not emit per-site length stages");
+        assertTrue(stageCounts.getOrDefault(VALIDATION_SEED_STAGE_DESC, 0) >= 2,
+            "validation sink did not emit per-site seed stages");
+        assertTrue(stageCounts.getOrDefault(VALIDATION_CHAR_STAGE_DESC, 0) >= 2,
+            "validation sink did not emit per-site char stages");
+        assertTrue(stageCounts.getOrDefault(VALIDATION_FINAL_STAGE_DESC, 0) >= 2,
+            "validation sink did not emit per-site final stages");
+    }
+
+    private static boolean isValidationStageDesc(String desc) {
+        return VALIDATION_LENGTH_STAGE_DESC.equals(desc)
+            || VALIDATION_SEED_STAGE_DESC.equals(desc)
+            || VALIDATION_CHAR_STAGE_DESC.equals(desc)
+            || VALIDATION_FINAL_STAGE_DESC.equals(desc);
+    }
+
+    private static int validationStageDataWordLocal(String desc) {
+        if (VALIDATION_LENGTH_STAGE_DESC.equals(desc)) return 1;
+        if (VALIDATION_FINAL_STAGE_DESC.equals(desc)) return 4;
+        return 3;
+    }
+
+    private static boolean stageLoadsDataWord(MethodNode method, int dataWordLocal) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.ILOAD
+                && load.var == dataWordLocal) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void assertValidationLiveWordConsumesDataDigest(L1Class clazz) {

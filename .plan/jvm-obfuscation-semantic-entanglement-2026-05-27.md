@@ -998,7 +998,7 @@ For every implementation row below:
   `MutableCallSite.setTarget` binding, same-class indy init migration, no
   fallback/helper-class/bridge layer, fresh validation, and plan evidence.
 
-### [ ] JSE-21: Split validation sink predicate into staged helpers
+### [x] JSE-21: Split validation sink predicate into staged helpers
 
 - Scope: split validation sink checks so length gate, seeded hash fold, per-char
   fold, and final compare are spread across multiple generated stage methods
@@ -1011,6 +1011,13 @@ For every implementation row below:
   `(Ljava/lang/String;JJI)Z` helper body carrying the full predicate; ASM audit
   proves staged helpers are per-site/variant and their material is CFF/data
   digest bound.
+- Fresh JSE-21 baseline evidence: `JvmValidationSinkHardeningPass.ensureHelper`
+  currently creates one helper per class/variant with descriptor
+  `(Ljava/lang/String;JJI)Z`, and `emitHelperBody` keeps `String.length`,
+  seeded hash initialization, the `String.charAt` loop, and the final `LCMP`
+  compare in that same body. The existing audit checks no plaintext target,
+  no `String.equals`, no old helper ABI, and both formula variants, but it does
+  not prove per-site staged helpers or stage-local CFF data-word consumption.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
 - Static/ASM audit: extend `assertValidationSinkUsesKeyedTag` with
@@ -1020,6 +1027,19 @@ For every implementation row below:
 - Completion criteria: validation fixture passes; no plaintext target,
   `String.equals` compare, standalone target carrier, or single-solver helper
   remains.
+- Completion evidence: validation sink generation now emits a per-site entry
+  helper plus same-class synthetic length, seed, char-fold, and final-compare
+  stage helpers keyed by class, variant, and site seed. Stage boundaries encode
+  length/hash material with the CFF data word, and each stage consumes the data
+  word before returning protected material.
+- Validation evidence: fresh command
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  passed. XML shows `ControlFlowFlatteningAlgebraicAuditTest` tests=6,
+  failures=0, errors=0.
+- Review evidence: JSE-21 subagent review PASS. It checked same-class staged
+  helpers, per-site/variant helper keying, data-word consumption in all stages,
+  no plaintext target/`String.equals`, no fallback/original-bytecode rescue,
+  and fresh validation.
 
 ### [ ] JSE-22: Route validation final stage through existing indy surface
 

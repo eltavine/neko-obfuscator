@@ -43,6 +43,12 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     private static final long TAG_ADD = 0x9E3779B97F4A7C15L;
     private static final long LIVE_MASK_LOW_DOMAIN = 0x5653484D41534B32L;
     private static final String HELPER_DESC = "(Ljava/lang/String;JJI)Z";
+    private static final String LENGTH_STAGE_DESC = "(Ljava/lang/String;I)I";
+    private static final String SEED_STAGE_DESC = "(JII)J";
+    private static final String CHAR_STAGE_DESC = "(Ljava/lang/String;JIII)J";
+    private static final String FINAL_STAGE_DESC = "(JJI)Z";
+    private static final long LENGTH_STAGE_DOMAIN = 0x5653484C454E3031L;
+    private static final long HASH_STAGE_DOMAIN = 0x5653484841534831L;
     private static final int VARIANT_COUNT = 2;
 
     @Override
@@ -280,7 +286,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         int dataWordArgLocal
     ) {
         int variant = nextVariant(pctx, clazz);
-        String helperName = ensureHelper(pctx, clazz, variant);
+        ValidationStages stages = ensureHelper(pctx, clazz, variant, siteSeed);
         long seedValue = tagSeed(target, siteSeed, variant);
         InsnList replacement = new InsnList();
         replacement.add(new VarInsnNode(Opcodes.ASTORE, receiverLocal));
@@ -301,7 +307,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         replacement.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             clazz.name(),
-            helperName,
+            stages.entry(),
             HELPER_DESC,
             clazz.isInterface()
         ));
@@ -349,31 +355,61 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     }
 
     @SuppressWarnings("unchecked")
-    private String ensureHelper(PipelineContext pctx, L1Class clazz, int variant) {
-        Map<String, String> helpers = pctx.getPassData(HELPERS);
+    private ValidationStages ensureHelper(PipelineContext pctx, L1Class clazz, int variant, long siteSeed) {
+        Map<String, ValidationStages> helpers = pctx.getPassData(HELPERS);
         if (helpers == null) {
             helpers = new LinkedHashMap<>();
             pctx.putPassData(HELPERS, helpers);
         }
-        String key = clazz.name() + '#' + variant;
-        String existing = helpers.get(key);
+        String key = clazz.name() + '#' + variant + '#' + Long.toUnsignedString(siteSeed, 36);
+        ValidationStages existing = helpers.get(key);
         if (existing != null) return existing;
 
-        String name = uniqueMethodName(clazz, "__neko_vsink" + variant + "$");
+        ValidationStages stages = new ValidationStages(
+            uniqueMethodName(clazz, "__neko_vsink" + variant + "$"),
+            uniqueMethodName(clazz, "__neko_vslen" + variant + "$"),
+            uniqueMethodName(clazz, "__neko_vsseed" + variant + "$"),
+            uniqueMethodName(clazz, "__neko_vschar" + variant + "$"),
+            uniqueMethodName(clazz, "__neko_vsend" + variant + "$")
+        );
         int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         access |= clazz.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
-        MethodNode helper = new MethodNode(access, name, HELPER_DESC, null, null);
-        emitHelperBody(helper.instructions, variant);
-        helper.maxLocals = 11;
-        helper.maxStack = 16;
-        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
-        clazz.asmNode().methods.add(helper);
+
+        MethodNode entry = new MethodNode(access, stages.entry(), HELPER_DESC, null, null);
+        emitHelperBody(entry.instructions, stages, clazz.name(), clazz.isInterface());
+        entry.maxLocals = 10;
+        entry.maxStack = 24;
+
+        MethodNode lengthStage = new MethodNode(access, stages.length(), LENGTH_STAGE_DESC, null, null);
+        emitLengthStageBody(lengthStage.instructions);
+        lengthStage.maxLocals = 2;
+        lengthStage.maxStack = 8;
+
+        MethodNode seedStage = new MethodNode(access, stages.seed(), SEED_STAGE_DESC, null, null);
+        emitSeedStageBody(seedStage.instructions, variant);
+        seedStage.maxLocals = 4;
+        seedStage.maxStack = 16;
+
+        MethodNode charStage = new MethodNode(access, stages.character(), CHAR_STAGE_DESC, null, null);
+        emitCharStageBody(charStage.instructions, variant);
+        charStage.maxLocals = 7;
+        charStage.maxStack = 16;
+
+        MethodNode finalStage = new MethodNode(access, stages.finish(), FINAL_STAGE_DESC, null, null);
+        emitFinalStageBody(finalStage.instructions);
+        finalStage.maxLocals = 5;
+        finalStage.maxStack = 8;
+
+        for (MethodNode generated : new MethodNode[] { entry, lengthStage, seedStage, charStage, finalStage }) {
+            JvmKeyDispatchPass.markGenerated(pctx, generated.instructions);
+            clazz.asmNode().methods.add(generated);
+        }
         clazz.markDirty();
-        helpers.put(key, name);
-        return name;
+        helpers.put(key, stages);
+        return stages;
     }
 
-    private void emitHelperBody(InsnList insns, int variant) {
+    private void emitHelperBody(InsnList insns, ValidationStages stages, String owner, boolean interfaceOwner) {
         int stringLocal = 0;
         int seedLocal = 1;
         int expectedLocal = 3;
@@ -381,24 +417,22 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         int lengthLocal = 6;
         int indexLocal = 7;
         int hashLocal = 8;
-        int charLocal = 10;
         LabelNode loop = new LabelNode();
         LabelNode done = new LabelNode();
-        LabelNode match = new LabelNode();
-
-        emitDecodeLongArgument(insns, seedLocal, dataWordLocal, 0x5653485345454431L);
-        emitDecodeLongArgument(insns, expectedLocal, dataWordLocal, 0x5653485441473031L);
 
         insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/String",
-            "length",
-            "()I",
-            false
-        ));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, stages.length(),
+            LENGTH_STAGE_DESC, interfaceOwner));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
+        emitValidationDataMaskFromTop(insns, LENGTH_STAGE_DOMAIN);
+        insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, lengthLocal));
-        emitInitialHash(insns, seedLocal, lengthLocal, variant);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, stages.seed(),
+            SEED_STAGE_DESC, interfaceOwner));
         insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
         insns.add(new InsnNode(Opcodes.ICONST_0));
         insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
@@ -407,6 +441,62 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, done));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, stages.character(),
+            CHAR_STAGE_DESC, interfaceOwner));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
+        insns.add(new IincInsnNode(indexLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+
+        insns.add(done);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, expectedLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, owner, stages.finish(),
+            FINAL_STAGE_DESC, interfaceOwner));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+    }
+
+    private void emitLengthStageBody(InsnList insns) {
+        int stringLocal = 0;
+        int dataWordLocal = 1;
+        insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "length",
+            "()I",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataWordLocal));
+        emitValidationDataMaskFromTop(insns, LENGTH_STAGE_DOMAIN);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+    }
+
+    private void emitSeedStageBody(InsnList insns, int variant) {
+        int seedLocal = 0;
+        int lengthLocal = 2;
+        int dataWordLocal = 3;
+        emitDecodeLongArgument(insns, seedLocal, dataWordLocal, 0x5653485345454431L);
+        emitInitialHash(insns, seedLocal, lengthLocal, variant);
+        emitValidationDataLongMask(insns, dataWordLocal, HASH_STAGE_DOMAIN);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+    }
+
+    private void emitCharStageBody(InsnList insns, int variant) {
+        int stringLocal = 0;
+        int hashLocal = 1;
+        int dataWordLocal = 3;
+        int indexLocal = 4;
+        int lengthLocal = 5;
+        int charLocal = 6;
+        emitDecodeLongArgument(insns, hashLocal, dataWordLocal, HASH_STAGE_DOMAIN);
         insns.add(new VarInsnNode(Opcodes.ALOAD, stringLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
         insns.add(new MethodInsnNode(
@@ -418,11 +508,18 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         ));
         insns.add(new VarInsnNode(Opcodes.ISTORE, charLocal));
         emitHashStep(insns, hashLocal, charLocal, indexLocal, lengthLocal, variant);
-        insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
-        insns.add(new IincInsnNode(indexLocal, 1));
-        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        emitValidationDataLongMask(insns, dataWordLocal, HASH_STAGE_DOMAIN);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+    }
 
-        insns.add(done);
+    private void emitFinalStageBody(InsnList insns) {
+        int hashLocal = 0;
+        int expectedLocal = 2;
+        int dataWordLocal = 4;
+        LabelNode match = new LabelNode();
+        emitDecodeLongArgument(insns, hashLocal, dataWordLocal, HASH_STAGE_DOMAIN);
+        emitDecodeLongArgument(insns, expectedLocal, dataWordLocal, 0x5653485441473031L);
         insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, expectedLocal));
         insns.add(new InsnNode(Opcodes.LCMP));
@@ -884,4 +981,12 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     }
 
     private record ValidationPlaceholder(String target, int ordinal) {}
+
+    private record ValidationStages(
+        String entry,
+        String length,
+        String seed,
+        String character,
+        String finish
+    ) {}
 }
