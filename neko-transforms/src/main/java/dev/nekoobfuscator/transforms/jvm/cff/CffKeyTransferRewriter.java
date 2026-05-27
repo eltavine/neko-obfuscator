@@ -1381,13 +1381,7 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         int guardKey = nonZeroInt(JvmPassBytecode.mix(seed, 0x47554152444B31L));
         int pathKey = nonZeroInt(JvmPassBytecode.mix(seed, 0x504154484B31L));
         int blockKey = nonZeroInt(JvmPassBytecode.mix(seed, 0x424C4F434B31L));
-        long methodSalt = adjustedMethodSaltForBlock(
-            guardKey,
-            pathKey,
-            blockKey,
-            pcToken,
-            nonZeroLong(JvmPassBytecode.mix(seed, 0x4D4554484F444B31L))
-        );
+        long methodSalt = nonZeroLong(JvmPassBytecode.mix(seed, 0x4D4554484F444B31L));
         return new CffBlockKeyState(
             guardKey,
             pathKey,
@@ -1405,7 +1399,10 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         int pcToken,
         long methodSalt
     ) {
-        return nonZeroLong(rawMethodKeyFromBlock(guardKey, pathKey, blockKey, pcToken, methodSalt));
+        long high = ((long) guardKey) << 32;
+        long low = ((long) pathKey) & 0xFFFFFFFFL;
+        long pc = ((long) pcToken) & 0xFFFFFFFFL;
+        return nonZeroLong((high ^ low) + (((long) blockKey) ^ methodSalt) ^ (pc * METHOD_KEY_PC_MIX));
     }
 
     protected CffBlockKeyState firstIslandKeyState(

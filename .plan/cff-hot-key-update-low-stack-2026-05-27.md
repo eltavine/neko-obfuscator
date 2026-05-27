@@ -507,7 +507,7 @@ java -XX:-UsePerfData \
   seed paths, the old performance plan has no diff, and the intended commit
   contains only this standalone plan plus `CffKeyStateEmitter.java`.
 
-### [ ] HKU-3: Prove JIT and runtime effect, then accept or reject
+### [x] HKU-3: Prove JIT and runtime effect, then accept or reject
 
 - Scope: validate that the lower-stack method-key helper improves the hot path
   without weakening semantics.
@@ -530,6 +530,64 @@ java -XX:-UsePerfData \
   - if any target fails, revert source changes, regenerate accepted-source
     artifacts, record rejection evidence here, run rejection review, and commit
     only the rejection record.
+
+- Rejection evidence:
+  - fresh optimized-source PrintInlining ran the HKU-2.3 full obfusjack artifact
+    with `-XX:-BackgroundCompilation -XX:+PrintCompilation
+    -XX:+PrintInlining` and completed with `=== All tests completed ===`;
+  - exact `a.da::cb (33 bytes)` helper counts in
+    `build/jvm-runtime-perf/hku-3-print-inlining/obfusjack-full-sync.stdout.log`
+    were `callee uses too much stack = 189`, `callee is too large = 0`,
+    and `inline = 11`, so the HKU-3 JIT target failed because the C1 stack
+    blocker remained on the generated hot callsite contexts;
+  - fresh optimized-source ablation report from HKU-2.3 was captured at
+    `2026-05-27T02:53:32.150417122Z`, `repeatCount=3`, with TEST original
+    Calc `10 ms`, TEST full Calc `183 ms`, obfusjack original Seq `2 ms`, and
+    obfusjack full Seq `312 ms`. TEST full did not regress from HKU-1 Calc
+    `218 ms`, but obfusjack full Seq did not improve from HKU-1 Seq `311 ms`.
+    This independently fails the HKU-3 runtime target.
+  - rejected source changes from HKU-2.1, HKU-2.2, and HKU-2.3 were mechanically
+    reversed only in:
+    - `CffKeyStateEmitter.java`;
+    - `CffKeyTransferRewriter.java`;
+    - `CffMaterialTables.java`.
+  - `git diff 116cc79 --` over those three source files is empty after the
+    reverse patch, proving the CFF source files are back at the HKU-1
+    accepted-source shape while this standalone plan keeps the audit record.
+  - accepted-source regeneration after the reverse patch passed the same
+    targeted Gradle validation command with `BUILD SUCCESSFUL in 1m 19s`.
+    The fresh accepted-source ablation report was captured at
+    `2026-05-27T03:09:27.514428639Z`, `repeatCount=3`, with selected rows all
+    `validRunCount=3` and no invalid runs:
+    - TEST original: Calc median `10 ms`;
+    - TEST `cff-only-stack`: Calc median `96 ms`, material calls
+      transition=`621`, step=`515`, island=`493`;
+    - TEST full: Calc median `179 ms`, material calls transition=`621`,
+      step=`495`, island=`493`;
+    - obfusjack original: Platform `27 ms`, Virtual `11 ms`, Seq `2 ms`,
+      Parallel `0 ms`, VThreads `0 ms`;
+    - obfusjack `cff-only-stack`: Platform `71 ms`, Virtual `77 ms`,
+      Seq `292 ms`, Parallel `6 ms`, VThreads `7 ms`, material calls
+      transition=`391`, step=`469`, island=`347`;
+    - obfusjack full: Platform `78 ms`, Virtual `82 ms`, Seq `307 ms`,
+      Parallel `8 ms`, VThreads `9 ms`, material calls transition=`391`,
+      step=`469`, island=`347`.
+  - accepted-source helper map shows
+    `METHOD a/a.__neko_cff_mkey$lvctwp(IIIIJJ)J -> cb`; javap for
+    `build/jvm-runtime-perf/hku-3-accepted-bytecode/obfusjack-method-key-helper.javap.txt`
+    shows descriptor `(IIIIJJ)J`, `stack=8`, `locals=8`, `args_size=6`,
+    and the original `dup2`/`lconst_0`/`lcmp`/`ifne`/`pop2` zero-check plus
+    fixed fallback long before `lreturn`.
+  - marker scan of `build/test-jvm-runtime-ablation` found no skip/original
+    bytecode/fallback, `translated=0`, SIGSEGV/SIGABRT, verifier, or linkage
+    failure markers. The nine targeted test XML rows show `failures="0"` and
+    `errors="0"`.
+  - Rejection review passed. The reviewer confirmed the fresh JIT/runtime
+    evidence fails the recorded HKU-3 targets, the source reverse patch is
+    limited to the three CFF files and returns them to `116cc79`, the
+    accepted-source artifact was freshly regenerated and validated after the
+    reverse patch, the old performance plan has no diff, and the intended
+    commit scope is only this standalone plan plus the three CFF source reverts.
 
 ## Common Runtime Hygiene
 

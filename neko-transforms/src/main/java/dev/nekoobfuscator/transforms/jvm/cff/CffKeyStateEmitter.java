@@ -547,6 +547,7 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
             ));
             return;
         }
+        LabelNode nonZero = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
@@ -556,11 +557,11 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, methodSalt ^ saltMask);
         JvmPassBytecode.pushLong(insns, saltMask);
         insns.add(new InsnNode(Opcodes.LXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
-        insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new InsnNode(Opcodes.LADD));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
@@ -570,6 +571,13 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         JvmPassBytecode.pushLong(insns, METHOD_KEY_PC_MIX);
         insns.add(new InsnNode(Opcodes.LMUL));
         insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new InsnNode(Opcodes.LCMP));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, nonZero));
+        insns.add(new InsnNode(Opcodes.POP2));
+        JvmPassBytecode.pushLong(insns, 0xD1B54A32D192ED03L);
+        insns.add(nonZero);
     }
 
     protected long methodKeyLongMask(CffBlockKeyState keyState, long seed) {
@@ -912,56 +920,21 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
             pathKey = (pathKey ^ guardKey) + nonZeroInt(JvmPassBytecode.mix(classSeed, 0x504154484D49584BL));
             blockKey = (blockKey + pathKey) ^ classWord;
         }
-        int pcToken = nonZeroInt(JvmPassBytecode.mix(seed, 0x494E49545043544BL));
-        long methodSalt = adjustedMethodSaltForBlock(
-            guardKey,
-            pathKey,
-            blockKey,
-            pcToken,
-            nonZeroLong(JvmPassBytecode.mix(seed, 0x494E49544D455448L))
-        );
+        long methodSalt = nonZeroLong(JvmPassBytecode.mix(seed, 0x494E49544D455448L));
         return new CffBlockKeyState(
             guardKey,
             pathKey,
             blockKey,
-            pcToken,
-            methodKeyFromBlock(guardKey, pathKey, blockKey, pcToken, methodSalt),
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x494E49545043544BL)),
+            methodKeyFromBlock(
+                guardKey,
+                pathKey,
+                blockKey,
+                nonZeroInt(JvmPassBytecode.mix(seed, 0x494E49545043544BL)),
+                methodSalt
+            ),
             methodSalt
         );
-    }
-
-    protected long adjustedMethodSaltForBlock(
-        int guardKey,
-        int pathKey,
-        int blockKey,
-        int pcToken,
-        long methodSalt
-    ) {
-        long salt = nonZeroLong(methodSalt);
-        if (rawMethodKeyFromBlock(guardKey, pathKey, blockKey, pcToken, salt) != 0L) {
-            return salt;
-        }
-        long adjusted = salt ^ 1L;
-        if (adjusted == 0L) {
-            adjusted = salt ^ 2L;
-        }
-        if (rawMethodKeyFromBlock(guardKey, pathKey, blockKey, pcToken, adjusted) == 0L) {
-            throw new IllegalStateException("Unable to generate non-zero CFF method key");
-        }
-        return adjusted;
-    }
-
-    protected long rawMethodKeyFromBlock(
-        int guardKey,
-        int pathKey,
-        int blockKey,
-        int pcToken,
-        long methodSalt
-    ) {
-        long high = ((long) guardKey) << 32;
-        long low = ((long) pathKey) & 0xFFFFFFFFL;
-        long pc = ((long) pcToken) & 0xFFFFFFFFL;
-        return (high ^ low) + (((long) blockKey) ^ methodSalt) ^ (pc * METHOD_KEY_PC_MIX);
     }
 
     protected int initialGuardKey(long keyValue, long seed) {
@@ -1173,12 +1146,8 @@ abstract class CffKeyStateEmitter extends CffDispatchEmitter {
         int pcToken = nonZeroInt(
             targetKeys.pcToken() ^ JvmPassBytecode.mix(bridgeSeed, 0x42525043544F4B31L)
         );
-        long methodSalt = adjustedMethodSaltForBlock(
-            guardKey,
-            pathKey,
-            blockKey,
-            pcToken,
-            nonZeroLong(JvmPassBytecode.mix(bridgeSeed, 0x42524D45544831L))
+        long methodSalt = nonZeroLong(
+            JvmPassBytecode.mix(bridgeSeed, 0x42524D45544831L)
         );
         return new CffBlockKeyState(
             guardKey,
