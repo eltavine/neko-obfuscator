@@ -57,7 +57,7 @@ import org.slf4j.LoggerFactory;
 abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
 
     protected final class TransitionOutliner {
-        private static final String DESC = "(JIIIII[J)J";
+        private static final String DESC = "(JIIIIII[J)J";
         private final PipelineContext pctx;
         private final L1Class clazz;
         private final String owner;
@@ -103,6 +103,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int blockKeyLocal,
             int pcLocal,
             int domainLocal,
+            int dataLocal,
             int keyTmpLocal,
             LabelNode poison,
             long methodSeed,
@@ -124,6 +125,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
             insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
             insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
             insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
             insns.add(
                 new MethodInsnNode(
@@ -184,6 +186,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int blockKeyLocal,
             int pcLocal,
             int domainLocal,
+            int dataLocal,
             int keyTmpLocal,
             LabelNode poison,
             long methodSeed,
@@ -240,6 +243,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
             insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
             insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
             insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
             insns.add(
                 new MethodInsnNode(
@@ -322,7 +326,8 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int helperBlockLocal = 4;
             int helperPcLocal = 5;
             int helperDomainLocal = 6;
-            int helperOutLocal = 7;
+            int helperDataLocal = 7;
+            int helperOutLocal = 8;
 
             TreeMap<Integer, LabelNode> domainCases = new TreeMap<>();
             List<LabelNode> islandLabels = new ArrayList<>();
@@ -418,6 +423,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperBlockLocal));
                 helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPcLocal));
                 helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDomainLocal));
+                helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDataLocal));
                 helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, helperOutLocal));
                 helper.instructions.add(new MethodInsnNode(
                     Opcodes.INVOKESTATIC,
@@ -442,7 +448,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 resultMaskSeed,
                 denseResultRouter
             );
-            helper.maxLocals = 8;
+            helper.maxLocals = 9;
             helper.maxStack = 16;
             JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
             clazz.asmNode().methods.add(helper);
@@ -605,10 +611,11 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int helperBlockLocal = 4;
             int helperPcLocal = 5;
             int helperDomainLocal = 6;
-            int helperOutLocal = 7;
-            int helperKeyTmpLocal = 8;
-            int helperMaterialWordLocal = 11;
-            int helperSourceLocal = 12;
+            int helperDataLocal = 7;
+            int helperOutLocal = 8;
+            int helperKeyTmpLocal = 9;
+            int helperMaterialWordLocal = 12;
+            int helperSourceLocal = 13;
             CffClassKeyTable stepTable = ensureClassKeyTable(pctx, clazz);
 
             TreeMap<Integer, LabelNode> cases = new TreeMap<>();
@@ -699,6 +706,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 helperGuardLocal,
                 helperPathLocal,
                 helperBlockLocal,
+                helperDataLocal,
                 cases,
                 dispatchMissLabel,
                 dispatchSeed,
@@ -780,9 +788,12 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                     helperBlockLocal,
                     helperPcLocal,
                     helperDomainLocal,
+                    helperDataLocal,
+                    helperKeyTmpLocal,
                     helperOutLocal,
                     methodSeed,
                     fakeSeed,
+                    dispatchSeed,
                     bounceToken,
                     resultMaskSeed,
                     denseResultRouter
@@ -819,7 +830,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 resultMaskSeed,
                 denseResultRouter
             );
-            helper.maxLocals = 14;
+            helper.maxLocals = 15;
             helper.maxStack = 32;
             JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
             clazz.asmNode().methods.add(helper);
@@ -1194,9 +1205,12 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int blockKeyLocal,
             int pcLocal,
             int domainLocal,
+            int dataLocal,
+            int keyTmpLocal,
             int outLocal,
             long methodSeed,
             long seed,
+            long dispatchSeed,
             int bounceToken,
             long resultMaskSeed,
             boolean denseResultRouter
@@ -1232,7 +1246,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         bounceTarget.selectorSeed(),
-                        8
+                        keyTmpLocal
                     );
                     emitStoreMethodKey(
                         insns,
@@ -1242,6 +1256,12 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         blockKeyLocal,
                         pcLocal,
                         bounceKeys
+                    );
+                    emitBindDispatchPcToDataDigest(
+                        insns,
+                        pcLocal,
+                        dataLocal,
+                        dispatchSeed
                     );
                     emitStoreDomain(
                         insns,
@@ -1255,7 +1275,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         domainSeed,
-                        8
+                        keyTmpLocal
                     );
                 }
                 case 1 -> {
@@ -1270,7 +1290,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         bounceTarget.selectorSeed(),
-                        8
+                        keyTmpLocal
                     );
                     emitStoreMethodKey(
                         insns,
@@ -1280,6 +1300,12 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         blockKeyLocal,
                         pcLocal,
                         bounceKeys
+                    );
+                    emitBindDispatchPcToDataDigest(
+                        insns,
+                        pcLocal,
+                        dataLocal,
+                        dispatchSeed
                     );
                     insns.add(new JumpInsnNode(Opcodes.GOTO, hop));
                     insns.add(hop);
@@ -1295,7 +1321,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         domainSeed,
-                        8
+                        keyTmpLocal
                     );
                 }
                 case 2 -> {
@@ -1311,7 +1337,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         domainSeed,
-                        8
+                        keyTmpLocal
                     );
                     emitStorePc(
                         insns,
@@ -1324,7 +1350,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         bounceTarget.selectorSeed(),
-                        8
+                        keyTmpLocal
                     );
                     emitStoreMethodKey(
                         insns,
@@ -1334,6 +1360,12 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         blockKeyLocal,
                         pcLocal,
                         bounceKeys
+                    );
+                    emitBindDispatchPcToDataDigest(
+                        insns,
+                        pcLocal,
+                        dataLocal,
+                        dispatchSeed
                     );
                     emitKeyPredicate(
                         insns,
@@ -1360,7 +1392,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         bounceTarget.selectorSeed(),
-                        8
+                        keyTmpLocal
                     );
                     emitStoreMethodKey(
                         insns,
@@ -1370,6 +1402,12 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         blockKeyLocal,
                         pcLocal,
                         bounceKeys
+                    );
+                    emitBindDispatchPcToDataDigest(
+                        insns,
+                        pcLocal,
+                        dataLocal,
+                        dispatchSeed
                     );
                     emitKeyPredicate(
                         insns,
@@ -1391,7 +1429,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         domainSeed,
-                        8
+                        keyTmpLocal
                     );
                     insns.add(new JumpInsnNode(Opcodes.GOTO, done));
                     insns.add(hop);
@@ -1407,7 +1445,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         bounceKeys,
                         methodSeed,
                         domainSeed,
-                        8
+                        keyTmpLocal
                     );
                     insns.add(done);
                 }
@@ -1549,7 +1587,9 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int blockKeyLocal,
             int pcLocal,
             int domainLocal,
+            int dataLocal,
             int keyTmpLocal,
+            long targetDispatchSeed,
             CffBlockKeyState sourceKeys,
             CffBlockKeyState targetKeys,
             long methodSeed,
@@ -1607,6 +1647,9 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
             }
             insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            if (!materialTransition) {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+            }
             insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
             if (materialTransition) {
                 insns.add(
@@ -1639,6 +1682,12 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 pcLocal,
                 domainLocal,
                 edgeKind != EdgeKind.DIRECT_ISLAND
+            );
+            emitBindDispatchPcToDataDigest(
+                insns,
+                pcLocal,
+                dataLocal,
+                targetDispatchSeed
             );
             insns.add(new JumpInsnNode(Opcodes.GOTO, jumpTarget));
             JvmKeyDispatchPass.markGenerated(pctx, insns);
@@ -1683,7 +1732,8 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int helperBlockLocal = 4;
             int helperPcLocal = 5;
             int helperDomainLocal = 6;
-            int helperOutLocal = 7;
+            int helperDataLocal = 7;
+            int helperOutLocal = 8;
             helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
             helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperGuardLocal));
             helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPathLocal));
@@ -1707,7 +1757,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 )
             );
             helper.instructions.add(new InsnNode(Opcodes.LRETURN));
-            helper.maxLocals = 8;
+            helper.maxLocals = 9;
             helper.maxStack = 32;
             JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
             clazz.asmNode().methods.add(helper);

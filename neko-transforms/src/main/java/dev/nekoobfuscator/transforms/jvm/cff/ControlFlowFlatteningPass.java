@@ -288,6 +288,8 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         Map<LabelNode, CffBlockKeyState> keyStateByLabel =
             buildBlockKeyStates(blocks, blockAliases, stateByLabel, dispatchPlan.targets(), salt);
         installEntryKeyState(blocks, dispatchPlan, keyStateByLabel, methodSeed, externalEntrySeed);
+        Map<DispatchTarget, Long> dispatchSeedByTarget =
+            buildDispatchSeedByTarget(dispatchPlan, keyStateByLabel);
         Set<LabelNode> runtimeKeyLabels = runtimeKeyLabels(
             pctx,
             mn,
@@ -349,11 +351,13 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 keyTmpLocal,
                 keyLocal,
                 stateByLabel,
                 keyStateByLabel,
                 dispatchPlan.targets(),
+                dispatchSeedByTarget,
                 runtimeKeyLabels,
                 methodSeed,
                 salt,
@@ -370,11 +374,13 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             blockKeyLocal,
             pcLocal,
             domainLocal,
+            dataLocal,
             keyTmpLocal,
             methodSeedLocal,
             stateByLabel,
             keyStateByLabel,
             dispatchPlan.targets(),
+            dispatchSeedByTarget,
             runtimeKeyLabels,
             methodSeed,
             salt,

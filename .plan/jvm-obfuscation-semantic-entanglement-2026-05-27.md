@@ -289,7 +289,7 @@ For every implementation row below:
   live primitive data can change `dataLocal`; no block coverage or transition
   semantics changed.
 
-### [ ] JSE-4: Mix CFF data digest into dispatcher token masks
+### [x] JSE-4: Mix CFF data digest into dispatcher token masks
 
 - Scope: consume `dataLocal` only in CFF token dispatch mask calculation and
   emitted token dispatch mask bytecode. Keep downstream constant/string/indy/

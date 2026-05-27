@@ -1219,11 +1219,13 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         int methodSeedLocal,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Map<DispatchTarget, Long> dispatchSeedByTarget,
         Set<LabelNode> runtimeKeyLabels,
         long methodSeed,
         long salt,
@@ -1264,11 +1266,13 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         int keyLocal,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Map<DispatchTarget, Long> dispatchSeedByTarget,
         Set<LabelNode> runtimeKeyLabels,
         long methodSeed,
         long salt,
@@ -1283,10 +1287,12 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Map<DispatchTarget, Long> dispatchSeedByTarget,
         Set<LabelNode> runtimeKeyLabels,
         LabelNode source,
         long methodSeed,
@@ -1302,10 +1308,12 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Map<DispatchTarget, Long> dispatchSeedByTarget,
         Set<LabelNode> runtimeKeyLabels,
         LabelNode source,
         long methodSeed,
@@ -1331,7 +1339,9 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
+        long targetDispatchSeed,
         CffBlockKeyState sourceKeys,
         CffBlockKeyState targetKeys,
         long methodSeed,
@@ -1356,7 +1366,9 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
+        long targetDispatchSeed,
         CffBlockKeyState sourceKeys,
         CffBlockKeyState targetKeys,
         long methodSeed,
@@ -1373,6 +1385,7 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         LabelNode poison,
         int island,
@@ -1394,10 +1407,12 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         int state,
         int island,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long dispatchSeed,
         long methodSeed,
         long seed,
         CffTransitionOutliner.TransitionOutliner transitionOutliner
@@ -1452,6 +1467,7 @@ abstract class CffSharedState {
         int guardLocal,
         int pathKeyLocal,
         int blockKeyLocal,
+        int dataLocal,
         TreeMap<Integer, LabelNode> cases,
         LabelNode poison,
         long seed,
@@ -1460,9 +1476,15 @@ abstract class CffSharedState {
     );
     protected abstract void emitSmallTokenDispatch(
         InsnList insns,
+        int pcLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int dataLocal,
         TreeMap<Integer, LabelNode> cases,
         LabelNode poison,
-        long seed
+        long seed,
+        int scratchLocal
     );
     protected abstract long tokenDispatchSeed(long groupSalt, int island);
     protected abstract long tokenDispatchSeed(
@@ -1488,7 +1510,9 @@ abstract class CffSharedState {
         int guardLocal,
         int pathKeyLocal,
         int blockKeyLocal,
-        long seed
+        int dataLocal,
+        long seed,
+        int scratchLocal
     );
     protected abstract void emitDispatchMethodKeyFold(InsnList insns, int keyLocal, long seed);
     protected abstract void emitInitKeys(
@@ -1933,6 +1957,14 @@ abstract class CffSharedState {
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
         long salt
+    );
+    protected abstract Map<DispatchTarget, Long> buildDispatchSeedByTarget(
+        DispatchPlan dispatchPlan,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel
+    );
+    protected abstract long requireDispatchSeed(
+        DispatchTarget target,
+        Map<DispatchTarget, Long> dispatchSeedByTarget
     );
     protected abstract void installEntryKeyState(
         List<Block> blocks,

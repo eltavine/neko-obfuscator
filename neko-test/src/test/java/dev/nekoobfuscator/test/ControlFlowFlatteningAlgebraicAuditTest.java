@@ -111,6 +111,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
         assertCffDataDigestInitializedFromEntryData(outputJar);
         assertCffDataDigestUpdatedFromPrimitiveFlow(outputJar);
+        assertCffDispatchConsumesDataDigest(outputJar);
 
         List<Finding> findings = auditJar(outputJar);
         assertFalse(
@@ -752,6 +753,76 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         );
     }
 
+    private static void assertCffDispatchConsumesDataDigest(Path jar)
+        throws Exception {
+        MethodNode value = cffAuditValueMethod(jar);
+        CffEntryDigestProof proof = cffEntryDigestProof(value);
+        AbstractInsnNode[] insns = value.instructions.toArray();
+        int pcLocal = proof.digestLocal() - 5;
+        assertTrue(pcLocal >= 0, "CFF data digest local did not match published pc/data local layout");
+
+        int checkedDispatchBranches = 0;
+        for (int i = proof.firstBranch(); i < insns.length; i++) {
+            if (!isDispatchSelectorBranch(insns[i])) {
+                continue;
+            }
+            int sliceStart = previousBranchIndex(insns, i) + 1;
+            int pcLoad = firstVarLoadIndex(insns, Opcodes.ILOAD, pcLocal, sliceStart, i);
+            if (pcLoad < 0) {
+                continue;
+            }
+            boolean sawDataDigest = false;
+            boolean sawNonlinearAfterDigest = false;
+            for (int j = pcLoad + 1; j < i; j++) {
+                if (insns[j] instanceof VarInsnNode load
+                    && load.getOpcode() == Opcodes.ILOAD
+                    && load.var == proof.digestLocal()) {
+                    sawDataDigest = true;
+                }
+                if (sawDataDigest && isNonlinearIntMixOpcode(insns[j].getOpcode())) {
+                    sawNonlinearAfterDigest = true;
+                }
+            }
+            assertTrue(
+                sawDataDigest && sawNonlinearAfterDigest,
+                "CFF dispatch selector loaded pc local without consuming nonlinear data digest before branch"
+            );
+            checkedDispatchBranches++;
+        }
+        assertTrue(
+            checkedDispatchBranches > 0,
+            "CFF audit fixture did not expose a pc-token dispatch selector"
+        );
+    }
+
+    private static boolean isDispatchSelectorBranch(AbstractInsnNode insn) {
+        if (insn instanceof LookupSwitchInsnNode || insn instanceof TableSwitchInsnNode) {
+            return true;
+        }
+        if (!(insn instanceof JumpInsnNode)) {
+            return false;
+        }
+        int opcode = insn.getOpcode();
+        return opcode == Opcodes.IF_ICMPEQ || opcode == Opcodes.IF_ICMPNE;
+    }
+
+    private static int previousBranchIndex(AbstractInsnNode[] insns, int index) {
+        for (int i = index - 1; i >= 0; i--) {
+            if (insns[i] instanceof JumpInsnNode
+                || insns[i] instanceof LookupSwitchInsnNode
+                || insns[i] instanceof TableSwitchInsnNode) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isNonlinearIntMixOpcode(int opcode) {
+        return opcode == Opcodes.IMUL
+            || opcode == Opcodes.IUSHR
+            || opcode == Opcodes.IXOR;
+    }
+
     private static MethodNode cffAuditValueMethod(Path jar)
         throws Exception {
         JarInput input = new JarInput(jar);
@@ -846,7 +917,17 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         int local,
         int limitExclusive
     ) {
-        for (int i = 0; i < limitExclusive && i < insns.length; i++) {
+        return firstVarLoadIndex(insns, opcode, local, 0, limitExclusive);
+    }
+
+    private static int firstVarLoadIndex(
+        AbstractInsnNode[] insns,
+        int opcode,
+        int local,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
             if (insns[i] instanceof VarInsnNode var
                 && var.getOpcode() == opcode
                 && var.var == local) {

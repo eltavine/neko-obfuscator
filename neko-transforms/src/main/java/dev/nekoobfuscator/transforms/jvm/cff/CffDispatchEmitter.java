@@ -81,6 +81,8 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         CffTransitionOutliner.TransitionOutliner transitionOutliner
     ) {
         List<IslandGroup> outlinedGroups = dispatchPlan.groups();
+        Map<DispatchTarget, Long> dispatchSeedByTarget =
+            buildDispatchSeedByTarget(dispatchPlan, keyStateByLabel);
         for (int groupIndex = 0; groupIndex < outlinedGroups.size(); groupIndex++) {
             IslandGroup group = outlinedGroups.get(groupIndex);
             Block entryBlock = group.blocks().get(0);
@@ -159,6 +161,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     pcLocal,
                     entryKeys
                 );
+                emitBindDispatchPcToDataDigest(
+                    insns,
+                    pcLocal,
+                    dataLocal,
+                    requireDispatchSeed(entryTarget, dispatchSeedByTarget)
+                );
                 emitStoreDomain(
                     insns,
                     domainLocal,
@@ -218,6 +226,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     domainLocal,
+                    dataLocal,
                     keyTmpLocal,
                     poison,
                     methodSeed,
@@ -264,6 +273,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                             blockKeyLocal,
                             pcLocal,
                             domainLocal,
+                            dataLocal,
                             keyTmpLocal,
                             poison,
                             island,
@@ -320,6 +330,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     domainLocal,
+                    dataLocal,
                     keyTmpLocal,
                     stateByLabel,
                     keyStateByLabel,
@@ -488,11 +499,13 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         int keyLocal,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Map<DispatchTarget, Long> dispatchSeedByTarget,
         Set<LabelNode> runtimeKeyLabels,
         long methodSeed,
         long salt,
@@ -527,7 +540,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                         blockKeyLocal,
                         pcLocal,
                         domainLocal,
+                        dataLocal,
                         keyTmpLocal,
+                        requireDispatchSeed(target, dispatchSeedByTarget),
                         requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
                         requireBlockKey(jump.label, labelValue(keyStateByLabel, jump.label)),
                         methodSeed,
@@ -580,7 +595,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                         blockKeyLocal,
                         pcLocal,
                         domainLocal,
+                        dataLocal,
                         keyTmpLocal,
+                        requireDispatchSeed(requireTarget(next, fallthrough), dispatchSeedByTarget),
                         requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
                         requireBlockKey(next, labelValue(keyStateByLabel, next)),
                         methodSeed,
@@ -602,7 +619,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                         blockKeyLocal,
                         pcLocal,
                         domainLocal,
+                        dataLocal,
                         keyTmpLocal,
+                        requireDispatchSeed(requireTarget(jump.label, target), dispatchSeedByTarget),
                         requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
                         requireBlockKey(jump.label, labelValue(keyStateByLabel, jump.label)),
                         methodSeed,
@@ -629,7 +648,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                         blockKeyLocal,
                         pcLocal,
                         domainLocal,
+                        dataLocal,
                         keyTmpLocal,
+                        requireDispatchSeed(requireTarget(jump.label, target), dispatchSeedByTarget),
                         requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
                         requireBlockKey(jump.label, labelValue(keyStateByLabel, jump.label)),
                         methodSeed,
@@ -651,7 +672,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                         blockKeyLocal,
                         pcLocal,
                         domainLocal,
+                        dataLocal,
                         keyTmpLocal,
+                        requireDispatchSeed(requireTarget(next, fallthrough), dispatchSeedByTarget),
                         requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
                         requireBlockKey(next, labelValue(keyStateByLabel, next)),
                         methodSeed,
@@ -675,10 +698,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 keyTmpLocal,
                 stateByLabel,
                 keyStateByLabel,
                 dispatchByLabel,
+                dispatchSeedByTarget,
                 runtimeKeyLabels,
                 block.label(),
                 methodSeed,
@@ -697,10 +722,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 keyTmpLocal,
                 stateByLabel,
                 keyStateByLabel,
                 dispatchByLabel,
+                dispatchSeedByTarget,
                 runtimeKeyLabels,
                 block.label(),
                 methodSeed,
@@ -723,7 +750,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     domainLocal,
+                    dataLocal,
                     keyTmpLocal,
+                    requireDispatchSeed(requireTarget(next, nextTarget), dispatchSeedByTarget),
                     requireBlockKey(block.label(), keyStateByLabel.get(block.label())),
                     requireBlockKey(next, labelValue(keyStateByLabel, next)),
                     methodSeed,
@@ -745,10 +774,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Map<DispatchTarget, Long> dispatchSeedByTarget,
         Set<LabelNode> runtimeKeyLabels,
         LabelNode source,
         long methodSeed,
@@ -783,7 +814,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 keyTmpLocal,
+                requireDispatchSeed(
+                    requireTarget(originalDefault, labelValue(dispatchByLabel, originalDefault)),
+                    dispatchSeedByTarget
+                ),
                 requireBlockKey(source, keyStateByLabel.get(source)),
                 requireBlockKey(originalDefault, labelValue(keyStateByLabel, originalDefault)),
                 methodSeed,
@@ -812,7 +848,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     domainLocal,
+                    dataLocal,
                     keyTmpLocal,
+                    requireDispatchSeed(
+                        requireTarget(originalTarget, labelValue(dispatchByLabel, originalTarget)),
+                        dispatchSeedByTarget
+                    ),
                     requireBlockKey(source, keyStateByLabel.get(source)),
                     requireBlockKey(originalTarget, labelValue(keyStateByLabel, originalTarget)),
                     methodSeed,
@@ -840,10 +881,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
+        Map<DispatchTarget, Long> dispatchSeedByTarget,
         Set<LabelNode> runtimeKeyLabels,
         LabelNode source,
         long methodSeed,
@@ -878,7 +921,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 keyTmpLocal,
+                requireDispatchSeed(
+                    requireTarget(originalDefault, labelValue(dispatchByLabel, originalDefault)),
+                    dispatchSeedByTarget
+                ),
                 requireBlockKey(source, keyStateByLabel.get(source)),
                 requireBlockKey(originalDefault, labelValue(keyStateByLabel, originalDefault)),
                 methodSeed,
@@ -907,7 +955,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     domainLocal,
+                    dataLocal,
                     keyTmpLocal,
+                    requireDispatchSeed(
+                        requireTarget(originalTarget, labelValue(dispatchByLabel, originalTarget)),
+                        dispatchSeedByTarget
+                    ),
                     requireBlockKey(source, keyStateByLabel.get(source)),
                     requireBlockKey(originalTarget, labelValue(keyStateByLabel, originalTarget)),
                     methodSeed,
@@ -1000,7 +1053,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
+        long targetDispatchSeed,
         CffBlockKeyState sourceKeys,
         CffBlockKeyState targetKeys,
         long methodSeed,
@@ -1024,7 +1079,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 keyTmpLocal,
+                targetDispatchSeed,
                 sourceKeys,
                 targetKeys,
                 methodSeed,
@@ -1044,7 +1101,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             blockKeyLocal,
             pcLocal,
             domainLocal,
+            dataLocal,
             keyTmpLocal,
+            targetDispatchSeed,
             sourceKeys,
             targetKeys,
             methodSeed,
@@ -1079,7 +1138,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
+        long targetDispatchSeed,
         CffBlockKeyState sourceKeys,
         CffBlockKeyState targetKeys,
         long methodSeed,
@@ -1136,6 +1197,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             targetKeys,
             transitionBaseSeed,
             stepSeed ^ 0x4D45544844454331L ^ role.ordinal()
+        );
+        emitBindDispatchPcToDataDigest(
+            insns,
+            pcLocal,
+            dataLocal,
+            targetDispatchSeed
         );
         if (edgeKind != EdgeKind.DIRECT_ISLAND) {
             emitStoreTransitionBaseToken(
@@ -1236,6 +1303,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         LabelNode poison,
         int island,
@@ -1308,6 +1376,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 keyTmpLocal,
                 poison,
                 methodSeed,
@@ -1341,6 +1410,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             guardLocal,
             pathKeyLocal,
             blockKeyLocal,
+            dataLocal,
             cases,
             poison,
             dispatchSeed,
@@ -1394,10 +1464,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 keyTmpLocal,
                 firstState,
                 island,
                 keyStateByLabel,
+                dispatchSeed,
                 methodSeed,
                 sharedFakeSeed,
                 transitionOutliner
@@ -1429,10 +1501,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     domainLocal,
+                    dataLocal,
                     keyTmpLocal,
                     firstState,
                     island,
                     keyStateByLabel,
+                    dispatchSeed,
                     methodSeed,
                     fakeSeed,
                     transitionOutliner
@@ -1507,6 +1581,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
@@ -1579,6 +1654,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                 blockKeyLocal,
                 pcLocal,
                 targetKeys
+            );
+            emitBindDispatchPcToDataDigest(
+                insns,
+                pcLocal,
+                dataLocal,
+                tokenDispatchSeed(group, island, keyStateByLabel)
             );
             emitStoreDomain(
                 insns,
@@ -1745,10 +1826,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         int state,
         int island,
         Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+        long dispatchSeed,
         long methodSeed,
         long seed,
         CffTransitionOutliner.TransitionOutliner transitionOutliner
@@ -1786,7 +1869,9 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     domainLocal,
+                    dataLocal,
                     keyTmpLocal,
+                    dispatchSeed,
                     bounceKeys,
                     bounceKeys,
                     methodSeed,
@@ -1819,6 +1904,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     bounceKeys
+                );
+                emitBindDispatchPcToDataDigest(
+                    insns,
+                    pcLocal,
+                    dataLocal,
+                    dispatchSeed
                 );
                 emitStoreDomain(
                     insns,
@@ -1858,6 +1949,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     bounceKeys
+                );
+                emitBindDispatchPcToDataDigest(
+                    insns,
+                    pcLocal,
+                    dataLocal,
+                    dispatchSeed
                 );
                 insns.add(new JumpInsnNode(Opcodes.GOTO, hop));
                 insns.add(hop);
@@ -1914,6 +2011,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     pcLocal,
                     bounceKeys
                 );
+                emitBindDispatchPcToDataDigest(
+                    insns,
+                    pcLocal,
+                    dataLocal,
+                    dispatchSeed
+                );
                 emitKeyPredicate(
                     insns,
                     guardLocal,
@@ -1948,6 +2051,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     blockKeyLocal,
                     pcLocal,
                     bounceKeys
+                );
+                emitBindDispatchPcToDataDigest(
+                    insns,
+                    pcLocal,
+                    dataLocal,
+                    dispatchSeed
                 );
                 emitKeyPredicate(
                     insns,
@@ -2145,13 +2254,28 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int guardLocal,
         int pathKeyLocal,
         int blockKeyLocal,
+        int dataLocal,
         TreeMap<Integer, LabelNode> cases,
         LabelNode poison,
         long seed,
         int scratchLocal,
         int smallTokenDispatchCases
     ) {
-        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        if (cases.size() <= smallTokenDispatchCases) {
+            emitSmallTokenDispatch(
+                insns,
+                pcLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                dataLocal,
+                cases,
+                poison,
+                seed,
+                scratchLocal
+            );
+            return;
+        }
         emitDispatchTokenMask(
             insns,
             pcLocal,
@@ -2159,13 +2283,12 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             guardLocal,
             pathKeyLocal,
             blockKeyLocal,
-            seed
+            dataLocal,
+            seed,
+            scratchLocal
         );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
         insns.add(new InsnNode(Opcodes.IXOR));
-        if (cases.size() <= smallTokenDispatchCases) {
-            emitSmallTokenDispatch(insns, cases, poison, seed);
-            return;
-        }
         int[] keys = new int[cases.size()];
         LabelNode[] labels = new LabelNode[cases.size()];
         int index = 0;
@@ -2179,14 +2302,36 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
 
     protected void emitSmallTokenDispatch(
         InsnList insns,
+        int pcLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int dataLocal,
         TreeMap<Integer, LabelNode> cases,
         LabelNode poison,
-        long seed
+        long seed,
+        int scratchLocal
     ) {
+        int multiplierLocal = scratchLocal;
+        int inverseLocal = scratchLocal + 1;
+        int rawPcLocal = scratchLocal + 2;
         if (cases.size() == 1) {
             Map.Entry<Integer, LabelNode> entry = cases.firstEntry();
+            emitDispatchSelectorFromEncodedPc(
+                insns,
+                pcLocal,
+                rawPcLocal,
+                dataLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                seed,
+                multiplierLocal,
+                inverseLocal
+            );
             JvmPassBytecode.pushInt(insns, entry.getKey());
             insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, poison));
+            emitRestoreRawDispatchPc(insns, pcLocal, rawPcLocal);
             insns.add(new JumpInsnNode(Opcodes.GOTO, entry.getValue()));
             return;
         }
@@ -2200,17 +2345,41 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             Map.Entry<Integer, LabelNode> entry = ordered.get(i);
             LabelNode match = new LabelNode();
             matches.add(match);
-            insns.add(new InsnNode(Opcodes.DUP));
+            emitDispatchSelectorFromEncodedPc(
+                insns,
+                pcLocal,
+                rawPcLocal,
+                dataLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                seed,
+                multiplierLocal,
+                inverseLocal
+            );
             JvmPassBytecode.pushInt(insns, entry.getKey());
             insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, match));
         }
         Map.Entry<Integer, LabelNode> last = ordered.get(ordered.size() - 1);
+        emitDispatchSelectorFromEncodedPc(
+            insns,
+            pcLocal,
+            rawPcLocal,
+            dataLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            seed,
+            multiplierLocal,
+            inverseLocal
+        );
         JvmPassBytecode.pushInt(insns, last.getKey());
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, poison));
+        emitRestoreRawDispatchPc(insns, pcLocal, rawPcLocal);
         insns.add(new JumpInsnNode(Opcodes.GOTO, last.getValue()));
         for (int i = 0; i < matches.size(); i++) {
             insns.add(matches.get(i));
-            insns.add(new InsnNode(Opcodes.POP));
+            emitRestoreRawDispatchPc(insns, pcLocal, rawPcLocal);
             insns.add(new JumpInsnNode(Opcodes.GOTO, ordered.get(i).getValue()));
         }
     }
@@ -2251,6 +2420,46 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         throw new IllegalStateException("CFF token dispatch seed collision for island");
     }
 
+    protected Map<DispatchTarget, Long> buildDispatchSeedByTarget(
+        DispatchPlan dispatchPlan,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel
+    ) {
+        Map<DispatchTarget, Long> seeds = new IdentityHashMap<>();
+        for (IslandGroup group : dispatchPlan.groups()) {
+            for (int island = 0; island < group.islandLabels().length; island++) {
+                long seed = tokenDispatchSeed(group, island, keyStateByLabel);
+                for (Block block : group.blocks()) {
+                    Integer blockIsland = group.islands().get(block.label());
+                    if (blockIsland == null || blockIsland != island) {
+                        continue;
+                    }
+                    DispatchTarget target = requireTarget(
+                        block.label(),
+                        dispatchPlan.targets().get(block.label())
+                    );
+                    Long existing = seeds.putIfAbsent(target, seed);
+                    if (existing != null && existing.longValue() != seed) {
+                        throw new IllegalStateException(
+                            "CFF dispatch target maps to multiple token seeds"
+                        );
+                    }
+                }
+            }
+        }
+        return seeds;
+    }
+
+    protected long requireDispatchSeed(
+        DispatchTarget target,
+        Map<DispatchTarget, Long> dispatchSeedByTarget
+    ) {
+        Long seed = dispatchSeedByTarget.get(target);
+        if (seed == null) {
+            throw new IllegalStateException("CFF dispatch target has no token seed");
+        }
+        return seed;
+    }
+
     protected int maskedDispatchToken(
         int token,
         CffBlockKeyState keyState,
@@ -2264,12 +2473,32 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         CffBlockKeyState keyState,
         long seed
     ) {
+        return dispatchTokenCoreMask(token, keyState, seed);
+    }
+
+    private int dispatchTokenCoreMask(
+        int token,
+        CffBlockKeyState keyState,
+        long seed
+    ) {
         int x = keyState.guardKey() +
             (keyState.pathKey() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x44545041544831L)));
         x ^= keyState.blockKey() *
             (nonZeroInt(JvmPassBytecode.mix(seed, 0x4454424C4F434B31L)) | 1);
         x ^= token + nonZeroInt(JvmPassBytecode.mix(seed, 0x44545043544F4B31L));
         return x;
+    }
+
+    protected void emitBindDispatchPcToDataDigest(
+        InsnList insns,
+        int pcLocal,
+        int dataLocal,
+        long seed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        emitDispatchDataTokenMultiplier(insns, dataLocal, seed);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
     }
 
     protected int dispatchMethodKeyFold(long keyValue, long seed) {
@@ -2282,6 +2511,71 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         InsnList insns,
         int pcLocal,
         int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int dataLocal,
+        long seed,
+        int scratchLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        emitDispatchDataTokenMultiplier(insns, dataLocal, seed);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, scratchLocal));
+        emitOddIntInverse(insns, scratchLocal, scratchLocal + 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
+        emitDispatchTokenCoreMask(
+            insns,
+            pcLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            seed
+        );
+    }
+
+    private void emitDispatchSelectorFromEncodedPc(
+        InsnList insns,
+        int encodedPcLocal,
+        int rawPcLocal,
+        int dataLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        long seed,
+        int multiplierLocal,
+        int inverseLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, encodedPcLocal));
+        emitDispatchDataTokenMultiplier(insns, dataLocal, seed);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, multiplierLocal));
+        emitOddIntInverse(insns, multiplierLocal, inverseLocal);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, rawPcLocal));
+        emitDispatchTokenCoreMask(
+            insns,
+            rawPcLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            seed
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rawPcLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitRestoreRawDispatchPc(
+        InsnList insns,
+        int pcLocal,
+        int rawPcLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rawPcLocal));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
+    }
+
+    private void emitDispatchTokenCoreMask(
+        InsnList insns,
+        int pcTokenLocal,
         int guardLocal,
         int pathKeyLocal,
         int blockKeyLocal,
@@ -2302,13 +2596,66 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         );
         insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcTokenLocal));
         JvmPassBytecode.pushInt(
             insns,
             nonZeroInt(JvmPassBytecode.mix(seed, 0x44545043544F4B31L))
         );
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitDispatchDataTokenMultiplier(
+        InsnList insns,
+        int dataLocal,
+        long seed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4454444D554C4131L))
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 3));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4454444D554C4D31L)) | 1
+        );
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 19));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4454444D554C4631L))
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+    }
+
+    private void emitOddIntInverse(
+        InsnList insns,
+        int multiplierLocal,
+        int inverseLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, multiplierLocal));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, inverseLocal));
+        for (int i = 0; i < 5; i++) {
+            insns.add(new VarInsnNode(Opcodes.ILOAD, inverseLocal));
+            JvmPassBytecode.pushInt(insns, 2);
+            insns.add(new VarInsnNode(Opcodes.ILOAD, multiplierLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, inverseLocal));
+            insns.add(new InsnNode(Opcodes.IMUL));
+            insns.add(new InsnNode(Opcodes.ISUB));
+            insns.add(new InsnNode(Opcodes.IMUL));
+            insns.add(new VarInsnNode(Opcodes.ISTORE, inverseLocal));
+        }
+        insns.add(new VarInsnNode(Opcodes.ILOAD, inverseLocal));
     }
 
     protected void emitDispatchMethodKeyFold(InsnList insns, int keyLocal, long seed) {
