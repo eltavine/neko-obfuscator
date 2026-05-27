@@ -419,7 +419,7 @@ For every implementation row below:
 - Completion criteria: validation fixture passes; validation material is
   data-flow-bound without changing helper topology.
 
-### [ ] JSE-9: Add derived numeric material emitters and classifier audit
+### [x] JSE-9: Add derived numeric material emitters and classifier audit
 
 - Scope: add transformer-only bytecode emitter utilities for derived int/long
   material and add JUnit/ASM classifier helpers that distinguish protected

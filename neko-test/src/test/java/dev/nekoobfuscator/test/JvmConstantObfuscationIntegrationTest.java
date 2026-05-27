@@ -7,11 +7,14 @@ import dev.nekoobfuscator.core.jar.JarInput;
 import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -32,6 +35,7 @@ import java.util.jar.Manifest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -40,6 +44,62 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and all primitive numeric widths.
  */
 public class JvmConstantObfuscationIntegrationTest {
+    @Test
+    void derivedNumericMaterialClassifierRejectsDirectAndSelfCancelingShapes() {
+        InsnList derivedInt = new InsnList();
+        JvmPassBytecode.pushDerivedIntMaterial(derivedInt, 3, 0x434F4E53544A5345L, 0x4E554D494E543031L);
+        AbstractInsnNode[] derivedIntInsns = derivedInt.toArray();
+        assertTrue(isProtectedNumericMaterial(derivedIntInsns, 0, derivedIntInsns.length));
+        assertNoDirectLargeProtectedNumericMaterial(derivedIntInsns, 0, derivedIntInsns.length);
+        assertNoSelfCancelingDerivedNumericMaterial(derivedIntInsns, 0, derivedIntInsns.length);
+
+        InsnList derivedLong = new InsnList();
+        JvmPassBytecode.pushDerivedLongMaterial(derivedLong, 4, 0x434F4E53544A5346L, 0x4E554D4C4F4E4731L);
+        AbstractInsnNode[] derivedLongInsns = derivedLong.toArray();
+        assertTrue(isProtectedNumericMaterial(derivedLongInsns, 0, derivedLongInsns.length));
+        assertNoDirectLargeProtectedNumericMaterial(derivedLongInsns, 0, derivedLongInsns.length);
+        assertNoSelfCancelingDerivedNumericMaterial(derivedLongInsns, 0, derivedLongInsns.length);
+
+        InsnList directLarge = new InsnList();
+        directLarge.add(new LdcInsnNode(0x6A09E667));
+        AbstractInsnNode[] directLargeInsns = directLarge.toArray();
+        assertFalse(isProtectedNumericMaterial(directLargeInsns, 0, directLargeInsns.length));
+        assertThrows(
+            AssertionError.class,
+            () -> assertNoDirectLargeProtectedNumericMaterial(directLargeInsns, 0, directLargeInsns.length)
+        );
+
+        InsnList xorSelfCancel = new InsnList();
+        xorSelfCancel.add(new VarInsnNode(Opcodes.ILOAD, 2));
+        JvmPassBytecode.pushInt(xorSelfCancel, 0x13579BDF);
+        xorSelfCancel.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(xorSelfCancel, 0x13579BDF);
+        xorSelfCancel.add(new InsnNode(Opcodes.IXOR));
+        AbstractInsnNode[] xorSelfCancelInsns = xorSelfCancel.toArray();
+        assertFalse(isProtectedNumericMaterial(xorSelfCancelInsns, 0, xorSelfCancelInsns.length));
+        assertThrows(
+            AssertionError.class,
+            () -> assertNoSelfCancelingDerivedNumericMaterial(
+                xorSelfCancelInsns,
+                0,
+                xorSelfCancelInsns.length
+            )
+        );
+
+        InsnList inversePair = new InsnList();
+        inversePair.add(new VarInsnNode(Opcodes.ILOAD, 2));
+        JvmPassBytecode.pushInt(inversePair, 0x2468ACE0);
+        inversePair.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(inversePair, 0x2468ACE0);
+        inversePair.add(new InsnNode(Opcodes.ISUB));
+        AbstractInsnNode[] inversePairInsns = inversePair.toArray();
+        assertFalse(isProtectedNumericMaterial(inversePairInsns, 0, inversePairInsns.length));
+        assertThrows(
+            AssertionError.class,
+            () -> assertNoSelfCancelingDerivedNumericMaterial(inversePairInsns, 0, inversePairInsns.length)
+        );
+    }
+
     @Test
     void constantObfuscationCoversJvmNumericShapesWithCff() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
@@ -451,6 +511,164 @@ public class JvmConstantObfuscationIntegrationTest {
             }
         }
         return false;
+    }
+
+    private static boolean isProtectedNumericMaterial(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        if (hasDirectLargeProtectedNumericMaterial(insns, startInclusive, limitExclusive)) {
+            return false;
+        }
+        if (selfCancelingNumericMaterialIndex(insns, startInclusive, limitExclusive) >= 0) {
+            return false;
+        }
+        boolean sawLiveLoad = false;
+        boolean sawMultiply = false;
+        boolean sawShift = false;
+        boolean sawMix = false;
+        int literals = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            AbstractInsnNode insn = insns[i];
+            if (insn instanceof VarInsnNode var
+                && (var.getOpcode() == Opcodes.ILOAD || var.getOpcode() == Opcodes.LLOAD)) {
+                sawLiveLoad = true;
+            }
+            if (numericLiteralBits(insn) != null) {
+                literals++;
+            }
+            int opcode = insn.getOpcode();
+            sawMultiply |= opcode == Opcodes.IMUL || opcode == Opcodes.LMUL;
+            sawShift |= opcode == Opcodes.IUSHR || opcode == Opcodes.LUSHR || opcode == Opcodes.LSHL;
+            sawMix |= opcode == Opcodes.IXOR
+                || opcode == Opcodes.LXOR
+                || opcode == Opcodes.IADD
+                || opcode == Opcodes.LADD
+                || opcode == Opcodes.IOR
+                || opcode == Opcodes.LOR;
+        }
+        return sawLiveLoad && sawMultiply && sawShift && sawMix && literals >= 3;
+    }
+
+    private static void assertNoDirectLargeProtectedNumericMaterial(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        assertFalse(
+            hasDirectLargeProtectedNumericMaterial(insns, startInclusive, limitExclusive),
+            "direct large protected numeric LdcInsnNode material survived"
+        );
+    }
+
+    private static void assertNoSelfCancelingDerivedNumericMaterial(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        assertEquals(
+            -1,
+            selfCancelingNumericMaterialIndex(insns, startInclusive, limitExclusive),
+            "self-canceling derived numeric material survived"
+        );
+    }
+
+    private static boolean hasDirectLargeProtectedNumericMaterial(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        int realInsns = 0;
+        int largeLdc = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            AbstractInsnNode insn = insns[i];
+            if (insn.getOpcode() < 0) continue;
+            realInsns++;
+            if (insn instanceof LdcInsnNode && isLargeNumericLiteral(insn)) {
+                largeLdc++;
+            }
+        }
+        return realInsns == 1 && largeLdc == 1;
+    }
+
+    private static int selfCancelingNumericMaterialIndex(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        int limit = Math.min(limitExclusive, insns.length);
+        for (int i = startInclusive; i < limit; i++) {
+            Long first = numericLiteralBits(insns[i]);
+            if (first == null) continue;
+            int opAIndex = nextRealIndexStatic(insns, i + 1, limit);
+            if (opAIndex < 0) continue;
+            int literalBIndex = nextNumericLiteralIndex(insns, opAIndex + 1, Math.min(limit, opAIndex + 5));
+            if (literalBIndex < 0) continue;
+            Long second = numericLiteralBits(insns[literalBIndex]);
+            if (!first.equals(second)) continue;
+            int opBIndex = nextRealIndexStatic(insns, literalBIndex + 1, limit);
+            if (opBIndex < 0) continue;
+            if (isSelfCancelingPair(insns[opAIndex].getOpcode(), insns[opBIndex].getOpcode())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int nextNumericLiteralIndex(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (numericLiteralBits(insns[i]) != null) return i;
+        }
+        return -1;
+    }
+
+    private static int nextRealIndexStatic(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() >= 0) return i;
+        }
+        return -1;
+    }
+
+    private static boolean isSelfCancelingPair(int opcodeA, int opcodeB) {
+        return (opcodeA == Opcodes.IXOR && opcodeB == Opcodes.IXOR)
+            || (opcodeA == Opcodes.LXOR && opcodeB == Opcodes.LXOR)
+            || (opcodeA == Opcodes.IADD && opcodeB == Opcodes.ISUB)
+            || (opcodeA == Opcodes.ISUB && opcodeB == Opcodes.IADD)
+            || (opcodeA == Opcodes.LADD && opcodeB == Opcodes.LSUB)
+            || (opcodeA == Opcodes.LSUB && opcodeB == Opcodes.LADD);
+    }
+
+    private static boolean isLargeNumericLiteral(AbstractInsnNode insn) {
+        Long bits = numericLiteralBits(insn);
+        return bits != null && (bits > Short.MAX_VALUE || bits < Short.MIN_VALUE);
+    }
+
+    private static Long numericLiteralBits(AbstractInsnNode insn) {
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Number value) {
+            if (value instanceof Integer i) return i.longValue();
+            if (value instanceof Long l) return l;
+            if (value instanceof Float f) return (long) Float.floatToRawIntBits(f);
+            if (value instanceof Double d) return Double.doubleToRawLongBits(d);
+        }
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) {
+            return (long) (opcode - Opcodes.ICONST_0);
+        }
+        if (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH) {
+            return (long) ((IntInsnNode) insn).operand;
+        }
+        if (opcode == Opcodes.LCONST_0) return 0L;
+        if (opcode == Opcodes.LCONST_1) return 1L;
+        return null;
     }
 
     private int previousVarLoadIndex(
