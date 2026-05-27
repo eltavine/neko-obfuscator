@@ -249,7 +249,7 @@ For every implementation row below:
 - Completion criteria: focused tests pass; static audit proves metadata/local
   plumbing exists and no consumer has been added before initialization.
 
-### [ ] JSE-2: Initialize CFF data digest from live method-entry data
+### [x] JSE-2: Initialize CFF data digest from live method-entry data
 
 - Scope: initialize `dataLocal` at CFF method entry from the hidden method key
   plus verifier-safe primitive argument values, including original application

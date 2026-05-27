@@ -64,6 +64,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         int methodSeedLocal,
         Map<LabelNode, Integer> stateByLabel,
@@ -111,6 +112,16 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     keyLocal,
                     entrySeed,
                     keyTmpLocal
+                );
+                emitInitDataDigest(
+                    insns,
+                    mn,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    dataLocal,
+                    entrySeed ^ 0x4441544144494731L
                 );
                 if (methodSeedLocal >= 0) {
                     insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
@@ -327,6 +338,145 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             }
             mn.instructions.insertBefore(entryBlock.label(), insns);
         }
+    }
+
+    protected void emitInitDataDigest(
+        InsnList insns,
+        MethodNode mn,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int dataLocal,
+        long seed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        emitMixDataDigestTopInt(insns, seed ^ 0x454E5452594B4559L);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dataLocal));
+
+        int local = (mn.access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        int argIndex = 0;
+        for (Type arg : Type.getArgumentTypes(mn.desc)) {
+            if (isDigestiblePrimitiveArgument(arg)
+                && !overlapsDigestKeyLocal(local, arg.getSize(), keyLocal)) {
+                emitPrimitiveArgumentDigestValue(insns, arg, local);
+                emitFoldDataDigestValue(
+                    insns,
+                    dataLocal,
+                    seed ^ 0x4152474449470000L ^ (argIndex * 0x9E3779B97F4A7C15L)
+                );
+            }
+            local += arg.getSize();
+            argIndex++;
+        }
+    }
+
+    private void emitPrimitiveArgumentDigestValue(
+        InsnList insns,
+        Type arg,
+        int local
+    ) {
+        switch (arg.getSort()) {
+            case Type.BOOLEAN, Type.BYTE, Type.CHAR, Type.SHORT, Type.INT ->
+                insns.add(new VarInsnNode(Opcodes.ILOAD, local));
+            case Type.FLOAT -> {
+                insns.add(new VarInsnNode(Opcodes.FLOAD, local));
+                insns.add(
+                    new MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        "java/lang/Float",
+                        "floatToRawIntBits",
+                        "(F)I",
+                        false
+                    )
+                );
+            }
+            case Type.LONG -> {
+                insns.add(new VarInsnNode(Opcodes.LLOAD, local));
+                insns.add(
+                    new MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        "java/lang/Long",
+                        "hashCode",
+                        "(J)I",
+                        false
+                    )
+                );
+            }
+            case Type.DOUBLE -> {
+                insns.add(new VarInsnNode(Opcodes.DLOAD, local));
+                insns.add(
+                    new MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        "java/lang/Double",
+                        "hashCode",
+                        "(D)I",
+                        false
+                    )
+                );
+            }
+            default -> {
+            }
+        }
+    }
+
+    private boolean isDigestiblePrimitiveArgument(Type arg) {
+        return switch (arg.getSort()) {
+            case Type.BOOLEAN,
+                Type.BYTE,
+                Type.CHAR,
+                Type.SHORT,
+                Type.INT,
+                Type.FLOAT,
+                Type.LONG,
+                Type.DOUBLE -> true;
+            default -> false;
+        };
+    }
+
+    private boolean overlapsDigestKeyLocal(int local, int slots, int keyLocal) {
+        return local < keyLocal + 2 && keyLocal < local + slots;
+    }
+
+    private void emitFoldDataDigestValue(
+        InsnList insns,
+        int dataLocal,
+        long seed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        insns.add(new InsnNode(Opcodes.SWAP));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitMixDataDigestTopInt(insns, seed);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dataLocal));
+    }
+
+    private void emitMixDataDigestTopInt(InsnList insns, long seed) {
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x4449474D554C31L)) | 1
+        );
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 11));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(
+            insns,
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x44494746494E31L))
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
     }
 
     protected void rewriteBlockExit(

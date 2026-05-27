@@ -382,6 +382,7 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             blockKeyLocal,
             pcLocal,
             domainLocal,
+            dataLocal,
             keyTmpLocal,
             methodSeedLocal,
             stateByLabel,

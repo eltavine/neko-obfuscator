@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
@@ -18,11 +19,13 @@ import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
@@ -106,6 +109,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertGeneratedCffPoisonDoesNotThrow(outputJar);
         assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
+        assertCffDataDigestInitializedFromEntryData(outputJar);
 
         List<Finding> findings = auditJar(outputJar);
         assertFalse(
@@ -705,6 +709,101 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertTrue(sawThreadName, "step-material helper does not fold thread name");
         assertTrue(sawStackTrace, "step-material helper does not read stack trace");
         assertTrue(sawStackElementHash, "step-material helper does not fold stack frame hash");
+    }
+
+    private static void assertCffDataDigestInitializedFromEntryData(Path jar)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("CffAuditShapes");
+        assertTrue(clazz != null, "missing CFF audit fixture class");
+        MethodNode value = null;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if ("value".equals(method.name)
+                && method.instructions != null
+                && method.instructions.size() > 0) {
+                value = method;
+                break;
+            }
+        }
+        assertTrue(value != null, "missing transformed CFF value method");
+
+        Type[] args = Type.getArgumentTypes(value.desc);
+        List<Integer> intArgLocals = new ArrayList<>();
+        int keyLocal = -1;
+        int local = (value.access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        for (Type arg : args) {
+            if (arg.getSort() == Type.INT) {
+                intArgLocals.add(local);
+            } else if (arg.getSort() == Type.LONG) {
+                keyLocal = local;
+            }
+            local += arg.getSize();
+        }
+        int argumentLimit = local;
+        assertTrue(
+            intArgLocals.size() >= 2 && keyLocal >= 0,
+            "fixture value method did not expose two primitive args plus hidden key: " + value.desc
+        );
+
+        AbstractInsnNode[] insns = value.instructions.toArray();
+        int firstBranch = firstBranchIndex(insns);
+        assertTrue(firstBranch > 0, "transformed value method has no dispatcher branch");
+        int firstX = firstVarLoadIndex(insns, Opcodes.ILOAD, intArgLocals.get(0), firstBranch);
+        int firstY = firstVarLoadIndex(insns, Opcodes.ILOAD, intArgLocals.get(1), firstBranch);
+        int firstKey = firstVarLoadIndex(insns, Opcodes.LLOAD, keyLocal, firstBranch);
+        assertTrue(firstX >= 0, "CFF entry digest did not read first int argument before dispatch");
+        assertTrue(firstY >= 0, "CFF entry digest did not read second int argument before dispatch");
+        assertTrue(firstKey >= 0, "CFF entry digest did not read hidden method key before dispatch");
+
+        int allEntryDataSeen = Math.max(firstKey, Math.max(firstX, firstY));
+        Set<Integer> earlierStores = new LinkedHashSet<>();
+        for (int i = 0; i < allEntryDataSeen; i++) {
+            if (insns[i] instanceof VarInsnNode var
+                && var.getOpcode() == Opcodes.ISTORE
+                && var.var >= argumentLimit) {
+                earlierStores.add(var.var);
+            }
+        }
+        boolean sawDigestStore = false;
+        for (int i = allEntryDataSeen + 1; i < firstBranch; i++) {
+            if (insns[i] instanceof VarInsnNode var
+                && var.getOpcode() == Opcodes.ISTORE
+                && earlierStores.contains(var.var)) {
+                sawDigestStore = true;
+                break;
+            }
+        }
+        assertTrue(
+            sawDigestStore,
+            "CFF entry digest did not store a protected local after reading entry data"
+        );
+    }
+
+    private static int firstBranchIndex(AbstractInsnNode[] insns) {
+        for (int i = 0; i < insns.length; i++) {
+            if (insns[i] instanceof JumpInsnNode
+                || insns[i] instanceof LookupSwitchInsnNode
+                || insns[i] instanceof TableSwitchInsnNode) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int firstVarLoadIndex(
+        AbstractInsnNode[] insns,
+        int opcode,
+        int local,
+        int limitExclusive
+    ) {
+        for (int i = 0; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode var
+                && var.getOpcode() == opcode
+                && var.var == local) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static Object[] cffObjectCarrier(Class<?> clazz) throws Exception {

@@ -1239,6 +1239,7 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         int keyTmpLocal,
         int methodSeedLocal,
         Map<LabelNode, Integer> stateByLabel,
