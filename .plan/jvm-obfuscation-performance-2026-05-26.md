@@ -5476,6 +5476,159 @@ Rejected implementation evidence:
   completed with `BUILD SUCCESSFUL in 1m 14s` and `19 actionable tasks: 19
   executed`.
 
+### P4.4 Move method-key non-zero guarantee from runtime helper to generated states
+
+Status: `[-]` plan-intake passed; plan-only checkpoint pending.
+
+Scope:
+
+- JVM runtime CFF/key-update performance only.
+- Generic method-key helper and CFF key-state generation change. No benchmark,
+  class, method, owner, descriptor, fixture, or hot-method special-casing.
+- Keep the method-key helper descriptor `(IIIIJJ)J`, salt-masked callsite ABI,
+  hidden-key propagation surface, CFF block coverage, CFF block boundaries,
+  token-material row layout, token-material helper topology, object-cell
+  storage, transition-material helper topology, and key-transfer helper
+  topology unchanged.
+- Do not add fallback behavior, static key recomputation, raw method-salt
+  exposure, Java-side runtime helpers, original-bytecode paths, or
+  reduced-obfuscation paths.
+- P4.4 is not a retry of P4.3 token-object helper splitting, P4.1 object-cell
+  storage replacement, P2.2.3 token row-pair caching, P2.2.6 object stack
+  carry, P2.2.14 carrier caching, P2.2.15 signed method-key mixing, or
+  P2.2.17 ticket-mode helper splitting.
+
+Fresh accepted-source evidence:
+
+- Accepted-source regeneration after the P4.3 revert passed
+  `JvmFullObfuscationPerfTest` with `BUILD SUCCESSFUL in 1m 14s`.
+- Fresh P4.4 before-edit 10x timing at
+  `build/jvm-runtime-perf/p4-4-accepted-source-10x/runtime-medians-valid.tsv`
+  records full TEST valid `Calc=190/190 ms` after excluding one already
+  documented bare-loop `Test 1.6: Pool FAIL` fixture flake, and full obfusjack
+  `Seq=312/313 ms`.
+- The same fresh 10x run records full obfusjack `Platform=84/84 ms`,
+  `Virtual=86/86 ms`, `Parallel=8/8 ms`, and `VThreads=8/8 ms`. Stderr logs
+  are empty and no fresh `hs_err_pid*.log` was found.
+- The clean accepted-source 10x run at
+  `build/jvm-runtime-perf/p5-accepted-source-10x/runtime-medians.tsv` remains
+  the stricter timing comparison row for full TEST `Calc=186/186 ms` and full
+  obfusjack `Seq=309/312 ms`.
+
+Fresh hot-path evidence:
+
+- P4.3 proved that splitting only the token-material object-cell update does
+  not satisfy the JIT precondition: the public token helper remained
+  `a.da.ua (131 bytes)` and still appeared as `callee is too large`.
+- Current bytecode/JIT evidence still identifies method-key updates as a
+  separate key-update hot surface. The P5 bytecode slices count method-key
+  helper calls in obfusjack hot methods: `a.a.e=31`, `a.a.x=19`, and
+  `a.a.y=14`.
+- Focused PrintInlining at
+  `build/jvm-runtime-perf/p5-print-inlining-focused/obfusjack-focused.stdout.log`
+  repeatedly reports `a.da::cb (43 bytes)` as `callee is too large` in hot
+  `a.a.x` and `a.a.y` compilation contexts, including offsets under the C1/C2
+  compilations of `a.a.x (7104 bytes)` and `a.a.y (6887 bytes)`. The same log
+  shows the 29-byte class-key helper `a.da::sa` inlines hot, so the current
+  method-key helper is just above the observed small-helper inline shape.
+- Source evidence in `CffMaterialTables.installMethodKeyFromStateHelper` shows
+  the helper computes the method key from live `guard/path/block/pc` and the
+  masked salt pair, then executes a runtime non-zero fallback branch:
+  `DUP2`, `LCONST_0`, `LCMP`, `IFNE`, `POP2`, and a fixed fallback long.
+- Source evidence in `CffKeyStateEmitter.initialKeyState`,
+  `CffKeyStateEmitter.bridgeKeyState`, and
+  `CffKeyTransferRewriter.blockKeyState` shows all generated
+  `CffBlockKeyState` instances are created in three sites that choose
+  `methodSalt` before calling `methodKeyFromBlock`.
+
+Invariant proof:
+
+- The raw method-key formula is
+  `(((long) guardKey) << 32 ^ (((long) pathKey) & 0xFFFFFFFFL)) +
+  (((long) blockKey) ^ methodSalt) ^ ((((long) pcToken) & 0xFFFFFFFFL) *
+  METHOD_KEY_PC_MIX)`.
+- P4.4 keeps this formula and keeps live `guard/path/block/pc` inputs in the
+  runtime helper. It changes only where the non-zero guarantee is enforced.
+- For each generated `CffBlockKeyState`, if the raw formula is already nonzero,
+  the state is unchanged.
+- If the raw formula is zero for a generated state, toggling bit `0` of
+  `methodSalt` changes `((long) blockKey) ^ methodSalt` by one modulo
+  `2^64`; if the salt value is `1`, toggling bit `1` keeps the salt nonzero
+  and changes that term by two modulo `2^64`. In both cases the sum term no
+  longer equals the pc-mix term that made the raw formula zero, so the adjusted
+  raw method key is nonzero.
+- Therefore every legitimate generated target state can be made raw-nonzero at
+  generation time without a runtime fallback branch. A corrupted live state may
+  still compute zero; that is a wrong-key state, not a fallback or original
+  bytecode path.
+- The masked salt pair remains at the callsite as `methodSalt ^ saltMask` and
+  `saltMask`; P4.4 does not push raw `methodSalt` as a constant.
+
+Planned repair:
+
+- Add a raw method-key formula helper used only by generation-time checks and
+  by the runtime emitter shape.
+- Add a generation-time salt adjustment helper and use it at all three
+  `CffBlockKeyState` construction sites: `initialKeyState`, `bridgeKeyState`,
+  and `blockKeyState`.
+- Remove the runtime zero-check/fallback sequence from
+  `installMethodKeyFromStateHelper` while keeping descriptor `(IIIIJJ)J` and
+  the masked salt pair inputs unchanged.
+- Remove the same zero-check/fallback sequence from the no-active-class-table
+  inline method-key emitter so both active-table and no-table method-key paths
+  use the same raw-nonzero generated-state invariant.
+
+Required validation target:
+
+- Run the targeted JVM validation suite used by P4.3 with repository
+  `./gradlew` and `--rerun-tasks`.
+- Regenerate fresh full-JVM-obfuscation artifacts with
+  `JvmFullObfuscationPerfTest`.
+- Inspect generated bytecode to prove the method-key helper descriptor remains
+  `(IIIIJJ)J`, the helper no longer contains `LCMP` or the fixed fallback long,
+  the helper bytecode size falls below the old `43 bytes`, and the masked salt
+  pair remains at callsites.
+- Inspect generated bytecode/topology to prove token-material helpers,
+  object-cell storage, CFF block coverage, block boundaries, key-transfer
+  helper routing, and transition-material helper routing are unchanged.
+- Run focused PrintInlining for `a.a::x` and `a.a::y` against the fresh full
+  obfusjack jar.
+- Run a fresh 10x runtime gate for original TEST, full TEST, original
+  obfusjack, and full obfusjack under a new
+  `build/jvm-runtime-perf/p4-4-method-key-no-runtime-fallback-10x/` directory.
+- Inspect stdout, stderr, runtime markers, and fresh `hs_err` files. Bare-loop
+  `Test 1.6: Pool FAIL` rows, if any, must be reported separately and cannot
+  replace the broad targeted JVM suite semantic proof.
+
+Completion criteria:
+
+- Targeted JVM validation passes.
+- Generated bytecode proves the method-key helper descriptor is unchanged, the
+  runtime fallback branch is absent, the fixed fallback long is absent, all
+  legitimate generated `CffBlockKeyState` method keys are raw-nonzero, and no
+  raw method salt is exposed at callsites.
+- Focused PrintInlining shows `a.da::cb` no longer appears as
+  `callee is too large` in the hot `a.a.x` and `a.a.y` compilation contexts.
+  If it remains too large, P4.4 is rejected.
+- Fresh 10x medians improve full obfusjack `Seq` from both accepted comparison
+  rows (`309/312 ms` clean P5 and `312/313 ms` fresh P4.4 before-edit) and
+  improve full TEST `Calc` from both accepted comparison rows (`186/186 ms`
+  clean P5 and `190/190 ms` fresh P4.4 valid before-edit). If either target
+  does not improve, P4.4 is rejected and reverted before any later runtime
+  change.
+- All stderr/log/marker/hs_err inspections are clean apart from any explicitly
+  reported bare-loop `Pool FAIL` fixture flake, and the broad targeted JVM
+  suite must pass regardless.
+- Subagent implementation review passes before commit.
+
+P4.4 first plan-intake review:
+
+- Plan-intake passed before source edits. The reviewer confirmed the plan has
+  fresh evidence, generic scope, preserved method-key/CFF invariants, credible
+  coverage of all three `CffBlockKeyState` construction sites, explicit
+  rejected-route separation, bounded validation, and clear reject conditions.
+  Implementation may start only after the plan-only checkpoint commit.
+
 ## Review Status
 
 First plan-intake review failed because the plan lacked numeric acceptance
