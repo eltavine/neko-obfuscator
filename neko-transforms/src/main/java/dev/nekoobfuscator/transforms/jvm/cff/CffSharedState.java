@@ -288,6 +288,7 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         Set<AbstractInsnNode> applicationInstructions,
         Map<AbstractInsnNode, CffInstructionState> instructionStates,
         CffClassKeyTable classKeyTable
@@ -1073,6 +1074,7 @@ abstract class CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         List<Block> blocks,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,

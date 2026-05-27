@@ -231,7 +231,7 @@ For every implementation row below:
   plan report is sent, and a checkpoint commit contains only this plan file and
   any matching todo-only update.
 
-### [-] JSE-1: Reserve and publish CFF data digest local
+### [x] JSE-1: Reserve and publish CFF data digest local
 
 - Scope: allocate one int `dataLocal` for each protected CFF method, publish it
   through `CffMethodMetadata`, and reserve it from runtime-variable

@@ -474,6 +474,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int pathKeyLocal = nextLocal++;
         int blockKeyLocal = nextLocal++;
         int pcLocal = nextLocal++;
+        int dataLocal = nextLocal++;
         String name = uniqueMethodName(
             clazz,
             "__neko_strcat$" + Long.toUnsignedString(helperSeed, 36)
@@ -494,6 +495,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 blockKeyLocal,
                 pcLocal,
                 -1,
+                dataLocal,
                 Set.of(),
                 Map.of(),
                 metadata.classKeyTable()

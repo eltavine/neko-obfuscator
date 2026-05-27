@@ -1407,7 +1407,8 @@ public final class JvmRuntimeVariableObfuscationPass implements TransformPass {
             || local == metadata.pathKeyLocal()
             || local == metadata.blockKeyLocal()
             || local == metadata.pcLocal()
-            || local == metadata.domainLocal();
+            || local == metadata.domainLocal()
+            || local == metadata.dataLocal();
     }
 
     private LocalKind kindForVarOpcode(int opcode) {

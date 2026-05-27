@@ -4123,6 +4123,7 @@ abstract class CffClassSetup extends CffSharedState {
         int blockKeyLocal,
         int pcLocal,
         int domainLocal,
+        int dataLocal,
         List<Block> blocks,
         Map<LabelNode, Integer> stateByLabel,
         Map<LabelNode, DispatchTarget> dispatchByLabel,
@@ -4179,6 +4180,7 @@ abstract class CffClassSetup extends CffSharedState {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
+                dataLocal,
                 applicationInstructions,
                 instructionStates,
                 classKeyTable
