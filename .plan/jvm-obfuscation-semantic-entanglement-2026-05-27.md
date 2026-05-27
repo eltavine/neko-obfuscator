@@ -402,7 +402,7 @@ For every implementation row below:
 - Completion criteria: indy fixture passes; indy flow word is data-flow-bound
   without changing resolver/payload/cache material layout.
 
-### [ ] JSE-8: Bind validation live-word derivation to CFF data digest
+### [x] JSE-8: Bind validation live-word derivation to CFF data digest
 
 - Scope: update only `JvmValidationSinkHardeningPass` live-word derivation so
   validation tag seed and expected-tag material consume `metadata.dataLocal()`.

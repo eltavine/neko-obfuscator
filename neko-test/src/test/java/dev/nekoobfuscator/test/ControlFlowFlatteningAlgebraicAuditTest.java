@@ -65,6 +65,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ControlFlowFlatteningAlgebraicAuditTest {
+    private static final String VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJII)Z";
+    private static final String OLD_VALIDATION_HELPER_DESC = "(Ljava/lang/String;JJI)Z";
+
     @Test
     void symbolicAuditRecognizesSelfCancelingAndLinearKeyShapes() {
         MethodNode method = syntheticLeakingMethod();
@@ -937,6 +940,20 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         return -1;
     }
 
+    private static int firstOpcodeIndex(
+        AbstractInsnNode[] insns,
+        int opcode,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i].getOpcode() == opcode) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private static Object[] cffObjectCarrier(Class<?> clazz) throws Exception {
         List<Field> carriers = new ArrayList<>();
         for (Field field : clazz.getDeclaredFields()) {
@@ -1181,6 +1198,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         }
         assertTrue(check != null, "missing validation sink fixture method");
         String helperName = null;
+        boolean sawOldHelperDesc = false;
         for (AbstractInsnNode insn = check.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn instanceof LdcInsnNode ldc && "swordfish-validated-flow".equals(ldc.cst)) {
                 throw new AssertionError("validation sink retained plaintext target in check method");
@@ -1195,11 +1213,19 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             if (insn instanceof MethodInsnNode call
                 && call.getOpcode() == Opcodes.INVOKESTATIC
                 && "ValidationSinkShape".equals(call.owner)
-                && "(Ljava/lang/String;JJI)Z".equals(call.desc)) {
+                && VALIDATION_HELPER_DESC.equals(call.desc)) {
                 helperName = call.name;
             }
+            if (insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKESTATIC
+                && "ValidationSinkShape".equals(call.owner)
+                && OLD_VALIDATION_HELPER_DESC.equals(call.desc)) {
+                sawOldHelperDesc = true;
+            }
         }
+        assertFalse(sawOldHelperDesc, "validation sink retained helper ABI without CFF data material");
         assertTrue(helperName != null, "validation sink did not call keyed tag helper");
+        assertValidationLiveWordConsumesDataDigest(clazz);
         assertValidationSinkHelperHasNoPlainTarget(clazz, helperName);
         assertValidationSinkUsesFormulaVariants(clazz);
         assertValidationSinkHasNoStandaloneTargetCarriers(clazz);
@@ -1208,7 +1234,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     private static void assertValidationSinkHelperHasNoPlainTarget(L1Class clazz, String helperName) {
         MethodNode helper = null;
         for (MethodNode method : clazz.asmNode().methods) {
-            if (helperName.equals(method.name) && "(Ljava/lang/String;JJI)Z".equals(method.desc)) {
+            if (helperName.equals(method.name) && VALIDATION_HELPER_DESC.equals(method.desc)) {
                 helper = method;
                 break;
             }
@@ -1236,7 +1262,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             "swordfish-variant-two"
         );
         for (MethodNode method : clazz.asmNode().methods) {
-            if (!"(Ljava/lang/String;JJI)Z".equals(method.desc)) continue;
+            if (!VALIDATION_HELPER_DESC.equals(method.desc)) continue;
             sawVariantZero |= method.name.startsWith("__neko_vsink0$");
             sawVariantOne |= method.name.startsWith("__neko_vsink1$");
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
@@ -1247,6 +1273,114 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         }
         assertTrue(sawVariantZero, "validation sink did not emit formula variant 0 helper");
         assertTrue(sawVariantOne, "validation sink did not emit formula variant 1 helper");
+    }
+
+    private static void assertValidationLiveWordConsumesDataDigest(L1Class clazz) {
+        int checkedCalls = 0;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null || method.name.startsWith("__neko_")) continue;
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            for (int i = 0; i < insns.length; i++) {
+                if (!(insns[i] instanceof MethodInsnNode call)
+                    || call.getOpcode() != Opcodes.INVOKESTATIC
+                    || !"ValidationSinkShape".equals(call.owner)) {
+                    continue;
+                }
+                if (OLD_VALIDATION_HELPER_DESC.equals(call.desc)) {
+                    throw new AssertionError("validation sink retained helper call without CFF data material");
+                }
+                if (!VALIDATION_HELPER_DESC.equals(call.desc)) continue;
+                assertTrue(
+                    validationHelperCallConsumesDataDigest(insns, i),
+                    "validation helper call material did not consume CFF data digest in " +
+                        method.name + method.desc
+                );
+                checkedCalls++;
+            }
+        }
+        assertTrue(checkedCalls >= 2, "validation sink fixture did not expose both protected helper calls");
+    }
+
+    private static boolean validationHelperCallConsumesDataDigest(AbstractInsnNode[] insns, int callIndex) {
+        int start = Math.max(0, callIndex - 1000);
+        for (int i = start; i < callIndex; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ILOAD
+                || load.var < 5) {
+                continue;
+            }
+            if (!validationDataWordPattern(insns, i, callIndex)) continue;
+            int dataWordStore = firstVarStoreIndex(insns, load.var, i + 1, Math.min(callIndex, i + 96));
+            if (dataWordStore < 0) continue;
+            int dataWordLocal = ((VarInsnNode) insns[dataWordStore]).var;
+            if (varLoadCount(insns, dataWordLocal, dataWordStore + 1, callIndex) < 4) {
+                continue;
+            }
+            if (firstVarLoadIndex(
+                insns,
+                Opcodes.ILOAD,
+                dataWordLocal,
+                Math.max(dataWordStore + 1, callIndex - 24),
+                callIndex
+            ) < 0) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean validationDataWordPattern(AbstractInsnNode[] insns, int start, int limitExclusive) {
+        VarInsnNode dataLoad = (VarInsnNode) insns[start];
+        int dataLocal = dataLoad.var;
+        int end = Math.min(limitExclusive, start + 80);
+        int guardLoad = firstVarLoadIndex(insns, Opcodes.ILOAD, dataLocal - 4, start + 1, end);
+        if (guardLoad < 0) return false;
+        int pathLoad = firstVarLoadIndex(insns, Opcodes.ILOAD, dataLocal - 3, guardLoad + 1, end);
+        if (pathLoad < 0) return false;
+        int blockLoad = firstVarLoadIndex(insns, Opcodes.ILOAD, dataLocal - 2, pathLoad + 1, end);
+        if (blockLoad < 0) return false;
+        int keyLoad = firstOpcodeIndex(insns, Opcodes.LLOAD, blockLoad + 1, end);
+        if (keyLoad < 0) return false;
+        int pcLoad = firstVarLoadIndex(insns, Opcodes.ILOAD, dataLocal - 5, keyLoad + 1, end);
+        if (pcLoad < 0) return false;
+        return firstOpcodeIndex(insns, Opcodes.IXOR, start + 1, end) >= 0
+            && firstOpcodeIndex(insns, Opcodes.IUSHR, start + 1, end) >= 0
+            && firstOpcodeIndex(insns, Opcodes.IMUL, start + 1, end) >= 0
+            && firstOpcodeIndex(insns, Opcodes.IADD, start + 1, end) >= 0;
+    }
+
+    private static int firstVarStoreIndex(
+        AbstractInsnNode[] insns,
+        int excludedLocal,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode store
+                && store.getOpcode() == Opcodes.ISTORE
+                && store.var != excludedLocal) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int varLoadCount(
+        AbstractInsnNode[] insns,
+        int local,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        int count = 0;
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.ILOAD
+                && load.var == local) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static void assertValidationSinkHasNoStandaloneTargetCarriers(L1Class clazz) {
