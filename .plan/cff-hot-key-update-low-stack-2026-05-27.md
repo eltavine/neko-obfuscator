@@ -4,7 +4,9 @@
 
 Optimize one generic JVM CFF hot-path key-update surface: the generated
 method-key-from-state helper and the matching no-active-table inline method-key
-shape.
+shape. The current accepted helper is blocked by size; prior size-only
+fallback removal exposed a stack-depth blocker. The implementation must address
+both surfaces without changing the formula or ABI.
 
 This is a standalone plan. It does not amend or continue any existing `.plan/`
 document.
@@ -70,17 +72,18 @@ Read-only evidence gathered before this plan:
   HKU-1 must refresh this JIT evidence on current accepted-source artifacts
   before any implementation edit starts.
 
-This evidence selects a generic repair surface: reduce the runtime operand
-stack depth of a single method-key update while keeping the formula, ABI,
-dynamic state inputs, and transform coverage unchanged.
+This evidence selects a generic repair surface: reduce the bytecode size and
+runtime operand-stack depth of a single method-key update while keeping the
+formula, ABI, dynamic state inputs, and transform coverage unchanged.
 
 ## Rejected Route Separation
 
 This plan is not a retry of rejected routes:
 
-- Not P4.4 fallback removal alone: this plan starts from the measured
-  `callee uses too much stack` blocker and requires a lower verified
-  `max_stack`.
+- Not P4.4 fallback removal alone: fresh HKU-1 accepted-source evidence starts
+  from the current `callee is too large` blocker, and historical P4.4 evidence
+  proves that size-only fallback removal exposes `callee uses too much stack`.
+  This plan requires the active helper to clear both blockers.
 - Not signed method-key mixing: zero-extension of `path` and `pc` remains, and
   `METHOD_KEY_PC_MIX` remains.
 - Not token helper splitting, object-cell storage replacement, ticket helper
@@ -157,7 +160,7 @@ Low-stack expression proof:
   implementation review plus commit checkpoints. The plan was reported to the
   user before the plan-only checkpoint.
 
-### [ ] HKU-1: Capture fresh accepted-source baseline before code edits
+### [x] HKU-1: Capture fresh accepted-source baseline before code edits
 
 - Scope: regenerate current accepted JVM artifacts and capture method-key helper
   bytecode plus runtime rows before implementation.
@@ -193,11 +196,46 @@ java -XX:-UsePerfData \
 - Runtime target: JVM-only TEST and obfusjack rows from the generated report.
 - Completion criteria: fresh artifacts run successfully, report rows are
   recorded in this plan, fresh PrintInlining proves the current method-key
-  helper is rejected with `callee uses too much stack` at generated hot
-  callsites discovered from the current artifact, no verifier/linkage/runtime/
-  fallback/skip/crash markers are found, and no CFF source edit has started.
-  If the fresh PrintInlining evidence does not show the stack-depth rejection,
-  HKU-2 must not start; this plan must be revised around the new evidence.
+  helper is rejected at generated hot callsites discovered from the current
+  artifact, no verifier/linkage/runtime/fallback/skip/crash markers are found,
+  and no CFF source edit has started. If the fresh blocker differs from the
+  expected stack-depth rejection, this plan must be revised and plan-reviewed
+  around the new evidence before HKU-2 starts.
+- Fresh evidence:
+  - scoped CFF source status was clean before the baseline refresh;
+  - Gradle command completed with `BUILD SUCCESSFUL in 1m 20s`;
+  - refreshed report
+    `build/test-jvm-runtime-ablation/jvm-runtime-ablation-report.json` was
+    captured at `2026-05-27T01:44:02.809021214Z`;
+  - fresh medians were TEST `cff-only-stack Calc=99 ms`, TEST
+    `full Calc=218 ms`, obfusjack `cff-only-stack Seq=301 ms`, and obfusjack
+    `full Seq=311 ms`;
+  - generated map lookup found method-key helper
+    `a/a.__neko_cff_mkey$15wdhy3(IIIIJJ)J -> cb`;
+  - `build/jvm-runtime-perf/hku-1-bytecode/obfusjack-method-key-helper.javap.txt`
+    shows `a.da.cb(int,int,int,int,long,long)` keeps descriptor `(IIIIJJ)J`,
+    has `stack=8`, `locals=8`, and still contains `LCMP` plus the fixed
+    fallback long;
+  - fresh PrintInlining stdout
+    `build/jvm-runtime-perf/hku-1-print-inlining/obfusjack-full.stdout.log`
+    completed obfusjack with `Seq: 306 ms` and `=== All tests completed ===`;
+  - filtered output
+    `build/jvm-runtime-perf/hku-1-print-inlining/obfusjack-full-cb.filtered.log`
+    records `139` method-key-helper `callee is too large` rows and `0`
+    method-key-helper `callee uses too much stack` rows on the current
+    accepted helper;
+  - stderr was empty, marker scans found no verifier/linkage/fallback/skip/
+    crash markers, and no fresh `hs_err_pid*.log` appeared under the HKU-1
+    repository-local temp/output directories.
+- Plan adjustment from fresh evidence: HKU-2.2 must clear the current
+  `callee is too large` blocker and must also avoid the historical P4.4
+  `callee uses too much stack` blocker that appeared after fallback removal.
+  HKU-2 may start only after this adjusted plan is reviewed and committed.
+- Completion evidence: subagent review passed after the HKU-1 evidence update.
+  The reviewer confirmed the current blocker is evidence-backed, generated names
+  are used only as artifact evidence, HKU-2 acceptance remains generic to the
+  discovered helper/callsites, the plan is distinct from P4.4 fallback removal
+  alone, and HKU-2 is blocked until this HKU-1 plan update is committed.
 
 ### [ ] HKU-2.1: Add generation-time raw-nonzero method-key state support
 
@@ -253,8 +291,9 @@ java -XX:-UsePerfData \
   - topology and dry-run evidence show no reduced CFF coverage or helper rows;
   - generated state audit proves legitimate method keys are raw-nonzero;
   - focused PrintInlining no longer reports the method-key helper as
-    `callee uses too much stack` at the HKU-1 discovered hot rejection
-    callsites, or this subtask is rejected and reverted before HKU-2.3 starts;
+    `callee is too large` or `callee uses too much stack` at the HKU-1
+    discovered hot rejection callsites, or this subtask is rejected and
+    reverted before HKU-2.3 starts;
   - fresh TEST/obfusjack runtime rows are recorded and do not regress from the
     HKU-1 baseline, or this subtask is rejected and reverted before HKU-2.3
     starts;
@@ -297,8 +336,9 @@ java -XX:-UsePerfData \
   - stdout, stderr, marker, and fresh `hs_err` scans;
   - implementation review before commit.
 - Runtime/JIT targets:
-  - method-key helper must no longer appear as `callee uses too much stack` in
-    the generated hot callsite contexts discovered by HKU-1;
+  - method-key helper must no longer appear as `callee is too large` or
+    `callee uses too much stack` in the generated hot callsite contexts
+    discovered by HKU-1;
   - full obfusjack `Seq` median must improve from the fresh HKU-1 baseline;
   - full TEST `Calc` median must not regress from the fresh HKU-1 baseline.
 - Completion criteria:
