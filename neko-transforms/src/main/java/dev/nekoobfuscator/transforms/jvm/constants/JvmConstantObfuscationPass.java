@@ -77,7 +77,11 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     private static final long DERIVED_INT_NOISE_A = 0x44494E544E4F4953L;
     private static final long DERIVED_INT_NOISE_B = 0x44494E544E4F4954L;
     private static final long DERIVED_INT_NOISE_C = 0x44494E544E4F4955L;
-    private static final long DERIVED_INT_HELPER_SEED = 0x44494E5448454C50L;
+    private static final int COMPACT_HELPER_WORD_A = 0x56A3C49D;
+    private static final int COMPACT_HELPER_WORD_B = 0x2D7E8B65;
+    private static final int COMPACT_HELPER_WORD_C = 0x6B31A8F7;
+    private static final int COMPACT_HELPER_SHIFT_A = 13;
+    private static final int COMPACT_HELPER_SHIFT_B = 19;
 
     @Override
     public String id() {
@@ -556,27 +560,14 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             );
             insns.add(new VarInsnNode(Opcodes.ISTORE, baseMultiplierLocal));
             insns.add(new VarInsnNode(Opcodes.ILOAD, baseMultiplierLocal));
-            emitExactDerivedIntMaterial(
-                insns,
-                baseMultiplierLocal,
-                expectedRawBase,
-                encrypted,
-                siteSeed,
-                DERIVED_INT_SPLIT_A
-            );
-            emitExactDerivedIntMaterial(
-                insns,
-                baseMultiplierLocal,
-                expectedRawBase,
-                (int) siteSeed,
-                siteSeed,
-                DERIVED_INT_HELPER_SEED
-            );
+            int decodedSeed = (int) siteSeed;
+            emitIntFragments(insns, encrypted ^ compactProtectedHelperWord(expectedRawBase ^ decodedSeed));
+            emitIntFragments(insns, decodedSeed ^ compactProtectedHelperWord(expectedRawBase));
             insns.add(new MethodInsnNode(
                 Opcodes.INVOKESTATIC,
                 clazz.name(),
                 compactProtectedHelper,
-                "(III)I",
+                "(IIIII)I",
                 clazz.isInterface()
             ));
         } else {
@@ -1725,10 +1716,10 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         String name = uniqueMethodName(clazz, "__neko_num_ip");
         int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         access |= (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0 ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
-        MethodNode helper = new MethodNode(access, name, "(III)I", null, null);
+        MethodNode helper = new MethodNode(access, name, "(IIIII)I", null, null);
         emitProtectedHelperDecode(helper.instructions);
         helper.instructions.add(new InsnNode(Opcodes.IRETURN));
-        helper.maxLocals = 3;
+        helper.maxLocals = 6;
         helper.maxStack = 8;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
@@ -1776,10 +1767,62 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     }
 
     private void emitProtectedHelperDecode(InsnList insns) {
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        emitHelperIntFromFragments(insns, 3, 4);
         insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
-        emitHelperSiteMaskFromTop(insns, 2);
+        emitHelperCompactProtectedWordFromTop(insns);
         insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, 5));
+        emitHelperIntFromFragments(insns, 1, 2);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 5));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitHelperCompactProtectedWordFromTop(insns);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        emitHelperSiteMaskFromTop(insns, 5);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitHelperCompactProtectedWordFromTop(InsnList insns) {
+        JvmPassBytecode.pushInt(insns, COMPACT_HELPER_WORD_A);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, COMPACT_HELPER_SHIFT_A);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, COMPACT_HELPER_WORD_B | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, COMPACT_HELPER_SHIFT_B);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, COMPACT_HELPER_WORD_C);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private int compactProtectedHelperWord(int value) {
+        int x = value ^ COMPACT_HELPER_WORD_A;
+        x ^= x >>> COMPACT_HELPER_SHIFT_A;
+        x *= COMPACT_HELPER_WORD_B | 1;
+        x += x >>> COMPACT_HELPER_SHIFT_B;
+        return x ^ COMPACT_HELPER_WORD_C;
+    }
+
+    private void emitIntFragments(InsnList insns, int value) {
+        JvmPassBytecode.pushInt(insns, (short) (value >>> 16));
+        JvmPassBytecode.pushInt(insns, (short) value);
+    }
+
+    private void emitHelperIntFromFragments(InsnList insns, int highLocal, int lowLocal) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, highLocal));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.ISHL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lowLocal));
+        JvmPassBytecode.pushInt(insns, -1);
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IOR));
     }
 
     private void emitHelperSiteMaskFromTop(InsnList insns, int seedLocal) {

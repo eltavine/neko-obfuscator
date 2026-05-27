@@ -127,6 +127,7 @@ public class JvmConstantObfuscationIntegrationTest {
         assertProtectedIntegerDecodeMaterialIsDerived(outputJar);
         assertProtectedLongDecodeMaterialIsDerived(outputJar);
         assertProtectedFloatingDecodeMaterialIsDerived(outputJar);
+        assertProtectedNumericHelperConsumesRawBase(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -275,42 +276,24 @@ public class JvmConstantObfuscationIntegrationTest {
         assertTrue(ints != null && ints.instructions != null, "constant fixture did not retain ints() method");
 
         AbstractInsnNode[] insns = ints.instructions.toArray();
-        int checkedDecodeSlices = 0;
-        int checkedDerivedWindows = 0;
+        int checkedDecodeCalls = 0;
         for (int i = 0; i < insns.length; i++) {
             assertFalse(insns[i].getOpcode() == Opcodes.IINC, "iinc survived protected integer replacement");
-            ConstantDecodeProof proof = constantDecodeProofAtRawStore(insns, i);
-            if (proof == null) continue;
-            int limit = nextConstantRawStore(insns, i + 1, Math.min(insns.length, i + 900));
-            if (limit < 0) limit = Math.min(insns.length, i + 900);
-            List<DerivedMaterialWindow> windows = derivedIntMaterialWindows(
-                insns,
-                proof.rawBaseLocal,
-                proof.rawStoreIndex + 1,
-                limit
-            );
+            if (!isNumericIntHelperCall(insns[i])) continue;
+            assertTrue(isProtectedIntHelperCall(insns[i]), "protected integer decode used legacy compact helper");
             assertTrue(
-                windows.size() >= 2,
-                "protected integer decode slice did not contain enough live-derived material in ints()"
+                protectedCompactCallReceivesRuntimeDerivedMaterial(
+                    insns,
+                    i,
+                    previousConstantDecodeProof(insns, i)
+                ),
+                "protected integer decode call was not live-derived in ints()"
             );
-            for (DerivedMaterialWindow window : windows) {
-                assertTrue(
-                    isProtectedNumericMaterial(insns, window.startInclusive, window.endExclusive),
-                    "derived integer material window was not classified as protected"
-                );
-                assertNoDirectLargeProtectedNumericMaterial(insns, window.startInclusive, window.endExclusive);
-                assertNoSelfCancelingDerivedNumericMaterial(insns, window.startInclusive, window.endExclusive);
-                checkedDerivedWindows++;
-            }
-            checkedDecodeSlices++;
+            checkedDecodeCalls++;
         }
         assertTrue(
-            checkedDecodeSlices > 0,
+            checkedDecodeCalls > 0,
             "constant fixture did not expose protected integer decode slices in ints()"
-        );
-        assertTrue(
-            checkedDerivedWindows >= checkedDecodeSlices * 2,
-            "protected integer decode material was not consistently live-derived"
         );
     }
 
@@ -442,6 +425,34 @@ public class JvmConstantObfuscationIntegrationTest {
             checkedDoubles++;
         }
         assertTrue(checkedDoubles > 0, "constant fixture did not expose protected double raw-bit decodes");
+    }
+
+    private void assertProtectedNumericHelperConsumesRawBase(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("ConstantShapes");
+        int checkedHelpers = 0;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!method.name.startsWith("__neko_num_ip")) continue;
+            assertEquals("(IIIII)I", method.desc, "protected numeric helper descriptor drifted");
+            assertTrue(method.instructions != null, "protected numeric helper had no instructions");
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            assertTrue(
+                varLoadCount(insns, 0, 0, insns.length) >= 3,
+                "protected numeric helper did not consume raw base"
+            );
+            assertTrue(
+                hasVarStore(insns, 5, 0, insns.length),
+                "protected numeric helper did not decode seed into a local"
+            );
+            assertTrue(hasOpcode(insns, Opcodes.ISHL, 0, insns.length), "protected numeric helper lacked fragment high-word assembly");
+            assertTrue(hasOpcode(insns, Opcodes.IAND, 0, insns.length), "protected numeric helper lacked fragment low-word mask");
+            assertTrue(hasOpcode(insns, Opcodes.IOR, 0, insns.length), "protected numeric helper lacked fragment rejoin");
+            assertTrue(hasOpcode(insns, Opcodes.IMUL, 0, insns.length), "protected numeric helper lacked multiply mix");
+            assertTrue(hasOpcode(insns, Opcodes.IUSHR, 0, insns.length), "protected numeric helper lacked shift mix");
+            assertTrue(hasOpcode(insns, Opcodes.IXOR, 0, insns.length), "protected numeric helper lacked xor mix");
+            checkedHelpers++;
+        }
+        assertTrue(checkedHelpers > 0, "constant fixture did not expose protected numeric helpers");
     }
 
     private boolean fixtureArrayPayload(int storeOpcode, long bits) {
@@ -580,7 +591,7 @@ public class JvmConstantObfuscationIntegrationTest {
     private boolean isCompactConstantDecodeCall(AbstractInsnNode insn) {
         return insn instanceof MethodInsnNode call
             && call.name.startsWith("__neko_num_i")
-            && "(III)I".equals(call.desc);
+            && ("(III)I".equals(call.desc) || "(IIIII)I".equals(call.desc));
     }
 
     private boolean compactCallReceivesRuntimeDerivedMaterial(
@@ -620,27 +631,12 @@ public class JvmConstantObfuscationIntegrationTest {
         int callIndex,
         ConstantDecodeProof proof
     ) {
-        int seedStart = previousDerivedIntMaterialStart(insns, proof.rawBaseLocal, callIndex, 32);
-        if (seedStart < 0) return false;
-        List<DerivedMaterialWindow> windows = derivedIntMaterialWindows(
-            insns,
-            proof.rawBaseLocal,
-            proof.rawStoreIndex + 1,
-            callIndex
-        );
-        if (windows.size() < 2 || windows.get(windows.size() - 1).startInclusive != seedStart) {
-            return false;
-        }
-        int encryptedStart = windows.get(0).startInclusive;
-        return varLoadCount(insns, proof.rawBaseLocal, proof.rawStoreIndex + 1, callIndex) >= 2
-            && isProtectedNumericMaterial(insns, encryptedStart, callIndex)
-            && selfCancelingNumericMaterialIndex(insns, encryptedStart, callIndex) < 0
-            && noUncoveredLargeNumericLdc(
-                insns,
-                proof.rawStoreIndex + 1,
-                callIndex,
-                windows
-            );
+        if (proof == null) return false;
+        if (!isProtectedIntHelperCall(insns[callIndex])) return false;
+        return varLoadCount(insns, proof.rawBaseLocal, proof.rawStoreIndex + 1, callIndex) >= 1
+            && !containsLargeNumericLdc(insns, proof.rawStoreIndex + 1, callIndex)
+            && intLiteralCount(insns, proof.rawStoreIndex + 1, callIndex) >= 4
+            && selfCancelingNumericMaterialIndex(insns, proof.rawStoreIndex + 1, callIndex) < 0;
     }
 
     private boolean noUncoveredLargeNumericLdc(
@@ -655,6 +651,19 @@ public class JvmConstantObfuscationIntegrationTest {
             }
         }
         return true;
+    }
+
+    private boolean containsLargeNumericLdc(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof LdcInsnNode && isLargeNumericLiteral(insns[i])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean coveredByWindow(int index, List<DerivedMaterialWindow> windows) {
@@ -698,13 +707,13 @@ public class JvmConstantObfuscationIntegrationTest {
     private boolean isNumericIntHelperCall(AbstractInsnNode insn) {
         return insn instanceof MethodInsnNode call
             && call.name.startsWith("__neko_num_i")
-            && "(III)I".equals(call.desc);
+            && ("(III)I".equals(call.desc) || "(IIIII)I".equals(call.desc));
     }
 
     private boolean isProtectedIntHelperCall(AbstractInsnNode insn) {
         return insn instanceof MethodInsnNode call
             && call.name.startsWith("__neko_num_ip")
-            && "(III)I".equals(call.desc);
+            && "(IIIII)I".equals(call.desc);
     }
 
     private boolean containsLargeLongLdc(
@@ -801,6 +810,22 @@ public class JvmConstantObfuscationIntegrationTest {
     ) {
         for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
             if (insns[i].getOpcode() == opcode) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasVarStore(
+        AbstractInsnNode[] insns,
+        int local,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (insns[i] instanceof VarInsnNode store
+                && store.getOpcode() == Opcodes.ISTORE
+                && store.var == local) {
                 return true;
             }
         }

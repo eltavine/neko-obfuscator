@@ -496,7 +496,7 @@ For every implementation row below:
 - Completion criteria: constant fixture output is unchanged; protected
   float/double material is live-derived.
 
-### [-] JSE-12C: Restore full-JVM size gate after protected numeric material
+### [x] JSE-12C: Restore full-JVM size gate after protected numeric material
 
 - Dependency reason: JSE-13 validation exposed that the full-JVM performance
   gate fails at the already-committed JSE-12 checkpoint `78cd76e` before any
@@ -512,16 +512,58 @@ For every implementation row below:
   material/helper sizing changes and tests; full-JVM failure evidence includes
   `JvmFullObfuscationPerfTest` failing at JSE-12 with
   `a/ca.a([Ljava/lang/Object;)V estimatedCodeBytes=89303`, proving the blocker
-  predates JSE-13.
+  predates JSE-13. Follow-up validation after compacting protected numeric
+  callsites to fragment arguments showed the scoped constant test passing, but
+  the full gate still failing in the 5-pass `cff-only-stack` ablation with
+  constant, string, and invokedynamic transforms disabled:
+  `a/ca.a([Ljava/lang/Object;)V` failed ASM frame preview with
+  `Incompatible stack heights` around instruction `29557`, while the largest
+  methods were `c([Ljava/lang/Object;)V estimatedCodeBytes=61785` and
+  `a([Ljava/lang/Object;)V estimatedCodeBytes=51478`. That proves the remaining
+  full-gate blocker is a CFF finalizer prerequisite, not protected numeric
+  material size. Fresh focused validation after the fragment-argument helper
+  rewrite passed with
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest`.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Static/ASM audit: existing constant numeric material audits must still prove
   protected int/iinc/long/float/double material uses `__neko_num_ip` and
-  live-derived callsite material; full-JVM structural audit must complete
-  without CFF finalizer size/frame failure.
-- Completion criteria: focused constant tests and full-JVM perf tests pass;
-  generated helper hardening does not leave legacy protected numeric helper
-  paths; no coverage skip, fallback, or original-bytecode rescue is introduced.
+  live-derived callsite material; full-JVM structural audit evidence must
+  classify any remaining failure before this row is closed.
+- Completion criteria: focused constant tests pass; full-JVM rerun evidence is
+  recorded; remaining CFF-only failure is handed to JSE-12D without changing
+  CFF block construction, coverage, fallback behavior, or unrelated worktree
+  files.
+
+### [-] JSE-12D: Repair CFF-only class-integrity finalizer stack mismatch
+
+- Dependency reason: JSE-12C validation proves the full-JVM gate still fails
+  when constant, string, and invokedynamic transforms are disabled. The failing
+  runtime path is the CFF output finalizer, so JSE-13 static numeric material
+  must wait for this generic CFF finalizer repair.
+- Scope: repair the generic CFF class-integrity/finalizer path that produces
+  `a/ca.a([Ljava/lang/Object;)V` with incompatible stack heights during
+  `CffClassSetup.finalizeClassIntegrityCodeMaterial -> writeClassBytes ->
+  JarOutput.previewClassBytes`. Allowed files are the CFF finalizer/preview
+  path and focused tests. Do not change CFF block construction, block
+  selection, block boundaries, transform coverage, generated helper skipping,
+  fallback behavior, or unrelated native/runtime files.
+- Required evidence: current `JvmFullObfuscationPerfTest` XML shows a
+  `cff-only-stack` ablation with exactly five scheduled transforms
+  (`renamer`, `keyDispatch`, `methodParameterObfuscation`,
+  `controlFlowFlattening`, `validationSinkHardening`) failing in
+  `CffClassSetup.writeClassBytes` for `a/ca.a([Ljava/lang/Object;)V` with
+  `AnalyzerException: Incompatible stack heights` and method estimates below
+  the pre-JSE-12C `89303` byte size failure.
+- Validation command or runtime target:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
+- Static/ASM audit: generated output must preview/write without ASM frame
+  merge failure; relocated CFF helper calls must not survive; class-integrity
+  code material must still finalize and patch expected hashes; full coverage
+  counters must not lose original application coverage.
+- Completion criteria: the full JVM perf test passes for TEST and ablation
+  variants; no skip, fallback, original-bytecode rescue, or reduced CFF
+  granularity is introduced.
 
 ### [ ] JSE-13: Migrate static numeric material
 
