@@ -562,7 +562,12 @@ public final class ObfuscationPipeline {
 
     private boolean isGeneratedHelperMethod(MethodNode method) {
         if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
+        if (isIndyPayloadAddressedGeneratedMethod(method)) return false;
         return method.name.startsWith("__neko_");
+    }
+
+    private boolean isIndyPayloadAddressedGeneratedMethod(MethodNode method) {
+        return method.name.startsWith("__neko_vsend") && "(JJI)Z".equals(method.desc);
     }
 
     private void rewriteGeneratedMemberNameStrings(ClassNode node, Map<RuntimeMemberKey, String> memberMap) {

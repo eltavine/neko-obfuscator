@@ -1085,15 +1085,54 @@ For every implementation row below:
   bootstrap usage, hidden bootstrap material, no fallback/original-bytecode
   rescue, and fresh validation.
 
-### [ ] JSE-23: Full JVM semantic-entanglement acceptance
+### [x] JSE-23: Full JVM semantic-entanglement acceptance
 
 - Scope: run the focused suite and full JVM obfuscation gate after all retained
   subtasks, inspect generated artifacts for forbidden patterns, and run final
   plan review.
 - Required evidence: fresh test outputs, static bytecode audits, current git
   diff limited to JVM transform/test/plan files, and review result.
+- Fresh JSE-23 repair evidence: the first full acceptance run failed
+  `JvmFullObfuscationPerfTest` because the full config's generated-helper API
+  rename happened after JSE-22 converted validation final-stage calls to indy.
+  The final-stage helper name is inside the encrypted indy payload and cannot
+  be updated by the ordinary ASM remapper, so runtime resolution used stale
+  helper names and TEST rows reported Throw/Loader/Annotation errors. The same
+  run also failed the method-parameter integration audit because carrier stores
+  still used decoded class-key material, but stronger constant/string code had
+  moved the class-key Object[] field load beyond the old 48-instruction audit
+  window.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: all retained subtasks are checked off with fresh
   evidence and committed in order; final review accepts evidence freshness,
   validation coverage, atomic commits, and scope discipline.
+- Repair completion evidence: `ObfuscationPipeline` now keeps same-class
+  validation final-stage helpers addressed from encrypted indy payload stable
+  during generated-helper API renaming, and the method-parameter audit window
+  now covers the stronger constant/string hardened carrier-store prelude while
+  still requiring a decoded class-key Object[] field load and non-constant
+  carrier index.
+- Validation evidence: after the repair, the targeted failure rerun
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`
+  passed. The full JSE-23 command listed above then passed. Fresh XML files
+  report `failures="0"` and `errors="0"` for
+  `ControlFlowFlatteningAlgebraicAuditTest` (6 tests),
+  `CffStrongEntrySeedRegressionTest` (1 test),
+  `JvmConstantObfuscationIntegrationTest` (2 tests),
+  `JvmStringObfuscationIntegrationTest` (2 tests),
+  `JvmInvokeDynamicObfuscationIntegrationTest` (1 test),
+  `JvmMethodParameterObfuscationIntegrationTest` (1 test), and
+  `JvmFullObfuscationPerfTest` (2 tests). The XML mtimes are after the
+  JSE-23 source changes.
+- Static audit evidence: `git diff --check` passed for the plan,
+  `ObfuscationPipeline`, and `JvmMethodParameterObfuscationIntegrationTest`.
+  `javap` of `validation-sink-shape-obf.jar` showed validation entry helpers
+  `__neko_vsink*:(Ljava/lang/String;JI)J` feeding indy final-stage calls
+  `(JJIJJ)Z`, with no direct application-method `invokestatic
+  __neko_vsend*:(JJI)Z` remaining.
+- Final plan review: subagent `019e6b1c-1c4e-75d3-8db1-ab67320845b2`
+  returned PASS with no blocking issues. It checked plan/order discipline,
+  commits `9160719` through `4ff74e8`, the current JSE-23 diff, XML
+  freshness, fallback/original-bytecode risk, and the validation sink artifact
+  audit.

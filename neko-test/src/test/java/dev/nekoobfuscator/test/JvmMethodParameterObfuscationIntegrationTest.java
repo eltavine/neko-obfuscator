@@ -221,7 +221,7 @@ public class JvmMethodParameterObfuscationIntegrationTest {
 
     private boolean hasClassKeyObjectFieldLoadBefore(AbstractInsnNode anchor) {
         int scanned = 0;
-        for (AbstractInsnNode insn = anchor.getPrevious(); insn != null && scanned++ < 48; insn = insn.getPrevious()) {
+        for (AbstractInsnNode insn = anchor.getPrevious(); insn != null && scanned++ < 192; insn = insn.getPrevious()) {
             if (insn instanceof FieldInsnNode field
                 && field.getOpcode() == Opcodes.GETSTATIC
                 && "[Ljava/lang/Object;".equals(field.desc)) {
