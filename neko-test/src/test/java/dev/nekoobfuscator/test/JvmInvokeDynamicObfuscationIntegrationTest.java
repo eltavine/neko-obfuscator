@@ -90,6 +90,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertReferenceSitesUseInvokeDynamic(outputJar);
         assertIndySitesHaveIndependentMaterialLayouts(outputJar);
         assertIndyResolverSeedsArePerSiteDerived(outputJar);
+        assertIndyPayloadMasksArePerSiteDerived(outputJar);
     }
 
     private void runObfuscation(Path input, Path output) throws Exception {
@@ -368,6 +369,36 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         );
     }
 
+    private void assertIndyPayloadMasksArePerSiteDerived(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        var clazz = input.classMap().get("IndyReferenceShapes");
+        MethodNode resolverHelper = null;
+        for (var method : clazz.asmNode().methods) {
+            if (method.name.startsWith("__neko_indy_resolve")) {
+                resolverHelper = method;
+                break;
+            }
+        }
+        assertTrue(resolverHelper != null, "resolver helper missing");
+        AbstractInsnNode[] insns = resolverHelper.instructions.toArray();
+        int loopStart = firstCall(insns, "java/lang/String", "toCharArray", "()[C");
+        int caload = firstOpcode(insns, Opcodes.CALOAD, loopStart);
+        int castore = firstOpcode(insns, Opcodes.CASTORE, caload);
+        int stringCtor = firstCall(insns, "java/lang/String", "<init>", "([C)V");
+        int maskStore = firstVarStore(insns, Opcodes.LSTORE, 30, loopStart);
+        assertTrue(caload > loopStart, "payload decode should load encrypted chars");
+        assertTrue(castore > caload, "payload decode should store reconstructed chars");
+        assertTrue(stringCtor > castore, "payload decode should construct string after char loop");
+        assertTrue(maskStore > loopStart && maskStore < caload, "payload mask should be computed before char load");
+        int maskStart = maskSequenceStart(insns, maskStore);
+        assertTrue(maskStart > loopStart, "payload mask slice should start after the loop bound check");
+        assertPayloadMaskSlice(insns, maskStart, maskStore);
+        assertTrue(
+            firstVarLoad(insns, Opcodes.LLOAD, 30, maskStore + 1) < castore,
+            "payload decode should use the stored mask before writing the char"
+        );
+    }
+
     private static void assertResolverSeedSlice(AbstractInsnNode[] insns, int start, int limit, String label) {
         assertTrue(
             sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_FLOW_LOCAL, start, limit),
@@ -384,6 +415,29 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertTrue(
             sliceContainsDescriptorFingerprint(insns, start, limit),
             label + " reconstruction should load the layout fingerprint"
+        );
+    }
+
+    private static void assertPayloadMaskSlice(AbstractInsnNode[] insns, int start, int limit) {
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, RESOLVER_FLOW_LOCAL, start, limit),
+            "payload mask should load dynamic flow"
+        );
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.LLOAD, 10, start, limit),
+            "payload mask should load dynamic token"
+        );
+        assertTrue(
+            sliceContainsVarLoad(insns, Opcodes.ILOAD, 29, start, limit),
+            "payload mask should load the character index inside the mask sequence"
+        );
+        assertTrue(
+            sliceContainsDescriptorFingerprint(insns, start, limit),
+            "payload mask should load the per-site layout fingerprint"
+        );
+        assertTrue(
+            sliceContainsIndexStrideMix(insns, start, limit),
+            "payload mask should multiply the character index by CHAR_STRIDE before mixing"
         );
     }
 
@@ -570,6 +624,47 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         return false;
     }
 
+    private static boolean sliceContainsIndexStrideMix(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ILOAD
+                || load.var != 29) {
+                continue;
+            }
+            int i2lIndex = nextInstructionIndex(insns, i + 1);
+            int strideIndex = nextInstructionIndex(insns, i2lIndex + 1);
+            int multiplyIndex = nextInstructionIndex(insns, strideIndex + 1);
+            int addIndex = nextInstructionIndex(insns, multiplyIndex + 1);
+            Long stride = strideIndex < 0 ? null : pushedLongValue(insns[strideIndex]);
+            if (i2lIndex >= 0
+                && strideIndex >= 0
+                && multiplyIndex >= 0
+                && addIndex >= 0
+                && insns[i2lIndex].getOpcode() == Opcodes.I2L
+                && Long.valueOf(0xD1342543DE82EF95L).equals(stride)
+                && insns[multiplyIndex].getOpcode() == Opcodes.LMUL
+                && insns[addIndex].getOpcode() == Opcodes.LADD) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int maskSequenceStart(AbstractInsnNode[] insns, int maskStore) {
+        for (int i = maskStore - 1; i >= 0; i--) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.LLOAD
+                && load.var == RESOLVER_FLOW_LOCAL) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private static int previousFlowHelperCall(AbstractInsnNode[] insns, int index) {
         for (int i = index - 1; i >= 0 && i >= index - 96; i--) {
             if (insns[i] instanceof MethodInsnNode call
@@ -747,6 +842,15 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static int firstVarLoad(AbstractInsnNode[] insns, int opcode, int local, int startInclusive) {
         for (int i = Math.max(0, startInclusive); i < insns.length; i++) {
             if (insns[i] instanceof VarInsnNode load && load.getOpcode() == opcode && load.var == local) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int firstOpcode(AbstractInsnNode[] insns, int opcode, int startInclusive) {
+        for (int i = Math.max(0, startInclusive); i < insns.length; i++) {
+            if (insns[i].getOpcode() == opcode) {
                 return i;
             }
         }

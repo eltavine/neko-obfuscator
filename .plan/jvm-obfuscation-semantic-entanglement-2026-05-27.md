@@ -909,7 +909,7 @@ For every implementation row below:
 - Completion criteria: indy fixture passes; recovering one resolver seed does
   not reveal a class-global resolver seed layout.
 
-### [ ] JSE-19: Derive indy payload character masks per callsite
+### [x] JSE-19: Derive indy payload character masks per callsite
 
 - Scope: migrate only indy encrypted payload character-stream mask derivation.
   Required live sources are dynamic flow word, token, per-site layout
@@ -918,6 +918,27 @@ For every implementation row below:
 - Required evidence: ASM audit proves payload decode loops mix flow/token/index
   and per-site fingerprint before each character reconstruction; bootstrap args
   still contain no plaintext owner/name/descriptor data.
+- Fresh JSE-19 baseline evidence: after JSE-18, payload encryption and decode
+  already use dynamic flow, token, resolver seed material, and character index,
+  but `charMask` and `emitDecodeInline` do not include resolver layout
+  fingerprint material. `emitDecodeInline` receives no descriptor/fingerprint
+  local, so the payload character stream remains keyed by seed/flow/token/index
+  without the per-site layout fingerprint required by this row.
+- Completion evidence: build-time payload encryption now receives the resolver
+  material descriptor and folds `indyMaterialFingerprint(descriptor)` into the
+  payload character mask. Runtime `emitDecodeInline` receives the resolver
+  descriptor local and loads the descriptor fingerprint inside the per-character
+  mask sequence before `LSTORE maskLocal`.
+- Validation evidence: `./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest` passed
+  after narrowing the payload mask ASM slice; JUnit XML reports `tests="1"
+  failures="0" errors="0"`. Source audit for old no-fingerprint char/decode
+  shapes returned no matches.
+- Review evidence: first JSE-19 review failed because the payload mask proof
+  slice was too broad. After narrowing the slice to `[maskStart, maskStore)`
+  and requiring explicit `ILOAD index -> I2L -> CHAR_STRIDE -> LMUL -> LADD`,
+  second review `019e6aea-8dad-7ff2-b114-5c1fc4997cdb` returned PASS with no
+  required fixes.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`.
 - Static/ASM audit: add `assertIndyPayloadMasksArePerSiteDerived`. Exact

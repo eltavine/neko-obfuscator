@@ -191,7 +191,9 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                 indyMaterialInit.add(new VarInsnNode(Opcodes.ASTORE, indyMaterialLocal));
             }
             int flowSaltSlot = registerIndyFlowSalt(pctx, flowTable, state.methodSalt(), siteSeed, state.state());
-            int resolverSeedSlot = registerIndyResolverSeed(pctx, flowTable, siteSeed, salt, flow, state.methodKey());
+            IndyResolverMaterialCell resolverSeedCell =
+                indyResolverMaterialCell(flowTable, flowTable.resolverCells().size(), siteSeed, salt, flow, state.methodKey());
+            int resolverSeedSlot = registerIndyResolverSeed(pctx, flowTable, resolverSeedCell);
 
             boolean interfaceOwner = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
             InvokeDynamicInsnNode indy = new InvokeDynamicInsnNode(
@@ -204,7 +206,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                     BSM_DESC,
                     helpers.bootstrapInterfaceOwner()
                 ),
-                encrypt(payload(spec), siteSeed ^ salt ^ OWNER_SEED, token, flow),
+                encrypt(payload(spec), siteSeed ^ salt ^ OWNER_SEED, token, flow, resolverSeedCell.descriptor()),
                 resolverSeedSlot,
                 new Handle(
                     Opcodes.H_GETSTATIC,
@@ -755,13 +757,10 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private int registerIndyResolverSeed(
         PipelineContext pctx,
         IndyFlowTable table,
-        long siteSeed,
-        long salt,
-        long flow,
-        long helperKey
+        IndyResolverMaterialCell cell
     ) {
         int slot = table.resolverCells().size();
-        table.resolverCells().add(indyResolverMaterialCell(table, slot, siteSeed, salt, flow, helperKey));
+        table.resolverCells().add(cell);
         rebuildIndyFlowTableInit(pctx, table);
         return slot;
     }
@@ -1704,6 +1703,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             OWNER_SEED,
             tokenLocal,
             flowLocal,
+            resolverDescriptorLocal,
             payloadLocal,
             28,
             29,
@@ -2308,6 +2308,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         long label,
         int tokenLocal,
         int flowLocal,
+        int descriptorLocal,
         int outputLocal,
         int charsLocal,
         int indexLocal,
@@ -2328,6 +2329,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, saltLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitIndyDescriptorFingerprint(insns, descriptorLocal);
         insns.add(new InsnNode(Opcodes.LXOR));
         JvmPassBytecode.pushLong(insns, label);
         insns.add(new InsnNode(Opcodes.LXOR));
@@ -3406,16 +3409,19 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IADD));
     }
 
-    private String encrypt(String value, long seed, long token, long flow) {
+    private String encrypt(String value, long seed, long token, long flow, long descriptor) {
         char[] chars = value.toCharArray();
         for (int i = 0; i < chars.length; i++) {
-            chars[i] = (char) (chars[i] ^ charMask(seed, token, flow, i));
+            chars[i] = (char) (chars[i] ^ charMask(seed, token, flow, descriptor, i));
         }
         return new String(chars);
     }
 
-    private int charMask(long seed, long token, long flow, int index) {
-        long mixed = JvmPassBytecode.mix(flow ^ seed, token + ((long) index * CHAR_STRIDE));
+    private int charMask(long seed, long token, long flow, long descriptor, int index) {
+        long mixed = JvmPassBytecode.mix(
+            flow ^ seed ^ indyMaterialFingerprint(descriptor),
+            token + ((long) index * CHAR_STRIDE)
+        );
         return (int) (mixed ^ (mixed >>> 32));
     }
 
