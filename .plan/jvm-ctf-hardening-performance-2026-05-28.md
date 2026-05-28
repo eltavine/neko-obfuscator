@@ -308,22 +308,413 @@ This plan will refresh that evidence before changing CFF performance code.
   static-array materialization coverage for classes with dynamic field
   protocols, but preserves JVM semantics and does not introduce fallback.
 
-### [ ] JCP-2: Bind Packed Entry Carriers To Internal Callsites
+### [x] JCP-2: Bind Packed Entry Carriers To Internal Callsites
 
 - Scope: extend method-parameter packing/key dispatch so internal packed
   `Object[]` call carriers contain per-callsite hidden attestation material
   derived from live caller key/CFF data. Callees must mix and validate that
   material before accepting hidden key transfer.
-- Required evidence before editing: bytecode proof of the current direct-entry
-  path (`CallCore` succeeds with copied `Object[]` plus hidden long) and source
-  path evidence for carrier creation/unpack in
-  `JvmMethodParameterObfuscationPass`.
+- Required evidence before editing: source and bytecode proof that packed
+  entry carriers currently contain only argument material, a carrier-index key,
+  and the transferred hidden key, with no callsite attestation accepted by the
+  callee before unpacking.
+- Fresh evidence before editing: after JCP-1 the stale copied-key `CallCore`
+  exploit no longer succeeds and is not used as a positive proof for this
+  subtask. The regenerated `ctf-obf.jar` still exposes public packed entry
+  descriptors such as `a.c.h(Object[], long)`, and the GUI caller constructs an
+  `Object[]` carrier before an invokedynamic callsite. In source,
+  `packCallArguments`, `rewriteMethodHandleInvoke`, and
+  `emitReflectiveCarrierForPlan` allocate `carrierArgumentCount(plan)`, store
+  the carrier-index key via `emitCarrierIndexKeyStore`, then store the original
+  arguments and hidden-key material. `installUnpackPrologue` reads the
+  carrier-index key and incoming hidden key, then immediately decodes and
+  unpacks argument slots. No per-callsite token or tag is stored by carrier
+  builders, and no callee-side validation binds the accepted carrier to the
+  protected caller key path before hidden-key transfer is trusted.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
   plus regenerated `ctf-obf.jar` direct-entry negative test.
 - Completion criteria: internal application callsites still run; direct
   external wrapper calls with copied hidden long fail closed; generated carrier
   slots are not direct constants and are bound to live caller material.
+- Implementation evidence: hidden-key packed carriers now reserve two
+  additional decoded logical slots after the carrier-index key: a per-callsite
+  token and a tag. During method-parameter preparation, direct, MethodHandle,
+  exact reflection, and runtime reflection candidate callsites are censused and
+  assigned independent site seeds. Each seed is registered against the target
+  carrier family, not just one concrete owner, so virtual/interface callsites
+  and implementation callees share the same accepted site set. Carrier builders
+  write token/tag slots through the existing CFF carrier-index decode path. The
+  token is derived from live target-key material, live carrier-index-key
+  material, and the registered per-callsite seed. Callee prologues load the
+  token/tag before unpacking user arguments, first prove the token matches one
+  registered callsite seed for the accepted carrier family, then recompute the
+  tag from the accepted token, incoming hidden key, and accepted carrier-index
+  key. Mismatch hard-fails with `SecurityException`. MethodHandle rewriting now
+  retains lookup kind; `findVirtual` and `findSpecial` preserve the receiver in
+  the polymorphic invoke descriptor and stack while packing only the target
+  method arguments into the carrier. Reflection invoke rewriting spills any
+  pre-existing operand-stack prefix to locals before generating runtime
+  carrier-selection branches, then restores it immediately before
+  `Method.invoke`; this keeps generated carrier selection zero-stack internally
+  and preserves JVM expression semantics. A CFF verifier repair treats ASM
+  `Lnull;` local descriptors as no-cast material, so null reflective targets no
+  longer produce invalid `CHECKCAST null` while splitting mixed verifier local
+  shapes. For MethodHandle values whose lookup and `invokeExact` use occur in
+  different methods, runtime invoke-site rewriting now stores the original
+  operands, matches only internal packed direct handles by packed
+  `MethodHandle.type()`, protected exact declaring-class/name character guards,
+  and packed `MethodType`, then constructs the attested carrier from the current
+  invoke site's live key. Non-matching external handles fall through to the
+  original JVM MethodHandle call shape; `revealDirect` is guarded by a narrow
+  `IllegalArgumentException` catch so adapted/non-direct handles with the same
+  runtime type become candidate misses instead of breaking the original call.
+  Callsite attestation seed computation uses the caller's final ABI identity
+  even during pre-declaration census, and duplicate pre/post census of the same
+  instruction hard-fails if it would produce different seed material.
+  Attestation seed material is now derived
+  from live incoming/caller key and carrier-index key through a non-linear
+  runtime expression instead of `value ^ mask; mask; LXOR` constant pairs. The
+  unpack prologue also separates raw incoming key-transfer material from the
+  canonical method key used by keyDispatch/CFF: it computes a canonical
+  method-key temp after the raw key is available for both split and non-split
+  carrier paths. Review `019e6d45-577f-73c1-8801-9b35048c4d7b` returned FAIL:
+  constructors were still excluded from method-parameter plans, exact
+  `Constructor.newInstance` had no carrier rewrite, and the integration audit
+  skipped `<init>` descriptors/callsites. The same JCP-2 subtask now remains
+  in progress until constructor packed-carrier attestation is implemented,
+  reviewed, and freshly validated. The constructor repair now includes
+  original application constructors in method-parameter plans, assigns
+  constructor packed descriptors of the form `([Ljava/lang/Object;J...)V`,
+  preserves overload separation with live-key-derived suffix arguments, rewrites
+  direct `new` / `dup` / `invokespecial <init>` callsites, rewrites exact
+  `Constructor.newInstance(Object[])`, and carries constructor MethodHandle
+  lookup metadata for `findConstructor`. Constructor callee prologues validate
+  the same carrier token/tag material before accepting the split hidden `long`.
+  A CFF verifier-graph repair also prevents fail-closed, no-callsite
+  constructors from creating island dispatch blocks for verifier-unreachable
+  constructor tails after the unconditional attestation failure; CFF prunes
+  verifier-unreachable real instructions before leader construction, preserving
+  every executable verifier-frame block without flattening dead code. Review
+  `019e6d69-00d2-79b3-bed6-a3a1463e0283` returned FAIL because overloaded
+  `findConstructor` calls were not resolved by parameter types and escaped or
+  array-enumerated `Constructor.newInstance` calls had no runtime candidate
+  rewrite. The follow-up repair now resolves `findConstructor` and
+  `getDeclaredConstructor` owners/parameter arrays through ASM source frames,
+  adds runtime constructor candidates for known-owner constructor arrays, and
+  covers exact, stored, array-enumerated, and MethodHandle constructor paths in
+  the integration fixture. The runtime reflective carrier builder also now
+  writes the split hidden-key outer slot whenever runtime arity is at least two;
+  the failed case was a constructor packed descriptor with a live ABI suffix
+  (`Object[], long, suffix`) where the previous `outerArity == 2` guard left
+  slot 1 null.
+- Fresh validation evidence:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  passed on 2026-05-28 at 15:36 Asia/Taipei after the constructor runtime
+  arity fix. The focused
+  `JvmMethodParameterObfuscationIntegrationTest` also passed after adding the
+  escaped `findSpecial` MethodHandle runtime candidate path, escaped interface
+  MethodHandle path, interface `Method.invoke` path, section-level result
+  assertions, non-split canonical-key repair, and exact protected runtime
+  MethodHandle name matching. The method-parameter integration fixture now asserts
+  decoded token/tag carrier reads, at least two derived `long` guards for
+  callsite-token whitelist plus tag validation, and a hard-fail branch in
+  packed callees while running direct, virtual dispatch, static MethodHandle,
+  virtual MethodHandle, escaped `findSpecial` MethodHandle, escaped interface
+  MethodHandle, exact reflection, runtime reflection, and interface reflection
+  paths. After the constructor repair, the focused
+  `JvmMethodParameterObfuscationIntegrationTest` passed with an unused
+  application constructor fixture that previously reproduced a CFF
+  no-verifier-frame island target. The full JCP-2 focused validation command
+  passed again on 2026-05-28. A fresh CTF CFF-only debug regeneration with
+  `test-jars/codex-cff-debug.yml` completed at 15:37 Asia/Taipei during the
+  initial constructor verifier-frame repair; that repair was later rejected and
+  replaced by the verifier-unreachable pruning repair recorded below. A fresh
+  `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar` regenerated at 15:38 Asia/Taipei
+  with `test-jars/full-jvm-obf.yml`; `jar -J-XX:-UsePerfData tf` is readable,
+  `javap -classpath /mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar -p a.c` shows
+  packed direct-entry methods such as `h(Object[], long)`, `ReflectDump a.c`
+  with `-XX:-UsePerfData` reports `d=null`, `a=null`, `e=null`, and `b=null`,
+  and the stale copied-key `CallCore` direct-entry wrapper returns `<null>` for
+  both `test` and `swing-gate-0427`, so the previously published direct-entry
+  solve path no longer returns the flag or a plaintext validation oracle.
+- Failed review evidence: subagent review
+  `019e6ced-6a73-7ce3-a037-5ea253a70d92` rejected this implementation because
+  the callee accepted `tokenTemp` as a free input and did not prove it came
+  from a registered per-callsite seed, so the stale `CallCore` length failure
+  did not prove a correct-length forged carrier would be rejected. The review
+  also identified that MethodHandle `findVirtual` / `findSpecial` paths were
+  not covered: lookup metadata did not retain the dispatch family, and
+  `rewriteMethodHandleInvoke` would drop the receiver when rewriting
+  polymorphic invoke descriptors.
+- Failed review evidence: subagent review
+  `019e6cfa-072d-7ca1-affa-611c26333805` rejected the follow-up because
+  `findSpecial` lookup rewriting was still treated like a three-operand
+  lookup and did not preserve the fourth `specialCaller` class operand. The
+  review also noted that the method-parameter fixture covered static and
+  virtual MethodHandle paths but not `findSpecial`. The follow-up production
+  fix preserves the `specialCaller` operand and adds runtime MethodHandle
+  candidate rewriting for escaped direct handles, because the first `findSpecial`
+  fixture exposed an ABI mismatch when the packed handle crossed an application
+  method boundary before `invokeExact`.
+- Failed review evidence: subagent review
+  `019e6d08-33cd-7eb0-8c26-1ecd58e1ed20` rejected the second follow-up because
+  attestation constants were emitted as algebraically foldable long pairs,
+  escaped interface/abstract MethodHandle and reflection paths were not covered,
+  and runtime MethodHandle matching embedded owner/name strings as plaintext
+  `LDC` values. The follow-up repair removed the foldable long material,
+  includes interface/abstract candidates, adds escaped interface/reflection
+  fixture coverage, and fixes the raw incoming versus canonical method-key
+  local split needed for CFF correctness.
+- Failed review evidence: subagent review
+  `019e6d28-0d54-7ad0-9dec-2e284931692c` rejected the next follow-up because
+  length plus `String.hashCode()` owner/name matching was collision-prone and
+  not exact JVM lookup semantics. The repair now keeps the runtime string on
+  stack and checks every character through an obfuscated integer transform
+  before allowing a MethodHandle/reflection candidate branch; this keeps exact
+  match semantics without emitting plaintext owner/name `LDC` strings.
+- Failed review evidence: subagent review
+  `019e6d31-3073-74c2-b63b-76f5d7d97425` rejected the next follow-up because
+  runtime MethodHandle matching called `revealDirect` after only a type check,
+  so adapted/non-direct handles with the same packed type could throw instead
+  of falling through to the original invoke shape. The repair wraps only
+  `revealDirect` in an `IllegalArgumentException` guard and treats that as a
+  candidate miss.
+- Failed review evidence: subagent review
+  `019e6d39-aef6-7020-8d7b-a4712cac6c44` rejected the next follow-up because
+  pre-pack and post-pack callsite census could compute different accepted
+  seeds for the same instruction, leaving stale pre-pack material in the callee
+  whitelist. The repair computes caller identity from the caller's final ABI
+  when a `MethodPlan` exists, and rejects conflicting duplicate seeds for the
+  same target/instruction/site-kind tuple.
+- Failed review evidence: subagent review
+  `019e6d87-2f23-7231-ac94-dbf7b49ac924` rejected the constructor follow-up
+  because escaped reflective members were still not covered. Runtime
+  `Method.invoke` / `Constructor.newInstance` candidate discovery only used
+  same-method lookup or same-method array evidence, so a packed reflective
+  member passed to another method could fall through with the original
+  un-obfuscated argument array and break reflective ABI/key propagation. JCP-2
+  remains in progress until escaped reflective members are rewritten,
+  validated, and reviewed. The escaped-member repair records interprocedural
+  provenance when an application method receives a `Method` or `Constructor`
+  argument sourced from an exact reflective lookup, then uses the callee's
+  packed argument-local mapping at the escaped `invoke` / `newInstance` site to
+  recover only that recorded candidate set. Same-method `getDeclaredMethods()`
+  enumeration now extracts the existing `Method.getName().equals(...)` guard
+  before `Method.invoke` and narrows runtime candidates by owner plus guarded
+  name. A naive all-candidate escaped-reflection repair was rejected during
+  validation by `MethodTooLargeException` in
+  `ParameterShapes.reflectMethods([Ljava/lang/Object;J)I`; the owner+name guard
+  repair reduced the method to `helpers=139` and
+  `estimatedCodeBytes=44966`, eliminating the method-size failure. The next
+  focused run failed in the CFF finalizer with
+  `ClassTooLargeException: Class too large: ParameterShapes` and
+  `constantPoolCount=68248`; the finalizer's largest-method estimates showed
+  `__neko_cff_tmat_init$*` and `__neko_cff_xmat_init$*` material initializer
+  helpers in the original class. The CFF repair keeps full CFF coverage and
+  moves those generated material initializer helpers through the existing
+  helper-host relocation mechanism, then rewrites the generated `<clinit>`
+  calls to the relocated host methods. This relocates equivalent generated
+  material initialization without changing CFF block construction, block
+  boundaries, dispatch semantics, or key material.
+- Fresh validation evidence after escaped-reflection repair:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`
+  passed on 2026-05-28 at 16:03 Asia/Taipei. The full JCP-2 focused validation
+  command
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  passed on 2026-05-28 at 16:03 Asia/Taipei. A fresh CTF CFF-only debug
+  regeneration with `test-jars/codex-cff-debug.yml` completed at 16:03
+  Asia/Taipei and relocated `hosts=2 methods=66`. A fresh
+  `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar` regenerated at 16:03 Asia/Taipei
+  with `test-jars/full-jvm-obf.yml`; finalizer evidence shows
+  `Relocated large CFF helper sets: hosts=8 methods=462` and
+  `Finalized class-integrity class-code key material: classes=3`. `jar
+  -J-XX:-UsePerfData tf` is readable, `javap -classpath
+  /mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar -p a.c` still exposes the JVM ABI
+  surface `h(Object[], long)` but no plaintext array values, `ReflectDump a.c`
+  reports `d=null`, `a=null`, `e=null`, and `b=null`, and the stale copied-key
+  `CallCore` direct-entry wrapper now fails before validation with
+  `ArrayIndexOutOfBoundsException: Index 3 out of bounds for length 2` for both
+  `test` and `swing-gate-0427`, proving the previously published two-slot
+  direct carrier no longer reaches the validation oracle.
+- Failed review evidence: subagent review
+  `019e6d9e-c7d3-7a61-b4df-75e49c46a50b` rejected the escaped-reflection
+  repair because escaped reflective provenance was exact-callee keyed rather
+  than dispatch-family keyed, so interface or virtual dispatch could record
+  candidates under an interface/super method but consume them inside an
+  implementation method. The review also rejected the first
+  `getDeclaredMethods()` owner+name narrowing because it scanned for the first
+  prior `Method.getName()` / string pair without proving that the string guard
+  was tied to the same `Method` value or dominated the eventual
+  `Method.invoke`. Finally, the review rejected the CTF negative evidence
+  because the stale two-slot carrier failed with array bounds before exercising
+  token whitelist/tag validation. JCP-2 remains in progress until these three
+  points are repaired, freshly validated, and reviewed.
+- Implementation evidence after the `019e6d9e-c7d3-7a61-b4df-75e49c46a50b`
+  review: escaped reflective member provenance now records against every
+  dispatch-family callee whose old owner/name/descriptor can receive the
+  bytecode call, not only the exact declared owner. Exact `Method.invoke` and
+  `Constructor.newInstance` rewrites are now tied to the actual reflective
+  member receiver dataflow through `SourceValue`, local stores, and
+  `CHECKCAST`, rather than a previous lookup found by bounded instruction
+  scanning. Runtime reflection candidate lists are precomputed once on the
+  original method before any callsite rewrite mutates the same method, so
+  earlier direct/interface/MethodHandle rewrites cannot pollute dataflow
+  analysis for later reflective calls. `getDeclaredMethods()` /
+  `getDeclaredConstructors()` array enumeration now recovers the array owner
+  from SourceAnalyzer `AALOAD` provenance, while guarded method-name narrowing
+  still requires the same `Method` local and a dominating
+  `getName().equals(...)` false branch that skips the eventual invoke.
+  Split packed entries whose ABI carries a split `long` but whose original
+  method did not expose a key-local parameter are now modeled as synthetic
+  hidden-key entries, so their carrier-index key, token, and tag slots are
+  mandatory. Carrier attestation shape validation and token/tag validation run
+  before the canonical method key is stored for CFF, making forged carriers
+  fail closed before invalid entry key material can dispatch into CFF poison
+  returns. Attestation slot reads use bounded in-carrier index normalization
+  only for the pre-CFF validation loads; normal argument loads still use the
+  carrier-index decode after validation has accepted the token/tag.
+- Failed review evidence: subagent review
+  `019e6dcb-d661-74e2-a10a-ef7c9cd28df7` rejected the follow-up because exact
+  reflection lookup planning and array-enumerated reflection still retained
+  stale bounded backward-scan fallbacks. A misleading prior `Class[]`,
+  owner/name constant, `getDeclaredMethods()`, or `getDeclaredConstructors()`
+  call could be selected instead of the actual operand feeding the current
+  reflective call. The review also rejected filtering labels without verifier
+  frames as a CFF block-selection workaround.
+- Implementation evidence after the `019e6dcb-d661-74e2-a10a-ef7c9cd28df7`
+  review: exact `getMethod` / `getDeclaredMethod` planning now uses only
+  SourceAnalyzer dataflow for receiver class, name, and parameter-array
+  operands. The Class[] parser follows `ALOAD`, `CHECKCAST`, `DUP`, constant
+  integer indexes, and the actual `ANEWARRAY java/lang/Class` allocation feeding
+  the current call; unrelated earlier arrays no longer contribute. Runtime
+  `getDeclaredMethods()` / `getDeclaredConstructors()` enumeration now accepts
+  only SourceAnalyzer `AALOAD` provenance from the actual member array source,
+  and the stale previous-array-owner fallbacks were removed. The integration
+  fixture includes misleading earlier owner/name/Class[] values and unrelated
+  method/constructor arrays in the same method before the real reflection sites.
+  The CFF no-frame repair was changed from label filtering to verifier-unreachable
+  instruction pruning before CFF leader construction; the reproduced failure was
+  a constructor tail label with `prev=java/lang/Object.<init>()V` and `next=RETURN`
+  that ASM did not assign a frame because the tail was unreachable.
+- Fresh validation evidence after the source-only reflection and CFF cleanup
+  repair: the focused command
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`
+  passed on 2026-05-28 at 17:27 Asia/Taipei. The fixture now covers direct,
+  virtual/interface, MethodHandle, escaped MethodHandle, exact reflection,
+  escaped reflection through interface dispatch, array-enumerated reflection
+  with unrelated name guards, exact and escaped constructor reflection, runtime
+  constructor arrays, constructor MethodHandle paths, and an exact-shape forged
+  packed carrier for `ParameterShapes.add(Object[], long)`. The forged carrier
+  uses the current exact five-slot carrier shape and fails with
+  `SecurityException`, proving token/tag validation is exercised rather than
+  an array-bounds failure.
+- Fresh focused regression evidence: the full JCP-2 focused command
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  passed on 2026-05-28 at 17:28 Asia/Taipei.
+- Fresh CTF validation evidence: `neko-cli/build/install/neko-cli/bin/neko-cli
+  obfuscate -c test-jars/codex-cff-debug.yml -i test-jars/ctf.jar -o
+  build/tmp/ctf-cff-debug.jar` completed on 2026-05-28 at 17:29 Asia/Taipei
+  and relocated `hosts=2 methods=65`. A fresh full JVM
+  `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar` regenerated with
+  `test-jars/full-jvm-obf.yml` at 17:29 Asia/Taipei; finalizer output shows
+  `Relocated large CFF helper sets: hosts=7 methods=424` and
+  `Finalized class-integrity class-code key material: classes=3`. `jar
+  -J-XX:-UsePerfData tf` is readable, `javap -classpath
+  /mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar -p a.c` still shows only the JVM
+  ABI packed entry surface, and `ReflectDump a.c` reports `d=null`, `a=null`,
+  `e=null`, and `b=null`. The stale copied-key `CallCore` direct-entry wrapper
+  now throws `SecurityException` for both `test` and `swing-gate-0427`. A
+  separate exact-shape forged `a.c.h(Object[], long)` carrier with four slots
+  also prints `FORGED CARRIER REJECTED`, proving the regenerated CTF artifact
+  rejects the direct packed-entry forgery through attestation rather than
+  array bounds.
+- Failed review evidence: subagent review
+  `019e6de3-e913-7d93-bbf2-5e128da0f925` rejected the source-only reflection
+  cleanup because `storedLocalValue` still retained a bounded textual
+  backward scan after SourceAnalyzer lookup failed. A misleading store to the
+  same local in an unreachable or non-dominating branch could be selected as
+  the parameter-array source for a later reflective lookup.
+- Implementation evidence after the `019e6de3-e913-7d93-bbf2-5e128da0f925`
+  review: `storedLocalValue` no longer scans previous instructions. It now
+  reads the SourceAnalyzer frame at the current load instruction and resolves
+  local-store source nodes through each store instruction's own stack frame,
+  preserving bytecode dataflow and excluding unrelated textual stores. The
+  integration fixture adds a same-local false source inside a `throw` branch
+  before the real reflective parameter array; the transformed path must ignore
+  the non-feeding store and still rewrite the actual lookup/callsite.
+- Fresh validation evidence after frame-local provenance repair: the focused
+  command
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`
+  passed on 2026-05-28 at 17:27 Asia/Taipei. The full JCP-2 focused command
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  passed on 2026-05-28 at 17:28 Asia/Taipei. Fresh `ctf.jar` CFF-only debug
+  regeneration completed at 17:29 Asia/Taipei with `hosts=2 methods=65`, and
+  fresh full JVM `ctf-obf.jar` regeneration completed at 17:29 Asia/Taipei
+  with `hosts=7 methods=424` and `class-integrity` material for 3 classes.
+  Local audit of that artifact shows 10 readable classes, `a.c` exposes only
+  the JVM ABI packed methods and private fields, `ReflectDump a.c` reports
+  `c=0`, `d=null`, `a=null`, `e=null`, `b=null`, and a non-null `f`, stale
+  `CallCore` wrappers for both `test` and `swing-gate-0427` throw
+  `SecurityException`, and the exact-shape forged carrier prints
+  `FORGED CARRIER REJECTED`.
+- Failed review evidence: subagent review
+  `019e6dee-14f4-74c2-805e-ade9c20e508c` rejected the follow-up because
+  MethodHandle lookup planning still used bounded textual backward scans.
+  `previousMethodHandleLookupTarget` scanned prior `LDC` owner/name material
+  for `findStatic` / `findVirtual` / `findSpecial`, and
+  `previousMethodTypeParameterTypes` scanned prior `MethodType.methodType`
+  producers without proving they fed the current `MethodHandles.Lookup`
+  call. This could bind a packed MethodHandle callsite seed to unrelated
+  owner/name/MethodType material in the same method.
+- Implementation evidence after the `019e6dee-14f4-74c2-805e-ade9c20e508c`
+  review: MethodHandle lookup planning now reads the SourceAnalyzer frame at
+  the actual `findStatic`, `findVirtual`, `findSpecial`, or `findConstructor`
+  call and derives the owner class, member name, and MethodType parameter
+  array from the operand `SourceValue`s feeding that call. Same-method
+  `MethodHandle.invoke` / `invokeExact` planning now resolves the actual
+  MethodHandle receiver value through SourceAnalyzer and local-store frames
+  rather than selecting a previous lookup textually. The integration fixture
+  adds misleading MethodHandle owner/name/MethodType constants and a stale
+  constructor MethodType branch before the real lookup; the transformed
+  MethodHandle calls must ignore the stale material and still rewrite the
+  actual static, virtual, special, interface, and constructor MethodHandle
+  paths. During validation this exposed an exact/runtime MethodHandle census
+  classification mismatch for constructor handles after lookup rewriting:
+  transform-time exact or runtime MethodHandle carrier builders could
+  otherwise create a new site seed after callee prologue generation. The
+  MethodHandle carrier builders now reuse whichever exact or runtime
+  MethodHandle attestation kind was already recorded for that invoke site
+  during prepare, preserving the prepared per-site seed instead of generating
+  a late unaccepted token.
+- Fresh validation evidence after MethodHandle source-provenance and
+  prepared-site-kind repair: the focused command
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`
+  passed on 2026-05-28 at 17:46 Asia/Taipei. The full JCP-2 focused command
+  with `JvmMethodParameterObfuscationIntegrationTest`,
+  `CffStrongEntrySeedRegressionTest`, and
+  `ControlFlowFlatteningAlgebraicAuditTest` passed on 2026-05-28 at 17:46
+  Asia/Taipei. Fresh `ctf.jar` CFF-only debug regeneration completed at
+  17:47:39 Asia/Taipei with `hosts=2 methods=65`. Fresh full JVM
+  `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar` regeneration completed at
+  17:47:53 Asia/Taipei with `hosts=7 methods=424` and `class-integrity`
+  material for 3 classes. Local audit of that artifact shows 10 readable
+  classes, `a.c` exposes only the JVM ABI packed methods and private fields,
+  `ReflectDump a.c` reports `c=0`, `d=null`, `a=null`, `e=null`, `b=null`,
+  and a non-null `f`, stale `CallCore` wrappers for both `test` and
+  `swing-gate-0427` throw `SecurityException`, and the exact-shape forged
+  carrier prints `FORGED CARRIER REJECTED`.
+- Final review evidence: subagent review
+  `019e6dfd-1afb-7bc1-8e9a-20ac4170c8b2` returned PASS. It verified that
+  `storedLocalValue` is frame-dataflow based, MethodHandle lookup and
+  `invokeExact` planning are sourced from actual operands/receiver values,
+  exact/runtime MethodHandle attestation kind reuse avoids late unaccepted
+  seeds, reflection/constructor/escaped/member-array paths remain compatible,
+  and the CFF verifier-unreachable pruning repair does not filter labels or
+  reduce block coverage. The only residual note was non-blocking:
+  `previousMethodArrayGuardName` still uses a bounded textual scan, but it is
+  tied back to the actual reflective member source locals and is not the
+  rejected MethodHandle or stored-local fallback path.
 
 ### [ ] JCP-3: Scatter Reversible Validation Helpers And Table Checks
 

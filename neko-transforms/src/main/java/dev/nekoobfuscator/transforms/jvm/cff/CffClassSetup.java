@@ -2251,7 +2251,7 @@ abstract class CffClassSetup extends CffSharedState {
         for (MethodNode method : clazz.asmNode().methods) {
             if ((method.access & Opcodes.ACC_STATIC) == 0) continue;
             if ((method.access & Opcodes.ACC_SYNTHETIC) == 0) continue;
-            if (!isRelocatableCffHelperDesc(method.desc)) continue;
+            if (!isRelocatableCffHelper(method)) continue;
             helpers.add(method);
         }
         return helpers;
@@ -2331,8 +2331,15 @@ abstract class CffClassSetup extends CffSharedState {
         return keys;
     }
 
-    private boolean isRelocatableCffHelperDesc(String desc) {
-        return "(JIIIII[J)J".equals(desc) || "(JIIIIII[J)J".equals(desc);
+    private boolean isRelocatableCffHelper(MethodNode method) {
+        if ("(JIIIII[J)J".equals(method.desc) || "(JIIIIII[J)J".equals(method.desc)) {
+            return true;
+        }
+        if (!"([Ljava/lang/Object;)V".equals(method.desc)) return false;
+        return method.name.startsWith("__neko_cff_tmat_init$")
+            || method.name.startsWith("__neko_cff_xmat_init$")
+            || method.name.startsWith("__neko_cff_step_init$")
+            || method.name.startsWith("__neko_cff_imat_init$");
     }
 
     private String uniqueCffHelperHostName(PipelineContext pctx, String owner) {

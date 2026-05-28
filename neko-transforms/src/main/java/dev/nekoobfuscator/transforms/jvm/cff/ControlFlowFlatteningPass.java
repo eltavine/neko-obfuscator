@@ -52,7 +52,10 @@ import org.objectweb.asm.tree.TableSwitchInsnNode;
 import org.objectweb.asm.tree.TryCatchBlockNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.analysis.Analyzer;
+import org.objectweb.asm.tree.analysis.BasicInterpreter;
 import org.objectweb.asm.tree.analysis.BasicValue;
+import org.objectweb.asm.tree.analysis.Frame;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -165,6 +168,10 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
                 keyLocal
             );
         if (rewrittenCarrierIndexSites > 0) {
+            clazz.markDirty();
+            pctx.invalidate(method);
+        }
+        if (pruneVerifierUnreachableInstructions(clazz.name(), mn)) {
             clazz.markDirty();
             pctx.invalidate(method);
         }
@@ -309,6 +316,23 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             blocks,
             blockAliases
         );
+        insertPreProtectedKeyTransferStateInit(
+            pctx,
+            mn,
+            protectedStart,
+            blocks,
+            dispatchPlan,
+            keyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal,
+            pcLocal,
+            keyTmpLocal,
+            externalEntrySeed,
+            methodSeed,
+            stateByLabel,
+            keyStateByLabel
+        );
         rewriteKeyedCallTransfers(
             pctx,
             mn,
@@ -447,6 +471,90 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             pctx,
             clazz.name() + "." + method.name() + method.descriptor()
         );
+    }
+
+    private void insertPreProtectedKeyTransferStateInit(
+        PipelineContext pctx,
+        MethodNode mn,
+        LabelNode protectedStart,
+        List<Block> blocks,
+        DispatchPlan dispatchPlan,
+        int keyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int pcLocal,
+        int keyTmpLocal,
+        boolean externalEntrySeed,
+        long methodSeed,
+        Map<LabelNode, Integer> stateByLabel,
+        Map<LabelNode, CffBlockKeyState> keyStateByLabel
+    ) {
+        AbstractInsnNode anchor = firstTargetSeededKeyLoadBeforeProtectedStart(pctx, mn, protectedStart);
+        if (anchor == null) return;
+        Block entry = firstNonHandler(blocks);
+        if (entry == null) return;
+        for (IslandGroup group : dispatchPlan.groups()) {
+            if (!group.blocks().contains(entry)) continue;
+            DispatchTarget entryTarget = requireTarget(
+                entry.label(),
+                dispatchPlan.targets().get(entry.label())
+            );
+            CffBlockKeyState entryKeys = requireBlockKey(
+                entry.label(),
+                keyStateByLabel.get(entry.label())
+            );
+            InsnList init = new InsnList();
+            emitInitKeys(
+                init,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                keyLocal,
+                entryInitSeed(group.salt(), externalEntrySeed, methodSeed),
+                keyTmpLocal
+            );
+            emitStorePc(
+                init,
+                pcLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                keyLocal,
+                requireState(entry.label(), stateByLabel.get(entry.label())),
+                entryKeys,
+                methodSeed,
+                entryTarget.selectorSeed(),
+                keyTmpLocal
+            );
+            emitStoreMethodKey(
+                init,
+                keyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                entryKeys
+            );
+            JvmKeyDispatchPass.markGenerated(pctx, init);
+            mn.instructions.insertBefore(anchor, init);
+            return;
+        }
+    }
+
+    private AbstractInsnNode firstTargetSeededKeyLoadBeforeProtectedStart(
+        PipelineContext pctx,
+        MethodNode mn,
+        LabelNode protectedStart
+    ) {
+        Map<AbstractInsnNode, Long> targetSeeds = generatedKeyLoadTargetSeeds(pctx);
+        if (targetSeeds.isEmpty()) return null;
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null && insn != protectedStart; insn = insn.getNext()) {
+            if (targetSeeds.containsKey(insn)) {
+                return insn;
+            }
+        }
+        return null;
     }
 
     private SyntheticNoiseBudget syntheticNoiseBudget(
@@ -627,6 +735,28 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             || (opcode >= Opcodes.IFEQ && opcode <= Opcodes.JSR)
             || opcode == Opcodes.TABLESWITCH
             || opcode == Opcodes.LOOKUPSWITCH;
+    }
+
+    private static boolean pruneVerifierUnreachableInstructions(String owner, MethodNode mn) {
+        if (mn.instructions == null || mn.instructions.size() == 0) return false;
+        try {
+            Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicInterpreter());
+            Frame<BasicValue>[] frames = analyzer.analyze(owner, mn);
+            AbstractInsnNode[] insns = mn.instructions.toArray();
+            boolean changed = false;
+            for (int i = 0; i < insns.length && i < frames.length; i++) {
+                if (frames[i] == null && insns[i].getOpcode() >= 0) {
+                    mn.instructions.remove(insns[i]);
+                    changed = true;
+                }
+            }
+            return changed;
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                "Cannot prune verifier-unreachable instructions for " + owner + "." + mn.name + mn.desc,
+                e
+            );
+        }
     }
 
     private PrimitiveDigestKind primitiveDigestKind(AbstractInsnNode insn, int keyLocal) {
@@ -953,7 +1083,11 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
     }
 
     private String referenceCastType(String descriptor) {
-        if (descriptor == null || descriptor.isBlank() || descriptor.equals(".") || "Ljava/lang/Object;".equals(descriptor)) {
+        if (descriptor == null
+            || descriptor.isBlank()
+            || descriptor.equals(".")
+            || descriptor.equals("Lnull;")
+            || "Ljava/lang/Object;".equals(descriptor)) {
             return null;
         }
         if (descriptor.charAt(0) == '[') {
@@ -1143,12 +1277,16 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         LabelNode protectedStart
     ) {
         Set<Integer> storedSlotsBeforeProtectedStart = storedSlotsBeforeProtectedStart(mn, protectedStart);
+        Set<Integer> readBeforeStoreSlots = readBeforeStoreSlotsBeforeProtectedStart(mn, protectedStart);
         Map<LocalShape, Integer> defaults = new LinkedHashMap<>();
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!readsLocal(insn)) continue;
             LocalShape shape = localShape(insn);
             if (shape == null || shape.var() < argumentLimit || overlapsKeyLocal(shape, keyLocal)) continue;
-            if (overlapsStoredSlot(shape, storedSlotsBeforeProtectedStart)) continue;
+            if (overlapsStoredSlot(shape, storedSlotsBeforeProtectedStart)
+                && !overlapsStoredSlot(shape, readBeforeStoreSlots)) {
+                continue;
+            }
             Integer local = remap.get(shape);
             defaults.putIfAbsent(shape, local == null ? shape.var() : local);
         }
@@ -1170,6 +1308,34 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             }
         }
         return stored;
+    }
+
+    private Set<Integer> readBeforeStoreSlotsBeforeProtectedStart(
+        MethodNode mn,
+        LabelNode protectedStart
+    ) {
+        Set<Integer> written = new HashSet<>();
+        Set<Integer> readBeforeWrite = new HashSet<>();
+        for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn == protectedStart) break;
+            if (readsLocal(insn)) {
+                LocalShape shape = localShape(insn);
+                if (shape != null) {
+                    for (int slot = shape.var(); slot < shape.var() + shape.kind().slots(); slot++) {
+                        if (!written.contains(slot)) {
+                            readBeforeWrite.add(slot);
+                        }
+                    }
+                }
+            }
+            if (!writesLocal(insn)) continue;
+            LocalShape shape = localShape(insn);
+            if (shape == null) continue;
+            for (int slot = shape.var(); slot < shape.var() + shape.kind().slots(); slot++) {
+                written.add(slot);
+            }
+        }
+        return readBeforeWrite;
     }
 
     private boolean overlapsStoredSlot(LocalShape shape, Set<Integer> storedSlots) {

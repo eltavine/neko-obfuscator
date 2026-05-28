@@ -91,9 +91,7 @@ final class CffFrameAnalysis {
     List<BasicValue> localValues(LabelNode label) {
         Frame<BasicValue> frame = frameAt(label);
         if (frame == null) {
-            throw new IllegalStateException(
-                "CFF island target has no frame: " + label.getLabel()
-            );
+            throw new IllegalStateException(missingFrameMessage(label));
         }
         List<BasicValue> values = new ArrayList<>();
         for (int i = 0; i < frame.getLocals(); i++) {
@@ -113,9 +111,7 @@ final class CffFrameAnalysis {
     String localsSignature(LabelNode label) {
         Frame<BasicValue> frame = frameAt(label);
         if (frame == null) {
-            throw new IllegalStateException(
-                "CFF island target has no frame: " + label.getLabel()
-            );
+            throw new IllegalStateException(missingFrameMessage(label));
         }
         StringBuilder sb = new StringBuilder(frame.getLocals() * 3);
         for (int i = 0; i < frame.getLocals(); i++) {
@@ -162,11 +158,51 @@ final class CffFrameAnalysis {
         return null;
     }
 
+    private String missingFrameMessage(LabelNode label) {
+        AbstractInsnNode next = nextReal(label.getNext());
+        AbstractInsnNode prev = previousReal(label.getPrevious());
+        return "CFF island target has no frame: method=" + method.name + method.desc +
+            " label=" + label.getLabel() +
+            " prev=" + describe(prev) +
+            " next=" + describe(next);
+    }
+
+    private static String describe(AbstractInsnNode insn) {
+        if (insn == null) return "<none>";
+        if (insn instanceof MethodInsnNode call) {
+            return call.getOpcode() + ":" + call.owner + "." + call.name + call.desc;
+        }
+        if (insn instanceof TypeInsnNode type) {
+            return type.getOpcode() + ":" + type.desc;
+        }
+        if (insn instanceof FieldInsnNode field) {
+            return field.getOpcode() + ":" + field.owner + "." + field.name + field.desc;
+        }
+        if (insn instanceof IntInsnNode integer) {
+            return integer.getOpcode() + ":" + integer.operand;
+        }
+        if (insn instanceof LdcInsnNode ldc) {
+            return insn.getOpcode() + ":" + ldc.cst;
+        }
+        return String.valueOf(insn.getOpcode());
+    }
+
     private static AbstractInsnNode nextReal(AbstractInsnNode start) {
         for (
             AbstractInsnNode insn = start;
             insn != null;
             insn = insn.getNext()
+        ) {
+            if (insn.getOpcode() >= 0) return insn;
+        }
+        return null;
+    }
+
+    private static AbstractInsnNode previousReal(AbstractInsnNode start) {
+        for (
+            AbstractInsnNode insn = start;
+            insn != null;
+            insn = insn.getPrevious()
         ) {
             if (insn.getOpcode() >= 0) return insn;
         }
