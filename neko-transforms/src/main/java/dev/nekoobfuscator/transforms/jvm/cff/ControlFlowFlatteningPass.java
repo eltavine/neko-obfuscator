@@ -18,6 +18,7 @@ import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import dev.nekoobfuscator.transforms.jvm.strings.JvmStringObfuscationPass;
 import dev.nekoobfuscator.transforms.jvm.constants.JvmConstantObfuscationPass;
+import dev.nekoobfuscator.transforms.jvm.constants.JvmStaticArrayMaterial;
 import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
 import dev.nekoobfuscator.transforms.jvm.validation.JvmValidationSinkHardeningPass;
 import java.util.ArrayList;
@@ -107,9 +108,12 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
     @Override
     public void transformClass(TransformContext ctx) {
         if (!(ctx instanceof PipelineContext pctx)) return;
+        L1Class clazz = pctx.currentL1Class();
+        if (clazz != null && pctx.config().isTransformEnabled(JvmConstantObfuscationPass.ID)) {
+            JvmStaticArrayMaterial.recordClass(pctx, clazz);
+        }
         lowerStringConstantValuesForStringPass(pctx);
         prepareClassKeyTables(pctx);
-        L1Class clazz = pctx.currentL1Class();
         if (clazz != null && hasStaticNumericConstantValue(clazz)) {
             ensureClassKeyTable(pctx, clazz);
         }

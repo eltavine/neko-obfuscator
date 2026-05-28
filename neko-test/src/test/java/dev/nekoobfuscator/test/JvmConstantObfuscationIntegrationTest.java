@@ -8,8 +8,14 @@ import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.ConstantDynamic;
+import org.objectweb.asm.Handle;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.MethodVisitor;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.FieldNode;
@@ -23,11 +29,15 @@ import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 import java.io.FileOutputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -135,6 +145,175 @@ public class JvmConstantObfuscationIntegrationTest {
         assertProtectedNumericHelperConsumesRawBase(outputJar);
     }
 
+    @Test
+    void staticPrimitiveArrayTablesAreNotReflectablePlaintextWithIndy() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-static-array-material"));
+        Path source = work.resolve("StaticArrayTables.java");
+        Files.writeString(source, staticArrayTablesSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("static-array-tables.jar");
+        writeJar(inputJar, classes, "StaticArrayTables");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("static-array-tables-obf.jar");
+        runObfuscationWithInvokeDynamic(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STATIC ARRAY TABLES OK"), obfuscated);
+        assertStaticArrayTablesNotReflectablePlaintext(outputJar);
+    }
+
+    @Test
+    void staticPrimitiveArrayReferenceSemanticsAreNotMaterializedWithIndy() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-static-array-reference-semantics"));
+        Path source = work.resolve("StaticArrayReferenceSemantics.java");
+        Files.writeString(source, staticArrayReferenceSemanticsSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("static-array-reference-semantics.jar");
+        writeJar(inputJar, classes, "StaticArrayReferenceSemantics");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("static-array-reference-semantics-obf.jar");
+        runObfuscationWithInvokeDynamic(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STATIC ARRAY REFERENCE SEMANTICS OK"), obfuscated);
+    }
+
+    @Test
+    void staticPrimitiveArrayDynamicFieldAccessIsNotMaterializedWithIndy() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-static-array-dynamic-access"));
+        Path source = work.resolve("StaticArrayDynamicFieldAccess.java");
+        Files.writeString(source, staticArrayDynamicFieldAccessSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("static-array-dynamic-access.jar");
+        writeJar(inputJar, classes, "StaticArrayDynamicFieldAccess");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("static-array-dynamic-access-obf.jar");
+        runObfuscationWithInvokeDynamic(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STATIC ARRAY DYNAMIC ACCESS OK"), obfuscated);
+    }
+
+    @Test
+    void staticPrimitiveArrayUnreflectFieldAccessIsNotMaterializedWithIndy() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-static-array-unreflect-access"));
+        Path providerSource = work.resolve("StaticArrayUnreflectFieldProvider.java");
+        Path source = work.resolve("StaticArrayUnreflectAccess.java");
+        Files.writeString(providerSource, staticArrayUnreflectFieldProviderSourceText(), StandardCharsets.UTF_8);
+        Files.writeString(source, staticArrayUnreflectAccessSourceText(), StandardCharsets.UTF_8);
+
+        Path providerClasses = Files.createDirectories(work.resolve("provider-classes"));
+        run(List.of("javac", "-d", providerClasses.toString(), providerSource.toString()), Duration.ofSeconds(30));
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(
+            List.of(
+                "javac",
+                "-cp",
+                providerClasses.toString(),
+                "-d",
+                classes.toString(),
+                source.toString()
+            ),
+            Duration.ofSeconds(30)
+        );
+
+        Path inputJar = work.resolve("static-array-unreflect-access.jar");
+        writeJar(inputJar, classes, "StaticArrayUnreflectAccess");
+        String original = runClass(inputJar, providerClasses, "StaticArrayUnreflectAccess");
+
+        Path outputJar = work.resolve("static-array-unreflect-access-obf.jar");
+        runObfuscationWithInvokeDynamic(inputJar, outputJar);
+        String obfuscated = runClass(outputJar, providerClasses, "StaticArrayUnreflectAccess");
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STATIC ARRAY UNREFLECT ACCESS OK"), obfuscated);
+        assertStaticIntArrayFieldPreserved(outputJar, "StaticArrayUnreflectAccess", "TABLE", new int[] {3, 5, 8});
+    }
+
+    @Test
+    void staticPrimitiveArrayCondyFieldProtocolIsNotMaterializedWithIndy() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-static-array-condy-access"));
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        Files.write(classes.resolve("StaticArrayCondyAccess.class"), staticArrayCondyAccessClassBytes());
+
+        Path inputJar = work.resolve("static-array-condy-access.jar");
+        writeJar(inputJar, classes, "StaticArrayCondyAccess");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("static-array-condy-access-obf.jar");
+        runObfuscationWithInvokeDynamic(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STATIC ARRAY CONDY ACCESS OK"), obfuscated);
+        assertStaticIntArrayFieldPreserved(outputJar, "StaticArrayCondyAccess", "TABLE", new int[] {3, 5, 8});
+    }
+
+    @Test
+    void staticPrimitiveArrayCustomIndyFieldProtocolIsNotMaterializedWithIndy() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-static-array-indy-protocol"));
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        Files.write(classes.resolve("StaticArrayIndyProtocolAccess.class"), staticArrayIndyProtocolAccessClassBytes());
+
+        Path inputJar = work.resolve("static-array-indy-protocol.jar");
+        writeJar(inputJar, classes, "StaticArrayIndyProtocolAccess");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("static-array-indy-protocol-obf.jar");
+        runObfuscationWithInvokeDynamic(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STATIC ARRAY INDY PROTOCOL OK"), obfuscated);
+        assertStaticIntArrayFieldPreserved(outputJar, "StaticArrayIndyProtocolAccess", "TABLE", new int[] {3, 5, 8});
+    }
+
+    @Test
+    void staticPrimitiveArrayOriginalReflectionGuardRunsBeforeIndyMutation() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-static-array-original-reflection"));
+        Path source = work.resolve("StaticArrayOriginalReflection.java");
+        Files.writeString(source, staticArrayOriginalReflectionSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("static-array-original-reflection.jar");
+        writeJar(inputJar, classes, "StaticArrayOriginalReflection");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("static-array-original-reflection-obf.jar");
+        runObfuscationWithInvokeDynamic(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STATIC ARRAY ORIGINAL REFLECTION OK"), obfuscated);
+    }
+
     private void runObfuscation(Path input, Path output) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
@@ -149,6 +328,69 @@ public class JvmConstantObfuscationIntegrationTest {
         PassRegistry registry = new PassRegistry();
         StandardJvmPasses.register(registry);
         new ObfuscationPipeline(config, registry).execute(input, output);
+    }
+
+    private void runObfuscationWithInvokeDynamic(Path input, Path output) throws Exception {
+        ObfuscationConfig config = new ObfuscationConfig();
+        config.setInputJar(input);
+        config.setOutputJar(output);
+        Map<String, TransformConfig> transforms = new LinkedHashMap<>();
+        transforms.put("keyDispatch", new TransformConfig(true, 1.0));
+        transforms.put("controlFlowFlattening", new TransformConfig(true, 1.0));
+        transforms.put("invokeDynamic", new TransformConfig(true, 1.0));
+        transforms.put("constantObfuscation", new TransformConfig(true, 1.0));
+        config.setTransforms(transforms);
+        config.keyConfig().setMasterSeed(0x1234ABCDL);
+
+        PassRegistry registry = new PassRegistry();
+        StandardJvmPasses.register(registry);
+        new ObfuscationPipeline(config, registry).execute(input, output);
+    }
+
+    private void assertStaticArrayTablesNotReflectablePlaintext(Path jar) throws Exception {
+        try (URLClassLoader loader = new URLClassLoader(
+            new java.net.URL[] { jar.toUri().toURL() },
+            ClassLoader.getPlatformClassLoader()
+        )) {
+            Class<?> clazz = Class.forName("StaticArrayTables", true, loader);
+            Method main = clazz.getMethod("main", String[].class);
+            main.invoke(null, (Object) new String[0]);
+
+            int[] mask = {49, 199, 90, 13, 132, 34, 225, 107};
+            int[] check = {81, 98, 218, 155, 56, 108, 149, 118};
+            byte[] salt = {66, 19, 55, 33, -64, 90, 126, 9};
+            int matchedPlaintextTables = 0;
+            for (Field field : clazz.getDeclaredFields()) {
+                field.setAccessible(true);
+                Object value = field.get(null);
+                if (value instanceof int[] ints &&
+                    (Arrays.equals(mask, ints) || Arrays.equals(check, ints))) {
+                    matchedPlaintextTables++;
+                } else if (value instanceof byte[] bytes && Arrays.equals(salt, bytes)) {
+                    matchedPlaintextTables++;
+                }
+            }
+            assertEquals(0, matchedPlaintextTables, "static primitive tables remained reflectable plaintext");
+        }
+    }
+
+    private void assertStaticIntArrayFieldPreserved(
+        Path jar,
+        String className,
+        String fieldName,
+        int[] expected
+    ) throws Exception {
+        try (URLClassLoader loader = new URLClassLoader(
+            new java.net.URL[] { jar.toUri().toURL() },
+            ClassLoader.getPlatformClassLoader()
+        )) {
+            Class<?> clazz = Class.forName(className, true, loader);
+            Field field = clazz.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            Object value = field.get(null);
+            assertTrue(value instanceof int[], "static primitive array field was not preserved");
+            assertTrue(Arrays.equals(expected, (int[]) value), "static primitive array field changed value");
+        }
     }
 
     private void assertNumericConstantValuesMovedToClinit(Path jar) throws Exception {
@@ -1553,6 +1795,14 @@ public class JvmConstantObfuscationIntegrationTest {
         return run(List.of("java", "-XX:-UsePerfData", "-jar", jar.toString()), Duration.ofSeconds(30));
     }
 
+    private String runClass(Path jar, Path extraClasspath, String mainClass) throws Exception {
+        String classpath = extraClasspath + System.getProperty("path.separator") + jar;
+        return run(
+            List.of("java", "-XX:-UsePerfData", "-cp", classpath, mainClass),
+            Duration.ofSeconds(30)
+        );
+    }
+
     private String run(List<String> command, Duration timeout) throws Exception {
         Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
         boolean exited = process.waitFor(timeout.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -1560,6 +1810,501 @@ public class JvmConstantObfuscationIntegrationTest {
         assertTrue(exited, "command timed out: " + command);
         assertEquals(0, process.exitValue(), "command failed: " + command + "\n" + output);
         return output;
+    }
+
+    private String staticArrayTablesSourceText() {
+        return """
+            public class StaticArrayTables {
+                private static final int[] MASK = new int[] {49, 199, 90, 13, 132, 34, 225, 107};
+                private static final int[] CHECK = new int[] {81, 98, 218, 155, 56, 108, 149, 118};
+                private static final byte[] SALT = new byte[] {66, 19, 55, 33, -64, 90, 126, 9};
+
+                public static void main(String[] args) {
+                    int value = score("swing-ga");
+                    if (value != 57685) {
+                        throw new AssertionError(value);
+                    }
+                    int digest = digestSalt();
+                    if (digest != 662256384) {
+                        throw new AssertionError(digest);
+                    }
+                    System.out.println("STATIC ARRAY TABLES OK");
+                }
+
+                static int score(String input) {
+                    byte[] bytes = input.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    int acc = SALT.length;
+                    for (int i = 0; i < MASK.length; i++) {
+                        int b = bytes[i % bytes.length] & 255;
+                        acc = (acc * 131) ^ ((b ^ MASK[i]) + CHECK[i]);
+                        acc += SALT[i & 7] & 255;
+                    }
+                    return acc & 65535;
+                }
+
+                static int digestSalt() {
+                    try {
+                        java.security.MessageDigest digest =
+                            java.security.MessageDigest.getInstance("SHA-256");
+                        digest.update(SALT);
+                        byte[] out = digest.digest();
+                        return ((out[0] & 255) << 24)
+                            | ((out[1] & 255) << 16)
+                            | ((out[2] & 255) << 8)
+                            | (out[3] & 255);
+                    } catch (java.security.NoSuchAlgorithmException ex) {
+                        throw new IllegalStateException(ex);
+                    }
+                }
+            }
+            """;
+    }
+
+    private String staticArrayReferenceSemanticsSourceText() {
+        return """
+            public class StaticArrayReferenceSemantics {
+                private static final int[] TABLE = new int[] {7, 11, 13};
+
+                public static void main(String[] args) throws Exception {
+                    int[] first = table();
+                    int[] second = TABLE;
+                    if (first != second) {
+                        throw new AssertionError("identity");
+                    }
+                    int hash = System.identityHashCode(TABLE);
+                    mutate(first);
+                    if (TABLE[0] != 12) {
+                        throw new AssertionError("mutation");
+                    }
+                    synchronized (TABLE) {
+                        TABLE[1] += 3;
+                    }
+                    if (TABLE[1] != 14) {
+                        throw new AssertionError("monitor");
+                    }
+                    java.lang.reflect.Field field =
+                        StaticArrayReferenceSemantics.class.getDeclaredField("TABLE");
+                    field.setAccessible(true);
+                    if (field.get(null) != TABLE) {
+                        throw new AssertionError("reflection identity");
+                    }
+                    if (System.identityHashCode(TABLE) != hash) {
+                        throw new AssertionError("identity hash");
+                    }
+                    System.out.println("STATIC ARRAY REFERENCE SEMANTICS OK");
+                }
+
+                private static int[] table() {
+                    return TABLE;
+                }
+
+                private static void mutate(int[] value) {
+                    value[0] += 5;
+                }
+            }
+            """;
+    }
+
+    private String staticArrayDynamicFieldAccessSourceText() {
+        return """
+            public class StaticArrayDynamicFieldAccess {
+                private static final int[] TABLE = new int[] {3, 5, 8};
+
+                public static void main(String[] args) throws Throwable {
+                    int direct = TABLE[1];
+                    java.lang.invoke.MethodHandles.Lookup lookup =
+                        java.lang.invoke.MethodHandles.lookup();
+                    java.lang.invoke.MethodHandle getter = lookup.findStaticGetter(
+                        StaticArrayDynamicFieldAccess.class,
+                        "TABLE",
+                        int[].class
+                    );
+                    int[] viaHandle = (int[]) getter.invokeExact();
+                    java.lang.invoke.VarHandle varHandle = lookup.findStaticVarHandle(
+                        StaticArrayDynamicFieldAccess.class,
+                        "TABLE",
+                        int[].class
+                    );
+                    int[] viaVarHandle = (int[]) varHandle.get();
+                    if (viaHandle != TABLE || viaVarHandle != TABLE) {
+                        throw new AssertionError("dynamic identity");
+                    }
+                    if (direct != 5 || viaHandle[2] != 8 || viaVarHandle[0] != 3) {
+                        throw new AssertionError("dynamic values");
+                    }
+                    System.out.println("STATIC ARRAY DYNAMIC ACCESS OK");
+                }
+            }
+            """;
+    }
+
+    private String staticArrayUnreflectFieldProviderSourceText() {
+        return """
+            public class StaticArrayUnreflectFieldProvider {
+                public static java.lang.reflect.Field field(Class<?> owner, String name) throws Exception {
+                    java.lang.reflect.Field field = owner.getDeclaredField(name);
+                    field.setAccessible(true);
+                    return field;
+                }
+            }
+            """;
+    }
+
+    private String staticArrayUnreflectAccessSourceText() {
+        return """
+            public class StaticArrayUnreflectAccess {
+                private static final int[] TABLE = new int[] {3, 5, 8};
+
+                public static void main(String[] args) throws Throwable {
+                    int direct = TABLE[1];
+                    java.lang.reflect.Field field =
+                        StaticArrayUnreflectFieldProvider.field(StaticArrayUnreflectAccess.class, "TABLE");
+                    java.lang.invoke.MethodHandles.Lookup lookup =
+                        java.lang.invoke.MethodHandles.lookup();
+                    java.lang.invoke.MethodHandle getter = lookup.unreflectGetter(field);
+                    int[] viaGetter = (int[]) getter.invokeExact();
+                    java.lang.invoke.VarHandle varHandle = lookup.unreflectVarHandle(field);
+                    int[] viaVarHandle = (int[]) varHandle.get();
+                    if (viaGetter != TABLE || viaVarHandle != TABLE) {
+                        throw new AssertionError("unreflect identity");
+                    }
+                    if (direct != 5 || viaGetter[2] != 8 || viaVarHandle[0] != 3) {
+                        throw new AssertionError("unreflect values");
+                    }
+                    System.out.println("STATIC ARRAY UNREFLECT ACCESS OK");
+                }
+            }
+            """;
+    }
+
+    private String staticArrayOriginalReflectionSourceText() {
+        return """
+            public class StaticArrayOriginalReflection {
+                private static final int[] TABLE = new int[] {4, 6, 9};
+
+                public static void main(String[] args) throws Exception {
+                    if (first() != 4) {
+                        throw new AssertionError("direct");
+                    }
+                    java.lang.reflect.Field field =
+                        StaticArrayOriginalReflection.class.getDeclaredField("TABLE");
+                    field.setAccessible(true);
+                    if (field.get(null) != TABLE) {
+                        throw new AssertionError("reflection identity");
+                    }
+                    System.out.println("STATIC ARRAY ORIGINAL REFLECTION OK");
+                }
+
+                private static int first() {
+                    return TABLE[0];
+                }
+            }
+            """;
+    }
+
+    private byte[] staticArrayCondyAccessClassBytes() {
+        String owner = "StaticArrayCondyAccess";
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V11, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+        cw.visitField(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL,
+            "TABLE",
+            "[I",
+            null,
+            null
+        ).visitEnd();
+
+        emitDefaultConstructor(cw);
+        emitStaticIntTableClinit(cw, owner, new int[] {3, 5, 8});
+        emitStaticArrayCondyBootstrap(cw);
+
+        MethodVisitor mv = cw.visitMethod(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "main",
+            "([Ljava/lang/String;)V",
+            null,
+            new String[] {"java/lang/Throwable"}
+        );
+        mv.visitCode();
+        mv.visitFieldInsn(Opcodes.GETSTATIC, owner, "TABLE", "[I");
+        mv.visitInsn(Opcodes.ICONST_1);
+        mv.visitInsn(Opcodes.IALOAD);
+        mv.visitVarInsn(Opcodes.ISTORE, 1);
+
+        Handle bsm = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            owner,
+            "__neko_condy",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/Class;" +
+                "Ljava/lang/invoke/MethodType;)" +
+                "Ljava/lang/Object;",
+            false
+        );
+        mv.visitLdcInsn(new ConstantDynamic(
+            "TABLE",
+            "Ljava/lang/Object;",
+            bsm,
+            Type.getObjectType(owner),
+            Type.getMethodType("()[I")
+        ));
+        mv.visitVarInsn(Opcodes.ASTORE, 2);
+
+        Label nonNull = new Label();
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitJumpInsn(Opcodes.IFNONNULL, nonNull);
+        emitThrowAssertionError(mv, "condy null");
+        mv.visitLabel(nonNull);
+
+        Label directOk = new Label();
+        mv.visitVarInsn(Opcodes.ILOAD, 1);
+        mv.visitInsn(Opcodes.ICONST_5);
+        mv.visitJumpInsn(Opcodes.IF_ICMPEQ, directOk);
+        emitThrowAssertionError(mv, "direct value");
+        mv.visitLabel(directOk);
+
+        Label instanceOk = new Label();
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitTypeInsn(Opcodes.INSTANCEOF, "[I");
+        mv.visitJumpInsn(Opcodes.IFNE, instanceOk);
+        emitThrowAssertionError(mv, "condy type");
+        mv.visitLabel(instanceOk);
+
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, "[I");
+        mv.visitVarInsn(Opcodes.ASTORE, 2);
+
+        Label tableOk = new Label();
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitInsn(Opcodes.ICONST_2);
+        mv.visitInsn(Opcodes.IALOAD);
+        mv.visitIntInsn(Opcodes.BIPUSH, 8);
+        mv.visitJumpInsn(Opcodes.IF_ICMPEQ, tableOk);
+        emitThrowAssertionError(mv, "condy value");
+        mv.visitLabel(tableOk);
+
+        mv.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        mv.visitLdcInsn("STATIC ARRAY CONDY ACCESS OK");
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/io/PrintStream",
+            "println",
+            "(Ljava/lang/String;)V",
+            false
+        );
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
+    private byte[] staticArrayIndyProtocolAccessClassBytes() {
+        String owner = "StaticArrayIndyProtocolAccess";
+        ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+        cw.visit(Opcodes.V11, Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null);
+        cw.visitField(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL,
+            "TABLE",
+            "[I",
+            null,
+            null
+        ).visitEnd();
+
+        emitDefaultConstructor(cw);
+        emitStaticIntTableClinit(cw, owner, new int[] {3, 5, 8});
+        emitStaticArrayProtocolBootstrap(cw, owner);
+
+        MethodVisitor mv = cw.visitMethod(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "main",
+            "([Ljava/lang/String;)V",
+            null,
+            new String[] {"java/lang/Throwable"}
+        );
+        mv.visitCode();
+        mv.visitFieldInsn(Opcodes.GETSTATIC, owner, "TABLE", "[I");
+        mv.visitInsn(Opcodes.ICONST_1);
+        mv.visitInsn(Opcodes.IALOAD);
+        mv.visitVarInsn(Opcodes.ISTORE, 1);
+
+        Handle bsm = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            owner,
+            "__neko_bootstrap",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+                "Ljava/lang/Class;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+            false
+        );
+        mv.visitInvokeDynamicInsn(
+            "TABLE",
+            "()Ljava/lang/Object;",
+            bsm,
+            Type.getObjectType(owner),
+            Type.getMethodType("()[I")
+        );
+        mv.visitVarInsn(Opcodes.ASTORE, 2);
+
+        Label instanceOk = new Label();
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitTypeInsn(Opcodes.INSTANCEOF, "[I");
+        mv.visitJumpInsn(Opcodes.IFNE, instanceOk);
+        emitThrowAssertionError(mv, "indy protocol type");
+        mv.visitLabel(instanceOk);
+
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, "[I");
+        mv.visitVarInsn(Opcodes.ASTORE, 3);
+
+        Label directOk = new Label();
+        mv.visitVarInsn(Opcodes.ILOAD, 1);
+        mv.visitInsn(Opcodes.ICONST_5);
+        mv.visitJumpInsn(Opcodes.IF_ICMPEQ, directOk);
+        emitThrowAssertionError(mv, "direct value");
+        mv.visitLabel(directOk);
+
+        Label indyOk = new Label();
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitInsn(Opcodes.ICONST_2);
+        mv.visitInsn(Opcodes.IALOAD);
+        mv.visitIntInsn(Opcodes.BIPUSH, 8);
+        mv.visitJumpInsn(Opcodes.IF_ICMPEQ, indyOk);
+        emitThrowAssertionError(mv, "indy protocol value");
+        mv.visitLabel(indyOk);
+
+        mv.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;");
+        mv.visitLdcInsn("STATIC ARRAY INDY PROTOCOL OK");
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/io/PrintStream",
+            "println",
+            "(Ljava/lang/String;)V",
+            false
+        );
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+        cw.visitEnd();
+        return cw.toByteArray();
+    }
+
+    private void emitStaticArrayCondyBootstrap(ClassWriter cw) {
+        MethodVisitor mv = cw.visitMethod(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
+            "__neko_condy",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/Class;" +
+                "Ljava/lang/invoke/MethodType;)Ljava/lang/Object;",
+            null,
+            new String[] {"java/lang/Throwable"}
+        );
+        mv.visitCode();
+        emitNewIntArray(mv, new int[] {3, 5, 8});
+        mv.visitInsn(Opcodes.ARETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    private void emitStaticArrayProtocolBootstrap(ClassWriter cw, String owner) {
+        MethodVisitor mv = cw.visitMethod(
+            Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
+            "__neko_bootstrap",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+                "Ljava/lang/Class;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+            null,
+            new String[] {"java/lang/Throwable"}
+        );
+        mv.visitCode();
+        emitNewIntArray(mv, new int[] {3, 5, 8});
+        mv.visitVarInsn(Opcodes.ASTORE, 5);
+
+        mv.visitLdcInsn(Type.getType("Ljava/lang/Object;"));
+        mv.visitVarInsn(Opcodes.ALOAD, 5);
+        mv.visitMethodInsn(
+            Opcodes.INVOKESTATIC,
+            "java/lang/invoke/MethodHandles",
+            "constant",
+            "(Ljava/lang/Class;Ljava/lang/Object;)Ljava/lang/invoke/MethodHandle;",
+            false
+        );
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/invoke/MethodHandle",
+            "asType",
+            "(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;",
+            false
+        );
+        mv.visitVarInsn(Opcodes.ASTORE, 6);
+
+        mv.visitTypeInsn(Opcodes.NEW, "java/lang/invoke/ConstantCallSite");
+        mv.visitInsn(Opcodes.DUP);
+        mv.visitVarInsn(Opcodes.ALOAD, 6);
+        mv.visitMethodInsn(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/invoke/ConstantCallSite",
+            "<init>",
+            "(Ljava/lang/invoke/MethodHandle;)V",
+            false
+        );
+        mv.visitInsn(Opcodes.ARETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    private void emitDefaultConstructor(ClassWriter cw) {
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    private void emitStaticIntTableClinit(ClassWriter cw, String owner, int[] values) {
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null);
+        mv.visitCode();
+        emitNewIntArray(mv, values);
+        mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, "TABLE", "[I");
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    private void emitNewIntArray(MethodVisitor mv, int[] values) {
+        emitPushInt(mv, values.length);
+        mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_INT);
+        for (int i = 0; i < values.length; i++) {
+            mv.visitInsn(Opcodes.DUP);
+            emitPushInt(mv, i);
+            emitPushInt(mv, values[i]);
+            mv.visitInsn(Opcodes.IASTORE);
+        }
+    }
+
+    private void emitPushInt(MethodVisitor mv, int value) {
+        if (value >= -1 && value <= 5) {
+            mv.visitInsn(Opcodes.ICONST_0 + value);
+        } else if (value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE) {
+            mv.visitIntInsn(Opcodes.BIPUSH, value);
+        } else if (value >= Short.MIN_VALUE && value <= Short.MAX_VALUE) {
+            mv.visitIntInsn(Opcodes.SIPUSH, value);
+        } else {
+            mv.visitLdcInsn(value);
+        }
+    }
+
+    private void emitThrowAssertionError(MethodVisitor mv, String message) {
+        mv.visitTypeInsn(Opcodes.NEW, "java/lang/AssertionError");
+        mv.visitInsn(Opcodes.DUP);
+        mv.visitLdcInsn(message);
+        mv.visitMethodInsn(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/AssertionError",
+            "<init>",
+            "(Ljava/lang/Object;)V",
+            false
+        );
+        mv.visitInsn(Opcodes.ATHROW);
     }
 
     private String sourceText() {

@@ -12,6 +12,8 @@ import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
+import dev.nekoobfuscator.transforms.jvm.constants.JvmStaticArrayMaterial;
+import dev.nekoobfuscator.transforms.jvm.constants.JvmStaticArrayMaterial.PrimitiveArrayKind;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import java.util.Collections;
 import java.util.HashMap;
@@ -53,6 +55,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private static final int KIND_INVOKESTATIC = 6;
     private static final int KIND_INVOKEINTERFACE = 7;
     private static final int KIND_INVOKESPECIAL = 8;
+    private static final int KIND_GETSTATIC_ARRAY_MATERIAL = 9;
+    private static final int KIND_PUTSTATIC_ARRAY_MATERIAL = 10;
 
     private static final long OWNER_SEED = 0x494E44594F574E31L;
     private static final long NAME_SEED = 0x494E44594E414D31L;
@@ -72,6 +76,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private static final String CLASS = "java/lang/Class";
     private static final String LONG = "java/lang/Long";
     private static final String BOOLEAN = "java/lang/Boolean";
+    private static final String VOID = "java/lang/Void";
     private static final String CONCURRENT_HASH_MAP = "java/util/concurrent/ConcurrentHashMap";
 
     private static final String BSM_DESC =
@@ -87,6 +92,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private static final String HELPERS_KEY = "invokeDynamic.classHelpers";
     private static final String SHARED_HELPERS_KEY = "invokeDynamic.sharedHelpers";
     private static final String FLOW_TABLES_KEY = "invokeDynamic.flowSaltTables";
+    private static final String STATIC_ARRAY_MATERIAL_ELIGIBLE_KEY =
+        "invokeDynamic.staticPrimitiveArrayMaterial.eligible";
     private static final int INDY_CELL_DESCRIPTOR_SLOT = 0;
     private static final int INDY_CELL_SPAN_SHIFT = 0;
     private static final int INDY_CELL_STRIDE_SHIFT = 8;
@@ -100,6 +107,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private static final int INDY_RESOLVER_EPOCH_LOGICAL = 0;
     private static final int INDY_RESOLVER_SEED_LOGICAL = 1;
     private static final int INDY_RESOLVER_SALT_LOGICAL = 2;
+    private static final int INDY_ARRAY_MATERIAL_TABLE_LOGICAL = 3;
     private static final int FLOW_HELPER_DATA_WORD_LOCAL = 4;
     private static final int FLOW_HELPER_METHOD_KEY_LOCAL = 7;
 
@@ -130,6 +138,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
 
     @Override
     public void transformClass(TransformContext ctx) {
+        // Class-level helper setup is driven lazily from protected callsites.
     }
 
     @Override
@@ -194,6 +203,20 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             IndyResolverMaterialCell resolverSeedCell =
                 indyResolverMaterialCell(flowTable, flowTable.resolverCells().size(), siteSeed, salt, flow, state.methodKey());
             int resolverSeedSlot = registerIndyResolverSeed(pctx, flowTable, resolverSeedCell);
+            if (spec.kind() == KIND_GETSTATIC_ARRAY_MATERIAL && spec.staticArrayMaterial() != null) {
+                setIndyStaticArrayMaterial(
+                    pctx,
+                    flowTable,
+                    resolverSeedSlot,
+                    indyStaticArrayMaterialCell(
+                        spec.staticArrayMaterial(),
+                        resolverSeedSlot,
+                        siteSeed,
+                        salt,
+                        flow
+                    )
+                );
+            }
 
             boolean interfaceOwner = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
             InvokeDynamicInsnNode indy = new InvokeDynamicInsnNode(
@@ -349,7 +372,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             if (kind == 0) return null;
             String receiverOwner = kind == KIND_INVOKESPECIAL ? caller.name() : call.owner;
             String indyDesc = methodIndyDescriptor(receiverOwner, call.desc, kind == KIND_INVOKESTATIC);
-            return new SiteSpec(kind, call.owner, call.name, call.desc, indyDesc);
+            return new SiteSpec(kind, call.owner, call.name, call.desc, indyDesc, null);
         }
         if (insn instanceof FieldInsnNode field) {
             if (TransformGuards.isRuntimeClass(field.owner) || TransformGuards.isGeneratedName(field.name)) return null;
@@ -361,8 +384,23 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                 default -> 0;
             };
             if (kind == 0) return null;
+            JvmStaticArrayMaterial.Material staticArrayMaterial =
+                staticArrayMaterialForField(pctx, field, kind);
+            if (staticArrayMaterial != null) {
+                int materialKind = kind == KIND_GETSTATIC
+                    ? KIND_GETSTATIC_ARRAY_MATERIAL
+                    : KIND_PUTSTATIC_ARRAY_MATERIAL;
+                return new SiteSpec(
+                    materialKind,
+                    field.owner,
+                    field.name,
+                    "()" + field.desc,
+                    fieldIndyDescriptor(field, kind),
+                    staticArrayMaterial
+                );
+            }
             makeWritableFinalStoreTarget(pctx, field, kind);
-            return new SiteSpec(kind, field.owner, field.name, "()" + field.desc, fieldIndyDescriptor(field, kind));
+            return new SiteSpec(kind, field.owner, field.name, "()" + field.desc, fieldIndyDescriptor(field, kind), null);
         }
         return null;
     }
@@ -390,6 +428,117 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             }
         }
         return false;
+    }
+
+    private JvmStaticArrayMaterial.Material staticArrayMaterialForField(
+        PipelineContext pctx,
+        FieldInsnNode field,
+        int kind
+    ) {
+        if (kind != KIND_GETSTATIC && kind != KIND_PUTSTATIC) return null;
+        PrimitiveArrayKind arrayKind = PrimitiveArrayKind.fromDescriptor(field.desc);
+        if (arrayKind == null) return null;
+        String key = JvmStaticArrayMaterial.key(field.owner, field.name, field.desc);
+        if (!eligibleStaticArrayMaterials(pctx).contains(key)) return null;
+        return JvmStaticArrayMaterial.materials(pctx).get(key);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Set<String> eligibleStaticArrayMaterials(PipelineContext pctx) {
+        Set<String> eligible = pctx.getPassData(STATIC_ARRAY_MATERIAL_ELIGIBLE_KEY);
+        if (eligible != null) return eligible;
+        eligible = new java.util.LinkedHashSet<>();
+        Map<String, JvmStaticArrayMaterial.Material> materials = JvmStaticArrayMaterial.materials(pctx);
+        for (JvmStaticArrayMaterial.Material material : materials.values()) {
+            if (isEligibleStaticArrayMaterial(pctx, material)) {
+                eligible.add(material.key());
+            }
+        }
+        pctx.putPassData(STATIC_ARRAY_MATERIAL_ELIGIBLE_KEY, eligible);
+        return eligible;
+    }
+
+    private boolean isEligibleStaticArrayMaterial(
+        PipelineContext pctx,
+        JvmStaticArrayMaterial.Material material
+    ) {
+        L1Class owner = pctx.classMap().get(material.owner());
+        if (owner == null || TransformGuards.isRuntimeClass(owner)) return false;
+        if (JvmStaticArrayMaterial.hasOriginalFieldReflection(pctx) ||
+            JvmStaticArrayMaterial.hasOriginalDynamicFieldAccess(pctx)) {
+            return false;
+        }
+        FieldNode field = findField(owner, material.name(), material.desc());
+        if (field == null) return false;
+        if ((field.access & Opcodes.ACC_PRIVATE) == 0 || (field.access & Opcodes.ACC_STATIC) == 0) {
+            return false;
+        }
+        JvmStaticArrayMaterial.UseSummary originalUses =
+            JvmStaticArrayMaterial.useSummaries(pctx).get(material.key());
+        if (originalUses == null ||
+            originalUses.unsafe() ||
+            originalUses.gets() <= 0 ||
+            originalUses.puts() != 1) {
+            return false;
+        }
+
+        int gets = 0;
+        int puts = 0;
+        for (L1Class clazz : pctx.classMap().values()) {
+            if (TransformGuards.isRuntimeClass(clazz)) continue;
+            for (L1Method method : clazz.methods()) {
+                if (!method.hasCode() || TransformGuards.isGeneratedMethod(method)) continue;
+                MethodNode mn = method.asmNode();
+                if (mn.instructions == null) continue;
+                for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof FieldInsnNode fieldInsn) ||
+                        !material.owner().equals(fieldInsn.owner) ||
+                        !material.name().equals(fieldInsn.name) ||
+                        !material.desc().equals(fieldInsn.desc)) {
+                        continue;
+                    }
+                    if (!material.owner().equals(clazz.name())) {
+                        return false;
+                    }
+                    int opcode = fieldInsn.getOpcode();
+                    if (opcode == Opcodes.GETSTATIC) {
+                        gets++;
+                    } else if (opcode == Opcodes.PUTSTATIC) {
+                        if (!material.owner().equals(clazz.name()) ||
+                            !"<clinit>".equals(method.name()) ||
+                            !"()V".equals(method.descriptor())) {
+                            return false;
+                        }
+                        puts++;
+                    } else {
+                        return false;
+                    }
+                    if (!isProtectedApplicationInstruction(pctx, clazz, method, insn)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return gets == originalUses.gets() && puts == originalUses.puts();
+    }
+
+    private FieldNode findField(L1Class clazz, String name, String desc) {
+        for (FieldNode field : clazz.asmNode().fields) {
+            if (field.name.equals(name) && field.desc.equals(desc)) return field;
+        }
+        return null;
+    }
+
+    private boolean isProtectedApplicationInstruction(
+        PipelineContext pctx,
+        L1Class clazz,
+        L1Method method,
+        AbstractInsnNode insn
+    ) {
+        String methodKey = JvmKeyDispatchPass.coverageKey(clazz, method);
+        ControlFlowFlatteningPass.CffMethodMetadata metadata =
+            ControlFlowFlatteningPass.methodMetadata(pctx).get(methodKey);
+        return metadata != null && metadata.applicationInstructions().contains(insn);
     }
 
     private void makeWritableFinalStoreTarget(PipelineContext pctx, FieldInsnNode field, int kind) {
@@ -505,6 +654,16 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         String resolver = uniqueMethodName(clazz, "__neko_indy_resolve");
         String bootstrapCore = uniqueMethodName(clazz, "__neko_indy_core");
         String bootstrap = uniqueMethodName(clazz, "__neko_indy_bsm");
+        StaticArrayHelperNames arrayHelpers = new StaticArrayHelperNames(
+            uniqueMethodName(clazz, "__neko_indy_arr_z"),
+            uniqueMethodName(clazz, "__neko_indy_arr_b"),
+            uniqueMethodName(clazz, "__neko_indy_arr_c"),
+            uniqueMethodName(clazz, "__neko_indy_arr_s"),
+            uniqueMethodName(clazz, "__neko_indy_arr_i"),
+            uniqueMethodName(clazz, "__neko_indy_arr_j"),
+            uniqueMethodName(clazz, "__neko_indy_arr_f"),
+            uniqueMethodName(clazz, "__neko_indy_arr_d")
+        );
         int access = Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         clazz.asmNode().methods.add(emitBootstrapTrampoline(
             bootstrap,
@@ -525,8 +684,25 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             clazz.name(),
             guard,
             interfaceOwner,
+            arrayHelpers,
             access
         ));
+        clazz.asmNode().methods.add(emitStaticArrayMaterialHelper(
+            arrayHelpers.booleanHelper(), PrimitiveArrayKind.BOOLEAN, access));
+        clazz.asmNode().methods.add(emitStaticArrayMaterialHelper(
+            arrayHelpers.byteHelper(), PrimitiveArrayKind.BYTE, access));
+        clazz.asmNode().methods.add(emitStaticArrayMaterialHelper(
+            arrayHelpers.charHelper(), PrimitiveArrayKind.CHAR, access));
+        clazz.asmNode().methods.add(emitStaticArrayMaterialHelper(
+            arrayHelpers.shortHelper(), PrimitiveArrayKind.SHORT, access));
+        clazz.asmNode().methods.add(emitStaticArrayMaterialHelper(
+            arrayHelpers.intHelper(), PrimitiveArrayKind.INT, access));
+        clazz.asmNode().methods.add(emitStaticArrayMaterialHelper(
+            arrayHelpers.longHelper(), PrimitiveArrayKind.LONG, access));
+        clazz.asmNode().methods.add(emitStaticArrayMaterialHelper(
+            arrayHelpers.floatHelper(), PrimitiveArrayKind.FLOAT, access));
+        clazz.asmNode().methods.add(emitStaticArrayMaterialHelper(
+            arrayHelpers.doubleHelper(), PrimitiveArrayKind.DOUBLE, access));
         clazz.asmNode().methods.add(emitGuard(guard, access));
         clazz.asmNode().methods.add(emitFlow(flow, classKeyMask, access));
         publishGeneratedIndyHelperFlowKey(pctx, clazz.name(), resolver, RESOLVER_DESC, RESOLVER_FLOW_LOCAL);
@@ -534,7 +710,21 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         installInjectedStackTraceFilter(
             pctx,
             clazz.name(),
-            List.of(bootstrap, bootstrapCore, resolver, flow, guard)
+            List.of(
+                bootstrap,
+                bootstrapCore,
+                resolver,
+                flow,
+                guard,
+                arrayHelpers.booleanHelper(),
+                arrayHelpers.byteHelper(),
+                arrayHelpers.charHelper(),
+                arrayHelpers.shortHelper(),
+                arrayHelpers.intHelper(),
+                arrayHelpers.longHelper(),
+                arrayHelpers.floatHelper(),
+                arrayHelpers.doubleHelper()
+            )
         );
         SharedHelperNames created = new SharedHelperNames(
             clazz.name(),
@@ -613,6 +803,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             helper,
             new java.util.ArrayList<>(),
             new java.util.ArrayList<>(),
+            new java.util.ArrayList<>(),
             initStart,
             initEnd
         );
@@ -638,7 +829,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         InsnList insns = new InsnList();
         boolean directClinit = "<clinit>".equals(table.initHelper().name);
         int tableLocal = directClinit ? table.initHelper().maxLocals : 0;
-        JvmPassBytecode.pushInt(insns, 3);
+        JvmPassBytecode.pushInt(insns, 4);
         insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, OBJECT));
         insns.add(new VarInsnNode(Opcodes.ASTORE, tableLocal));
         insns.add(new FieldInsnNode(Opcodes.GETSTATIC, table.owner(), table.fieldName(), OBJECT_ARRAY_DESC));
@@ -694,6 +885,22 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             insns.add(new TypeInsnNode(Opcodes.NEW, OBJECT));
             insns.add(new InsnNode(Opcodes.DUP));
             insns.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, OBJECT, "<init>", "()V", false));
+            insns.add(new InsnNode(Opcodes.AASTORE));
+        }
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, tableLocal));
+        JvmPassBytecode.pushInt(insns, INDY_ARRAY_MATERIAL_TABLE_LOGICAL);
+        JvmPassBytecode.pushInt(insns, table.arrayCells().size());
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, OBJECT));
+        for (int i = 0; i < table.arrayCells().size(); i++) {
+            insns.add(new InsnNode(Opcodes.DUP));
+            JvmPassBytecode.pushInt(insns, i);
+            IndyStaticArrayMaterialCell cell = table.arrayCells().get(i);
+            if (cell == null) {
+                insns.add(new InsnNode(Opcodes.ACONST_NULL));
+            } else {
+                emitLongArray(insns, cell.encoded());
+            }
             insns.add(new InsnNode(Opcodes.AASTORE));
         }
         insns.add(new InsnNode(Opcodes.AASTORE));
@@ -799,8 +1006,22 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     ) {
         int slot = table.resolverCells().size();
         table.resolverCells().add(cell);
+        table.arrayCells().add(null);
         rebuildIndyFlowTableInit(pctx, table);
         return slot;
+    }
+
+    private void setIndyStaticArrayMaterial(
+        PipelineContext pctx,
+        IndyFlowTable table,
+        int slot,
+        IndyStaticArrayMaterialCell cell
+    ) {
+        while (table.arrayCells().size() <= slot) {
+            table.arrayCells().add(null);
+        }
+        table.arrayCells().set(slot, cell);
+        rebuildIndyFlowTableInit(pctx, table);
     }
 
     private IndyResolverMaterialCell indyResolverMaterialCell(
@@ -837,6 +1058,64 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             salt ^ indyResolverSeedMask(slot, descriptor, epoch, flow, helperKey, 0x494E44595253414CL)
         );
         return new IndyResolverMaterialCell(descriptor, encoded);
+    }
+
+    private IndyStaticArrayMaterialCell indyStaticArrayMaterialCell(
+        JvmStaticArrayMaterial.Material material,
+        int slot,
+        long siteSeed,
+        long salt,
+        long flow
+    ) {
+        long[] values = material.values();
+        long[] encoded = new long[values.length + 1];
+        encoded[0] = values.length;
+        for (int i = 0; i < values.length; i++) {
+            encoded[i + 1] = values[i] ^ staticArrayMaterialMask(
+                siteSeed,
+                salt,
+                flow,
+                i,
+                values.length,
+                material.kind()
+            ) ^ slot;
+        }
+        return new IndyStaticArrayMaterialCell(encoded);
+    }
+
+    private static long staticArrayMaterialMask(
+        long seed,
+        long salt,
+        long flow,
+        int index,
+        int length,
+        PrimitiveArrayKind kind
+    ) {
+        long value = seed
+            ^ Long.rotateLeft(salt + ((long) index * 0x9E3779B97F4A7C15L), 17)
+            ^ flow
+            ^ (((long) index) << 32)
+            ^ length
+            ^ staticArrayMaterialDomain(kind);
+        value ^= value >>> 33;
+        value *= 0xff51afd7ed558ccdl;
+        value ^= value >>> 33;
+        value *= 0xc4ceb9fe1a85ec53L;
+        value ^= value >>> 33;
+        return value;
+    }
+
+    private static long staticArrayMaterialDomain(PrimitiveArrayKind kind) {
+        return switch (kind) {
+            case BOOLEAN -> 0x4152524D5A424F4FL;
+            case BYTE -> 0x4152524D5A425954L;
+            case CHAR -> 0x4152524D5A434852L;
+            case SHORT -> 0x4152524D5A534852L;
+            case INT -> 0x4152524D5A494E54L;
+            case LONG -> 0x4152524D5A4C4F4EL;
+            case FLOAT -> 0x4152524D5A464C54L;
+            case DOUBLE -> 0x4152524D5A44424CL;
+        };
     }
 
     private long indyResolverSeedInitialEpoch(IndyFlowTable table, int slot, long descriptor) {
@@ -1681,6 +1960,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         String guardOwner,
         String guardName,
         boolean guardInterfaceOwner,
+        StaticArrayHelperNames arrayHelpers,
         int access
     ) {
         MethodNode mn = new MethodNode(
@@ -1811,15 +2091,21 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         LabelNode statik = new LabelNode();
         LabelNode iface = new LabelNode();
         LabelNode special = new LabelNode();
+        LabelNode getStaticArrayMaterial = new LabelNode();
+        LabelNode putStaticArrayMaterial = new LabelNode();
         LabelNode badKind = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, kindLocal));
         insns.add(new LookupSwitchInsnNode(
             badKind,
             new int[] {
                 KIND_GETFIELD, KIND_PUTFIELD, KIND_GETSTATIC, KIND_PUTSTATIC,
-                KIND_INVOKEVIRTUAL, KIND_INVOKESTATIC, KIND_INVOKEINTERFACE, KIND_INVOKESPECIAL
+                KIND_INVOKEVIRTUAL, KIND_INVOKESTATIC, KIND_INVOKEINTERFACE, KIND_INVOKESPECIAL,
+                KIND_GETSTATIC_ARRAY_MATERIAL, KIND_PUTSTATIC_ARRAY_MATERIAL
             },
-            new LabelNode[] {getField, putField, getStatic, putStatic, virtual, statik, iface, special}
+            new LabelNode[] {
+                getField, putField, getStatic, putStatic, virtual, statik, iface, special,
+                getStaticArrayMaterial, putStaticArrayMaterial
+            }
         ));
 
         insns.add(getField);
@@ -1860,6 +2146,27 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(special);
         emitFindMethod(insns, "findSpecial", classLocal, nameLocal, typeLocal, true);
         insns.add(new VarInsnNode(Opcodes.ASTORE, handleLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, afterResolve));
+
+        insns.add(getStaticArrayMaterial);
+        emitStaticArrayMaterialGetter(
+            insns,
+            guardOwner,
+            guardInterfaceOwner,
+            arrayHelpers,
+            descLocal,
+            carrierLocal,
+            resolverSlotLocal,
+            seedLocal,
+            saltLocal,
+            flowLocal,
+            handleLocal,
+            badKind
+        );
+        insns.add(new JumpInsnNode(Opcodes.GOTO, afterResolve));
+
+        insns.add(putStaticArrayMaterial);
+        emitStaticArrayMaterialPutNoop(insns, typeLocal, handleLocal);
         insns.add(new JumpInsnNode(Opcodes.GOTO, afterResolve));
 
         insns.add(badKind);
@@ -2066,6 +2373,317 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         ));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, arrayType));
         insns.add(new VarInsnNode(Opcodes.ASTORE, resultLocal));
+    }
+
+    private void emitStaticArrayMaterialGetter(
+        InsnList insns,
+        String helperOwner,
+        boolean helperInterfaceOwner,
+        StaticArrayHelperNames helpers,
+        int descLocal,
+        int carrierLocal,
+        int resolverSlotLocal,
+        int seedLocal,
+        int saltLocal,
+        int flowLocal,
+        int handleLocal,
+        LabelNode badKind
+    ) {
+        LabelNode done = new LabelNode();
+        emitStaticArrayMaterialGetterBranch(
+            insns, "()[Z", helperOwner, helpers.booleanHelper(), "[Z", helperInterfaceOwner,
+            descLocal, carrierLocal, resolverSlotLocal, seedLocal, saltLocal, flowLocal, handleLocal, done);
+        emitStaticArrayMaterialGetterBranch(
+            insns, "()[B", helperOwner, helpers.byteHelper(), "[B", helperInterfaceOwner,
+            descLocal, carrierLocal, resolverSlotLocal, seedLocal, saltLocal, flowLocal, handleLocal, done);
+        emitStaticArrayMaterialGetterBranch(
+            insns, "()[C", helperOwner, helpers.charHelper(), "[C", helperInterfaceOwner,
+            descLocal, carrierLocal, resolverSlotLocal, seedLocal, saltLocal, flowLocal, handleLocal, done);
+        emitStaticArrayMaterialGetterBranch(
+            insns, "()[S", helperOwner, helpers.shortHelper(), "[S", helperInterfaceOwner,
+            descLocal, carrierLocal, resolverSlotLocal, seedLocal, saltLocal, flowLocal, handleLocal, done);
+        emitStaticArrayMaterialGetterBranch(
+            insns, "()[I", helperOwner, helpers.intHelper(), "[I", helperInterfaceOwner,
+            descLocal, carrierLocal, resolverSlotLocal, seedLocal, saltLocal, flowLocal, handleLocal, done);
+        emitStaticArrayMaterialGetterBranch(
+            insns, "()[J", helperOwner, helpers.longHelper(), "[J", helperInterfaceOwner,
+            descLocal, carrierLocal, resolverSlotLocal, seedLocal, saltLocal, flowLocal, handleLocal, done);
+        emitStaticArrayMaterialGetterBranch(
+            insns, "()[F", helperOwner, helpers.floatHelper(), "[F", helperInterfaceOwner,
+            descLocal, carrierLocal, resolverSlotLocal, seedLocal, saltLocal, flowLocal, handleLocal, done);
+        emitStaticArrayMaterialGetterBranch(
+            insns, "()[D", helperOwner, helpers.doubleHelper(), "[D", helperInterfaceOwner,
+            descLocal, carrierLocal, resolverSlotLocal, seedLocal, saltLocal, flowLocal, handleLocal, done);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, badKind));
+        insns.add(done);
+    }
+
+    private void emitStaticArrayMaterialGetterBranch(
+        InsnList insns,
+        String expectedDesc,
+        String helperOwner,
+        String helperName,
+        String returnDesc,
+        boolean helperInterfaceOwner,
+        int descLocal,
+        int carrierLocal,
+        int resolverSlotLocal,
+        int seedLocal,
+        int saltLocal,
+        int flowLocal,
+        int handleLocal,
+        LabelNode done
+    ) {
+        LabelNode next = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ALOAD, descLocal));
+        insns.add(new LdcInsnNode(expectedDesc));
+        insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals",
+            "(Ljava/lang/Object;)Z", false));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, next));
+        insns.add(new LdcInsnNode(new Handle(
+            Opcodes.H_INVOKESTATIC,
+            helperOwner,
+            helperName,
+            "(Ljava/lang/Object;IJJJ)" + returnDesc,
+            helperInterfaceOwner
+        )));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, OBJECT));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, resolverSlotLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf",
+            "(I)Ljava/lang/Integer;", false));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 2);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, LONG, "valueOf", "(J)Ljava/lang/Long;", false));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 3);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, saltLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, LONG, "valueOf", "(J)Ljava/lang/Long;", false));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 4);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, LONG, "valueOf", "(J)Ljava/lang/Long;", false));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, METHOD_HANDLES, "insertArguments",
+            "(Ljava/lang/invoke/MethodHandle;I[Ljava/lang/Object;)Ljava/lang/invoke/MethodHandle;", false));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, handleLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(next);
+    }
+
+    private void emitStaticArrayMaterialPutNoop(InsnList insns, int typeLocal, int handleLocal) {
+        insns.add(new FieldInsnNode(Opcodes.GETSTATIC, VOID, "TYPE", "Ljava/lang/Class;"));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, typeLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, METHOD_TYPE, "returnType",
+            "()Ljava/lang/Class;", false));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, METHOD_TYPE, "methodType",
+            "(Ljava/lang/Class;Ljava/lang/Class;)Ljava/lang/invoke/MethodType;", false));
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, METHOD_HANDLES, "empty",
+            "(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;", false));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, handleLocal));
+    }
+
+    private MethodNode emitStaticArrayMaterialHelper(
+        String name,
+        PrimitiveArrayKind kind,
+        int access
+    ) {
+        MethodNode mn = new MethodNode(
+            access,
+            name,
+            "(Ljava/lang/Object;IJJJ)" + kind.descriptor(),
+            null,
+            null
+        );
+        InsnList insns = mn.instructions;
+        int carrierLocal = 0;
+        int slotLocal = 1;
+        int seedLocal = 2;
+        int saltLocal = 4;
+        int flowLocal = 6;
+        int tableLocal = 8;
+        int arraysLocal = 9;
+        int cellLocal = 10;
+        int lengthLocal = 11;
+        int outputLocal = 12;
+        int indexLocal = 13;
+        int valueLocal = 14;
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, OBJECT_ARRAY_DESC));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.INDY_MATERIAL_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, OBJECT_ARRAY_DESC));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, tableLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, tableLocal));
+        JvmPassBytecode.pushInt(insns, INDY_ARRAY_MATERIAL_TABLE_LOGICAL);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, OBJECT_ARRAY_DESC));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, arraysLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, arraysLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, slotLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[J"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, cellLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cellLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.LALOAD));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lengthLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
+        insns.add(new IntInsnNode(Opcodes.NEWARRAY, kind.newArrayOperand()));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, outputLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+
+        LabelNode loop = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, done));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, cellLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.LALOAD));
+        emitStaticArrayMaterialMask(
+            insns,
+            seedLocal,
+            saltLocal,
+            flowLocal,
+            slotLocal,
+            indexLocal,
+            lengthLocal,
+            kind
+        );
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, slotLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, valueLocal));
+        emitStaticArrayElementStore(insns, kind, outputLocal, indexLocal, valueLocal);
+        insns.add(new IincInsnNode(indexLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        insns.add(done);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, outputLocal));
+        insns.add(new InsnNode(Opcodes.ARETURN));
+        mn.maxStack = 12;
+        mn.maxLocals = 16;
+        return mn;
+    }
+
+    private void emitStaticArrayMaterialMask(
+        InsnList insns,
+        int seedLocal,
+        int saltLocal,
+        int flowLocal,
+        int slotLocal,
+        int indexLocal,
+        int lengthLocal,
+        PrimitiveArrayKind kind
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, saltLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0x9E3779B97F4A7C15L);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.LADD));
+        JvmPassBytecode.pushInt(insns, 17);
+        insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, LONG, "rotateLeft", "(JI)J", false));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LSHL));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lengthLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, staticArrayMaterialDomain(kind));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitInlineLongMix(insns);
+    }
+
+    private void emitStaticArrayElementStore(
+        InsnList insns,
+        PrimitiveArrayKind kind,
+        int outputLocal,
+        int indexLocal,
+        int valueLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, outputLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        switch (kind) {
+            case BOOLEAN -> {
+                insns.add(new InsnNode(Opcodes.L2I));
+                insns.add(new InsnNode(Opcodes.ICONST_1));
+                insns.add(new InsnNode(Opcodes.IAND));
+                insns.add(new InsnNode(Opcodes.BASTORE));
+            }
+            case BYTE -> {
+                insns.add(new InsnNode(Opcodes.L2I));
+                insns.add(new InsnNode(Opcodes.BASTORE));
+            }
+            case CHAR -> {
+                insns.add(new InsnNode(Opcodes.L2I));
+                insns.add(new InsnNode(Opcodes.CASTORE));
+            }
+            case SHORT -> {
+                insns.add(new InsnNode(Opcodes.L2I));
+                insns.add(new InsnNode(Opcodes.SASTORE));
+            }
+            case INT -> {
+                insns.add(new InsnNode(Opcodes.L2I));
+                insns.add(new InsnNode(Opcodes.IASTORE));
+            }
+            case LONG -> insns.add(new InsnNode(Opcodes.LASTORE));
+            case FLOAT -> {
+                insns.add(new InsnNode(Opcodes.L2I));
+                insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Float", "intBitsToFloat",
+                    "(I)F", false));
+                insns.add(new InsnNode(Opcodes.FASTORE));
+            }
+            case DOUBLE -> {
+                insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Double", "longBitsToDouble",
+                    "(J)D", false));
+                insns.add(new InsnNode(Opcodes.DASTORE));
+            }
+        }
+    }
+
+    private void emitInlineLongMix(InsnList insns) {
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 33);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xff51afd7ed558ccdl);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 33);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xc4ceb9fe1a85ec53L);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 33);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
     }
 
     private void emitAdaptTarget(InsnList insns, int handleLocal) {
@@ -3615,12 +4233,24 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         boolean guardInterfaceOwner
     ) {}
 
+    private record StaticArrayHelperNames(
+        String booleanHelper,
+        String byteHelper,
+        String charHelper,
+        String shortHelper,
+        String intHelper,
+        String longHelper,
+        String floatHelper,
+        String doubleHelper
+    ) {}
+
     private record IndyFlowTable(
         String owner,
         String fieldName,
         MethodNode initHelper,
         List<IndyFlowMaterialCell> cells,
         List<IndyResolverMaterialCell> resolverCells,
+        List<IndyStaticArrayMaterialCell> arrayCells,
         LabelNode initStart,
         LabelNode initEnd
     ) {}
@@ -3629,5 +4259,14 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
 
     private record IndyResolverMaterialCell(long descriptor, long[] encoded) {}
 
-    private record SiteSpec(int kind, String owner, String name, String desc, String indyDesc) {}
+    private record IndyStaticArrayMaterialCell(long[] encoded) {}
+
+    private record SiteSpec(
+        int kind,
+        String owner,
+        String name,
+        String desc,
+        String indyDesc,
+        JvmStaticArrayMaterial.Material staticArrayMaterial
+    ) {}
 }

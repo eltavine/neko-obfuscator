@@ -184,7 +184,7 @@ This plan will refresh that evidence before changing CFF performance code.
   Second plan-intake review `019e6c88-380b-7393-b355-f9da9972e492` returned
   PASS with no required fixes.
 
-### [ ] JCP-1: Replace Reflectable Static Primitive Tables With Protected Material
+### [x] JCP-1: Replace Reflectable Static Primitive Tables With Protected Material
 
 - Scope: generically transform eligible application-owned static primitive
   array tables that are initialized from constants and only read by protected
@@ -194,13 +194,119 @@ This plan will refresh that evidence before changing CFF performance code.
   have no non-`<clinit>` writes and no unrewritable external application uses;
   source-path evidence showing where array literal material currently bypasses
   field-level protection.
+- Fresh source-path evidence: `JvmConstantObfuscationPass` only protects
+  inline primitive array construction and scalar `ConstantValue` fields. The
+  CTF tables are static primitive array fields; after CFF, `invokeDynamic`
+  rewrites their `PUTSTATIC` / `GETSTATIC` instructions into field callsites,
+  but the backing fields still receive decoded arrays. Runtime reflection
+  therefore reads the field value directly and bypasses the indy/CFF access
+  path.
+- Fresh field-use census: the original `Vault` tables are initialized only in
+  `<clinit>` from primitive array literals. `MASK`, `CHECK`, and
+  `ENCRYPTED_FLAG` are consumed by element reads or `arraylength`; `SALT` is
+  consumed by element reads and the JDK `MessageDigest.update(byte[])`
+  read-only array consumer. No non-`<clinit>` `PUTSTATIC`, identity-sensitive
+  use, monitor use, return, local alias escape, or original application field
+  reflection path was observed for those tables. The observed full-obf `a.c`
+  `<clinit>` has exactly four static primitive array stores routed through indy
+  field setter sites, and application reads are routed through protected indy
+  getter sites.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
   plus regenerating `ctf-obf.jar` with `test-jars/full-jvm-obf.yml`.
-- Completion criteria: regenerated `ctf-obf.jar` runs internally, reflection
-  no longer dumps plaintext `int[]` / `byte[]` challenge tables, `javap -p a.c`
-  no longer exposes those plaintext primitive-array fields, and no fallback or
-  original-bytecode path is introduced.
+- Completion criteria: obfuscated static-array regression fixtures run with the
+  same keyDispatch+CFF+indy+constant transform set; regenerated `ctf-obf.jar`
+  class initialization succeeds; reflection no longer dumps plaintext
+  `int[]` / `byte[]` challenge tables; `javap -p a.c` may still list the
+  private JVM fields, but those fields must not store plaintext table values;
+  no fallback or original-bytecode path is introduced.
+- Failed review evidence: subagent review
+  `019e6c9d-b896-7000-a897-f46b5f1d2073` rejected the first implementation
+  because it materialized fresh arrays for every eligible `GETSTATIC`, marked
+  original fields synthetic, and lacked unsafe-reference regression coverage.
+  Subagent review `019e6cab-722d-7852-8af6-260a4d92a996` rejected the revised
+  implementation because the eligibility proof still scanned mutable
+  post-indy bytecode for field reflection and did not account for original
+  MethodHandle, VarHandle, or field-handle constant dynamic access. Subagent
+  review `019e6cb2-933f-7c10-979d-75740ea976d9` rejected the next revision
+  because non-handle `ConstantDynamic` and custom invokedynamic bootstrap
+  protocols can carry owner/name/type field-resolution material without an ASM
+  field `Handle`; materializing the field in that case would make the true
+  backing field null while the original dynamic protocol still resolves it.
+  Subagent review `019e6cc0-ba23-7422-a2cd-d199cfdedbf9` rejected the
+  follow-up because the guard considered bootstrap arguments but not
+  `ConstantDynamic.getName()` or `InvokeDynamicInsnNode.name`, and because it
+  only recognized `ConstantBootstraps.getStaticFinal` rather than the JDK field
+  VarHandle bootstraps. Subagent review
+  `019e6cc6-b546-7260-bf48-70d9df17552b` rejected the next revision because
+  ASM `Type.METHOD` bootstrap arguments can carry primitive-array types in
+  method descriptors such as `()[I`, while the guard only recognized direct
+  ASM `Type.ARRAY` arguments. Subagent review
+  `019e6cca-5c7f-7981-b0b9-10bdbd9e08e9` rejected the next revision because
+  `MethodHandles.Lookup.unreflectGetter(Field)`,
+  `unreflectSetter(Field)`, and `unreflectVarHandle(Field)` are MethodHandle
+  field-access paths that can receive a `Field` from outside the transformed
+  application without any original `Class.getDeclaredField` bytecode in the
+  application itself.
+- Implementation evidence: CFF now records original static primitive array
+  literal material and a pre-CFF use census before CFF creates helper methods
+  or destroys the initializer and use patterns. InvokeDynamic only treats
+  private static primitive array fields as protected material when the original
+  census proves read-only, non-escaping, non-identity-sensitive use; original
+  application field reflection, MethodHandle field lookup, VarHandle field
+  lookup/use, or primitive-array field handle constants disable this
+  materialization path before invokeDynamic mutates calls. Getter callsites
+  decode per-callsite encrypted material from the indy/CFF carrier, while
+  initializer setter callsites consume the decoded literal with a no-op target
+  so the backing field never stores the plaintext array. Original fields are
+  not marked synthetic.
+- Fresh validation evidence:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  passed on 2026-05-28, including fixtures for read-only table materialization,
+  `MessageDigest.update(byte[])` table consumption, and unsafe array reference
+  semantics, plus MethodHandle/VarHandle dynamic field access and original
+  reflection guards recorded before indy mutation. Regenerated
+  `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar` with
+  `test-jars/full-jvm-obf.yml`; `ReflectDump a.c` now reports `d=null`,
+  `a=null`, `e=null`, and `b=null` instead of the plaintext challenge arrays.
+  `javap -p a.c` still lists the private static array field symbols, but the
+  runtime field values are not plaintext arrays. The stale copied-key
+  `CallCore` wrapper now fails with `ArrayIndexOutOfBoundsException`, so it is
+  no longer a valid internal-run proof and is recorded only as a direct-entry
+  negative observation. After the third review failure, the original dynamic
+  access guard was extended to treat non-handle `ConstantDynamic` bootstrap
+  arguments and custom invokedynamic bootstrap arguments that carry field-name
+  strings plus primitive-array type material as unsafe dynamic field protocols.
+  The validation command above passed again on 2026-05-28, including new ASM
+  fixtures for `ConstantDynamic` and custom invokedynamic field protocols whose
+  callsite descriptors do not expose primitive-array types. After the fourth
+  review failure, the guard was extended again so `ConstantDynamic.getName()`
+  and `InvokeDynamicInsnNode.name` are treated as possible field-name carriers
+  when paired with primitive-array type material, and
+  `ConstantBootstraps.fieldVarHandle` / `staticFieldVarHandle` are recognized
+  as field-resolving bootstraps. The ASM fixtures now carry the field name only
+  in the condy/indy name while bootstrap arguments carry owner/type material.
+  The validation command above passed again on 2026-05-28 after that change.
+  After the fifth review failure, the primitive-array type detector was
+  extended to recurse into ASM method types and inspect return and argument
+  descriptors. The name-carried condy/indy fixtures now use
+  `Type.getMethodType("()[I")` as the only primitive-array type carrier. The
+  validation command above passed again on 2026-05-28 after that MethodType
+  change. After the sixth review failure, the original dynamic access guard was
+  extended to reject `Lookup.unreflectGetter`, `Lookup.unreflectSetter`, and
+  `Lookup.unreflectVarHandle`. A regression fixture now obtains a `Field` from
+  a non-input provider class and the transformed application bytecode only uses
+  the `unreflect*` APIs, proving this path is not accidentally covered by the
+  original field-reflection guard. The validation command above passed again on
+  2026-05-28 after that unreflect change. A freshly regenerated
+  `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar` initializes successfully for
+  reflection audit; `ReflectDump a.c` reports `d=null`, `a=null`, `e=null`,
+  and `b=null`, while `javap -p a.c` still lists only the private field
+  symbols. Final JCP-1 review `019e6ccf-7c0f-7260-b704-0248652b553b`
+  returned PASS and noted only a non-blocking coverage tradeoff: the dynamic
+  access guard is intentionally class-global and conservative, which can reduce
+  static-array materialization coverage for classes with dynamic field
+  protocols, but preserves JVM semantics and does not introduce fallback.
 
 ### [ ] JCP-2: Bind Packed Entry Carriers To Internal Callsites
 
@@ -318,7 +424,30 @@ This plan will refresh that evidence before changing CFF performance code.
   200 ms, `Seq` > 400 ms, or any `Parallel` / `VThreads` matrix timing exceeds
   15 ms; production code contains no benchmark-specific checks.
 
-### [ ] JCP-9: Final Six-Jar Full JVM Regeneration And Acceptance
+### [ ] JCP-9: Global Class-Load-State Key Table Initialization
+
+- Scope: repair the `g18` and classtable key-table initialization path so
+  dynamic table perturbation depends on true current JVM global class-loading
+  state, including load-order-sensitive state, rather than only mixing the low
+  16 bits of a local perturbation value.
+- Required evidence before editing: source and generated-artifact proof of the
+  current `g18` / classtable initialization path, the exact word-width or mask
+  that limits perturbation to the low 16 bits, and a concrete runtime trace or
+  bytecode artifact showing that different class-loading orders do not
+  currently produce meaningfully different full-width key-table state.
+- Validation command or runtime target:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`
+  plus a focused regenerated-artifact audit that runs two deterministic class
+  loading orders and proves full-width key-table initialization changes with
+  the observed global load state.
+- Completion criteria: key-table initialization is generic and architecture
+  level; it consumes live global class-loading state across more than the low
+  16 bits; class initialization remains deterministic for a fixed load order;
+  CFF, invokeDynamic, constant, string, and method-parameter transforms remain
+  compatible under the full JVM profile; no static key exposure, descriptor-only
+  recomputation, or fallback path is introduced.
+
+### [ ] JCP-10: Final Six-Jar Full JVM Regeneration And Acceptance
 
 - Scope: regenerate all six test jars with full JVM obfuscation into
   `/mnt/d/Code/Reverse/NekoOBF/m` using `originname-obf.jar`, then run the
