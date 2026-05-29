@@ -1035,25 +1035,30 @@ This plan will refresh that evidence before changing CFF performance code.
   enforcement; it must not fail merely because the known pre-repair baseline is
   above the requested thresholds.
 
-### [ ] JCP-4A: Repair Shared String Decode Key-Byte Symmetry
+### [-] JCP-4A: Repair Shared String Decode Canonical CFF Pc Binding
 
-- Scope: repair the generic shared string decode/encrypt key-byte ordering
-  invariant before JCP-4 measurement can complete. The runtime shared string
-  tail currently derives a selector bit from per-site material and uses that
-  bit to choose forward or reverse byte order while filling AES/DES keys. The
-  transform-time encrypt path always writes key words in forward byte order.
-  This mismatch corrupts decrypted plaintext for sites whose selector chooses
-  reverse ordering, leaving the first four decoded bytes as an invalid UTF-8
-  payload length.
+- Scope: repair the generic shared string decode/CFF binding invariant before
+  JCP-4 measurement can complete. The runtime shared string tail was receiving
+  `metadata.pcLocal()` directly from transformed callers. In large CFF methods
+  that local can hold the raw dispatch pc, while `CffInstructionState.pcToken`
+  records the canonical block key pc token used to encrypt the string payload.
+  String decode must derive the canonical pc token from live method key,
+  guard, path, and block state before entering the shared tail.
 - Required evidence before editing: fresh `TEST` full JVM run failed with
   `StringIndexOutOfBoundsException` in `String.<init>([B,I,I,Charset)` from
   `a.na.gg`; fresh `full-no-indy` failed with the same decode shape; fresh
   `stringObfuscation`-only failed with the same decode shape; fresh
-  `constObfuscation`-only ran without this string-constructor crash. Source
-  evidence is `encodedStringKeyCell` storing `(siteSeed & 2) != 0` into the
-  selector, runtime `emitFillKey` branching on that selector into reversed key
-  byte order, and encrypt-time `keyBytes` always calling `writeWord` in forward
-  order.
+  `constObfuscation`-only ran without this string-constructor crash. Further
+  ablations proved the same crash remained with method-parameter obfuscation
+  disabled, with validation-sink hardening disabled, and with the minimal
+  `keyDispatch + controlFlowFlattening + stringObfuscation` transform set.
+  Temporary tagged diagnostics on the minimal `TEST` repro showed the first
+  failing string site had matching runtime and compile-time `methodKey`,
+  `guard`, `path`, and `block`, but mismatched pc material:
+  compile-time `pc=-1503747671`, runtime tail `pc=1724244705`. A key-byte
+  ordering hypothesis was tested and rejected: changing transform-time key
+  byte writes did not remove the crash, and the runtime selector branch only
+  changes store order, not final byte layout.
 - Validation command or runtime target: regenerate and run fresh `TEST`
   `stringObfuscation`-only, `full-no-indy`, and full JVM artifacts using
   repository-local build directories, then rerun
@@ -1064,6 +1069,116 @@ This plan will refresh that evidence before changing CFF performance code.
   and dynamic per-site key material remain enabled; no fallback, skipped
   string transform, original literal path, or reduced CFF coverage is
   introduced.
+
+### [-] JCP-4B: Keep Generated Reflection Filters Out Of Application Constant Rewrites
+
+- Scope: repair the generic constant-obfuscation interaction with generated
+  reflection member filters. CFF inserts generated filters after
+  `Class.getFields`, `getDeclaredFields`, `getMethods`, and
+  `getDeclaredMethods` so synthetic/static generated members do not leak into
+  application reflection counts. Constant obfuscation must not treat those
+  generated bookkeeping instructions as original application numeric sites when
+  it later scans a normal application method, while still allowing the explicit
+  generated-helper hardening pass to protect real generated helper methods.
+- Required evidence before editing: a fresh regenerated `TEST`
+  const-enabled artifact runs without the earlier string-constructor crash but
+  prints `Counter FAIL`, `Field ERROR`, and `Annotation ERROR`; a fresh
+  `full-no-const-string` artifact keeps `Counter PASS`, `Field PASS`, and
+  `Annotation PASS`; bytecode inspection of obfuscated `Count.run` shows CFF
+  reflection filters around `getFields` / `getDeclaredFields` /
+  `getMethods` / `getDeclaredMethods`, but those filter bodies now contain
+  constant-obfuscation decode calls such as `a/a.j(...)` and `a/a.s(...)`.
+  Source inspection shows `JvmConstantObfuscationPass.transformMethod` skips an
+  entire generated helper method unless hardening is enabled, but its
+  per-instruction scan only checks `metadata.applicationInstructions()` and
+  does not reject `JvmKeyDispatchPass.isGeneratedNode(...)` inside ordinary
+  application methods.
+- Validation command or runtime target: regenerate and run fresh `TEST`
+  const-enabled and full JVM artifacts, then rerun the focused constant/string
+  regressions and the no-quick JVM full-obfuscation measurement harness.
+- Completion criteria: generated reflection member filters in application
+  methods are no longer rewritten as application numeric constants; explicit
+  generated-helper hardening still runs for generated helper methods; fresh
+  const-enabled `TEST` no longer introduces `Counter`, `Field`, or
+  `Annotation` regressions beyond the remaining independently tracked
+  reflective construction/stack-trace blockers; no application constants,
+  strings, or full-obfuscation surfaces are skipped.
+
+### [-] JCP-4C: Repair Cross-Class Carrier Index Table Binding
+
+- Scope: repair the generic packed-carrier logical-slot invariant before the
+  `full.jar` smoke fixture can be accepted. A carrier producer and consumer
+  must decode the same logical carrier slot to the same physical `Object[]`
+  index even when the call crosses class boundaries.
+- Required evidence before editing: fresh no-quick full JVM obfuscation of
+  `test-jars/full.jar` succeeded, but the resulting
+  `build/test-jvm-full-obf-perf/full-current-full.jar` failed immediately with
+  `NullPointerException: Cannot throw exception because "null" is null` in
+  `a.o.<init>`. A fresh no-indy full JVM obfuscation failed the same way,
+  proving the failure is not invokedynamic-specific. Bytecode inspection of
+  `a.o.<init>` shows the carrier length check succeeds and the failure is in
+  the pre-super carrier token whitelist path. The direct caller `a.mh.kj`
+  stores the three constructor carrier logical slots through `a.mh.a`, while
+  the constructor loads those same logical slots through `a.o.a`; these are
+  different CFF class-key tables, so logical-to-physical carrier slot decoding
+  is not stable across the producer/consumer boundary.
+- Validation command or runtime target: regenerate `test-jars/full.jar` with
+  `test-jars/full-jvm-obf.yml`, run the fresh artifact without `quick` /
+  `--quick`, and rerun the focused method-parameter integration test.
+- Completion criteria: fresh full and no-indy `full.jar` artifacts reach the
+  Java 21 feature runner instead of failing in constructor carrier attestation;
+  carrier slot decoding remains bound to live carrier/key material and an
+  existing CFF class-key table; no carrier fallback, original descriptor path,
+  reduced CFF coverage, or unprotected constructor path is introduced.
+- Dependency note: the cross-class carrier table repair changed the fresh
+  `full.jar` failure mode from constructor carrier attestation to Java 21 runner
+  execution and exposed the separate interface-default packed-entry CFF key
+  blocker recorded in JCP-4D. JCP-4C remains open until the same fresh full
+  `full.jar` acceptance run completes after JCP-4D; proceeding to JCP-4D is the
+  next prerequisite for closing JCP-4C, not a workaround around it.
+
+### [ ] JCP-4D: Bind Packed Virtual Entry CFF Seeds To Carrier Hidden Keys
+
+- Scope: repair the generic CFF entry-key invariant for packed non-static
+  application methods whose hidden method key is transported inside an
+  `Object[]` carrier. Public, virtual, and interface-default methods are still
+  externally keyed after method-parameter obfuscation even though their JVM
+  dispatch family is virtual; CFF entry-state initialization must derive the
+  entry seed shape from that live carrier key instead of the pre-packing
+  virtual-family heuristic.
+- Required evidence before editing: a fresh no-quick full JVM obfuscation of
+  `test-jars/full.jar` succeeded, and the resulting
+  `build/test-jvm-full-obf-perf/full-current-full.jar` reached the Java 21
+  runner but failed with
+  `NullPointerException: Cannot invoke java.lang.Iterable.iterator()Iterator/invokeInterface with null receiver`
+  at obfuscated `RunnerOptions.accepts(String, Iterable)`. Bytecode inspection
+  of the caller showed the `FeatureTestCase.tags()` result is stored into the
+  correct `Set` carrier slot for `accepts`; bytecode inspection of the
+  obfuscated interface default `FeatureTestCase.tags()` method showed its
+  carrier shape and attestation checks pass, then its CFF-dispatched fallback
+  path returns `aconst_null` while the normal path returns `Set.of()`. Source
+  inspection shows `CffKeyTransferRewriter.usesExternalEntrySeed(...)` returns
+  `false` for non-final public/interface methods based on dispatch family, but
+  `JvmMethodParameterObfuscationPass.installUnpackPrologue(...)` accepts a live
+  hidden key from the packed carrier and records that mixed key as the method
+  key local for those same methods.
+- Validation command or runtime target: add a focused no-quick integration
+  regression covering an interface default method returning a collection that
+  is immediately passed through another packed method's `Iterable` carrier
+  under `keyDispatch + methodParameterObfuscation + controlFlowFlattening`,
+  with the integration harness also enabling `invokeDynamic`,
+  `constantObfuscation`, and `stringObfuscation` so the test exercises the same
+  post-CFF full-profile wrapping surface used by `full-jvm-obf.yml`. Before the
+  repair, the focused regression must reproduce the default-method null/fallback
+  symptom or fail at the equivalent packed-entry path; after the repair rerun
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`,
+  regenerate `test-jars/full.jar` with `test-jars/full-jvm-obf.yml`, and run the
+  fresh artifact without a `quick` / `--quick` application argument.
+- Completion criteria: the focused interface-default carrier regression passes;
+  fresh full JVM `full.jar` no longer returns `null` from the default
+  collection path and runs successfully; CFF remains keyed by live method-entry
+  material; no virtual dispatch fallback, original descriptor path, reduced CFF
+  coverage, or skipped packed-carrier hardening is introduced.
 
 ### [ ] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
 
