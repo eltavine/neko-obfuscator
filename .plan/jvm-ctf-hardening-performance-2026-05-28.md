@@ -1719,6 +1719,30 @@ This plan will refresh that evidence before changing CFF performance code.
   fresh focused serialization failures, separating record canonical constructor
   fallout already covered by JCP-4E1 from serialization-specific magic member
   lookup or descriptor failures.
+- Evidence before editing: the fresh focused no-quick run on the current
+  full-profile artifact passed `features.jvm.serialization-proxy` but failed
+  `features.serialization.roundtrip` with
+  `custom serialization transient restoration expected <tail> but got <null>`
+  and failed `features.name-sensitive.serialization-fields` with
+  `serialVersionUID expected <2101> but got <7359731577184801303>`.
+  The fresh map shows generic serialization ABI members were renamed:
+  `SerializationRoundTripFeatureTest$CustomData.writeObject(Ljava/io/ObjectOutputStream;)V -> zd`,
+  `CustomData.readObject(Ljava/io/ObjectInputStream;)V -> xd`,
+  `CanonicalSingleton.readResolve()Ljava/lang/Object; -> wd`, and multiple
+  `serialVersionUIDJ` fields were renamed. The same map shows
+  `StableNamedFixture.publicValue`, `privateNumber`, and `serialVersionUID`
+  were renamed even though `ObjectStreamClass.getFields()` and
+  `getSerialVersionUID()` observe those names as the serialized-form ABI.
+  Original `javap -p -s` shows `CustomData` declares exact private
+  `writeObject(ObjectOutputStream)` and `readObject(ObjectInputStream)`,
+  `CanonicalSingleton` declares exact private `readResolve()Object`, and
+  `StableNamedFixture` declares `serialVersionUID`, `publicValue`, and
+  `privateNumber`. Fresh obfuscated `javap -p -s` shows the same members as
+  renamed and descriptor-mutated, for example
+  `a.od.zd([Ljava/lang/Object;J)V`, `a.od.xd([Ljava/lang/Object;J)V`, and
+  `a.nd.wd([Ljava/lang/Object;J)Ljava/lang/Object;`. Therefore serialization
+  ABI surfaces must be identified before renaming, hidden-key injection,
+  packed-carrier rewriting, and static numeric constant movement.
 - Validation command or runtime target: add focused serialization regression
   under the full JVM transform set, rerun relevant integration tests,
   regenerate full `full.jar`, and run serialization focused targets without
