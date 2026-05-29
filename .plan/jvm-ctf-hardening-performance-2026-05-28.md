@@ -8,6 +8,8 @@ profile. It addresses two concrete problem groups:
 - CTF recoverability in the freshly generated
   `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar`.
 - JVM full-obfuscation runtime performance for `test.jar` and `test21.jar`.
+- Additional downstream full-profile smoke/performance coverage for the
+  user-requested `test-jars/full.jar` Java 21 fixture.
 
 Native translation/runtime, JNI removal, GC barriers, generated C, website
 files, and unrelated dirty native worktree changes are out of scope.
@@ -1019,7 +1021,9 @@ This plan will refresh that evidence before changing CFF performance code.
 
 - Scope: add or update JVM full-obfuscation performance validation so the
   requested rows are captured as a repeatable focused measurement harness
-  without enforcing the final thresholds yet.
+  without enforcing the final thresholds yet. Include `test-jars/full.jar` as
+  a non-enforcing full-profile smoke/performance fixture so later repairs do
+  not regress the broader Java 21 feature surface.
 - Required evidence before editing: current local run and ablation medians
   recorded above.
 - Validation command or runtime target:
@@ -1035,7 +1039,9 @@ This plan will refresh that evidence before changing CFF performance code.
 - Scope: collect fresh profiler/topology evidence for current full-obfuscated
   `test21` and `test` artifacts, then identify the exact runtime paths that
   must be repaired. This subtask may update the later JCP-6/JCP-7 descriptions
-  with evidence-backed repair boundaries before implementation.
+  with evidence-backed repair boundaries before implementation. If
+  `full-obf.jar` fails or exposes a distinct material performance hot path,
+  record that evidence here before any additional repair is planned.
 - Required evidence before editing later performance code: fresh delayed JFR or
   equivalent profiler output for `test21-obf.jar`; fresh profiler or
   bytecode/topology evidence for `test-obf.jar`; source-path evidence tying the
@@ -1120,18 +1126,22 @@ This plan will refresh that evidence before changing CFF performance code.
   compatible under the full JVM profile; no static key exposure, descriptor-only
   recomputation, or fallback path is introduced.
 
-### [ ] JCP-10: Final Six-Jar Full JVM Regeneration And Acceptance
+### [ ] JCP-10: Final Full JVM Regeneration And Acceptance
 
-- Scope: regenerate all six test jars with full JVM obfuscation into
+- Scope: regenerate the six originally requested test jars plus
+  `test-jars/full.jar` with full JVM obfuscation into
   `/mnt/d/Code/Reverse/NekoOBF/m` using `originname-obf.jar`, then run the
-  final CTF hardening and performance audits.
+  final CTF hardening, performance, and Java 21 fixture smoke audits.
 - Required evidence: fresh output file list, `jar tf` readability checks,
   CTF reflection/direct-entry negative checks, focused Gradle XML, and direct
   performance runs.
 - Validation command or runtime target:
   full CLI regeneration for `crackme.jar`, `ctf.jar`, `evaluator.jar`,
-  `snake.jar`, `test.jar`, and `test21.jar`; `jar tf` on every output; direct
-  runs for `test-obf.jar` and `test21-obf.jar`.
-- Completion criteria: all six outputs exist and are readable; CTF plaintext
+  `snake.jar`, `test.jar`, `test21.jar`, and `full.jar`; `jar tf` on every
+  output; direct runs for `test-obf.jar`, `test21-obf.jar`, and
+  `full-obf.jar`.
+- Completion criteria: all requested outputs exist and are readable; CTF plaintext
   table/direct-entry exploit no longer works on the regenerated artifact;
-  performance thresholds are met; final plan review returns PASS.
+  performance thresholds are met; `full-obf.jar` completes its runnable smoke
+  target or records a generic evidence-backed blocker for repair; final plan
+  review returns PASS.
