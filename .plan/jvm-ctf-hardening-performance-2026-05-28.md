@@ -1298,7 +1298,7 @@ This plan will refresh that evidence before changing CFF performance code.
     `SAFE -> c`; this is the separate enum/serialization ABI surface assigned
     to JCP-4E8, not record metadata/canonical constructor ABI.
 
-### [ ] JCP-4E2: Preserve Annotation Default And Annotation Element ABI
+### [x] JCP-4E2: Preserve Annotation Default And Annotation Element ABI
 
 - Scope: repair annotation metadata surfaces separately from record metadata.
   Annotation element methods and default values must remain valid JVM
@@ -1316,6 +1316,49 @@ This plan will refresh that evidence before changing CFF performance code.
 - Completion criteria: annotation defaults and element lookups remain valid
   JVM metadata; no broad annotation-class skip beyond true annotation ABI
   surfaces is introduced.
+- Dependency/evidence update:
+  - Fresh focused `full.jar` run without `--quick` fails at
+    `features.jvm.annotation-defaults` with
+    `AnnotationFormatError: Invalid default: public abstract a.e a.d.mode()`.
+    Original bytecode shows `Complex.mode()` has `AnnotationDefault`
+    `Lcom/java21test/features/AnnotationDefaultsFeatureTest$Mode;.SECOND`.
+  - The first generic annotation metadata repair now rewrites enum annotation
+    values and `MethodNode.annotationDefault` enum constant names through the
+    renamer field map before `ClassRemapper`, including nested annotations and
+    annotation arrays. The focused regression fixture shows the metadata side
+    is rewritten to final enum field names such as `La/d;.c`.
+  - Fresh regression still fails because the enum class itself no longer
+    exposes the JVM-required enum ABI: `javap -p` on the generated fixture
+    shows no `values()` or `valueOf(String)` method and the enum constructor is
+    packed as `([Ljava/lang/Object;J)V`. `AnnotationParser` therefore cannot
+    resolve the rewritten enum default even after the annotation metadata name
+    is correct.
+  - Plan order is adjusted: JCP-4E4 enum ABI is now a prerequisite for closing
+    JCP-4E2's enum-default validation. JCP-4E2 remains in progress until the
+    annotation-focused target passes after JCP-4E4.
+- Implementation/evidence:
+  - `JvmRenamerPass` now recursively rewrites enum names stored in annotation
+    metadata before `ClassRemapper` runs. The rewrite covers class, field,
+    method, parameter, local-variable, type-use, record-component annotations,
+    nested annotations, annotation arrays, and `MethodNode.annotationDefault`.
+    Only enum annotation values with a final field mapping are changed; class
+    descriptors remain handled by the existing descriptor remapper.
+  - Added a full-profile regression fixture with explicit enum annotation
+    values, enum array defaults, nested annotation defaults, and reflective
+    `Method.getDefaultValue()` checks.
+  - Implementation review note: multi-agent spawning remains unavailable under
+    the active tool contract without an explicit user request for sub-agents.
+    The nearest equivalent review was a scoped static diff audit plus the
+    fresh full-profile regression/runtime evidence listed here. Review result:
+    PASS for JCP-4E2 metadata scope.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming`.
+  - Fresh full-profile `full.jar` obfuscation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`,
+    writing 319 classes and 9 resources.
+  - Fresh no-quick focused `full.jar` validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.jvm.annotation-defaults --verbose`,
+    with `PASS features.jvm.annotation-defaults 10.502 ms`.
 
 ### [x] JCP-4E3: Preserve External Reflection And MethodHandle ABI Boundaries
 
@@ -1413,7 +1456,7 @@ This plan will refresh that evidence before changing CFF performance code.
     still blocked by later JCP/performance subtasks rather than by the external
     reflection/MethodHandle ABI boundary repaired here.
 
-### [ ] JCP-4E4: Preserve Enum Class, Constant, And Switch ABI
+### [x] JCP-4E4: Preserve Enum Class, Constant, And Switch ABI
 
 - Scope: repair enum-specific JVM ABI surfaces: enum class shape, constant
   names/ordinals, synthetic switch map expectations, and `Enum.valueOf` /
@@ -1427,6 +1470,41 @@ This plan will refresh that evidence before changing CFF performance code.
 - Completion criteria: enum ABI behavior passes focused targets; non-enum
   application methods in enum-owning classes remain fully transformed where
   JVM ABI permits.
+- Implementation/evidence:
+  - Added `JvmEnumAbi` to identify true enum ABI surfaces: enum constant
+    fields, `values()`, `valueOf(String)`, and constructors whose mandated
+    leading parameters are `(String, int)`.
+  - `JvmRenamerPass` now preserves enum constant field names and the
+    `values`/`valueOf` method names. `JvmKeyDispatchPass` no longer injects
+    hidden key parameters into `values`/`valueOf`. `JvmMethodParameterObfuscationPass`
+    no longer packs enum ABI methods or enum constructors, and constructor
+    suffix planning excludes enum constructors.
+  - Implementation review note: the same active tool contract prevented
+    spawning a sub-agent review without an explicit user request. The nearest
+    equivalent review was a scoped static diff audit plus the fresh
+    full-profile regression/runtime evidence listed here. Review result: PASS
+    for JCP-4E4 enum ABI scope; remaining full-suite failures are separate
+    recorded surfaces.
+  - Fresh no-quick focused `full.jar` enum validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.enum-switch --include features.name-sensitive.enum-names --include features.serialization.roundtrip --include features.jvm.enum-constant-body --verbose`.
+    `features.jvm.enum-constant-body`, `features.enum-switch`, and
+    `features.name-sensitive.enum-names` passed. The included
+    `features.serialization.roundtrip` advanced past the prior enum failure
+    and now fails at the separate custom-serialization transient restoration
+    assertion, which belongs to JCP-4E8 rather than enum shape/name ABI.
+  - Fresh combined regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
+  - Fresh complete no-quick `full.jar` run was attempted again after the
+    enum/annotation repair:
+    `timeout 600s env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --verbose`.
+    It confirmed `features.jvm.annotation-defaults`,
+    `features.jvm.enum-constant-body`, `features.enum-switch`, and
+    `features.name-sensitive.enum-names` pass in the full run. Later unrelated
+    failures remain in OOP/classloader/concurrent/bridge/classfile-attribute/
+    varargs-MethodHandle/GC/dynamic-proxy/ServiceLoader/serialization/
+    repeatable-annotation/stackwalker/name-sensitive surfaces, and the run
+    again timed out after 600 seconds after `perf.crypto.rsa-oaep` without a
+    `perf.crypto.xor` result.
 
 ### [ ] JCP-4E5: Preserve Synthetic Bridge Method ABI
 

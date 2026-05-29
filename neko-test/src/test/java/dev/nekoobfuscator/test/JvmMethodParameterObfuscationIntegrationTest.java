@@ -184,6 +184,28 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void annotationEnumDefaultsSurviveFullProfileRenaming() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-annotation-enum-defaults"));
+        Path source = work.resolve("AnnotationEnumDefaultEntry.java");
+        Files.writeString(source, annotationEnumDefaultSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("annotation-enum-default-entry.jar");
+        writeJar(inputJar, classes, "AnnotationEnumDefaultEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("annotation-enum-default-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("ANNOTATION ENUM DEFAULT OK"), obfuscated);
+    }
+
+    @Test
     void packedInterfaceEntrySurvivesCrossClassStringTailDecode() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cross-class-string-tail"));
@@ -1417,6 +1439,65 @@ public class JvmMethodParameterObfuscationIntegrationTest {
 
                 static String call() {
                     return "local-call";
+                }
+            }
+            """;
+    }
+
+    private String annotationEnumDefaultSourceText() {
+        return """
+            import java.lang.annotation.Retention;
+            import java.lang.annotation.RetentionPolicy;
+            import java.lang.reflect.Method;
+
+            public class AnnotationEnumDefaultEntry {
+                enum Mode {
+                    FIRST,
+                    SECOND,
+                    THIRD
+                }
+
+                @Retention(RetentionPolicy.RUNTIME)
+                @interface Marker {
+                    Mode mode() default Mode.SECOND;
+
+                    Mode[] modes() default {Mode.FIRST, Mode.THIRD};
+
+                    Nested nested() default @Nested(Mode.THIRD);
+                }
+
+                @Retention(RetentionPolicy.RUNTIME)
+                @interface Nested {
+                    Mode value() default Mode.FIRST;
+                }
+
+                @Marker(mode = Mode.THIRD, modes = {Mode.SECOND})
+                static final class Annotated {
+                }
+
+                public static void main(String[] args) throws Exception {
+                    Marker marker = Annotated.class.getAnnotation(Marker.class);
+                    if (marker.mode() != Mode.THIRD) {
+                        throw new AssertionError("explicit-mode:" + marker.mode());
+                    }
+                    if (marker.modes().length != 1 || marker.modes()[0] != Mode.SECOND) {
+                        throw new AssertionError("explicit-array");
+                    }
+                    Method mode = Marker.class.getDeclaredMethod("mode");
+                    if (mode.getDefaultValue() != Mode.SECOND) {
+                        throw new AssertionError("default-mode:" + mode.getDefaultValue());
+                    }
+                    Method modes = Marker.class.getDeclaredMethod("modes");
+                    Mode[] defaultModes = (Mode[]) modes.getDefaultValue();
+                    if (defaultModes.length != 2 || defaultModes[0] != Mode.FIRST || defaultModes[1] != Mode.THIRD) {
+                        throw new AssertionError("default-array");
+                    }
+                    Method nested = Marker.class.getDeclaredMethod("nested");
+                    Nested nestedDefault = (Nested) nested.getDefaultValue();
+                    if (nestedDefault.value() != Mode.THIRD) {
+                        throw new AssertionError("nested-default:" + nestedDefault.value());
+                    }
+                    System.out.println("ANNOTATION ENUM DEFAULT OK");
                 }
             }
             """;

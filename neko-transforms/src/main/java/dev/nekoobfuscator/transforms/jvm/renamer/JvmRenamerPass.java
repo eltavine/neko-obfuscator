@@ -7,6 +7,7 @@ import dev.nekoobfuscator.api.transform.TransformPhase;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmEnumAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import org.objectweb.asm.Opcodes;
@@ -14,6 +15,7 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FieldNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
@@ -139,6 +141,7 @@ public final class JvmRenamerPass implements TransformPass {
             String originalName = clazz.name();
             originalNames.put(clazz, originalName);
             rewriteReflectiveStrings(clazz.asmNode(), classesByOldName, methodNameMap, fieldNameMap);
+            rewriteAnnotationEnumValueNames(clazz.asmNode(), membersByOldKey);
             ClassNode remapped = new ClassNode();
             clazz.asmNode().accept(new ClassRemapper(remapped, remapper));
             stripDebugMetadata(remapped);
@@ -434,6 +437,7 @@ public final class JvmRenamerPass implements TransformPass {
         if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
         if ((method.access & Opcodes.ACC_NATIVE) != 0) return false;
         if (clazz.isAnnotation()) return false;
+        if (JvmEnumAbi.isEnumValuesMethod(clazz, method) || JvmEnumAbi.isEnumValueOfMethod(clazz, method)) return false;
         if ("main".equals(method.name)
             && "([Ljava/lang/String;)V".equals(method.desc)
             && (method.access & Opcodes.ACC_STATIC) != 0) {
@@ -444,6 +448,7 @@ public final class JvmRenamerPass implements TransformPass {
     }
 
     private boolean canRenameField(L1Class clazz, FieldNode field) {
+        if (JvmEnumAbi.isEnumConstantField(clazz, field)) return false;
         if (JvmRecordAbi.isRecordComponentField(clazz, field)) return false;
         return true;
     }
@@ -1181,6 +1186,86 @@ public final class JvmRenamerPass implements TransformPass {
         } catch (Exception ignored) {
             return bytes;
         }
+    }
+
+    private void rewriteAnnotationEnumValueNames(ClassNode node, Map<MemberKey, String> members) {
+        rewriteAnnotationEnumValues(node.visibleAnnotations, members);
+        rewriteAnnotationEnumValues(node.invisibleAnnotations, members);
+        rewriteAnnotationEnumValues(node.visibleTypeAnnotations, members);
+        rewriteAnnotationEnumValues(node.invisibleTypeAnnotations, members);
+        for (FieldNode field : node.fields) {
+            rewriteAnnotationEnumValues(field.visibleAnnotations, members);
+            rewriteAnnotationEnumValues(field.invisibleAnnotations, members);
+            rewriteAnnotationEnumValues(field.visibleTypeAnnotations, members);
+            rewriteAnnotationEnumValues(field.invisibleTypeAnnotations, members);
+        }
+        for (MethodNode method : node.methods) {
+            method.annotationDefault = rewriteAnnotationEnumValue(method.annotationDefault, members);
+            rewriteAnnotationEnumValues(method.visibleAnnotations, members);
+            rewriteAnnotationEnumValues(method.invisibleAnnotations, members);
+            rewriteAnnotationEnumValues(method.visibleTypeAnnotations, members);
+            rewriteAnnotationEnumValues(method.invisibleTypeAnnotations, members);
+            rewriteAnnotationEnumValues(method.visibleParameterAnnotations, members);
+            rewriteAnnotationEnumValues(method.invisibleParameterAnnotations, members);
+            rewriteAnnotationEnumValues(method.visibleLocalVariableAnnotations, members);
+            rewriteAnnotationEnumValues(method.invisibleLocalVariableAnnotations, members);
+        }
+        if (node.recordComponents != null) {
+            for (var component : node.recordComponents) {
+                rewriteAnnotationEnumValues(component.visibleAnnotations, members);
+                rewriteAnnotationEnumValues(component.invisibleAnnotations, members);
+                rewriteAnnotationEnumValues(component.visibleTypeAnnotations, members);
+                rewriteAnnotationEnumValues(component.invisibleTypeAnnotations, members);
+            }
+        }
+    }
+
+    private void rewriteAnnotationEnumValues(List<? extends AnnotationNode> annotations, Map<MemberKey, String> members) {
+        if (annotations == null) return;
+        for (AnnotationNode annotation : annotations) {
+            rewriteAnnotationEnumValue(annotation, members);
+        }
+    }
+
+    private void rewriteAnnotationEnumValues(
+        List<? extends AnnotationNode>[] annotations,
+        Map<MemberKey, String> members
+    ) {
+        if (annotations == null) return;
+        for (List<? extends AnnotationNode> annotationList : annotations) {
+            rewriteAnnotationEnumValues(annotationList, members);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object rewriteAnnotationEnumValue(Object value, Map<MemberKey, String> members) {
+        if (value instanceof AnnotationNode annotation) {
+            if (annotation.values != null) {
+                for (int i = 1; i < annotation.values.size(); i += 2) {
+                    annotation.values.set(i, rewriteAnnotationEnumValue(annotation.values.get(i), members));
+                }
+            }
+            return value;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> values = (List<Object>) list;
+            for (int i = 0; i < values.size(); i++) {
+                values.set(i, rewriteAnnotationEnumValue(values.get(i), members));
+            }
+            return value;
+        }
+        if (value instanceof String[] enumValue && enumValue.length == 2) {
+            String descriptor = enumValue[0];
+            String constantName = enumValue[1];
+            Type type = Type.getType(descriptor);
+            if (type.getSort() == Type.OBJECT) {
+                String mapped = members.get(MemberKey.field(type.getInternalName(), constantName, descriptor));
+                if (mapped != null) {
+                    enumValue[1] = mapped;
+                }
+            }
+        }
+        return value;
     }
 
     private void writeMapLines(

@@ -9,6 +9,7 @@ import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmEnumAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
@@ -520,6 +521,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
             for (L1Method method : clazz.methods()) {
                 if (TransformGuards.isRuntimeClass(clazz) || TransformGuards.isGeneratedMethod(method)) continue;
                 if (clazz.isAnnotation() || !canReceiveLongKey(method) || method.isNative()) continue;
+                if (JvmEnumAbi.isEnumValuesMethod(clazz, method) || JvmEnumAbi.isEnumValueOfMethod(clazz, method)) continue;
                 if (JvmRecordAbi.isRecordComponentAccessor(clazz, method)) continue;
                 if (overridesExternalMethod(pctx, clazz, method.asmNode(), method.descriptor())) continue;
                 if (indySamTargets.contains(coverageKey(clazz.name(), method.name(), method.descriptor()))) continue;
