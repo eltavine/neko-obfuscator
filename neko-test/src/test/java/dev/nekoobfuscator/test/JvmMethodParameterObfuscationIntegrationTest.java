@@ -81,6 +81,58 @@ public class JvmMethodParameterObfuscationIntegrationTest {
         new ObfuscationPipeline(config, registry).execute(input, output);
     }
 
+    @Test
+    void packedInterfaceEntrySurvivesCrossClassStringTailDecode() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cross-class-string-tail"));
+        Path source = work.resolve("PackedStringTailEntry.java");
+        Files.writeString(source, crossClassStringTailSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("packed-string-tail-entry.jar");
+        writeJar(
+            inputJar,
+            classes,
+            "PackedStringTailEntry",
+            List.of(
+                "PackedStringTailHostCase.class",
+                "PackedStringTailOtherCase.class",
+                "PackedStringTailCaseLike.class"
+            )
+        );
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("packed-string-tail-entry-obf.jar");
+        runCffStringObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STRING TAIL ENTRY OK"), obfuscated);
+    }
+
+    private void runCffStringObfuscation(Path input, Path output) throws Exception {
+        ObfuscationConfig config = new ObfuscationConfig();
+        config.setInputJar(input);
+        config.setOutputJar(output);
+        Map<String, TransformConfig> transforms = new LinkedHashMap<>();
+        transforms.put("renamer", new TransformConfig(true, 1.0, Map.of("packagePrefix", "a/")));
+        transforms.put("keyDispatch", new TransformConfig(true, 1.0));
+        transforms.put("methodParameterObfuscation", new TransformConfig(true, 1.0));
+        transforms.put("controlFlowFlattening", new TransformConfig(true, 1.0));
+        transforms.put("validationSinkHardening", new TransformConfig(false, 1.0));
+        transforms.put("invokeDynamic", new TransformConfig(false, 1.0));
+        transforms.put("constantObfuscation", new TransformConfig(false, 1.0));
+        transforms.put("stringObfuscation", new TransformConfig(true, 1.0));
+        config.setTransforms(transforms);
+        config.keyConfig().setMasterSeed(0x5354525441494CL);
+
+        PassRegistry registry = new PassRegistry();
+        StandardJvmPasses.register(registry);
+        new ObfuscationPipeline(config, registry).execute(input, output);
+    }
+
     private void assertPackedDescriptors(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
         for (L1Class clazz : input.classMap().values()) {
@@ -390,6 +442,10 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {
+        writeJar(jar, classes, mainClass, List.of());
+    }
+
+    private void writeJar(Path jar, Path classes, String mainClass, List<String> firstEntries) throws Exception {
         Manifest manifest = new Manifest();
         manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
         manifest.getMainAttributes().putValue("Main-Class", mainClass);
@@ -398,13 +454,27 @@ public class JvmMethodParameterObfuscationIntegrationTest {
             try (var stream = Files.walk(classes)) {
                 stream.filter(path -> path.toString().endsWith(".class")).forEach(classFiles::add);
             }
+            Map<String, Path> byEntry = new LinkedHashMap<>();
             for (Path classFile : classFiles) {
                 String name = classes.relativize(classFile).toString().replace('\\', '/');
-                jos.putNextEntry(new JarEntry(name));
-                jos.write(Files.readAllBytes(classFile));
-                jos.closeEntry();
+                byEntry.put(name, classFile);
+            }
+            for (String entryName : firstEntries) {
+                Path classFile = byEntry.remove(entryName);
+                if (classFile != null) {
+                    writeJarEntry(jos, entryName, classFile);
+                }
+            }
+            for (Map.Entry<String, Path> entry : byEntry.entrySet()) {
+                writeJarEntry(jos, entry.getKey(), entry.getValue());
             }
         }
+    }
+
+    private void writeJarEntry(JarOutputStream jos, String name, Path classFile) throws Exception {
+        jos.putNextEntry(new JarEntry(name));
+        jos.write(Files.readAllBytes(classFile));
+        jos.closeEntry();
     }
 
     private String runJar(Path jar) throws Exception {
@@ -772,6 +842,65 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                 static String join(String prefix, int value, boolean flag) {
                     return prefix + ":" + value + ":" + flag;
                 }
+            }
+            """;
+    }
+
+    private String crossClassStringTailSourceText() {
+        return """
+            import java.util.ArrayList;
+            import java.util.List;
+            import java.util.Locale;
+            import java.util.Set;
+
+            public class PackedStringTailEntry {
+                public static void main(String[] args) {
+                    String out = run();
+                    System.out.println(out);
+                    if (!out.equals("STRING TAIL ENTRY OK")) {
+                        throw new AssertionError(out);
+                    }
+                }
+
+                static String run() {
+                    List<PackedStringTailCaseLike> tests = new ArrayList<>();
+                    tests.add(new PackedStringTailHostCase());
+                    tests.add(new PackedStringTailOtherCase());
+                    int total = 0;
+                    for (PackedStringTailCaseLike test : tests) {
+                        String marker = System.getProperty("packed.string.tail.marker", "marker");
+                        if (marker.toLowerCase(Locale.ROOT).contains("mark")) {
+                            total += test.id().length();
+                            total += test.tags().size();
+                        }
+                    }
+                    return total == 21 ? "STRING TAIL ENTRY OK" : "STRING TAIL ENTRY FAIL";
+                }
+            }
+
+            final class PackedStringTailHostCase implements PackedStringTailCaseLike {
+                public String id() {
+                    return "alpha-tail";
+                }
+
+                public Set<String> tags() {
+                    return Set.of("tail");
+                }
+            }
+
+            final class PackedStringTailOtherCase implements PackedStringTailCaseLike {
+                public String id() {
+                    return "beta-case";
+                }
+
+                public Set<String> tags() {
+                    return Set.of("other");
+                }
+            }
+
+            interface PackedStringTailCaseLike {
+                String id();
+                Set<String> tags();
             }
             """;
     }

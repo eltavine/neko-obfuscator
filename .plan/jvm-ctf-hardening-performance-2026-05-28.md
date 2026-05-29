@@ -1137,48 +1137,55 @@ This plan will refresh that evidence before changing CFF performance code.
   `full.jar` acceptance run completes after JCP-4D; proceeding to JCP-4D is the
   next prerequisite for closing JCP-4C, not a workaround around it.
 
-### [ ] JCP-4D: Bind Packed Virtual Entry CFF Seeds To Carrier Hidden Keys
+### [x] JCP-4D: Isolate Runtime String Tail Helpers By Owner Class
 
-- Scope: repair the generic CFF entry-key invariant for packed non-static
-  application methods whose hidden method key is transported inside an
-  `Object[]` carrier. Public, virtual, and interface-default methods are still
-  externally keyed after method-parameter obfuscation even though their JVM
-  dispatch family is virtual; CFF entry-state initialization must derive the
-  entry seed shape from that live carrier key instead of the pre-packing
-  virtual-family heuristic.
-- Required evidence before editing: a fresh no-quick full JVM obfuscation of
-  `test-jars/full.jar` succeeded, and the resulting
-  `build/test-jvm-full-obf-perf/full-current-full.jar` reached the Java 21
-  runner but failed with
-  `NullPointerException: Cannot invoke java.lang.Iterable.iterator()Iterator/invokeInterface with null receiver`
-  at obfuscated `RunnerOptions.accepts(String, Iterable)`. Bytecode inspection
-  of the caller showed the `FeatureTestCase.tags()` result is stored into the
-  correct `Set` carrier slot for `accepts`; bytecode inspection of the
-  obfuscated interface default `FeatureTestCase.tags()` method showed its
-  carrier shape and attestation checks pass, then its CFF-dispatched fallback
-  path returns `aconst_null` while the normal path returns `Set.of()`. Source
-  inspection shows `CffKeyTransferRewriter.usesExternalEntrySeed(...)` returns
-  `false` for non-final public/interface methods based on dispatch family, but
-  `JvmMethodParameterObfuscationPass.installUnpackPrologue(...)` accepts a live
-  hidden key from the packed carrier and records that mixed key as the method
-  key local for those same methods.
-- Validation command or runtime target: add a focused no-quick integration
-  regression covering an interface default method returning a collection that
-  is immediately passed through another packed method's `Iterable` carrier
-  under `keyDispatch + methodParameterObfuscation + controlFlowFlattening`,
-  with the integration harness also enabling `invokeDynamic`,
-  `constantObfuscation`, and `stringObfuscation` so the test exercises the same
-  post-CFF full-profile wrapping surface used by `full-jvm-obf.yml`. Before the
-  repair, the focused regression must reproduce the default-method null/fallback
-  symptom or fail at the equivalent packed-entry path; after the repair rerun
+- Scope: repair the generic interaction between runtime string decode helpers,
+  CFF state, and immediately following packed virtual/interface entry calls.
+  Runtime string decode helpers must remain bound to the caller owner's live
+  class table/CFF/key material; package-shared string tails allow a caller to
+  invoke a helper hosted in another transformed application class, then
+  continue into a packed virtual/interface call with perturbed state.
+- Required evidence before editing: a fresh string+CFF+method-parameter
+  obfuscation of `test-jars/full.jar` succeeded, but
+  `java -jar build/test-jvm-full-obf-perf/full-string-current-validation.jar --list`
+  failed with `NullPointerException: Cannot invoke
+  "String.toLowerCase(java.util.Locale)" because "<local1>" is null` in
+  obfuscated `RunnerOptions.accepts`. Mapping and bytecode inspection showed
+  `ClassLiteralArrayFeatureTest.id()` mapped to `a/o.jf([Object])String`,
+  where carrier length, hidden key, carrier-index key, token, and tag checks
+  pass before CFF reaches an `aconst_null; areturn` poison path. Caller
+  bytecode in `Runner.printList` showed a runtime string helper call
+  `invokestatic a/o.c([Object;JIIIIII)String` immediately before constructing
+  the next packed interface carrier. A static-string probe replacing only the
+  runtime decode helper call with static string emission made the same fresh
+  artifact's `--list` path pass, proving the failure came from the runtime
+  string helper call. A per-class tail probe changing
+  `ensureStringDecodeTail` from `packageName(clazz.name())` to `clazz.name()`
+  made the same string+CFF artifact's `--list` path pass, proving the
+  package-shared helper ownership was the failing invariant. A focused
+  synthetic regression for cross-class string-tail decode passed under the old
+  strategy, so the actual `full.jar` bytecode path remains the runtime target
+  for this subtask.
+- Validation command or runtime target: rerun
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`,
-  regenerate `test-jars/full.jar` with `test-jars/full-jvm-obf.yml`, and run the
-  fresh artifact without a `quick` / `--quick` application argument.
-- Completion criteria: the focused interface-default carrier regression passes;
-  fresh full JVM `full.jar` no longer returns `null` from the default
-  collection path and runs successfully; CFF remains keyed by live method-entry
-  material; no virtual dispatch fallback, original descriptor path, reduced CFF
-  coverage, or skipped packed-carrier hardening is introduced.
+  regenerate `test-jars/full.jar` with the string+CFF profile and
+  `test-jars/full-jvm-obf.yml`, run both fresh artifacts with `--list`, then
+  run the fresh full-profile artifact without `quick` / `--quick` to expose
+  any remaining independent Java 21 ABI failures.
+- Completion criteria: the focused method-parameter integration suite passes;
+  fresh string+CFF and full-profile `full.jar --list` no longer return null
+  from the string decode / packed interface path; runtime string encryption,
+  per-site seeds, CFF live key binding, and packed-carrier hardening stay
+  enabled; no static string fallback, original-bytecode fallback, reduced CFF
+  coverage, or skipped packed virtual/interface path is introduced. Full
+  no-quick `full.jar` acceptance is delegated to JCP-4E subtasks for the
+  independent JVM ABI/metadata failures exposed after this fix.
+- Completion evidence: implementation review passed for the owner-isolated
+  string tail cache key. Fresh
+  `JvmMethodParameterObfuscationIntegrationTest` passed; fresh string+CFF
+  `full.jar --list` passed; fresh full-profile `full.jar --list` passed; the
+  no-quick full-profile run advanced to independent Java 21 ABI/metadata
+  failures recorded under JCP-4E.
 
 ### [ ] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
 

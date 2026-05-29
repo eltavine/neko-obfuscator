@@ -1252,7 +1252,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             tails = new LinkedHashMap<>();
             pctx.putPassData(STRING_DECODE_TAILS, tails);
         }
-        String key = packageName(clazz.name());
+        String key = clazz.name();
         StringDecodeTail existing = tails.get(key);
         if (existing != null) return existing;
 
