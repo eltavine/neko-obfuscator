@@ -63,7 +63,7 @@ public final class ObfuscationPipeline {
         log.info("Class hierarchy: {} entries", hierarchy.size());
 
         // Step 3: Create pipeline context
-        PipelineContext ctx = new PipelineContext(config, hierarchy, input.classMap());
+        PipelineContext ctx = new PipelineContext(config, hierarchy, input.classMap(), resources);
         log.info("Master seed: 0x{}", Long.toHexString(ctx.masterSeed()));
 
         // Step 4: Schedule and filter passes
@@ -858,6 +858,9 @@ public final class ObfuscationPipeline {
 
     private byte[] remapTextResource(String name, byte[] data, Map<String, String> classMap) {
         if (!isTextLikeResource(name)) return data;
+        if (name.startsWith("META-INF/services/")) {
+            return remapServiceResource(data, classMap);
+        }
         String text = new String(data, StandardCharsets.UTF_8);
         String remapped = text;
         List<Map.Entry<String, String>> entries = new ArrayList<>(classMap.entrySet());
@@ -867,6 +870,63 @@ public final class ObfuscationPipeline {
             remapped = remapped.replace(entry.getKey().replace('/', '.'), entry.getValue().replace('/', '.'));
         }
         return remapped.equals(text) ? data : remapped.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private byte[] remapServiceResource(byte[] data, Map<String, String> classMap) {
+        String text = new String(data, StandardCharsets.UTF_8);
+        StringBuilder remapped = new StringBuilder(text.length());
+        int lineStart = 0;
+        boolean changed = false;
+        while (lineStart < text.length()) {
+            int lineEnd = lineEnd(text, lineStart);
+            int nextLine = nextLineStart(text, lineEnd);
+            String line = text.substring(lineStart, lineEnd);
+            String newLine = remapServiceResourceLine(line, classMap);
+            changed |= !newLine.equals(line);
+            remapped.append(newLine);
+            remapped.append(text, lineEnd, nextLine);
+            lineStart = nextLine;
+        }
+        return changed ? remapped.toString().getBytes(StandardCharsets.UTF_8) : data;
+    }
+
+    private String remapServiceResourceLine(String line, Map<String, String> classMap) {
+        int comment = line.indexOf('#');
+        int contentEnd = comment < 0 ? line.length() : comment;
+        int start = 0;
+        while (start < contentEnd && Character.isWhitespace(line.charAt(start))) start++;
+        int end = contentEnd;
+        while (end > start && Character.isWhitespace(line.charAt(end - 1))) end--;
+        if (start >= end) return line;
+        String provider = line.substring(start, end);
+        String remappedProvider = remapServiceBinaryName(provider, classMap);
+        if (provider.equals(remappedProvider)) return line;
+        return line.substring(0, start) + remappedProvider + line.substring(end);
+    }
+
+    private String remapServiceBinaryName(String binaryName, Map<String, String> classMap) {
+        String internalName = binaryName.replace('.', '/');
+        String remapped = classMap.get(internalName);
+        return remapped == null ? binaryName : remapped.replace('/', '.');
+    }
+
+    private int lineEnd(String text, int lineStart) {
+        int i = lineStart;
+        while (i < text.length()) {
+            char c = text.charAt(i);
+            if (c == '\n' || c == '\r') return i;
+            i++;
+        }
+        return i;
+    }
+
+    private int nextLineStart(String text, int lineEnd) {
+        if (lineEnd >= text.length()) return lineEnd;
+        char c = text.charAt(lineEnd);
+        if (c == '\r' && lineEnd + 1 < text.length() && text.charAt(lineEnd + 1) == '\n') {
+            return lineEnd + 2;
+        }
+        return lineEnd + 1;
     }
 
     private List<Map.Entry<String, String>> packageMapForRenamer(Map<String, String> classMap) {

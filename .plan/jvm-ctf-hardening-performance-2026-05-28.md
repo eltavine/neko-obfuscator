@@ -1559,7 +1559,7 @@ This plan will refresh that evidence before changing CFF performance code.
   - Fresh combined regression passed:
     `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
-### [ ] JCP-4E6: Preserve Service Provider Construction ABI
+### [x] JCP-4E6: Preserve Service Provider Construction ABI
 
 - Scope: repair service-provider public no-arg construction and service
   resource compatibility while retaining class/resource renaming and protected
@@ -1568,6 +1568,20 @@ This plan will refresh that evidence before changing CFF performance code.
   fresh focused service-loader failure, including whether constructor packing,
   access changes, resource rewriting, or provider class renaming caused
   `ServiceLoader` to miss a public no-arg constructor.
+- Evidence before editing: fresh no-quick focused run on the JCP-4E5
+  full-profile artifact failed with
+  `ServiceConfigurationError: a.ph: a.oh Unable to get public no-arg constructor`
+  caused by `NoSuchMethodException: a.oh.<init>()`. Original bytecode for
+  `com/java21test/services/DefaultGreetingService` has a public
+  `DefaultGreetingService.<init>()V` and implements
+  `GreetingService.greet(String)`. The obfuscated resource rewrite is correct:
+  original `META-INF/services/com.java21test.services.GreetingService` contains
+  `com.java21test.services.DefaultGreetingService`, while the obfuscated
+  artifact contains `META-INF/services/a.ph` with provider `a.oh`. The failing
+  obfuscated provider class `a.oh` is still public and implements `a.ph`, but
+  its only constructor is `public a.oh([Ljava/lang/Object;J)V`; therefore the
+  failing invariant is method-parameter constructor packing of a
+  resource-declared ServiceLoader provider's public no-arg constructor.
 - Validation command or runtime target: add focused service-loader regression
   under the full JVM transform set, rerun relevant integration tests,
   regenerate full `full.jar`, and run the service focused target without
@@ -1575,6 +1589,48 @@ This plan will refresh that evidence before changing CFF performance code.
 - Completion criteria: service providers load and instantiate through the JDK
   `ServiceLoader` ABI; provider implementation methods remain fully
   obfuscated where JVM/library ABI permits.
+- Implementation/evidence:
+  - `PipelineContext` now carries the original input resources so JVM
+    transforms can prove external resource-declared ABI surfaces before output
+    resource rewriting. `JvmServiceAbi` parses `META-INF/services/*` files and
+    module `provides` entries, maps original provider names through
+    `renamer.classMap` when renamer has already run, and identifies only
+    resource/module-declared provider public `()V` constructors as ServiceLoader
+    construction ABI.
+  - `JvmMethodParameterObfuscationPass` now excludes only those provider
+    public no-arg constructors from packed descriptor rewriting and constructor
+    ABI suffix planning. Provider business methods and service interface
+    methods remain eligible for packing/key/CFF/indy/string/constant
+    hardening.
+  - `ObfuscationPipeline` now rewrites `META-INF/services/*` contents with
+    service-specific binary-name semantics. This fixes the generic default-
+    package provider case where the previous generic text remapper could write
+    an invalid internal name such as `a/c` into a ServiceLoader resource; normal
+    resource path remapping still renames the service resource itself.
+  - Added a full-profile regression fixture that loads a resource-declared
+    provider through `ServiceLoader`, invokes the provider through the
+    transformed service interface, and reflects `getConstructor()` on the
+    loaded provider.
+  - Implementation review note: the active multi-agent tool contract still
+    prevents spawning a sub-agent review without an explicit user request. The
+    nearest equivalent review was a scoped static diff audit plus the fresh
+    JUnit/runtime evidence listed here. Review result: PASS for JCP-4E6 service
+    ABI scope; remaining full-suite failures are separate recorded surfaces.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting`.
+  - Fresh full-profile `full.jar` obfuscation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`,
+    writing 319 classes and 9 resources.
+  - Fresh no-quick focused `full.jar` service validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.service-loader --verbose`,
+    with `PASS features.service-loader 3.253 ms`.
+  - Static runtime-artifact check: `META-INF/services/a.ph` contains `a.oh`;
+    `javap -p -s a.oh a.ph` shows provider constructor `public a.oh()V` while
+    service method dispatch remains transformed as
+    `a.ph.ih([Ljava/lang/Object;)Ljava/lang/String;` and
+    `a.oh.ih([Ljava/lang/Object;)Ljava/lang/String;`.
+  - Fresh combined regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
 ### [ ] JCP-4E7: Preserve Classfile MethodParameters Metadata ABI
 

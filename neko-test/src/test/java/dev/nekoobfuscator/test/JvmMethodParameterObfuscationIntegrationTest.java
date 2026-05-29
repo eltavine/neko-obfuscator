@@ -228,6 +228,33 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void serviceProviderConstructorsSurviveFullProfileAbiRewriting() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-service-abi"));
+        Path source = work.resolve("ServiceLoaderAbiEntry.java");
+        Files.writeString(source, serviceLoaderAbiSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("service-loader-abi-entry.jar");
+        writeJar(
+            inputJar,
+            classes,
+            "ServiceLoaderAbiEntry",
+            Map.of("META-INF/services/ServiceLoaderAbiEntry$Greeting", "ServiceLoaderAbiEntry$Provider\n")
+        );
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("service-loader-abi-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("SERVICE ABI OK"), obfuscated);
+    }
+
+    @Test
     void packedInterfaceEntrySurvivesCrossClassStringTailDecode() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cross-class-string-tail"));
@@ -623,7 +650,21 @@ public class JvmMethodParameterObfuscationIntegrationTest {
         writeJar(jar, classes, mainClass, List.of());
     }
 
+    private void writeJar(Path jar, Path classes, String mainClass, Map<String, String> resources) throws Exception {
+        writeJar(jar, classes, mainClass, List.of(), resources);
+    }
+
     private void writeJar(Path jar, Path classes, String mainClass, List<String> firstEntries) throws Exception {
+        writeJar(jar, classes, mainClass, firstEntries, Map.of());
+    }
+
+    private void writeJar(
+        Path jar,
+        Path classes,
+        String mainClass,
+        List<String> firstEntries,
+        Map<String, String> resources
+    ) throws Exception {
         Manifest manifest = new Manifest();
         manifest.getMainAttributes().putValue("Manifest-Version", "1.0");
         manifest.getMainAttributes().putValue("Main-Class", mainClass);
@@ -646,12 +687,21 @@ public class JvmMethodParameterObfuscationIntegrationTest {
             for (Map.Entry<String, Path> entry : byEntry.entrySet()) {
                 writeJarEntry(jos, entry.getKey(), entry.getValue());
             }
+            for (Map.Entry<String, String> entry : resources.entrySet()) {
+                writeResourceEntry(jos, entry.getKey(), entry.getValue());
+            }
         }
     }
 
     private void writeJarEntry(JarOutputStream jos, String name, Path classFile) throws Exception {
         jos.putNextEntry(new JarEntry(name));
         jos.write(Files.readAllBytes(classFile));
+        jos.closeEntry();
+    }
+
+    private void writeResourceEntry(JarOutputStream jos, String name, String data) throws Exception {
+        jos.putNextEntry(new JarEntry(name));
+        jos.write(data.getBytes(StandardCharsets.UTF_8));
         jos.closeEntry();
     }
 
@@ -1575,6 +1625,42 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     return Arrays.stream(type.getDeclaredMethods())
                         .filter(method -> method.getName().equals(name))
                         .anyMatch(Method::isBridge);
+                }
+            }
+            """;
+    }
+
+    private String serviceLoaderAbiSourceText() {
+        return """
+            import java.lang.reflect.Constructor;
+            import java.util.ServiceLoader;
+
+            public class ServiceLoaderAbiEntry {
+                public interface Greeting {
+                    String greet(String name);
+                }
+
+                public static final class Provider implements Greeting {
+                    public Provider() {
+                    }
+
+                    public String greet(String name) {
+                        return "svc:" + name;
+                    }
+                }
+
+                public static void main(String[] args) throws Exception {
+                    Greeting greeting = ServiceLoader.load(Greeting.class)
+                        .findFirst()
+                        .orElseThrow(() -> new AssertionError("provider missing"));
+                    if (!"svc:jar".equals(greeting.greet("jar"))) {
+                        throw new AssertionError("provider invocation");
+                    }
+                    Constructor<?> constructor = greeting.getClass().getConstructor();
+                    if (constructor.getParameterCount() != 0) {
+                        throw new AssertionError("provider constructor arity");
+                    }
+                    System.out.println("SERVICE ABI OK");
                 }
             }
             """;

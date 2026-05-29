@@ -8,6 +8,7 @@ import dev.nekoobfuscator.core.ir.l2.ControlFlowGraph;
 import dev.nekoobfuscator.core.ir.l2.SSAForm;
 import dev.nekoobfuscator.core.ir.lift.L1ToL2Lifter;
 import dev.nekoobfuscator.core.jar.ClassHierarchy;
+import dev.nekoobfuscator.core.jar.ResourceEntry;
 import dev.nekoobfuscator.core.util.RandomUtil;
 
 import java.util.*;
@@ -20,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class PipelineContext extends TransformContext {
     private final ClassHierarchy hierarchy;
     private final Map<String, L1Class> classMap;
+    private final List<ResourceEntry> resources;
     private final L1ToL2Lifter lifter = new L1ToL2Lifter();
     private final Map<String, ControlFlowGraph> cfgCache = new ConcurrentHashMap<>();
     private final Map<String, SSAForm> ssaCache = new ConcurrentHashMap<>();
@@ -32,9 +34,15 @@ public final class PipelineContext extends TransformContext {
 
     public PipelineContext(ObfuscationConfig config, ClassHierarchy hierarchy,
                            Map<String, L1Class> classMap) {
+        this(config, hierarchy, classMap, List.of());
+    }
+
+    public PipelineContext(ObfuscationConfig config, ClassHierarchy hierarchy,
+                           Map<String, L1Class> classMap, List<ResourceEntry> resources) {
         super(config);
         this.hierarchy = hierarchy;
         this.classMap = classMap;
+        this.resources = List.copyOf(resources);
         long seed = config.keyConfig().masterSeed();
         this.masterSeed = seed != 0 ? seed : RandomUtil.secureLong();
         this.random = new RandomUtil(masterSeed);
@@ -42,6 +50,7 @@ public final class PipelineContext extends TransformContext {
 
     public ClassHierarchy hierarchy() { return hierarchy; }
     public Map<String, L1Class> classMap() { return classMap; }
+    public List<ResourceEntry> resources() { return resources; }
     public RandomUtil random() { return random; }
     public long masterSeed() { return masterSeed; }
 
