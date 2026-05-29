@@ -1022,8 +1022,9 @@ This plan will refresh that evidence before changing CFF performance code.
 - Scope: add or update JVM full-obfuscation performance validation so the
   requested rows are captured as a repeatable focused measurement harness
   without enforcing the final thresholds yet. Include `test-jars/full.jar` as
-  a non-enforcing full-profile smoke/performance fixture so later repairs do
-  not regress the broader Java 21 feature surface.
+  a non-enforcing full-profile smoke/performance fixture, run without a
+  `quick` / `--quick` application argument, so later repairs do not regress the
+  broader Java 21 feature surface.
 - Required evidence before editing: current local run and ablation medians
   recorded above.
 - Validation command or runtime target:
@@ -1033,6 +1034,36 @@ This plan will refresh that evidence before changing CFF performance code.
   `VThreads` timings and emits enough report data for later threshold
   enforcement; it must not fail merely because the known pre-repair baseline is
   above the requested thresholds.
+
+### [ ] JCP-4A: Repair Shared String Decode Key-Byte Symmetry
+
+- Scope: repair the generic shared string decode/encrypt key-byte ordering
+  invariant before JCP-4 measurement can complete. The runtime shared string
+  tail currently derives a selector bit from per-site material and uses that
+  bit to choose forward or reverse byte order while filling AES/DES keys. The
+  transform-time encrypt path always writes key words in forward byte order.
+  This mismatch corrupts decrypted plaintext for sites whose selector chooses
+  reverse ordering, leaving the first four decoded bytes as an invalid UTF-8
+  payload length.
+- Required evidence before editing: fresh `TEST` full JVM run failed with
+  `StringIndexOutOfBoundsException` in `String.<init>([B,I,I,Charset)` from
+  `a.na.gg`; fresh `full-no-indy` failed with the same decode shape; fresh
+  `stringObfuscation`-only failed with the same decode shape; fresh
+  `constObfuscation`-only ran without this string-constructor crash. Source
+  evidence is `encodedStringKeyCell` storing `(siteSeed & 2) != 0` into the
+  selector, runtime `emitFillKey` branching on that selector into reversed key
+  byte order, and encrypt-time `keyBytes` always calling `writeWord` in forward
+  order.
+- Validation command or runtime target: regenerate and run fresh `TEST`
+  `stringObfuscation`-only, `full-no-indy`, and full JVM artifacts using
+  repository-local build directories, then rerun
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest.fullJvmObfuscationPerformanceBaseline`.
+- Completion criteria: fresh string-only and full JVM `TEST` artifacts no
+  longer throw from the string constructor; the JCP-4 measurement harness can
+  proceed to the requested no-quick full fixture coverage; selector diversity
+  and dynamic per-site key material remain enabled; no fallback, skipped
+  string transform, original literal path, or reduced CFF coverage is
+  introduced.
 
 ### [ ] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
 
