@@ -82,6 +82,108 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void interfaceDefaultPackedCarrierSurvivesFullProfileWrapping() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-interface-default-carrier"));
+        Path source = work.resolve("PackedDefaultEntry.java");
+        Files.writeString(source, interfaceDefaultCarrierSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("packed-default-entry.jar");
+        writeJar(
+            inputJar,
+            classes,
+            "PackedDefaultEntry",
+            List.of(
+                "PackedDefaultEntry$OverrideCase.class",
+                "PackedDefaultEntry$SecondOverrideCase.class",
+                "PackedDefaultEntry$CaseLike.class"
+            )
+        );
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("packed-default-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("DEFAULT ENTRY OK"), obfuscated);
+    }
+
+    @Test
+    void topLevelFinalInterfaceCarrierSurvivesFullProfileWrapping() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-top-level-interface-carrier"));
+        Path source = work.resolve("PackedTopLevelEntry.java");
+        Files.writeString(source, topLevelInterfaceCarrierSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("packed-top-level-entry.jar");
+        writeJar(
+            inputJar,
+            classes,
+            "PackedTopLevelEntry",
+            topLevelInterfaceCarrierFirstEntries()
+        );
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("packed-top-level-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("TOP LEVEL ENTRY OK"), obfuscated);
+    }
+
+    @Test
+    void recordMetadataAndCanonicalConstructorSurviveFullProfile() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-record-abi"));
+        Path source = work.resolve("RecordAbiEntry.java");
+        Files.writeString(source, recordAbiSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("record-abi-entry.jar");
+        writeJar(inputJar, classes, "RecordAbiEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("record-abi-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("RECORD ABI OK"), obfuscated);
+    }
+
+    @Test
+    void exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-external-reflection-abi"));
+        Path source = work.resolve("ExternalReflectionAbiEntry.java");
+        Files.writeString(source, externalReflectionAbiSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("external-reflection-abi-entry.jar");
+        writeJar(inputJar, classes, "ExternalReflectionAbiEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("external-reflection-abi-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("EXTERNAL REFLECTION ABI OK"), obfuscated);
+    }
+
+    @Test
     void packedInterfaceEntrySurvivesCrossClassStringTailDecode() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cross-class-string-tail"));
@@ -112,6 +214,27 @@ public class JvmMethodParameterObfuscationIntegrationTest {
         assertTrue(obfuscated.contains("STRING TAIL ENTRY OK"), obfuscated);
     }
 
+    private void runFullProfileObfuscation(Path input, Path output) throws Exception {
+        ObfuscationConfig config = new ObfuscationConfig();
+        config.setInputJar(input);
+        config.setOutputJar(output);
+        Map<String, TransformConfig> transforms = new LinkedHashMap<>();
+        transforms.put("renamer", new TransformConfig(true, 1.0, Map.of("packagePrefix", "a/")));
+        transforms.put("keyDispatch", new TransformConfig(true, 1.0));
+        transforms.put("methodParameterObfuscation", new TransformConfig(true, 1.0));
+        transforms.put("controlFlowFlattening", new TransformConfig(true, 1.0));
+        transforms.put("validationSinkHardening", new TransformConfig(true, 1.0));
+        transforms.put("invokeDynamic", new TransformConfig(true, 1.0));
+        transforms.put("constantObfuscation", new TransformConfig(true, 1.0));
+        transforms.put("stringObfuscation", new TransformConfig(true, 1.0));
+        config.setTransforms(transforms);
+        config.keyConfig().setMasterSeed(0x44454641554C54L);
+
+        PassRegistry registry = new PassRegistry();
+        StandardJvmPasses.register(registry);
+        new ObfuscationPipeline(config, registry).execute(input, output);
+    }
+
     private void runCffStringObfuscation(Path input, Path output) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
@@ -131,6 +254,17 @@ public class JvmMethodParameterObfuscationIntegrationTest {
         PassRegistry registry = new PassRegistry();
         StandardJvmPasses.register(registry);
         new ObfuscationPipeline(config, registry).execute(input, output);
+    }
+
+    private List<String> topLevelInterfaceCarrierFirstEntries() {
+        List<String> entries = new ArrayList<>();
+        for (int index = 0; index < 24; index++) {
+            entries.add("PackedTopLevelCase%02d.class".formatted(index));
+        }
+        entries.add("PackedTopLevelClassLiteralCase.class");
+        entries.add("PackedTopLevelSecondCase.class");
+        entries.add("PackedTopLevelCaseLike.class");
+        return entries;
     }
 
     private void assertPackedDescriptors(Path jar) throws Exception {
@@ -498,6 +632,8 @@ public class JvmMethodParameterObfuscationIntegrationTest {
             import java.lang.invoke.MethodHandles;
             import java.lang.invoke.MethodType;
             import java.util.Arrays;
+            import java.util.Locale;
+            import java.util.Set;
 
             public class ParameterShapes {
                 interface Worker {
@@ -508,9 +644,34 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     int invoke(Method method, Object target, Object[] args) throws Throwable;
                 }
 
+                interface CaseLike {
+                    String id();
+
+                    default Set<String> tags() {
+                        return Set.of();
+                    }
+                }
+
                 static class Impl implements Worker {
                     public int work(int value, String text) {
                         return value + text.length();
+                    }
+                }
+
+                static class DefaultCase implements CaseLike {
+                    public String id() {
+                        return "alpha-default";
+                    }
+                }
+
+                static class Options {
+                    boolean accepts(String value, Iterable<String> patterns) {
+                        String lower = value.toLowerCase(Locale.ROOT);
+                        int length = 0;
+                        for (String pattern : patterns) {
+                            length += pattern.toLowerCase(Locale.ROOT).length();
+                        }
+                        return lower.startsWith("alpha") && length == 0;
                     }
                 }
 
@@ -558,10 +719,36 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     }
                 }
 
+                static class TraceLike {
+                    static int count;
+
+                    private void bounce(int value) throws Throwable {
+                        count++;
+                        String name = new Throwable().getStackTrace()[1].getMethodName();
+                        Method method = TraceLike.class.getDeclaredMethod(name, int.class);
+                        method.setAccessible(true);
+                        method.invoke(this, new Object[] {value - 1});
+                    }
+
+                    public void entry(int value) throws Throwable {
+                        if (value == 0) return;
+                        bounce(value);
+                    }
+                }
+
+                static class NewInstanceTarget {
+                    NewInstanceTarget() {
+                    }
+
+                    int value() {
+                        return 11;
+                    }
+                }
+
                 public static void main(String[] args) throws Throwable {
                     String out = runAll(args);
                     System.out.println(out);
-                    if (!out.equals("total:382:true")) {
+                    if (!out.equals("total:420:true")) {
                         throw new AssertionError(out);
                     }
                     System.out.println("PARAMETER OBF OK");
@@ -572,7 +759,7 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     Worker worker = new Impl();
                     Box box = new Box(3, "xy");
                     int direct = directAndReflectionPaths(shapes, worker, box);
-                    if (direct != 276) {
+                    if (direct != 291) {
                         throw new AssertionError("direct:" + direct);
                     }
                     int methodHandles = methodHandlePaths(box);
@@ -580,7 +767,7 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                         throw new AssertionError("methodHandles:" + methodHandles);
                     }
                     int interfaces = interfacePaths(worker);
-                    if (interfaces != 39) {
+                    if (interfaces != 62) {
                         throw new AssertionError("interfaces:" + interfaces);
                     }
                     int total = direct + methodHandles + interfaces;
@@ -593,7 +780,7 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                         throw new AssertionError("direct-core:" + direct);
                     }
                     int reflectedMethods = reflectMethods();
-                    if (reflectedMethods != 90) {
+                    if (reflectedMethods != 105) {
                         throw new AssertionError("reflect-methods:" + reflectedMethods);
                     }
                     int reflectedConstructor = reflectConstructor();
@@ -641,6 +828,8 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     total += methodInvokeEscaped(method, null, new Object[] {"wx", 16});
                     ReflectInvoker invoker = new ReflectInvokerImpl();
                     total += invoker.invoke(method, null, new Object[] {"ij", 18});
+                    total += stackTraceReflectPath();
+                    total += classNewInstancePath();
 
                     Method[] actualMethods = ParameterShapes.class.getDeclaredMethods();
                     Method[] wrongMethods = Box.class.getDeclaredMethods();
@@ -659,6 +848,20 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                         }
                     }
                     return total;
+                }
+
+                static int stackTraceReflectPath() throws Throwable {
+                    TraceLike.count = 0;
+                    new TraceLike().entry(4);
+                    return TraceLike.count;
+                }
+
+                static int classNewInstancePath() throws Throwable {
+                    Class<?> type = Class.forName("ParameterShapes$NewInstanceTarget");
+                    Object instance = type.newInstance();
+                    Method method = type.getDeclaredMethod("value");
+                    method.setAccessible(true);
+                    return ((Integer) method.invoke(instance, new Object[0])).intValue();
                 }
 
                 static int reflectSameLocalAfterThrow() throws Throwable {
@@ -836,11 +1039,384 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     );
                     Method interfaceMethod = Worker.class.getMethod("work", int.class, String.class);
                     return callWorkerHandle(interfaceHandle, worker)
-                        + ((Integer) interfaceMethod.invoke(worker, new Object[] {17, "r"})).intValue();
+                        + ((Integer) interfaceMethod.invoke(worker, new Object[] {17, "r"})).intValue()
+                        + defaultInterfaceCarrierPath();
+                }
+
+                static int defaultInterfaceCarrierPath() {
+                    CaseLike test = new DefaultCase();
+                    Options options = new Options();
+                    if (!options.accepts(test.id(), test.tags())) {
+                        throw new AssertionError("default-interface-tags");
+                    }
+                    return 23;
                 }
 
                 static String join(String prefix, int value, boolean flag) {
                     return prefix + ":" + value + ":" + flag;
+                }
+            }
+            """;
+    }
+
+    private String interfaceDefaultCarrierSourceText() {
+        return """
+            import java.util.List;
+            import java.util.Locale;
+            import java.util.Set;
+
+            public class PackedDefaultEntry {
+                interface CaseLike {
+                    String id();
+
+                    default Set<String> tags() {
+                        return Set.of("default");
+                    }
+                }
+
+                static final class DefaultCase implements CaseLike {
+                    public String id() {
+                        return "alpha-default";
+                    }
+                }
+
+                static final class OverrideCase implements CaseLike {
+                    public String id() {
+                        return "alpha-override";
+                    }
+
+                    public Set<String> tags() {
+                        return Set.of("feature", "jvm");
+                    }
+                }
+
+                static final class SecondOverrideCase implements CaseLike {
+                    public String id() {
+                        return "alpha-second";
+                    }
+
+                    public Set<String> tags() {
+                        return Set.of("runner", "case");
+                    }
+                }
+
+                static final class FourTagOverrideCase implements CaseLike {
+                    public String id() {
+                        return "alpha-four";
+                    }
+
+                    public Set<String> tags() {
+                        return Set.of("feature", "jvm", "class-literal", "array");
+                    }
+                }
+
+                static final class Options {
+                    boolean accepts(String value, Iterable<String> patterns) {
+                        String lower = value.toLowerCase(Locale.ROOT);
+                        int length = 0;
+                        for (String pattern : patterns) {
+                            length += pattern.toLowerCase(Locale.ROOT).length();
+                        }
+                        return lower.startsWith("alpha") && length >= 10;
+                    }
+                }
+
+                public static void main(String[] args) {
+                    String out = run();
+                    System.out.println(out);
+                    if (!out.equals("DEFAULT ENTRY OK")) {
+                        throw new AssertionError(out);
+                    }
+                }
+
+                static String run() {
+                    Options options = new Options();
+                    int accepted = 0;
+                    for (CaseLike test : List.of(select(), new SecondOverrideCase(), new FourTagOverrideCase())) {
+                        if (options.accepts(test.id(), test.tags())) {
+                            accepted++;
+                        }
+                    }
+                    return accepted == 3 ? "DEFAULT ENTRY OK" : "DEFAULT ENTRY FAIL";
+                }
+
+                static CaseLike select() {
+                    return Boolean.getBoolean("neko.default.case")
+                        ? new DefaultCase()
+                        : new OverrideCase();
+                }
+            }
+            """;
+    }
+
+    private String topLevelInterfaceCarrierSourceText() {
+        StringBuilder listAdds = new StringBuilder();
+        StringBuilder caseClasses = new StringBuilder();
+        for (int index = 0; index < 24; index++) {
+            if (index == 20) {
+                listAdds.append("                    tests.add(new PackedTopLevelClassLiteralCase());\n");
+            }
+            listAdds.append("                    tests.add(new PackedTopLevelCase%02d());\n".formatted(index));
+            caseClasses.append(
+                """
+                final class PackedTopLevelCase%1$02d implements PackedTopLevelCaseLike {
+                    public String id() {
+                        return "alpha-case-%1$02d";
+                    }
+
+                    public Set<String> tags() {
+                        return Set.of("feature", "case", "slot%1$02d");
+                    }
+                }
+
+                """.formatted(index)
+            );
+        }
+        return """
+            import java.util.ArrayList;
+            import java.util.List;
+            import java.util.Locale;
+            import java.util.Set;
+
+            public class PackedTopLevelEntry {
+                public static void main(String[] args) {
+                    String out = run();
+                    System.out.println(out);
+                    if (!out.equals("TOP LEVEL ENTRY OK")) {
+                        throw new AssertionError(out);
+                    }
+                }
+
+                static String run() {
+                    PackedTopLevelOptions options = new PackedTopLevelOptions();
+                    List<PackedTopLevelCaseLike> tests = new ArrayList<>();
+%s
+                    tests.add(new PackedTopLevelSecondCase());
+                    int accepted = 0;
+                    for (PackedTopLevelCaseLike test : tests) {
+                        String marker = System.getProperty("packed.marker", "marker");
+                        if (marker.toLowerCase(Locale.ROOT).contains("mark") && options.accepts(test.id(), test.tags())) {
+                            accepted++;
+                        }
+                    }
+                    return accepted == 26 ? "TOP LEVEL ENTRY OK" : "TOP LEVEL ENTRY FAIL";
+                }
+            }
+
+%s
+            final class PackedTopLevelClassLiteralCase implements PackedTopLevelCaseLike {
+                public String id() {
+                    return "alpha-classliteral-arrays";
+                }
+
+                public Set<String> tags() {
+                    return Set.of("feature", "jvm", "class-literal", "array");
+                }
+
+                Class<?>[] literals() {
+                    return new Class<?>[] {
+                        int[][].class,
+                        String[][].class,
+                        java.lang.invoke.MethodHandle.class,
+                        PackedTopLevelCaseLike.class
+                    };
+                }
+            }
+
+            final class PackedTopLevelSecondCase implements PackedTopLevelCaseLike {
+                public String id() {
+                    return "alpha-second";
+                }
+
+                public Set<String> tags() {
+                    return Set.of("runner", "case", "interface");
+                }
+            }
+
+            interface PackedTopLevelCaseLike {
+                String id();
+
+                default Set<String> tags() {
+                    return Set.of("default");
+                }
+            }
+
+            final class PackedTopLevelOptions {
+                boolean accepts(String value, Iterable<String> patterns) {
+                    String lower = value.toLowerCase(Locale.ROOT);
+                    int length = 0;
+                    for (String pattern : patterns) {
+                        length += pattern.toLowerCase(Locale.ROOT).length();
+                    }
+                    return lower.startsWith("alpha") && length >= 13;
+                }
+            }
+            """.formatted(listAdds, caseClasses);
+    }
+
+    private String recordAbiSourceText() {
+        return """
+            import java.io.ByteArrayInputStream;
+            import java.io.ByteArrayOutputStream;
+            import java.io.ObjectInputStream;
+            import java.io.ObjectOutputStream;
+            import java.io.Serializable;
+            import java.lang.reflect.Constructor;
+            import java.lang.reflect.Method;
+            import java.lang.reflect.RecordComponent;
+
+            public class RecordAbiEntry {
+                public static void main(String[] args) throws Exception {
+                    Person person = new Person("ada", 36);
+                    if (!Person.class.isRecord()) {
+                        throw new AssertionError("not-record");
+                    }
+                    RecordComponent[] components = Person.class.getRecordComponents();
+                    if (components.length != 2) {
+                        throw new AssertionError("components:" + components.length);
+                    }
+                    if (!"name".equals(components[0].getName()) || !"age".equals(components[1].getName())) {
+                        throw new AssertionError("component-names:" + components[0].getName() + ":" + components[1].getName());
+                    }
+                    if (!"name".equals(components[0].getAccessor().getName()) ||
+                        !"age".equals(components[1].getAccessor().getName())) {
+                        throw new AssertionError("accessor-names");
+                    }
+                    if (components[0].getAccessor().getParameterCount() != 0 ||
+                        components[1].getAccessor().getParameterCount() != 0) {
+                        throw new AssertionError("accessor-parameters");
+                    }
+                    if (!"ada".equals(person.name()) || person.age() != 36) {
+                        throw new AssertionError("accessor-values");
+                    }
+                    if (!"ada".equals(components[0].getAccessor().invoke(person, new Object[0])) ||
+                        ((Integer) components[1].getAccessor().invoke(person, new Object[0])).intValue() != 36) {
+                        throw new AssertionError("reflective-accessor-values");
+                    }
+                    Method declaredName = Person.class.getDeclaredMethod("name");
+                    Method publicAge = Person.class.getMethod("age");
+                    if (declaredName.getParameterCount() != 0 || publicAge.getParameterCount() != 0) {
+                        throw new AssertionError("direct-reflective-accessor-parameters");
+                    }
+                    if (!"ada".equals(declaredName.invoke(person, new Object[0])) ||
+                        ((Integer) publicAge.invoke(person, new Object[0])).intValue() != 36) {
+                        throw new AssertionError("direct-reflective-accessor-values");
+                    }
+                    Method merged = args.length == 0
+                        ? declaredName
+                        : Helper.class.getDeclaredMethod("touch");
+                    if (!"ada".equals(merged.invoke(person, new Object[0]))) {
+                        throw new AssertionError("merged-reflective-accessor-values");
+                    }
+                    Constructor<Person> constructor = Person.class.getDeclaredConstructor(String.class, int.class);
+                    Person constructed = constructor.newInstance("ada", 36);
+                    if (!person.equals(constructed)) {
+                        throw new AssertionError("canonical-constructor");
+                    }
+                    Object restored = read(write(person));
+                    if (!person.equals(restored)) {
+                        throw new AssertionError("record-serialization");
+                    }
+                    if (!"ada:36".equals(person.label())) {
+                        throw new AssertionError("record-method");
+                    }
+                    System.out.println("RECORD ABI OK");
+                }
+
+                public record Person(String name, int age) implements Serializable {
+                    public String label() {
+                        return name + ":" + age;
+                    }
+                }
+
+                static final class Helper {
+                    private static int touched;
+
+                    private static void touch() {
+                        touched++;
+                    }
+                }
+
+                static byte[] write(Object value) throws Exception {
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                    try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+                        out.writeObject(value);
+                    }
+                    return bytes.toByteArray();
+                }
+
+                static Object read(byte[] bytes) throws Exception {
+                    try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes))) {
+                        return in.readObject();
+                    }
+                }
+            }
+            """;
+    }
+
+    private String externalReflectionAbiSourceText() {
+        return """
+            import java.lang.reflect.Method;
+            import java.lang.invoke.MethodHandle;
+            import java.lang.invoke.MethodHandles;
+            import java.lang.invoke.MethodType;
+            import java.util.concurrent.Callable;
+
+            public class ExternalReflectionAbiEntry {
+                public static void main(String[] args) throws Throwable {
+                    Class<?> integerType = Class.forName("java.lang.Integer");
+                    Class<?> threadType = Class.forName("java.lang.Thread");
+                    Class<?> stringType = Class.forName("java.lang.String");
+                    Class<?> callableType = Class.forName("java.util.concurrent.Callable");
+
+                    Method parse = integerType.getMethod("parseInt", String.class);
+                    int parsed = ((Integer) parse.invoke(null, "41")).intValue();
+
+                    Method threadName = threadType.getMethod("getName");
+                    String currentName = (String) threadName.invoke(Thread.currentThread(), new Object[0]);
+                    if (currentName == null || currentName.isEmpty()) {
+                        throw new AssertionError("thread-name");
+                    }
+
+                    Method charAt = stringType.getDeclaredMethod("charAt", int.class);
+                    int code = ((Character) charAt.invoke("abc", 1)).charValue();
+
+                    Method callableCall = callableType.getMethod("call");
+                    Callable<String> callable = () -> "external-call";
+                    if (!"external-call".equals(callableCall.invoke(callable))) {
+                        throw new AssertionError("callable-call");
+                    }
+
+                    MethodHandles.Lookup lookup = MethodHandles.lookup();
+                    MethodHandle parseHandle = lookup.findStatic(
+                        integerType,
+                        "parseInt",
+                        MethodType.methodType(int.class, String.class)
+                    );
+                    if (((Integer) parseHandle.invoke("1")).intValue() != 1) {
+                        throw new AssertionError("methodhandle-parse");
+                    }
+                    MethodHandle callableHandle = lookup.findVirtual(
+                        callableType,
+                        "call",
+                        MethodType.methodType(Object.class)
+                    );
+                    if (!"external-call".equals(callableHandle.invoke(callable))) {
+                        throw new AssertionError("methodhandle-call");
+                    }
+
+                    int total = parsed + code;
+                    if (total != 139) {
+                        throw new AssertionError("total:" + total);
+                    }
+                    if (!"local-call".equals(call())) {
+                        throw new AssertionError("local-call");
+                    }
+                    System.out.println("EXTERNAL REFLECTION ABI OK");
+                }
+
+                static String call() {
+                    return "local-call";
                 }
             }
             """;

@@ -833,7 +833,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             pctx.putPassData(SHARED_HELPERS_KEY, helpersByPackage);
         }
         int classKeyMask = metadata.classKeyTable().values().length - 1;
-        String sharedKey = packageName(clazz.name()) + "#" + classKeyMask;
+        String sharedKey = clazz.name() + "#" + classKeyMask;
         SharedHelperNames existing = helpersByPackage.get(sharedKey);
         if (existing != null) {
             return existing;
@@ -3175,6 +3175,10 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     }
 
     private void emitAdaptTarget(InsnList insns, int handleLocal) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
+        insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, METHOD_HANDLE, "asFixedArity",
+            "()Ljava/lang/invoke/MethodHandle;", false));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, handleLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
         insns.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, METHOD_HANDLE, "type",

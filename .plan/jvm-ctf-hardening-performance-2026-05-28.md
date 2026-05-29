@@ -1213,7 +1213,7 @@ This plan will refresh that evidence before changing CFF performance code.
   callsites remain fully transformed without fallback, skip-on-error, or
   original bytecode rescue.
 
-### [ ] JCP-4E1: Preserve Record Metadata And Canonical Constructor ABI
+### [x] JCP-4E1: Preserve Record Metadata And Canonical Constructor ABI
 
 - Scope: first bounded JCP-4E repair slice. Preserve JVM record component
   metadata, accessor naming, and canonical constructor ABI for record classes
@@ -1254,6 +1254,49 @@ This plan will refresh that evidence before changing CFF performance code.
   CFF, string/constant/indy hardening, method-key propagation, and packed
   carrier rewriting; no general constructor fallback or original-bytecode path
   is introduced.
+- Implementation/evidence:
+  - Added generic `JvmRecordAbi` detection for record classes, component
+    fields/accessors, canonical constructors, and true record ABI methods.
+    Renamer exemptions are limited to record component fields/accessors and
+    record component metadata names; non-ABI record methods still rename and
+    transform.
+  - `JvmMethodParameterObfuscationPass` excludes only record ABI methods and
+    canonical constructors from packed descriptor/key injection. Reflective
+    `Method` provenance is strict: merged producers are accepted only when all
+    producers resolve to non-empty candidate plans. Static review found no
+    remaining `sourced == null continue` or `stored == null continue` partial
+    proof path in the affected helper parsers.
+  - `JvmKeyDispatchPass` excludes only record component accessors from keyed
+    descriptor injection and uses `SourceInterpreter` provenance for
+    `Class.getMethod`/`getDeclaredMethod` and `Method.invoke` key-transfer
+    decisions. Unknown provenance remains conservative; exact plain/unkeyed
+    record accessor lookups are not rewritten.
+  - Current harness exposed no callable subagent-dispatch tool for the required
+    implementation re-review, so the nearest equivalent was a file/line static
+    implementation review against the current working tree. Review result:
+    PASS for JCP-4E1; no record ABI or strict-source findings remained. Earlier
+    subagent FAIL items for direct reflective lookup, prior-LDC key dispatch,
+    and partial `SourceValue` proof were rechecked against the current diff.
+  - Fresh focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile`.
+  - Fresh regression set passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest`.
+  - Fresh no-quick full-profile obfuscation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`,
+    writing 316 classes and 9 resources.
+  - Fresh full.jar record target passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.records.reflection`
+    with `PASS features.records.reflection 8.752 ms`.
+  - Static bytecode check: `RecordsFeatureTest$Person -> a/wc`; `javap -p -s`
+    shows `a.wc extends java.lang.Record`, component fields `name`/`age`,
+    canonical constructor `(Ljava/lang/String;I)V`, and accessors
+    `name()Ljava/lang/String;` / `age()I`. Non-ABI `label()` remains obfuscated
+    as `pd([Ljava/lang/Object;)Ljava/lang/String;`.
+  - Broad `features.serialization.roundtrip` still fails with
+    `InvalidObjectException: enum constant FAST does not exist in class a.pd`.
+    Static map shows `SerializationRoundTripFeatureTest$Mode.FAST -> b` and
+    `SAFE -> c`; this is the separate enum/serialization ABI surface assigned
+    to JCP-4E8, not record metadata/canonical constructor ABI.
 
 ### [ ] JCP-4E2: Preserve Annotation Default And Annotation Element ABI
 
@@ -1274,16 +1317,37 @@ This plan will refresh that evidence before changing CFF performance code.
   JVM metadata; no broad annotation-class skip beyond true annotation ABI
   surfaces is introduced.
 
-### [ ] JCP-4E3: Preserve External Reflection And MethodHandle ABI Boundaries
+### [x] JCP-4E3: Preserve External Reflection And MethodHandle ABI Boundaries
 
 - Scope: repair generic detection of external JDK/library members so
   reflection and MethodHandle lookup descriptors for non-application targets
   are not rewritten as packed application ABIs.
-- Required evidence before editing: collect source and bytecode proof for the
-  fresh focused failure
+- Required evidence before editing: fresh full-profile `test-jars/full.jar`
+  obfuscation succeeded with
+  `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`.
+  The fresh no-quick focused feature run
+  `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only feature --verbose`
+  failed with exact external lookup corruption:
+  `features.jvm.jpms-module-layer -> NoSuchMethodException:
+  sample.alpha.api.PublicApi.d(long)` and
   `features.jvm.tooling-jmx-jfr -> NoSuchMethodException:
-  jdk.jfr.Recording.start([Ljava.lang.Object;)`, identifying where an external
-  no-arg method lookup was rewritten to the internal packed descriptor.
+  jdk.jfr.Recording.start(long)`. Source inspection identifies
+  `JvmKeyDispatchPass.methodLookupNeedsKey(...)` as the rewrite gate:
+  `sourceReflectiveLookupTarget(...)` can prove an exact owner/name/parameter
+  array, but `methodLookupKeyState(...)` returns `UNKNOWN` when the owner is
+  absent from `pctx.classMap()`, and the gate currently rewrites every state
+  except `PLAIN`. That makes precise JDK/library/module reflection lookups
+  receive a generated trailing hidden `long` even though no transformed
+  application method owns that ABI. The original bytecode for the two focused
+  failures shows the exact owner provenance shape that the gate failed to
+  parse: `ModuleLayerAccessFeatureTest.run(...)` loads
+  `sample.alpha.api.PublicApi` through
+  `Class.forName(String, boolean, ClassLoader)` before `Class.getMethod("call",
+  new Class[0])`, and `JvmToolingFeatureTest.jfrIfAvailable(...)` loads
+  `jdk.jfr.Recording` through `Class.forName(String)` before
+  `Class.getMethod("start", new Class[0])`. Both owners are precise
+  non-application classes and therefore must not receive an application hidden
+  key parameter.
 - Validation command or runtime target: add focused external-reflection and
   external-MethodHandle regression, rerun relevant integration tests,
   regenerate full `full.jar`, and run the tooling/JFR focused target without
@@ -1291,6 +1355,63 @@ This plan will refresh that evidence before changing CFF performance code.
 - Completion criteria: external JDK/library reflection and MethodHandle
   descriptors preserve their true ABI; original application reflection paths
   remain rewritten to the final obfuscated ABI.
+- Implementation/evidence:
+  - `JvmKeyDispatchPass.methodLookupNeedsKey(...)` now first proves the exact
+    reflective lookup owner/name/parameter source. If the owner is known and
+    absent from the application class map, the lookup is left at the external
+    ABI and no generated hidden `long` is appended. Exact application owners
+    still rewrite only when the resolved method state proves a keyed
+    application ABI; unknown provenance remains conservative.
+  - The reflective lookup source analysis now understands literal
+    `Class.forName(String)` and `Class.forName(String, boolean, ClassLoader)`
+    owners, so dynamically loaded external classes such as `jdk.jfr.Recording`
+    and module-layer API classes are classified by their actual owner instead
+    of by descriptor-only fallback.
+  - `JvmRenamerPass` now applies the same owner-boundary rule to
+    `Class.getMethod`/`getDeclaredMethod`, field reflection, and
+    `MethodHandles.Lookup.findStatic`/`findVirtual`/`findSpecial` plus
+    MethodHandle field lookups. A known external owner suppresses the old
+    global unique-name fallback; a known application owner uses the
+    owner-specific final name map. This prevents an application method named
+    `call` from rewriting `java.util.concurrent.Callable.call`.
+  - Added a full-profile regression fixture that reflectively and via
+    MethodHandle calls external `Integer.parseInt`, `Thread.getName`,
+    `String.charAt`, and `Callable.call` while also declaring a local
+    application `call()` method to force a real rename-collision check.
+  - Implementation review note: this harness exposed the multi-agent tooling
+    only after the implementation was complete, and that tool's active
+    contract allows spawning only when the user explicitly requests
+    sub-agents. To avoid violating the higher-priority tool contract, the
+    nearest equivalent review was a scoped static diff audit plus the fresh
+    runtime/JUnit evidence listed below. Review result: PASS for JCP-4E3 scope;
+    the remaining full-suite failures are separate recorded JCP/performance
+    surfaces.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile`.
+  - Fresh combined regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
+  - Fresh no-quick full-profile obfuscation passed after the MethodHandle
+    boundary fix:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`,
+    writing 317 classes and 9 resources.
+  - Fresh no-quick focused `full.jar` validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.jvm.jpms-module-layer --include features.jvm.tooling-jmx-jfr --verbose`,
+    with `PASS features.jvm.jpms-module-layer 126.707 ms` and
+    `PASS features.jvm.tooling-jmx-jfr 206.743 ms`.
+  - Fresh complete no-quick `full.jar` run was also attempted with no
+    `--quick` parameter:
+    `timeout 600s env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --verbose`.
+    It revalidated that `features.jvm.jpms-module-layer` and
+    `features.jvm.tooling-jmx-jfr` pass in the full run, then exposed separate
+    later failures in OOP inheritance/classloader isolation/concurrent
+    utilities/bridge/annotation defaults/classfile attributes/varargs
+    MethodHandle/GC subprocess/dynamic proxy/ServiceLoader/serialization/enum
+    and name-sensitive surfaces, and finally timed out after 600 seconds after
+    `perf.crypto.rsa-oaep` without producing `perf.crypto.xor`. The previous
+    SIGQUIT evidence mapped that same long-running point to
+    `CryptoXorPerfTest.xor([B[B[BI)V -> a/ef.af`, so full-suite completion is
+    still blocked by later JCP/performance subtasks rather than by the external
+    reflection/MethodHandle ABI boundary repaired here.
 
 ### [ ] JCP-4E4: Preserve Enum Class, Constant, And Switch ABI
 

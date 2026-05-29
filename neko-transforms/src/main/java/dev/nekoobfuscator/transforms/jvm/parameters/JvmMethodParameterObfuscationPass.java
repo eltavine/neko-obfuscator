@@ -12,6 +12,7 @@ import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
@@ -60,8 +61,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     private static final String PLAN_BY_OWNER_NAME_DESC = "methodParameterObfuscation.planByOwnerNameDesc";
     private static final String INDY_HANDLE_TARGETS = "methodParameterObfuscation.indyHandleTargets";
     private static final String INDY_SAM_TARGETS = "methodParameterObfuscation.indySamTargets";
+    private static final String METHOD_HANDLE_LOOKUP_TARGETS = "methodParameterObfuscation.methodHandleLookupTargets";
+    private static final String REFLECTIVE_METHOD_LOOKUP_TARGETS =
+        "methodParameterObfuscation.reflectiveMethodLookupTargets";
+    private static final String REFLECTIVE_CONSTRUCTOR_LOOKUP_TARGETS =
+        "methodParameterObfuscation.reflectiveConstructorLookupTargets";
     public static final String CFF_KEY_LOAD_TARGET_SEED = "controlFlowFlattening.generatedKeyLoadTargetSeed";
     public static final String CFF_PACKED_CALL_TARGET_SEED = "controlFlowFlattening.packedCallTargetSeed";
+    public static final String CFF_PACKED_VIRTUAL_ENTRY_KEYS = "controlFlowFlattening.packedVirtualEntryKeys";
     public static final String CFF_DATA_DIGEST_EXCLUDED_ARGUMENT_LOCALS =
         "controlFlowFlattening.dataDigestExcludedArgumentLocals";
     public static final String CARRIER_INDEX_PLAN_BY_FINAL_KEY = "methodParameterObfuscation.carrierIndexPlanByFinalKey";
@@ -297,6 +304,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
 
         plans.sort(Comparator.comparing(MethodPlan::owner).thenComparing(MethodPlan::oldName).thenComparing(MethodPlan::oldDesc));
         Map<String, CarrierIndexPlan> carrierPlansByFamily = new HashMap<>();
+        Map<String, String> carrierAnchorOwners = carrierIndexAnchorOwners(pctx, plans);
+        String fallbackCarrierAnchorOwner = carrierIndexFallbackAnchorOwner(pctx);
         for (MethodPlan plan : plans) {
             L1Class clazz = pctx.classMap().get(plan.owner());
             if (clazz == null) continue;
@@ -316,19 +325,31 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 JvmKeyDispatchPass.recordMethodSeed(pctx, finalKey, abstractSeed);
             }
             long targetSeed = requireMethodSeed(pctx, plan, finalKey);
-            String carrierFamily = carrierIndexFamily(plan, mn.access, finalKey);
+            String carrierFamily = carrierIndexFamily(pctx, plan, mn.access, finalKey);
             long carrierSeed = ((mn.access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) == 0)
                 ? JvmPassBytecode.mix(pctx.masterSeed() ^ CARRIER_INDEX_DOMAIN, carrierFamily.hashCode())
                 : targetSeed;
             CarrierIndexPlan carrierIndexPlan = carrierPlansByFamily.computeIfAbsent(
                 carrierFamily,
-                ignored -> createCarrierIndexPlan(plan, carrierSeed, carrierFamily)
+                ignored -> createCarrierIndexPlan(
+                    plan,
+                    carrierSeed,
+                    carrierFamily,
+                    carrierAnchorOwners.getOrDefault(
+                        carrierFamily,
+                        fallbackCarrierAnchorOwner == null ? plan.owner() : fallbackCarrierAnchorOwner
+                    )
+                )
             );
             plan.carrierIndexPlan(carrierIndexPlan);
             plan.carrierIndexKeySeed(carrierIndexKeySeed(carrierIndexPlan));
             carrierIndexPlans(pctx).put(finalKey, carrierIndexPlan);
+            if (isPackedVirtualEntry(mn, plan)) {
+                cffPackedVirtualEntryKeys(pctx).add(finalKey);
+            }
             recordCffDataDigestExcludedArgumentLocals(pctx, plan, mn.access);
         }
+        assertVirtualCarrierFamilySeeds(pctx, plans);
         collectEscapedReflectiveParameterCandidates(pctx);
         collectCarrierAttestationSites(pctx);
         for (MethodPlan plan : plans) {
@@ -342,6 +363,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             clazz.markDirty();
         }
         collectCarrierAttestationSites(pctx);
+        seedEmptyCarrierAttestationSites(pctx);
     }
 
     private void collectCarrierAttestationSites(PipelineContext pctx) {
@@ -411,6 +433,23 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                                         "reflective constructor runtime target"
                                     );
                                 }
+                            }
+                        }
+                        continue;
+                    }
+                    if ("java/lang/Class".equals(call.owner)
+                        && "newInstance".equals(call.name)
+                        && "()Ljava/lang/Object;".equals(call.desc)) {
+                        for (MethodPlan candidate : classNewInstanceConstructorCandidates(pctx, mn, call)) {
+                            if (packedHiddenKeyArgumentIndex(candidate) >= 0) {
+                                recordCarrierAttestationSite(
+                                    pctx,
+                                    candidate,
+                                    clazz.name(),
+                                    mn,
+                                    call,
+                                    "Class.newInstance constructor target"
+                                );
                             }
                         }
                         continue;
@@ -533,51 +572,77 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         boolean methodMember,
         int depth
     ) {
-        if (value == null || depth > 4) return List.of();
+        ReflectiveSourcePlans resolved = reflectiveMemberSourceCandidatesResult(pctx, mn, frames, value, methodMember, depth);
+        return resolved.known() ? resolved.plans() : List.of();
+    }
+
+    private ReflectiveSourcePlans reflectiveMemberSourceCandidatesResult(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        boolean methodMember,
+        int depth
+    ) {
+        if (value == null || depth > 4 || value.insns.isEmpty()) return ReflectiveSourcePlans.unknown();
         List<MethodPlan> candidates = new ArrayList<>();
         for (AbstractInsnNode insn : value.insns) {
+            ReflectiveSourcePlans sourced = ReflectiveSourcePlans.unknown();
             if (insn instanceof MethodInsnNode call) {
                 MethodPlan plan = null;
                 if (methodMember && isReflectionLookup(call)) {
                     plan = resolveReflectiveLookupPlan(pctx, mn, call);
                 } else if (!methodMember && isReflectionConstructorLookup(call)) {
                     plan = resolveReflectiveConstructorLookupPlan(pctx, mn, call);
+                } else {
+                    return ReflectiveSourcePlans.unknown();
                 }
                 if (plan != null) {
-                    addUniquePlan(candidates, plan);
+                    sourced = ReflectiveSourcePlans.known(List.of(plan));
+                } else if (methodMember && isReflectionLookup(call)) {
+                    List<MethodPlan> runtimeCandidates = new ArrayList<>();
+                    for (MethodPlan candidate : runtimeReflectiveLookupCandidates(pctx, mn, call)) {
+                        addUniquePlan(runtimeCandidates, candidate);
+                    }
+                    if (!runtimeCandidates.isEmpty()) {
+                        sourced = ReflectiveSourcePlans.known(runtimeCandidates);
+                    }
                 }
-            }
-            if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
-                for (MethodPlan candidate : reflectiveMemberSourceCandidates(
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = reflectiveMemberSourceCandidatesResult(
                     pctx,
                     mn,
                     frames,
                     storedLocalValue(mn, frames, var),
                     methodMember,
                     depth + 1
-                )) {
-                    addUniquePlan(candidates, candidate);
-                }
+                );
             } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
                 int index = mn.instructions.indexOf(type);
-                if (index >= 0 && index < frames.length) {
-                    Frame<SourceValue> frame = frames[index];
-                    if (frame != null && frame.getStackSize() > 0) {
-                        for (MethodPlan candidate : reflectiveMemberSourceCandidates(
-                            pctx,
-                            mn,
-                            frames,
-                            frame.getStack(frame.getStackSize() - 1),
-                            methodMember,
-                            depth + 1
-                        )) {
-                            addUniquePlan(candidates, candidate);
-                        }
-                    }
-                }
+                if (index < 0 || index >= frames.length) return ReflectiveSourcePlans.unknown();
+                Frame<SourceValue> frame = frames[index];
+                if (frame == null || frame.getStackSize() == 0) return ReflectiveSourcePlans.unknown();
+                sourced = reflectiveMemberSourceCandidatesResult(
+                    pctx,
+                    mn,
+                    frames,
+                    frame.getStack(frame.getStackSize() - 1),
+                    methodMember,
+                    depth + 1
+                );
+            } else {
+                return ReflectiveSourcePlans.unknown();
+            }
+            if (!sourced.known() || sourced.plans().isEmpty()) {
+                return ReflectiveSourcePlans.unknown();
+            }
+            for (MethodPlan candidate : sourced.plans()) {
+                addUniquePlan(candidates, candidate);
             }
         }
-        return candidates;
+        return candidates.isEmpty()
+            ? ReflectiveSourcePlans.unknown()
+            : ReflectiveSourcePlans.known(candidates);
     }
 
     private static void addUniquePlan(List<MethodPlan> plans, MethodPlan candidate) {
@@ -637,11 +702,85 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return true;
     }
 
-    private static String carrierIndexFamily(MethodPlan plan, int access, String finalKey) {
+    private static String carrierIndexFamily(PipelineContext pctx, MethodPlan plan, int access, String finalKey) {
+        if ("<init>".equals(plan.oldName())) {
+            return "M:" + finalKey;
+        }
         if ((access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) != 0) {
             return "M:" + finalKey;
         }
-        return "V:" + plan.oldName() + plan.oldDesc();
+        L1Class clazz = pctx.classMap().get(plan.owner());
+        String rootOwner = clazz == null
+            ? plan.owner()
+            : JvmKeyDispatchPass.virtualFamilyOwner(pctx, clazz, plan.oldName(), plan.oldDesc());
+        return "V:" + rootOwner + "." + plan.oldName() + plan.oldDesc();
+    }
+
+    private static Map<String, String> carrierIndexAnchorOwners(PipelineContext pctx, List<MethodPlan> plans) {
+        Map<String, String> anchors = new LinkedHashMap<>();
+        for (MethodPlan plan : plans) {
+            L1Class clazz = pctx.classMap().get(plan.owner());
+            if (clazz == null) continue;
+            MethodNode mn = findMethodNode(clazz, plan.oldName(), plan.oldDesc());
+            if (!isCarrierIndexAnchorCandidate(clazz, mn)) continue;
+            String finalKey = key(plan.owner(), plan.finalName(), plan.packedDesc());
+            String family = carrierIndexFamily(pctx, plan, mn.access, finalKey);
+            anchors.merge(
+                family,
+                plan.owner(),
+                (current, candidate) -> current.compareTo(candidate) <= 0 ? current : candidate
+            );
+        }
+        return anchors;
+    }
+
+    private static void assertVirtualCarrierFamilySeeds(PipelineContext pctx, List<MethodPlan> plans) {
+        Map<String, Long> seedByFamily = new LinkedHashMap<>();
+        Map<String, String> ownerByFamily = new LinkedHashMap<>();
+        for (MethodPlan plan : plans) {
+            L1Class clazz = pctx.classMap().get(plan.owner());
+            if (clazz == null) continue;
+            MethodNode mn = findMethodNode(clazz, plan.oldName(), plan.oldDesc());
+            if (mn == null) continue;
+            if ("<init>".equals(plan.oldName()) || (mn.access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) != 0) {
+                continue;
+            }
+            String finalKey = key(plan.owner(), plan.finalName(), plan.packedDesc());
+            String family = carrierIndexFamily(pctx, plan, mn.access, finalKey);
+            long seed = seedForPlan(pctx, plan);
+            Long existing = seedByFamily.putIfAbsent(family, seed);
+            if (existing == null) {
+                ownerByFamily.put(family, plan.owner() + "." + plan.finalName() + plan.packedDesc());
+            } else if (existing.longValue() != seed) {
+                throw new IllegalStateException(
+                    "Virtual packed carrier family seed mismatch for " + family +
+                        " between " + ownerByFamily.get(family) + " and " +
+                        plan.owner() + "." + plan.finalName() + plan.packedDesc()
+                );
+            }
+        }
+    }
+
+    private static String carrierIndexFallbackAnchorOwner(PipelineContext pctx) {
+        String best = null;
+        for (L1Class clazz : pctx.classMap().values()) {
+            if (TransformGuards.isRuntimeClass(clazz) || clazz.isAnnotation()) continue;
+            for (L1Method method : clazz.methods()) {
+                if (TransformGuards.isGeneratedMethod(method)) continue;
+                MethodNode mn = method.asmNode();
+                if (!isCarrierIndexAnchorCandidate(clazz, mn)) continue;
+                best = best == null || clazz.name().compareTo(best) < 0 ? clazz.name() : best;
+                break;
+            }
+        }
+        return best;
+    }
+
+    private static boolean isCarrierIndexAnchorCandidate(L1Class clazz, MethodNode mn) {
+        if (mn == null) return false;
+        if ((mn.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) return false;
+        if (mn.instructions == null || mn.instructions.size() == 0) return false;
+        return true;
     }
 
     private boolean isEligible(PipelineContext pctx, L1Class clazz, L1Method method) {
@@ -651,6 +790,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if ("main".equals(method.name()) && "([Ljava/lang/String;)V".equals(method.descriptor()) && method.isStatic()) {
             return false;
         }
+        if (JvmRecordAbi.isRecordAbiMethod(clazz, method)) return false;
         if (!method.isConstructor() && overridesExternalMethod(pctx, clazz, method.asmNode(), method.descriptor())) return false;
         return true;
     }
@@ -662,6 +802,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             List<L1Method> constructors = new ArrayList<>();
             for (L1Method method : clazz.methods()) {
                 if (!method.isConstructor() || method.isNative() || TransformGuards.isGeneratedMethod(method)) continue;
+                if (JvmRecordAbi.isRecordCanonicalConstructor(clazz, method)) continue;
                 constructors.add(method);
             }
             constructors.sort(Comparator.comparing(L1Method::descriptor));
@@ -811,6 +952,10 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         MethodInsnNode call
     ) {
         if (!isMethodHandleLookup(call)) return null;
+        if (pctx != null) {
+            MethodHandleLookupTarget rewritten = methodHandleLookupTargets(pctx).get(call);
+            if (rewritten != null) return rewritten;
+        }
         int index = mn.instructions.indexOf(call);
         if (index < 0 || index >= frames.length) return null;
         Frame<SourceValue> frame = frames[index];
@@ -864,7 +1009,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     }
                 }
             }
-            if (sourced == null) continue;
+            if (sourced == null) return null;
             if (result != null && !sameTypes(result, sourced)) return null;
             result = sourced;
         }
@@ -1000,7 +1145,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 for (AbstractInsnNode insn = method.instructions().getFirst(); insn != null; insn = insn.getNext()) {
                     if (!(insn instanceof MethodInsnNode call)) continue;
                     if (isReflectionLookup(call)) {
-                        MethodHandleLookupTarget target = sourceReflectiveLookupTarget(method.asmNode(), call);
+                        MethodHandleLookupTarget target = sourceReflectiveLookupTarget(pctx, method.asmNode(), call);
                         if (target == null) continue;
                         if (target.name() == null) {
                             if (target.owner() != null &&
@@ -1011,7 +1156,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                             targets.add((target.owner() == null ? "*" : target.owner()) + "." + target.name());
                         }
                     } else if (isReflectionMethodArrayLookup(call)) {
-                        String owner = sourceReflectionArrayLookupOwner(method.asmNode(), call);
+                        String owner = sourceReflectionArrayLookupOwner(pctx, method.asmNode(), call);
                         if (owner != null) {
                             targets.add(owner + ".*");
                         }
@@ -1059,16 +1204,190 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() == 0) return null;
-            return sourceClassArrayParameterTypes(
+            SourceValue arrayValue = frame.getStack(frame.getStackSize() - 1);
+            Type[] result = sourceClassArrayParameterTypes(
                 pctx,
                 mn,
                 frames,
                 call,
-                frame.getStack(frame.getStackSize() - 1)
+                arrayValue
             );
+            return result;
         } catch (AnalyzerException | RuntimeException ignored) {
             return null;
         }
+    }
+
+    private static Type[] stripGeneratedTrailingHiddenKeyParameter(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode consumerCall,
+        SourceValue arrayValue,
+        String owner,
+        String name,
+        Type[] parameterTypes
+    ) {
+        if (pctx == null
+            || parameterTypes == null
+            || parameterTypes.length == 0
+            || !Type.LONG_TYPE.equals(parameterTypes[parameterTypes.length - 1])) {
+            return parameterTypes;
+        }
+        if (isPackedReflectiveLookupParameters(pctx, owner, name, parameterTypes)) {
+            return parameterTypes;
+        }
+        if (!hasGeneratedTrailingHiddenKeyParameter(pctx, mn, frames, consumerCall, arrayValue, parameterTypes, 0)) {
+            return parameterTypes;
+        }
+        Type[] visible = new Type[parameterTypes.length - 1];
+        System.arraycopy(parameterTypes, 0, visible, 0, visible.length);
+        return visible;
+    }
+
+    private static boolean isPackedReflectiveLookupParameters(
+        PipelineContext pctx,
+        String owner,
+        String name,
+        Type[] parameterTypes
+    ) {
+        if (pctx == null || parameterTypes == null) return false;
+        for (MethodPlan plan : planByFinalKey(pctx).values()) {
+            if ("<init>".equals(plan.oldName())) continue;
+            if (owner != null && !owner.equals(plan.owner())) continue;
+            if (name != null && !name.equals(plan.oldName()) && !name.equals(plan.finalName())) continue;
+            if (sameTypes(Type.getArgumentTypes(plan.packedDesc()), parameterTypes)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasGeneratedTrailingHiddenKeyParameter(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode consumerCall,
+        SourceValue arrayValue,
+        Type[] parameterTypes,
+        int depth
+    ) {
+        if (arrayValue == null || depth > 6) return false;
+        boolean proved = false;
+        for (AbstractInsnNode insn : arrayValue.insns) {
+            Boolean sourced = null;
+            if (insn instanceof TypeInsnNode type
+                && type.getOpcode() == Opcodes.ANEWARRAY
+                && "java/lang/Class".equals(type.desc)) {
+                sourced = allocationStoresGeneratedTrailingHiddenKey(
+                    pctx,
+                    mn,
+                    frames,
+                    consumerCall,
+                    type,
+                    parameterTypes
+                );
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = hasGeneratedTrailingHiddenKeyParameter(
+                    pctx,
+                    mn,
+                    frames,
+                    consumerCall,
+                    storedLocalValue(mn, frames, var),
+                    parameterTypes,
+                    depth + 1
+                );
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                int index = mn.instructions.indexOf(type);
+                if (index >= 0 && index < frames.length) {
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame != null && frame.getStackSize() > 0) {
+                        sourced = hasGeneratedTrailingHiddenKeyParameter(
+                            pctx,
+                            mn,
+                            frames,
+                            consumerCall,
+                            frame.getStack(frame.getStackSize() - 1),
+                            parameterTypes,
+                            depth + 1
+                        );
+                    }
+                }
+            } else if (insn.getOpcode() == Opcodes.DUP) {
+                int index = mn.instructions.indexOf(insn);
+                if (index >= 0 && index < frames.length) {
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame != null && frame.getStackSize() > 0) {
+                        sourced = hasGeneratedTrailingHiddenKeyParameter(
+                            pctx,
+                            mn,
+                            frames,
+                            consumerCall,
+                            frame.getStack(frame.getStackSize() - 1),
+                            parameterTypes,
+                            depth + 1
+                        );
+                    }
+                }
+            } else if (isClassArraySourceBookkeeping(insn)) {
+                continue;
+            }
+            if (sourced == null || !sourced) return false;
+            proved = true;
+        }
+        return proved;
+    }
+
+    private static boolean allocationStoresGeneratedTrailingHiddenKey(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode consumerCall,
+        TypeInsnNode allocation,
+        Type[] parameterTypes
+    ) {
+        int allocationIndex = mn.instructions.indexOf(allocation);
+        int consumerIndex = mn.instructions.indexOf(consumerCall);
+        if (allocationIndex < 0 || consumerIndex <= allocationIndex || allocationIndex >= frames.length) {
+            return false;
+        }
+        Frame<SourceValue> allocationFrame = frames[allocationIndex];
+        if (allocationFrame == null || allocationFrame.getStackSize() == 0) return false;
+        Integer length = literalInt(
+            mn,
+            frames,
+            allocationFrame.getStack(allocationFrame.getStackSize() - 1),
+            0
+        );
+        if (length == null || length != parameterTypes.length) return false;
+        int trailingSlot = parameterTypes.length - 1;
+        for (
+            AbstractInsnNode scan = allocation.getNext();
+            scan != null && scan != consumerCall;
+            scan = scan.getNext()
+        ) {
+            if (!(scan instanceof InsnNode store) || store.getOpcode() != Opcodes.AASTORE) continue;
+            int storeIndex = mn.instructions.indexOf(store);
+            if (storeIndex < 0 || storeIndex >= frames.length) return false;
+            Frame<SourceValue> frame = frames[storeIndex];
+            if (frame == null || frame.getStackSize() < 3) return false;
+            SourceValue arrayRef = frame.getStack(frame.getStackSize() - 3);
+            if (!sourceMayAliasInstruction(mn, frames, arrayRef, allocation, 0)) continue;
+            Integer slot = literalInt(
+                mn,
+                frames,
+                frame.getStack(frame.getStackSize() - 2),
+                0,
+                allocation,
+                parameterTypes.length
+            );
+            if (slot == null || slot != trailingSlot) continue;
+            Type type = literalClassType(mn, frames, frame.getStack(frame.getStackSize() - 1), 0);
+            if (Type.LONG_TYPE.equals(type) && JvmKeyDispatchPass.isGeneratedNode(pctx, store)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static Type[] sourceClassArrayParameterTypes(
@@ -1144,12 +1463,23 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                         );
                     }
                 }
+            } else if (isClassArraySourceBookkeeping(insn)) {
+                continue;
             }
-            if (sourced == null) continue;
-            if (result != null && !sameTypes(result, sourced)) return null;
+            if (sourced == null) {
+                return null;
+            }
+            if (result != null && !sameTypes(result, sourced)) {
+                return null;
+            }
             result = sourced;
         }
         return result;
+    }
+
+    private static boolean isClassArraySourceBookkeeping(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        return opcode == Opcodes.AASTORE || opcode == Opcodes.ASTORE;
     }
 
     private static Type[] sourceClassArrayParameterTypesFromAllocation(
@@ -1172,7 +1502,9 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             allocationFrame.getStack(allocationFrame.getStackSize() - 1),
             0
         );
-        if (length == null || length < 0 || length > 256) return null;
+        if (length == null || length < 0 || length > 256) {
+            return null;
+        }
         Type[] types = new Type[length];
         boolean[] seen = new boolean[length];
         for (
@@ -1180,25 +1512,94 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             scan != null && scan != consumerCall;
             scan = scan.getNext()
         ) {
-            if (pctx != null && JvmKeyDispatchPass.isGeneratedNode(pctx, scan)) continue;
+            if (scan instanceof MethodInsnNode arraycopy && isSystemArrayCopy(arraycopy)) {
+                if (!applyClassArrayCopy(pctx, mn, frames, consumerCall, allocation, arraycopy, types, seen)) {
+                    return null;
+                }
+                continue;
+            }
             if (!(scan instanceof InsnNode store) || store.getOpcode() != Opcodes.AASTORE) continue;
             int storeIndex = mn.instructions.indexOf(store);
             if (storeIndex < 0 || storeIndex >= frames.length) return null;
             Frame<SourceValue> frame = frames[storeIndex];
             if (frame == null || frame.getStackSize() < 3) return null;
             SourceValue arrayRef = frame.getStack(frame.getStackSize() - 3);
-            if (!sourceAliasesInstruction(mn, frames, arrayRef, allocation, 0)) continue;
-            Integer slot = literalInt(mn, frames, frame.getStack(frame.getStackSize() - 2), 0);
+            boolean alias = sourceMayAliasInstruction(mn, frames, arrayRef, allocation, 0);
+            if (!alias) continue;
+            Integer slot = literalInt(
+                mn,
+                frames,
+                frame.getStack(frame.getStackSize() - 2),
+                0,
+                allocation,
+                types.length
+            );
             Type type = literalClassType(mn, frames, frame.getStack(frame.getStackSize() - 1), 0);
-            if (slot == null || slot < 0 || slot >= types.length || type == null) return null;
-            if (seen[slot] && !types[slot].equals(type)) return null;
-            types[slot] = type;
-            seen[slot] = true;
+            if (slot == null || slot < 0 || slot >= types.length || type == null) {
+                return null;
+            }
+            if (!storeClassArrayType(types, seen, slot, type)) return null;
         }
         for (int i = 0; i < seen.length; i++) {
-            if (!seen[i]) return null;
+            if (!seen[i]) {
+                return null;
+            }
         }
         return types;
+    }
+
+    private static boolean isSystemArrayCopy(MethodInsnNode call) {
+        return call.getOpcode() == Opcodes.INVOKESTATIC
+            && "java/lang/System".equals(call.owner)
+            && "arraycopy".equals(call.name)
+            && "(Ljava/lang/Object;ILjava/lang/Object;II)V".equals(call.desc);
+    }
+
+    private static boolean applyClassArrayCopy(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode consumerCall,
+        AbstractInsnNode allocation,
+        MethodInsnNode arraycopy,
+        Type[] types,
+        boolean[] seen
+    ) {
+        int index = mn.instructions.indexOf(arraycopy);
+        if (index < 0 || index >= frames.length) return false;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < 5) return false;
+        int base = frame.getStackSize() - 5;
+        SourceValue sourceArray = frame.getStack(base);
+        SourceValue destArray = frame.getStack(base + 2);
+        if (!sourceMayAliasInstruction(mn, frames, destArray, allocation, 0)) return true;
+        Integer sourceOffset = literalInt(mn, frames, frame.getStack(base + 1), 0);
+        Integer destOffset = literalInt(mn, frames, frame.getStack(base + 3), 0);
+        Integer copyLength = literalInt(mn, frames, frame.getStack(base + 4), 0);
+        Type[] sourceTypes = sourceClassArrayParameterTypes(
+            pctx,
+            mn,
+            frames,
+            arraycopy,
+            sourceArray
+        );
+        if (sourceOffset == null || destOffset == null || copyLength == null || sourceTypes == null) return false;
+        if (sourceOffset < 0 || destOffset < 0 || copyLength < 0) return false;
+        if (sourceOffset + copyLength > sourceTypes.length || destOffset + copyLength > types.length) return false;
+        for (int i = 0; i < copyLength; i++) {
+            if (!storeClassArrayType(types, seen, destOffset + i, sourceTypes[sourceOffset + i])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean storeClassArrayType(Type[] types, boolean[] seen, int slot, Type type) {
+        if (slot < 0 || slot >= types.length || type == null) return false;
+        if (seen[slot] && !types[slot].equals(type)) return false;
+        types[slot] = type;
+        seen[slot] = true;
+        return true;
     }
 
     private static boolean sourceAliasesInstruction(
@@ -1259,29 +1660,269 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return sawSource;
     }
 
+    private static boolean sourceMayAliasInstruction(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        AbstractInsnNode target,
+        int depth
+    ) {
+        if (value == null || depth > 12) return false;
+        for (AbstractInsnNode insn : value.insns) {
+            if (insn == target) return true;
+            if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                if (sourceMayAliasInstruction(
+                    mn,
+                    frames,
+                    storedLocalValue(mn, frames, var),
+                    target,
+                    depth + 1
+                )) {
+                    return true;
+                }
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                int index = mn.instructions.indexOf(type);
+                if (index >= 0 && index < frames.length) {
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame != null && frame.getStackSize() > 0 &&
+                        sourceMayAliasInstruction(
+                            mn,
+                            frames,
+                            frame.getStack(frame.getStackSize() - 1),
+                            target,
+                            depth + 1
+                        )) {
+                        return true;
+                    }
+                }
+            } else if (insn.getOpcode() == Opcodes.DUP) {
+                int index = mn.instructions.indexOf(insn);
+                if (index >= 0 && index < frames.length) {
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame != null && frame.getStackSize() > 0 &&
+                        sourceMayAliasInstruction(
+                            mn,
+                            frames,
+                            frame.getStack(frame.getStackSize() - 1),
+                            target,
+                            depth + 1
+                        )) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     private static Integer literalInt(
         MethodNode mn,
         Frame<SourceValue>[] frames,
         SourceValue value,
         int depth
     ) {
+        return literalInt(mn, frames, value, depth, null, null);
+    }
+
+    private static Integer literalInt(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth,
+        AbstractInsnNode arrayLengthAlias,
+        Integer aliasLength
+    ) {
         if (value == null || depth > 4) return null;
         Integer result = null;
         for (AbstractInsnNode insn : value.insns) {
-            Integer direct = intConstant(insn);
-            if (direct != null) {
-                if (result != null && !result.equals(direct)) return null;
-                result = direct;
-                continue;
-            }
+            Integer sourced = intConstant(insn);
             if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ILOAD) {
-                Integer stored = literalInt(mn, frames, storedLocalValue(mn, frames, var), depth + 1);
-                if (stored == null) continue;
-                if (result != null && !result.equals(stored)) return null;
-                result = stored;
+                sourced = literalInt(
+                    mn,
+                    frames,
+                    storedLocalValue(mn, frames, var),
+                    depth + 1,
+                    arrayLengthAlias,
+                    aliasLength
+                );
+            } else if (sourced == null) {
+                sourced = literalIntExpression(mn, frames, insn, depth + 1, arrayLengthAlias, aliasLength);
             }
+            if (sourced == null) return null;
+            if (result != null && !result.equals(sourced)) return null;
+            result = sourced;
         }
         return result;
+    }
+
+    private static Integer literalIntExpression(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        AbstractInsnNode insn,
+        int depth,
+        AbstractInsnNode arrayLengthAlias,
+        Integer aliasLength
+    ) {
+        if (insn == null || depth > 4) return null;
+        int index = mn.instructions.indexOf(insn);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null) return null;
+        int opcode = insn.getOpcode();
+        if (opcode == Opcodes.INEG) {
+            if (frame.getStackSize() < 1) return null;
+            Integer value = literalInt(
+                mn,
+                frames,
+                frame.getStack(frame.getStackSize() - 1),
+                depth + 1,
+                arrayLengthAlias,
+                aliasLength
+            );
+            return value == null ? null : -value;
+        }
+        if (opcode == Opcodes.I2B || opcode == Opcodes.I2C || opcode == Opcodes.I2S) {
+            if (frame.getStackSize() < 1) return null;
+            Integer value = literalInt(
+                mn,
+                frames,
+                frame.getStack(frame.getStackSize() - 1),
+                depth + 1,
+                arrayLengthAlias,
+                aliasLength
+            );
+            if (value == null) return null;
+            return switch (opcode) {
+                case Opcodes.I2B -> (int) (byte) value.intValue();
+                case Opcodes.I2C -> (int) (char) value.intValue();
+                case Opcodes.I2S -> (int) (short) value.intValue();
+                default -> null;
+            };
+        }
+        if (opcode == Opcodes.ARRAYLENGTH) {
+            if (frame.getStackSize() < 1) return null;
+            SourceValue array = frame.getStack(frame.getStackSize() - 1);
+            if (arrayLengthAlias != null && aliasLength != null &&
+                sourceMayAliasInstruction(mn, frames, array, arrayLengthAlias, 0)) {
+                return aliasLength;
+            }
+            Integer length = sourceArrayLength(mn, frames, array, depth + 1);
+            return length;
+        }
+        if (!isIntBinaryExpression(opcode) || frame.getStackSize() < 2) return null;
+        Integer left = literalInt(
+            mn,
+            frames,
+            frame.getStack(frame.getStackSize() - 2),
+            depth + 1,
+            arrayLengthAlias,
+            aliasLength
+        );
+        Integer right = literalInt(
+            mn,
+            frames,
+            frame.getStack(frame.getStackSize() - 1),
+            depth + 1,
+            arrayLengthAlias,
+            aliasLength
+        );
+        if (left == null || right == null) {
+            return null;
+        }
+        return switch (opcode) {
+            case Opcodes.IADD -> left + right;
+            case Opcodes.ISUB -> left - right;
+            case Opcodes.IMUL -> left * right;
+            case Opcodes.IAND -> left & right;
+            case Opcodes.IOR -> left | right;
+            case Opcodes.IXOR -> left ^ right;
+            case Opcodes.ISHL -> left << (right & 31);
+            case Opcodes.ISHR -> left >> (right & 31);
+            case Opcodes.IUSHR -> left >>> (right & 31);
+            default -> null;
+        };
+    }
+
+    private static boolean isIntBinaryExpression(int opcode) {
+        return opcode == Opcodes.IADD
+            || opcode == Opcodes.ISUB
+            || opcode == Opcodes.IMUL
+            || opcode == Opcodes.IAND
+            || opcode == Opcodes.IOR
+            || opcode == Opcodes.IXOR
+            || opcode == Opcodes.ISHL
+            || opcode == Opcodes.ISHR
+            || opcode == Opcodes.IUSHR;
+    }
+
+    private static Integer sourceArrayLength(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 12) return null;
+        Integer result = null;
+        for (AbstractInsnNode insn : value.insns) {
+            Integer sourced = null;
+            if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.ANEWARRAY) {
+                sourced = sourceNewArrayLength(mn, frames, type, depth + 1);
+            } else if (insn instanceof IntInsnNode intInsn && intInsn.getOpcode() == Opcodes.NEWARRAY) {
+                sourced = sourceNewArrayLength(mn, frames, intInsn, depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                SourceValue stored = storedLocalValue(mn, frames, var);
+                sourced = sourceArrayLength(mn, frames, stored, depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                int index = mn.instructions.indexOf(type);
+                if (index >= 0 && index < frames.length) {
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame != null && frame.getStackSize() > 0) {
+                        sourced = sourceArrayLength(
+                            mn,
+                            frames,
+                            frame.getStack(frame.getStackSize() - 1),
+                            depth + 1
+                        );
+                    }
+                }
+            } else if (insn.getOpcode() == Opcodes.DUP) {
+                int index = mn.instructions.indexOf(insn);
+                if (index >= 0 && index < frames.length) {
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame != null && frame.getStackSize() > 0) {
+                        sourced = sourceArrayLength(
+                            mn,
+                            frames,
+                            frame.getStack(frame.getStackSize() - 1),
+                            depth + 1
+                        );
+                    }
+                }
+            } else if (isClassArraySourceBookkeeping(insn)) {
+                continue;
+            }
+            if (sourced == null) {
+                return null;
+            }
+            if (result != null && !result.equals(sourced)) {
+                return null;
+            }
+            result = sourced;
+        }
+        return result;
+    }
+
+    private static Integer sourceNewArrayLength(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        AbstractInsnNode allocation,
+        int depth
+    ) {
+        int index = mn.instructions.indexOf(allocation);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() == 0) return null;
+        return literalInt(mn, frames, frame.getStack(frame.getStackSize() - 1), 0);
     }
 
     private static Integer intConstant(AbstractInsnNode insn) {
@@ -1350,8 +1991,12 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             && "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;".equals(call.desc);
     }
 
-    private static MethodHandleLookupTarget sourceReflectiveLookupTarget(MethodNode mn, MethodInsnNode call) {
+    private static MethodHandleLookupTarget sourceReflectiveLookupTarget(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
         if (mn == null || mn.instructions == null) return null;
+        if (pctx != null) {
+            MethodHandleLookupTarget rewritten = reflectiveMethodLookupTargets(pctx).get(call);
+            if (rewritten != null) return rewritten;
+        }
         int index = mn.instructions.indexOf(call);
         if (index < 0) return null;
         try {
@@ -1359,12 +2004,36 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() < 3) return null;
             int top = frame.getStackSize();
-            String owner = literalObjectClass(mn, frames, frame.getStack(top - 3), 0);
+            String owner = sourceClassObjectOwner(pctx, mn, frames, frame.getStack(top - 3), 0);
             String name = literalString(mn, frames, frame.getStack(top - 2), 0);
-            return owner == null && name == null ? null : new MethodHandleLookupTarget(owner, name, null);
+            SourceValue parameterArray = frame.getStack(top - 1);
+            Type[] params = sourceClassArrayParameterTypes(
+                pctx,
+                mn,
+                frames,
+                call,
+                parameterArray
+            );
+            params = stripGeneratedTrailingHiddenKeyParameter(
+                pctx,
+                mn,
+                frames,
+                call,
+                parameterArray,
+                owner,
+                name,
+                params
+            );
+            return owner == null && name == null && params == null
+                ? null
+                : new MethodHandleLookupTarget(owner, name, null, params);
         } catch (AnalyzerException | RuntimeException ignored) {
             return null;
         }
+    }
+
+    private static MethodHandleLookupTarget sourceReflectiveLookupTarget(MethodNode mn, MethodInsnNode call) {
+        return sourceReflectiveLookupTarget(null, mn, call);
     }
 
     private static String literalObjectClass(
@@ -1376,21 +2045,108 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (value == null || depth > 4) return null;
         String owner = null;
         for (AbstractInsnNode insn : value.insns) {
+            String sourced = null;
             if (insn instanceof LdcInsnNode ldc &&
                 ldc.cst instanceof Type type &&
                 type.getSort() == Type.OBJECT) {
-                if (owner != null && !owner.equals(type.getInternalName())) return null;
-                owner = type.getInternalName();
-                continue;
+                sourced = type.getInternalName();
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = literalObjectClass(mn, frames, storedLocalValue(mn, frames, var), depth + 1);
             }
-            if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
-                String stored = literalObjectClass(mn, frames, storedLocalValue(mn, frames, var), depth + 1);
-                if (stored == null) continue;
-                if (owner != null && !owner.equals(stored)) return null;
-                owner = stored;
-            }
+            if (sourced == null) return null;
+            if (owner != null && !owner.equals(sourced)) return null;
+            owner = sourced;
         }
         return owner;
+    }
+
+    private static String sourceClassObjectOwner(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 6) return null;
+        String owner = null;
+        for (AbstractInsnNode insn : value.insns) {
+            String sourced = null;
+            if (insn instanceof LdcInsnNode ldc &&
+                ldc.cst instanceof Type type &&
+                type.getSort() == Type.OBJECT) {
+                sourced = type.getInternalName();
+            } else if (insn instanceof MethodInsnNode call && returnsClassObject(call)) {
+                sourced = sourceClassObjectOwnerFromProducingCall(pctx, mn, frames, call, depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceClassObjectOwner(pctx, mn, frames, storedLocalValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                int index = mn.instructions.indexOf(type);
+                if (index >= 0 && index < frames.length) {
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame != null && frame.getStackSize() > 0) {
+                        sourced = sourceClassObjectOwner(
+                            pctx,
+                            mn,
+                            frames,
+                            frame.getStack(frame.getStackSize() - 1),
+                            depth + 1
+                        );
+                    }
+                }
+            }
+            if (sourced == null) return null;
+            if (owner != null && !owner.equals(sourced)) return null;
+            owner = sourced;
+        }
+        return owner;
+    }
+
+    private static boolean returnsClassObject(MethodInsnNode call) {
+        return "()Ljava/lang/Class;".equals(call.desc)
+            || call.desc.endsWith(")Ljava/lang/Class;");
+    }
+
+    private static String sourceClassObjectOwnerFromProducingCall(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode call,
+        int depth
+    ) {
+        int index = mn.instructions.indexOf(call);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        Type[] args = Type.getArgumentTypes(call.desc);
+        int receiverSlots = call.getOpcode() == Opcodes.INVOKESTATIC ? 0 : 1;
+        int base = frame == null ? -1 : frame.getStackSize() - args.length - receiverSlots;
+        if (base < 0) return null;
+        if ("java/lang/Class".equals(call.owner)
+            && "forName".equals(call.name)
+            && call.desc.startsWith("(Ljava/lang/String;")) {
+            return normalizedClassName(pctx, literalString(mn, frames, frame.getStack(base), depth + 1));
+        }
+        if (args.length == 1
+            && "Ljava/lang/String;".equals(args[0].getDescriptor())
+            && ("loadClass".equals(call.name) || "findClass".equals(call.name))) {
+            return normalizedClassName(
+                pctx,
+                literalString(mn, frames, frame.getStack(base + receiverSlots), depth + 1)
+            );
+        }
+        return null;
+    }
+
+    private static String normalizedClassName(PipelineContext pctx, String name) {
+        if (name == null || name.isEmpty()) return null;
+        String internal = name;
+        if (internal.startsWith("[L") && internal.endsWith(";")) {
+            internal = internal.substring(2, internal.length() - 1);
+        }
+        internal = internal.replace('.', '/');
+        if (pctx == null || pctx.classMap().containsKey(internal)) {
+            return internal;
+        }
+        return internal.indexOf('/') >= 0 ? internal : null;
     }
 
     private static Type literalClassType(
@@ -1402,18 +2158,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (value == null || depth > 4) return null;
         Type result = null;
         for (AbstractInsnNode insn : value.insns) {
-            Type direct = classConstant(insn);
-            if (direct != null) {
-                if (result != null && !result.equals(direct)) return null;
-                result = direct;
-                continue;
-            }
+            Type sourced = classConstant(insn);
             if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
-                Type stored = literalClassType(mn, frames, storedLocalValue(mn, frames, var), depth + 1);
-                if (stored == null) continue;
-                if (result != null && !result.equals(stored)) return null;
-                result = stored;
+                sourced = literalClassType(mn, frames, storedLocalValue(mn, frames, var), depth + 1);
             }
+            if (sourced == null) return null;
+            if (result != null && !result.equals(sourced)) return null;
+            result = sourced;
         }
         return result;
     }
@@ -1427,17 +2178,15 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (value == null || depth > 4) return null;
         String string = null;
         for (AbstractInsnNode insn : value.insns) {
+            String sourced = null;
             if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String valueString) {
-                if (string != null && !string.equals(valueString)) return null;
-                string = valueString;
-                continue;
+                sourced = valueString;
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = literalString(mn, frames, storedLocalValue(mn, frames, var), depth + 1);
             }
-            if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
-                String stored = literalString(mn, frames, storedLocalValue(mn, frames, var), depth + 1);
-                if (stored == null) continue;
-                if (string != null && !string.equals(stored)) return null;
-                string = stored;
-            }
+            if (sourced == null) return null;
+            if (string != null && !string.equals(sourced)) return null;
+            string = sourced;
         }
         return string;
     }
@@ -1521,6 +2270,37 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             }
         }
         pctx.putPassData(INDY_SAM_TARGETS, targets);
+        return targets;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<MethodInsnNode, MethodHandleLookupTarget> methodHandleLookupTargets(PipelineContext pctx) {
+        Map<MethodInsnNode, MethodHandleLookupTarget> targets = pctx.getPassData(METHOD_HANDLE_LOOKUP_TARGETS);
+        if (targets == null) {
+            targets = new IdentityHashMap<>();
+            pctx.putPassData(METHOD_HANDLE_LOOKUP_TARGETS, targets);
+        }
+        return targets;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<MethodInsnNode, MethodHandleLookupTarget> reflectiveMethodLookupTargets(PipelineContext pctx) {
+        Map<MethodInsnNode, MethodHandleLookupTarget> targets = pctx.getPassData(REFLECTIVE_METHOD_LOOKUP_TARGETS);
+        if (targets == null) {
+            targets = new IdentityHashMap<>();
+            pctx.putPassData(REFLECTIVE_METHOD_LOOKUP_TARGETS, targets);
+        }
+        return targets;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<MethodInsnNode, MethodHandleLookupTarget> reflectiveConstructorLookupTargets(PipelineContext pctx) {
+        Map<MethodInsnNode, MethodHandleLookupTarget> targets =
+            pctx.getPassData(REFLECTIVE_CONSTRUCTOR_LOOKUP_TARGETS);
+        if (targets == null) {
+            targets = new IdentityHashMap<>();
+            pctx.putPassData(REFLECTIVE_CONSTRUCTOR_LOOKUP_TARGETS, targets);
+        }
         return targets;
     }
 
@@ -1710,6 +2490,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             emitUnboxOrCast(prologue, type);
             prologue.add(new VarInsnNode(type.getOpcode(Opcodes.ISTORE), storeLocal));
         }
+        List<AbstractInsnNode> prologueNodes = instructionNodes(prologue);
         AbstractInsnNode first = firstRealInstruction(mn);
         if (first == null) {
             mn.instructions.add(prologue);
@@ -1724,7 +2505,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             rewriteGeneratedKeyLocalLoads(pctx, mn, plan.keyLocal(), activeKeyLocal);
             JvmKeyDispatchPass.recordMethodKeyLocal(pctx, finalKey(plan), activeKeyLocal, seedForPlan(pctx, plan));
         }
-        JvmKeyDispatchPass.markGenerated(pctx, prologue);
+        markGeneratedNodes(pctx, prologueNodes);
     }
 
     private static int packedHiddenKeyArgumentIndex(MethodPlan plan) {
@@ -2047,8 +2828,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 || !"(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc)) {
                 continue;
             }
-            if (resolveReflectiveInvokePlan(pctx, mn, call) != null) continue;
-            candidates.put(call, List.copyOf(runtimeReflectiveInvokeCandidates(pctx, callerOwner, mn, call)));
+            List<MethodPlan> runtime = runtimeReflectiveInvokeCandidates(pctx, callerOwner, mn, call);
+            candidates.put(call, List.copyOf(runtime));
         }
         return candidates;
     }
@@ -2066,8 +2847,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 || !"([Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc)) {
                 continue;
             }
-            if (resolveReflectiveConstructorInvokePlan(pctx, mn, call) != null) continue;
-            candidates.put(call, List.copyOf(runtimeReflectiveConstructorInvokeCandidates(pctx, callerOwner, mn, call)));
+            List<MethodPlan> runtime = runtimeReflectiveConstructorInvokeCandidates(pctx, callerOwner, mn, call);
+            candidates.put(call, List.copyOf(runtime));
         }
         return candidates;
     }
@@ -2075,8 +2856,9 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     private boolean rewriteMethodHandleLookup(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
         if (!isMethodHandleLookup(call)) return false;
         MethodHandleLookupTarget target = sourceMethodHandleLookupTarget(pctx, mn, call);
-        MethodPlan plan = target == null ? null : resolveMethodHandleLookupPlan(pctx, target);
+        MethodPlan plan = target == null ? null : resolveExactMethodHandleLookupPlan(pctx, target);
         if (plan == null) return false;
+        methodHandleLookupTargets(pctx).put(call, target);
         boolean specialLookup = "findSpecial".equals(target.lookupKind());
         boolean constructorLookup = "findConstructor".equals(target.lookupKind());
         if (!specialLookup) {
@@ -2190,6 +2972,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         for (int i = args.length - 1; i >= 0; i--) {
             before.add(new VarInsnNode(args[i].getOpcode(Opcodes.ISTORE), locals[i]));
         }
+        CarrierCallsiteKeys carrierKeys = materializeCarrierCallsiteKeys(
+            pctx,
+            mn,
+            before,
+            plan,
+            callerKeyLocal,
+            attestationKind
+        );
         if (receiverHandle) {
             if (args.length == 0 || (args[0].getSort() != Type.OBJECT && args[0].getSort() != Type.ARRAY)) {
                 throw new IllegalStateException(
@@ -2202,12 +2992,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         Type[] packedArgs = plan.argumentTypes();
         JvmPassBytecode.pushInt(before, carrierArgumentCount(plan));
         before.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
-        emitCarrierIndexKeyStore(pctx, before, plan, callerKeyLocal, attestationKind);
+        emitCarrierIndexKeyStore(pctx, before, plan, callerKeyLocal, carrierKeys, attestationKind);
         emitCarrierAttestationStores(
             pctx,
             before,
             plan,
             callerKeyLocal,
+            carrierKeys,
             carrierAttestationSiteSeedOrZero(pctx, plan, callerOwner, mn, call, attestationKind),
             attestationKind
         );
@@ -2218,25 +3009,23 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 continue;
             }
             before.add(new InsnNode(Opcodes.DUP));
-            emitCarrierIndexDecodeMarker(
+            emitBoundedCarrierIndexForArrayOnStack(
                 pctx,
                 before,
                 plan,
                 carrierIndex++,
-                callerKeyLocal,
-                true,
+                carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+                carrierKeys == null,
                 plan.carrierIndexKeySeed()
             );
             if (isHiddenKeyArgument(plan, i)) {
                 if (callerKeyLocal == null) {
                     throw new IllegalStateException(
                         "Missing caller key for methodParameterObfuscation MethodHandle target " +
-                            plan.owner() + "." + plan.finalName() + plan.packedDesc()
+                        plan.owner() + "." + plan.finalName() + plan.packedDesc()
                     );
                 }
-                VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-                before.add(keyLoad);
-                cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+                before.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
             } else {
                 if (sourceIndex >= args.length) {
                     throw new IllegalStateException(
@@ -2258,8 +3047,12 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 );
             }
             VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-            before.add(keyLoad);
-            cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+            if (carrierKeys == null) {
+                before.add(keyLoad);
+                cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+            } else {
+                before.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
+            }
             call.desc = methodHandlePackedInvokeDescriptor(returnType, receiverHandle ? args[0] : null, plan);
         } else {
             call.desc = methodHandlePackedInvokeDescriptor(returnType, receiverHandle ? args[0] : null, plan);
@@ -2402,6 +3195,11 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return visible.toArray(Type[]::new);
     }
 
+    private static boolean matchesVisibleOrPackedArguments(MethodPlan plan, Type[] argumentTypes) {
+        return sameTypes(visibleArgumentTypes(plan), argumentTypes)
+            || sameTypes(Type.getArgumentTypes(plan.packedDesc()), argumentTypes);
+    }
+
     private static boolean receiverCompatible(PipelineContext pctx, Type receiverType, String owner) {
         if (receiverType.getSort() != Type.OBJECT) return false;
         String receiver = receiverType.getInternalName();
@@ -2425,6 +3223,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         MethodPlan plan = candidate.plan();
         Type receiverType = candidate.receiverType();
         String attestationKind = methodHandleAttestationSiteKind(pctx, plan, originalCall);
+        CarrierCallsiteKeys carrierKeys = materializeCarrierCallsiteKeys(
+            pctx,
+            mn,
+            out,
+            plan,
+            callerKeyLocal,
+            attestationKind
+        );
         loadStackPrefix(out, stackPrefixTypes, stackPrefixLocals);
         out.add(new VarInsnNode(Opcodes.ALOAD, handleLocal));
         if (receiverType != null) {
@@ -2432,12 +3238,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
         JvmPassBytecode.pushInt(out, carrierArgumentCount(plan));
         out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
-        emitCarrierIndexKeyStore(pctx, out, plan, callerKeyLocal, attestationKind);
+        emitCarrierIndexKeyStore(pctx, out, plan, callerKeyLocal, carrierKeys, attestationKind);
         emitCarrierAttestationStores(
             pctx,
             out,
             plan,
             callerKeyLocal,
+            carrierKeys,
             carrierAttestationSiteSeedOrZero(pctx, plan, callerOwner, mn, originalCall, attestationKind),
             attestationKind
         );
@@ -2449,19 +3256,17 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 continue;
             }
             out.add(new InsnNode(Opcodes.DUP));
-            emitCarrierIndexDecodeMarker(
+            emitBoundedCarrierIndexForArrayOnStack(
                 pctx,
                 out,
                 plan,
                 carrierIndex++,
-                callerKeyLocal,
-                true,
+                carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+                carrierKeys == null,
                 plan.carrierIndexKeySeed()
             );
             if (isHiddenKeyArgument(plan, i)) {
-                VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-                out.add(keyLoad);
-                cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+                out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
             } else {
                 out.add(new VarInsnNode(invokeArgs[sourceIndex].getOpcode(Opcodes.ILOAD), locals[sourceIndex]));
                 sourceIndex++;
@@ -2470,9 +3275,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             out.add(new InsnNode(Opcodes.AASTORE));
         }
         if (plan.splitHiddenKey()) {
-            VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-            out.add(keyLoad);
-            cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+            if (carrierKeys == null) {
+                VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
+                out.add(keyLoad);
+                cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+            } else {
+                out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
+            }
         }
         emitPackedSuffixArguments(pctx, out, plan, callerKeyLocal, attestationKind);
         out.add(new MethodInsnNode(
@@ -2693,7 +3502,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 frame.getStack(handleIndex),
                 0
             );
-            MethodPlan plan = target == null ? null : resolveMethodHandleLookupPlan(pctx, target);
+            MethodPlan plan = target == null ? null : resolveExactMethodHandleLookupPlan(pctx, target);
             return plan == null ? null : new MethodHandleRewriteTarget(plan, target.lookupKind());
         } catch (AnalyzerException | RuntimeException ignored) {
             return null;
@@ -2736,7 +3545,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     }
                 }
             }
-            if (sourced == null) continue;
+            if (sourced == null) return null;
             if (result != null && !result.equals(sourced)) return null;
             result = sourced;
         }
@@ -2753,13 +3562,25 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             if (target.name() == null) continue;
             if (!plan.oldName().equals(target.name()) && !plan.finalName().equals(target.name())) continue;
             if (target.owner() != null && !plan.owner().equals(target.owner())) continue;
-            if (target.parameterTypes() != null && !sameTypes(visibleArgumentTypes(plan), target.parameterTypes())) {
+            if (target.parameterTypes() != null && !matchesVisibleOrPackedArguments(plan, target.parameterTypes())) {
                 continue;
             }
             if (matched != null) return null;
             matched = plan;
         }
         return matched;
+    }
+
+    private MethodPlan resolveExactMethodHandleLookupPlan(PipelineContext pctx, MethodHandleLookupTarget target) {
+        if (!hasExactLookupTarget(target)) return null;
+        return resolveMethodHandleLookupPlan(pctx, target);
+    }
+
+    private static boolean hasExactLookupTarget(MethodHandleLookupTarget target) {
+        return target != null
+            && target.owner() != null
+            && target.name() != null
+            && target.parameterTypes() != null;
     }
 
     private void rewriteInvokeDynamic(PipelineContext pctx, InvokeDynamicInsnNode indy) {
@@ -2785,8 +3606,24 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if ("java/lang/Class".equals(call.owner)
             && ("getMethod".equals(call.name) || "getDeclaredMethod".equals(call.name))
             && "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;".equals(call.desc)) {
-            InsnList before = rewriteMethodLookup(mn, resolveReflectiveLookupPlan(pctx, mn, call));
+            MethodPlan plan = resolveReflectiveLookupPlan(pctx, mn, call);
+            List<MethodPlan> runtimeCandidates = plan == null ? runtimeReflectiveLookupCandidates(pctx, mn, call) : List.of();
+            if (plan == null && runtimeCandidates.isEmpty()) {
+                return false;
+            }
+            InsnList before = rewriteMethodLookup(
+                pctx,
+                mn,
+                plan,
+                runtimeCandidates
+            );
             mn.instructions.insertBefore(call, before);
+            return true;
+        }
+        if ("java/lang/Class".equals(call.owner)
+            && "newInstance".equals(call.name)
+            && "()Ljava/lang/Object;".equals(call.desc)) {
+            if (!rewriteClassNewInstance(pctx, callerOwner, mn, call, callerKeyLocal)) return false;
             return true;
         }
         if ("java/lang/Class".equals(call.owner)
@@ -2794,7 +3631,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             && "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;".equals(call.desc)) {
             MethodPlan plan = resolveReflectiveConstructorLookupPlan(pctx, mn, call);
             if (plan == null) return false;
-            InsnList before = rewriteConstructorLookup(mn, plan);
+            InsnList before = rewriteConstructorLookup(pctx, mn, plan);
             mn.instructions.insertBefore(call, before);
             return true;
         }
@@ -2815,9 +3652,9 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             mn.instructions.insertBefore(call, before);
             return true;
         }
-        if ("java/lang/reflect/Constructor".equals(call.owner)
-            && "newInstance".equals(call.name)
-            && "([Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc)) {
+                    if ("java/lang/reflect/Constructor".equals(call.owner)
+                        && "newInstance".equals(call.name)
+                        && "([Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc)) {
             MethodPlan plan = resolveReflectiveConstructorInvokePlan(pctx, mn, call);
             InsnList before = rewriteReflectiveInvoke(
                 pctx,
@@ -2837,9 +3674,45 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     private MethodPlan resolveReflectiveLookupPlan(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
-        MethodHandleLookupTarget target = sourceReflectiveLookupTarget(mn, call);
-        if (target == null) return null;
-        return resolveMethodHandleLookupPlan(pctx, target);
+        MethodHandleLookupTarget target = sourceReflectiveLookupTarget(pctx, mn, call);
+        if (target == null) {
+            return null;
+        }
+        MethodPlan plan = resolveExactMethodHandleLookupPlan(pctx, target);
+        if (plan != null) {
+            reflectiveMethodLookupTargets(pctx).put(call, target);
+        }
+        return plan;
+    }
+
+    private List<MethodPlan> runtimeReflectiveLookupCandidates(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
+        MethodHandleLookupTarget target = sourceReflectiveLookupTarget(pctx, mn, call);
+        if (target == null || target.owner() == null) {
+            return List.of();
+        }
+        return runtimeReflectiveLookupCandidates(pctx, target);
+    }
+
+    private List<MethodPlan> exactRuntimeReflectiveLookupCandidates(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
+        MethodHandleLookupTarget target = sourceReflectiveLookupTarget(pctx, mn, call);
+        if (!hasExactLookupTarget(target)) return List.of();
+        return runtimeReflectiveLookupCandidates(pctx, target);
+    }
+
+    private List<MethodPlan> runtimeReflectiveLookupCandidates(PipelineContext pctx, MethodHandleLookupTarget target) {
+        List<MethodPlan> candidates = new ArrayList<>();
+        for (MethodPlan plan : planByFinalKey(pctx).values()) {
+            if ("<init>".equals(plan.oldName())) continue;
+            if (!target.owner().equals(plan.owner())) continue;
+            if (target.name() != null
+                && !plan.oldName().equals(target.name())
+                && !plan.finalName().equals(target.name())) {
+                continue;
+            }
+            if (target.parameterTypes() != null && !matchesVisibleOrPackedArguments(plan, target.parameterTypes())) continue;
+            addUniquePlan(candidates, plan);
+        }
+        return candidates;
     }
 
     private MethodPlan resolveReflectiveInvokePlan(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
@@ -2847,15 +3720,19 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return candidates.size() == 1 ? candidates.get(0) : null;
     }
 
-    private static MethodHandleLookupTarget sourceReflectiveConstructorLookupTarget(MethodNode mn, MethodInsnNode call) {
+    private static MethodHandleLookupTarget sourceReflectiveConstructorLookupTarget(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
         if (mn == null || mn.instructions == null) return null;
+        if (pctx != null) {
+            MethodHandleLookupTarget rewritten = reflectiveConstructorLookupTargets(pctx).get(call);
+            if (rewritten != null) return rewritten;
+        }
         int index = mn.instructions.indexOf(call);
         if (index < 0) return null;
         try {
             Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() < 2) return null;
-            String sourced = literalObjectClass(mn, frames, frame.getStack(frame.getStackSize() - 2), 0);
+            String sourced = sourceClassObjectOwner(pctx, mn, frames, frame.getStack(frame.getStackSize() - 2), 0);
             return sourced == null ? null : new MethodHandleLookupTarget(sourced, "<init>", null);
         } catch (AnalyzerException | RuntimeException ignored) {
             return null;
@@ -2863,10 +3740,20 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     private MethodPlan resolveReflectiveConstructorLookupPlan(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
-        MethodHandleLookupTarget target = sourceReflectiveConstructorLookupTarget(mn, call);
+        MethodHandleLookupTarget target = sourceReflectiveConstructorLookupTarget(pctx, mn, call);
         if (target == null || target.owner() == null) return null;
-        Type[] params = sourceReflectiveParameterTypes(pctx, mn, call);
-        return resolveConstructorPlan(pctx, target.owner(), params);
+        Type[] params = target.parameterTypes() == null
+            ? sourceReflectiveParameterTypes(pctx, mn, call)
+            : target.parameterTypes();
+        if (params == null) return null;
+        MethodPlan plan = resolveConstructorPlan(pctx, target.owner(), params);
+        if (plan != null) {
+            reflectiveConstructorLookupTargets(pctx).put(
+                call,
+                new MethodHandleLookupTarget(target.owner(), "<init>", target.lookupKind(), params)
+            );
+        }
+        return plan;
     }
 
     private MethodPlan resolveReflectiveConstructorInvokePlan(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
@@ -2889,7 +3776,12 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return matched;
     }
 
-    private InsnList rewriteMethodLookup(MethodNode mn, MethodPlan plan) {
+    private InsnList rewriteMethodLookup(
+        PipelineContext pctx,
+        MethodNode mn,
+        MethodPlan plan,
+        List<MethodPlan> runtimeCandidates
+    ) {
         int paramsLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
         int nameLocal = allocateLocal(mn, Type.getType(String.class));
         int classLocal = allocateLocal(mn, Type.getType(Class.class));
@@ -2897,15 +3789,57 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         out.add(new VarInsnNode(Opcodes.ASTORE, paramsLocal));
         out.add(new VarInsnNode(Opcodes.ASTORE, nameLocal));
         out.add(new VarInsnNode(Opcodes.ASTORE, classLocal));
+        if (plan == null && runtimeCandidates != null && !runtimeCandidates.isEmpty()) {
+            LabelNode done = new LabelNode();
+            for (MethodPlan candidate : runtimeCandidates) {
+                LabelNode next = new LabelNode();
+                out.add(new VarInsnNode(Opcodes.ALOAD, nameLocal));
+                emitProtectedStringEqualsGuards(out, candidate.finalName(), next);
+                if (requiresRuntimeLookupParameterGuard(runtimeCandidates, candidate)) {
+                    out.add(new VarInsnNode(Opcodes.ALOAD, paramsLocal));
+                    emitParameterTypeArrayEqualsGuard(out, visibleArgumentTypes(candidate), next);
+                }
+                out.add(new VarInsnNode(Opcodes.ALOAD, classLocal));
+                out.add(new VarInsnNode(Opcodes.ALOAD, nameLocal));
+                emitParameterTypes(out, Type.getArgumentTypes(candidate.packedDesc()));
+                out.add(new JumpInsnNode(Opcodes.GOTO, done));
+                out.add(next);
+            }
+            out.add(new TypeInsnNode(Opcodes.NEW, "java/lang/NoSuchMethodException"));
+            out.add(new InsnNode(Opcodes.DUP));
+            out.add(new VarInsnNode(Opcodes.ALOAD, nameLocal));
+            out.add(new MethodInsnNode(
+                Opcodes.INVOKESPECIAL,
+                "java/lang/NoSuchMethodException",
+                "<init>",
+                "(Ljava/lang/String;)V",
+                false
+            ));
+            out.add(new InsnNode(Opcodes.ATHROW));
+            out.add(done);
+            JvmKeyDispatchPass.markGenerated(pctx, out);
+            return out;
+        }
         out.add(new VarInsnNode(Opcodes.ALOAD, classLocal));
         out.add(new VarInsnNode(Opcodes.ALOAD, nameLocal));
         emitParameterTypes(out, plan == null
             ? new Type[] { OBJECT_ARRAY_TYPE }
             : Type.getArgumentTypes(plan.packedDesc()));
+        JvmKeyDispatchPass.markGenerated(pctx, out);
         return out;
     }
 
-    private InsnList rewriteConstructorLookup(MethodNode mn, MethodPlan plan) {
+    private static boolean requiresRuntimeLookupParameterGuard(List<MethodPlan> candidates, MethodPlan candidate) {
+        int matches = 0;
+        for (MethodPlan other : candidates) {
+            if (candidate.finalName().equals(other.finalName()) && ++matches > 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private InsnList rewriteConstructorLookup(PipelineContext pctx, MethodNode mn, MethodPlan plan) {
         int paramsLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
         int classLocal = allocateLocal(mn, Type.getType(Class.class));
         InsnList out = new InsnList();
@@ -2915,6 +3849,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         emitParameterTypes(out, plan == null
             ? new Type[] { OBJECT_ARRAY_TYPE }
             : Type.getArgumentTypes(plan.packedDesc()));
+        JvmKeyDispatchPass.markGenerated(pctx, out);
         return out;
     }
 
@@ -2985,6 +3920,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         } else {
             emitReflectiveCarrierForPlan(
                 pctx,
+                mn,
                 out,
                 plan,
                 argsLocal,
@@ -3054,6 +3990,132 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
         out.add(new VarInsnNode(Opcodes.ALOAD, outerLocal));
         return out;
+    }
+
+    private boolean rewriteClassNewInstance(
+        PipelineContext pctx,
+        String callerOwner,
+        MethodNode mn,
+        MethodInsnNode call,
+        Integer callerKeyLocal
+    ) {
+        List<MethodPlan> candidates = classNewInstanceConstructorCandidates(pctx, mn, call);
+        if (candidates.isEmpty()) return false;
+        int classLocal = allocateLocal(mn, Type.getType(Class.class));
+        int emptyArgsLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
+        int innerLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
+        int splitKeyLocal = hasSplitHiddenKeyCandidate(candidates)
+            ? allocateLocal(mn, Type.getType(Object.class))
+            : -1;
+        int outerLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
+        List<Type> stackPrefixTypes = stackPrefixTypes(mn, call, 1);
+        int[] stackPrefixLocals = allocateStackPrefixLocals(mn, stackPrefixTypes);
+        InsnList out = new InsnList();
+        out.add(new VarInsnNode(Opcodes.ASTORE, classLocal));
+        storeStackPrefix(out, stackPrefixTypes, stackPrefixLocals);
+        JvmPassBytecode.pushInt(out, 0);
+        out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        out.add(new VarInsnNode(Opcodes.ASTORE, emptyArgsLocal));
+
+        LabelNode fallback = new LabelNode();
+        LabelNode done = new LabelNode();
+        for (MethodPlan candidate : candidates) {
+            LabelNode next = new LabelNode();
+            emitClassNameMatch(out, classLocal, candidate.owner().replace('/', '.'), next);
+            emitReflectiveCarrierForPlan(
+                pctx,
+                mn,
+                out,
+                candidate,
+                emptyArgsLocal,
+                innerLocal,
+                candidate.splitHiddenKey() ? splitKeyLocal : -1,
+                callerKeyLocal,
+                carrierAttestationSiteSeedOrZero(
+                    pctx,
+                    candidate,
+                    callerOwner,
+                    mn,
+                    call,
+                    "Class.newInstance constructor target"
+                )
+            );
+            emitReflectiveOuterArray(
+                pctx,
+                out,
+                candidate,
+                innerLocal,
+                candidate.splitHiddenKey() ? splitKeyLocal : -1,
+                -1,
+                new int[0],
+                callerKeyLocal,
+                outerLocal
+            );
+            loadStackPrefix(out, stackPrefixTypes, stackPrefixLocals);
+            out.add(new VarInsnNode(Opcodes.ALOAD, classLocal));
+            emitParameterTypes(out, Type.getArgumentTypes(candidate.packedDesc()));
+            out.add(new MethodInsnNode(
+                Opcodes.INVOKEVIRTUAL,
+                "java/lang/Class",
+                "getDeclaredConstructor",
+                "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;",
+                false
+            ));
+            out.add(new VarInsnNode(Opcodes.ALOAD, outerLocal));
+            out.add(new MethodInsnNode(
+                Opcodes.INVOKEVIRTUAL,
+                "java/lang/reflect/Constructor",
+                "newInstance",
+                "([Ljava/lang/Object;)Ljava/lang/Object;",
+                false
+            ));
+            out.add(new JumpInsnNode(Opcodes.GOTO, done));
+            out.add(next);
+        }
+        out.add(fallback);
+        loadStackPrefix(out, stackPrefixTypes, stackPrefixLocals);
+        out.add(new VarInsnNode(Opcodes.ALOAD, classLocal));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "newInstance",
+            "()Ljava/lang/Object;",
+            false
+        ));
+        out.add(done);
+        mn.instructions.insertBefore(call, out);
+        mn.instructions.remove(call);
+        return true;
+    }
+
+    private List<MethodPlan> classNewInstanceConstructorCandidates(
+        PipelineContext pctx,
+        MethodNode mn,
+        MethodInsnNode call
+    ) {
+        String owner = sourceClassNewInstanceOwner(pctx, mn, call);
+        List<MethodPlan> candidates = new ArrayList<>();
+        for (MethodPlan plan : planByFinalKey(pctx).values()) {
+            if (!"<init>".equals(plan.oldName())) continue;
+            if (owner != null && !owner.equals(plan.owner())) continue;
+            if (visibleArgumentTypes(plan).length != 0) continue;
+            addUniquePlan(candidates, plan);
+        }
+        return candidates;
+    }
+
+    private static String sourceClassNewInstanceOwner(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
+        if (mn == null || mn.instructions == null) return null;
+        int index = mn.instructions.indexOf(call);
+        if (index < 0) return null;
+        try {
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
+            Frame<SourceValue> frame = frames[index];
+            if (frame == null || frame.getStackSize() < 1) return null;
+            return sourceClassObjectOwner(pctx, mn, frames, frame.getStack(frame.getStackSize() - 1), 0);
+        } catch (AnalyzerException | RuntimeException ignored) {
+            return null;
+        }
     }
 
     private void emitReflectiveOuterArray(
@@ -3195,6 +4257,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
 
     private void emitReflectiveCarrierForPlan(
         PipelineContext pctx,
+        MethodNode mn,
         InsnList out,
         MethodPlan plan,
         int argsLocal,
@@ -3203,11 +4266,19 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         Integer callerKeyLocal,
         long siteSeed
     ) {
+        CarrierCallsiteKeys carrierKeys = materializeCarrierCallsiteKeys(
+            pctx,
+            mn,
+            out,
+            plan,
+            callerKeyLocal,
+            "reflective target"
+        );
         JvmPassBytecode.pushInt(out, carrierArgumentCount(plan));
         out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         out.add(new VarInsnNode(Opcodes.ASTORE, innerLocal));
-        emitCarrierIndexKeyStoreFromLocal(pctx, out, plan, callerKeyLocal, innerLocal, "reflective target");
-        emitCarrierAttestationStoresFromLocal(pctx, out, plan, callerKeyLocal, innerLocal, siteSeed, "reflective target");
+        emitCarrierIndexKeyStoreFromLocal(pctx, out, plan, callerKeyLocal, carrierKeys, innerLocal, "reflective target");
+        emitCarrierAttestationStoresFromLocal(pctx, out, plan, callerKeyLocal, carrierKeys, innerLocal, siteSeed, "reflective target");
         int sourceIndex = 0;
         int carrierIndex = 0;
         Type[] args = plan.argumentTypes();
@@ -3219,25 +4290,23 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                             plan.owner() + "." + plan.finalName() + plan.packedDesc()
                     );
                 }
-                VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-                cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
                 if (plan.splitHiddenKey()) {
-                    out.add(keyLoad);
+                    out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
                     out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf",
                         "(J)Ljava/lang/Long;", false));
                     out.add(new VarInsnNode(Opcodes.ASTORE, splitKeyLocal));
                 } else {
                     out.add(new VarInsnNode(Opcodes.ALOAD, innerLocal));
-                    emitCarrierIndexDecodeMarker(
+                    emitBoundedCarrierIndexForArrayOnStack(
                         pctx,
                         out,
                         plan,
                         carrierIndex++,
-                        callerKeyLocal,
-                        true,
+                        carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+                        carrierKeys == null,
                         plan.carrierIndexKeySeed()
                     );
-                    out.add(keyLoad);
+                    out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
                     out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf",
                         "(J)Ljava/lang/Long;", false));
                     out.add(new InsnNode(Opcodes.AASTORE));
@@ -3245,13 +4314,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 continue;
             }
             out.add(new VarInsnNode(Opcodes.ALOAD, innerLocal));
-            emitCarrierIndexDecodeMarker(
+            emitBoundedCarrierIndexForArrayOnStack(
                 pctx,
                 out,
                 plan,
                 carrierIndex++,
-                callerKeyLocal,
-                true,
+                carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+                carrierKeys == null,
                 plan.carrierIndexKeySeed()
             );
             out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
@@ -3287,41 +4356,57 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (candidates.isEmpty()) return;
 
         LabelNode done = new LabelNode();
+        Map<String, List<MethodPlan>> candidatesByOwner = new LinkedHashMap<>();
         for (MethodPlan candidate : candidates) {
-            LabelNode next = new LabelNode();
-            if (methodMember) {
-                emitRuntimeMethodMatch(out, memberLocal, candidate, next);
-            } else {
-                emitRuntimeConstructorMatch(out, memberLocal, candidate, next);
-            }
-            emitReflectiveCarrierForPlan(
-                pctx,
-                out,
-                candidate,
-                argsLocal,
-                innerLocal,
-                candidate.splitHiddenKey() ? splitKeyLocal : -1,
-                callerKeyLocal,
-                carrierAttestationSiteSeedOrZero(
+            candidatesByOwner.computeIfAbsent(candidate.owner(), ignored -> new ArrayList<>()).add(candidate);
+        }
+        for (Map.Entry<String, List<MethodPlan>> ownerEntry : candidatesByOwner.entrySet()) {
+            LabelNode nextOwner = new LabelNode();
+            emitRuntimeMemberOwnerMatch(out, methodMember, memberLocal, ownerEntry.getKey(), nextOwner);
+            for (MethodPlan candidate : ownerEntry.getValue()) {
+                LabelNode next = new LabelNode();
+                if (methodMember) {
+                    emitRuntimeMethodMatch(out, memberLocal, candidate, next, true);
+                } else {
+                    emitRuntimeConstructorMatch(out, memberLocal, candidate, next, true);
+                }
+                emitReflectiveCarrierForPlan(
                     pctx,
+                    mn,
+                    out,
+                    candidate,
+                    argsLocal,
+                    innerLocal,
+                    candidate.splitHiddenKey() ? splitKeyLocal : -1,
+                    callerKeyLocal,
+                    carrierAttestationSiteSeedOrZero(
+                        pctx,
                     candidate,
                     callerOwner,
                     mn,
                     call,
-                    methodMember ? "reflective runtime target" : "reflective constructor runtime target"
+                    reflectiveAttestationSiteKind(
+                        pctx,
+                        candidate,
+                        call,
+                        methodMember ? "reflective target" : "reflective constructor target",
+                        methodMember ? "reflective runtime target" : "reflective constructor runtime target"
+                    )
                 )
             );
-            if (matchedLocal >= 0) {
-                out.add(new InsnNode(Opcodes.ICONST_1));
-                out.add(new VarInsnNode(Opcodes.ISTORE, matchedLocal));
+                if (matchedLocal >= 0) {
+                    out.add(new InsnNode(Opcodes.ICONST_1));
+                    out.add(new VarInsnNode(Opcodes.ISTORE, matchedLocal));
+                }
+                if (outerArityLocal >= 0) {
+                    JvmPassBytecode.pushInt(out, packedOuterArgumentCount(candidate));
+                    out.add(new VarInsnNode(Opcodes.ISTORE, outerArityLocal));
+                }
+                emitRuntimeSuffixLocalStores(pctx, out, candidate, callerKeyLocal, runtimeSuffixLocals);
+                out.add(new JumpInsnNode(Opcodes.GOTO, done));
+                out.add(next);
             }
-            if (outerArityLocal >= 0) {
-                JvmPassBytecode.pushInt(out, packedOuterArgumentCount(candidate));
-                out.add(new VarInsnNode(Opcodes.ISTORE, outerArityLocal));
-            }
-            emitRuntimeSuffixLocalStores(pctx, out, candidate, callerKeyLocal, runtimeSuffixLocals);
-            out.add(new JumpInsnNode(Opcodes.GOTO, done));
-            out.add(next);
+            out.add(nextOwner);
         }
         out.add(done);
     }
@@ -3515,7 +4600,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     ) {
         List<MethodPlan> sourcedPlans = reflectiveInvokeSourceCandidates(pctx, mn, invokeCall, true, 3);
         if (!sourcedPlans.isEmpty()) return sourcedPlans;
-        String arrayOwner = methodArrayOwner(mn, invokeCall);
+        String arrayOwner = methodArrayOwner(pctx, mn, invokeCall);
         if (arrayOwner != null) {
             String arrayName = previousMethodArrayGuardName(mn, invokeCall);
             List<MethodPlan> plans = plansMatchingReflectionTarget(pctx, arrayOwner, arrayName);
@@ -3533,7 +4618,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     ) {
         List<MethodPlan> sourcedPlans = reflectiveInvokeSourceCandidates(pctx, mn, invokeCall, false, 2);
         if (!sourcedPlans.isEmpty()) return sourcedPlans;
-        String arrayOwner = constructorArrayOwner(mn, invokeCall);
+        String arrayOwner = constructorArrayOwner(pctx, mn, invokeCall);
         if (arrayOwner != null) {
             List<MethodPlan> plans = constructorPlansMatchingReflectionTarget(pctx, arrayOwner, null);
             if (!plans.isEmpty()) return plans;
@@ -3563,8 +4648,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return plans;
     }
 
-    private String methodArrayOwner(MethodNode mn, MethodInsnNode invokeCall) {
-        return sourceReflectiveMemberArrayOwner(mn, invokeCall, 3, true);
+    private String methodArrayOwner(PipelineContext pctx, MethodNode mn, MethodInsnNode invokeCall) {
+        return sourceReflectiveMemberArrayOwner(pctx, mn, invokeCall, 3, true);
     }
 
     private String previousMethodArrayGuardName(MethodNode mn, MethodInsnNode invokeCall) {
@@ -3613,11 +4698,12 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return branchIndex < invokeIndex && invokeIndex < falseIndex ? value : null;
     }
 
-    private String constructorArrayOwner(MethodNode mn, MethodInsnNode invokeCall) {
-        return sourceReflectiveMemberArrayOwner(mn, invokeCall, 2, false);
+    private String constructorArrayOwner(PipelineContext pctx, MethodNode mn, MethodInsnNode invokeCall) {
+        return sourceReflectiveMemberArrayOwner(pctx, mn, invokeCall, 2, false);
     }
 
     private static String sourceReflectiveMemberArrayOwner(
+        PipelineContext pctx,
         MethodNode mn,
         MethodInsnNode invokeCall,
         int invokeOperandValues,
@@ -3630,13 +4716,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() < invokeOperandValues) return null;
             SourceValue member = frame.getStack(frame.getStackSize() - invokeOperandValues);
-            return sourceReflectiveMemberArrayOwner(mn, frames, member, methodMember, 0);
+            return sourceReflectiveMemberArrayOwner(pctx, mn, frames, member, methodMember, 0);
         } catch (AnalyzerException | RuntimeException ignored) {
             return null;
         }
     }
 
     private static String sourceReflectiveMemberArrayOwner(
+        PipelineContext pctx,
         MethodNode mn,
         Frame<SourceValue>[] frames,
         SourceValue value,
@@ -3649,9 +4736,10 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             String sourced = null;
             if (insn instanceof MethodInsnNode call &&
                 (methodMember ? isReflectionMethodArrayLookup(call) : isReflectionConstructorArrayLookup(call))) {
-                sourced = sourceReflectionArrayLookupOwner(mn, frames, call);
+                sourced = sourceReflectionArrayLookupOwner(pctx, mn, frames, call);
             } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
                 sourced = sourceReflectiveMemberArrayOwner(
+                    pctx,
                     mn,
                     frames,
                     storedLocalValue(mn, frames, var),
@@ -3664,6 +4752,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     Frame<SourceValue> frame = frames[index];
                     if (frame != null && frame.getStackSize() >= 2) {
                         sourced = sourceReflectiveMemberArrayOwner(
+                            pctx,
                             mn,
                             frames,
                             frame.getStack(frame.getStackSize() - 2),
@@ -3678,6 +4767,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     Frame<SourceValue> frame = frames[index];
                     if (frame != null && frame.getStackSize() > 0) {
                         sourced = sourceReflectiveMemberArrayOwner(
+                            pctx,
                             mn,
                             frames,
                             frame.getStack(frame.getStackSize() - 1),
@@ -3687,7 +4777,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     }
                 }
             }
-            if (sourced == null) continue;
+            if (sourced == null) return null;
             if (owner != null && !owner.equals(sourced)) return null;
             owner = sourced;
         }
@@ -3695,19 +4785,21 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     private static String sourceReflectionArrayLookupOwner(
+        PipelineContext pctx,
         MethodNode mn,
         MethodInsnNode call
     ) {
         if (mn == null || mn.instructions == null) return null;
         try {
             Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
-            return sourceReflectionArrayLookupOwner(mn, frames, call);
+            return sourceReflectionArrayLookupOwner(pctx, mn, frames, call);
         } catch (AnalyzerException | RuntimeException ignored) {
             return null;
         }
     }
 
     private static String sourceReflectionArrayLookupOwner(
+        PipelineContext pctx,
         MethodNode mn,
         Frame<SourceValue>[] frames,
         MethodInsnNode call
@@ -3716,21 +4808,43 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (index < 0 || index >= frames.length) return null;
         Frame<SourceValue> frame = frames[index];
         if (frame == null || frame.getStackSize() == 0) return null;
-        return literalObjectClass(mn, frames, frame.getStack(frame.getStackSize() - 1), 0);
+        return sourceClassObjectOwner(pctx, mn, frames, frame.getStack(frame.getStackSize() - 1), 0);
+    }
+
+    private static void emitRuntimeMemberOwnerMatch(
+        InsnList out,
+        boolean methodMember,
+        int memberLocal,
+        String owner,
+        LabelNode next
+    ) {
+        out.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
+        out.add(new TypeInsnNode(
+            Opcodes.CHECKCAST,
+            methodMember ? "java/lang/reflect/Method" : "java/lang/reflect/Constructor"
+        ));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            methodMember ? "java/lang/reflect/Method" : "java/lang/reflect/Constructor",
+            "getDeclaringClass",
+            "()Ljava/lang/Class;",
+            false
+        ));
+        out.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Class",
+            "getName", "()Ljava/lang/String;", false));
+        emitProtectedStringEqualsGuards(out, owner.replace('/', '.'), next);
     }
 
     private static void emitRuntimeMethodMatch(
         InsnList out,
         int memberLocal,
         MethodPlan candidate,
-        LabelNode next
+        LabelNode next,
+        boolean ownerAlreadyMatched
     ) {
-        out.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
-        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/reflect/Method"));
-        out.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/reflect/Method",
-            "getDeclaringClass", "()Ljava/lang/Class;", false));
-        emitClassConstant(out, Type.getObjectType(candidate.owner()));
-        out.add(new JumpInsnNode(Opcodes.IF_ACMPNE, next));
+        if (!ownerAlreadyMatched) {
+            emitRuntimeMemberOwnerMatch(out, true, memberLocal, candidate.owner(), next);
+        }
 
         out.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
         out.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/reflect/Method"));
@@ -3745,18 +4859,28 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         emitParameterTypeArrayEqualsGuard(out, Type.getArgumentTypes(candidate.packedDesc()), next);
     }
 
+    private static void emitClassNameMatch(InsnList out, int classLocal, String expectedName, LabelNode next) {
+        out.add(new VarInsnNode(Opcodes.ALOAD, classLocal));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getName",
+            "()Ljava/lang/String;",
+            false
+        ));
+        emitProtectedStringEqualsGuards(out, expectedName, next);
+    }
+
     private static void emitRuntimeConstructorMatch(
         InsnList out,
         int memberLocal,
         MethodPlan candidate,
-        LabelNode next
+        LabelNode next,
+        boolean ownerAlreadyMatched
     ) {
-        out.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
-        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/reflect/Constructor"));
-        out.add(new MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/reflect/Constructor",
-            "getDeclaringClass", "()Ljava/lang/Class;", false));
-        emitClassConstant(out, Type.getObjectType(candidate.owner()));
-        out.add(new JumpInsnNode(Opcodes.IF_ACMPNE, next));
+        if (!ownerAlreadyMatched) {
+            emitRuntimeMemberOwnerMatch(out, false, memberLocal, candidate.owner(), next);
+        }
 
         out.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
         out.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/reflect/Constructor"));
@@ -3810,35 +4934,41 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             if (isSyntheticHiddenKeyArgument(plan, i)) continue;
             out.add(new VarInsnNode(args[i].getOpcode(Opcodes.ISTORE), locals[i]));
         }
+        CarrierCallsiteKeys carrierKeys = materializeCarrierCallsiteKeys(
+            pctx,
+            mn,
+            out,
+            plan,
+            callerKeyLocal,
+            "target"
+        );
         JvmPassBytecode.pushInt(out, carrierArgumentCount(plan));
         out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
-        emitCarrierIndexKeyStore(pctx, out, plan, callerKeyLocal, "target");
-        emitCarrierAttestationStores(pctx, out, plan, callerKeyLocal, siteSeed, "target");
+        emitCarrierIndexKeyStore(pctx, out, plan, callerKeyLocal, carrierKeys, "target");
+        emitCarrierAttestationStores(pctx, out, plan, callerKeyLocal, carrierKeys, siteSeed, "target");
         int carrierIndex = 0;
         for (int i = 0; i < args.length; i++) {
             if (plan.splitHiddenKey() && isHiddenKeyArgument(plan, i)) {
                 continue;
             }
             out.add(new InsnNode(Opcodes.DUP));
-            emitCarrierIndexDecodeMarker(
+            emitBoundedCarrierIndexForArrayOnStack(
                 pctx,
                 out,
                 plan,
                 carrierIndex++,
-                callerKeyLocal,
-                true,
+                carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+                carrierKeys == null,
                 plan.carrierIndexKeySeed()
             );
             if (isHiddenKeyArgument(plan, i)) {
                 if (callerKeyLocal == null) {
                     throw new IllegalStateException(
                         "Missing caller key for methodParameterObfuscation target " +
-                            plan.owner() + "." + plan.finalName() + plan.packedDesc()
+                        plan.owner() + "." + plan.finalName() + plan.packedDesc()
                     );
                 }
-                VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-                out.add(keyLoad);
-                cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+                out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
             } else {
                 out.add(new VarInsnNode(args[i].getOpcode(Opcodes.ILOAD), locals[i]));
             }
@@ -3848,13 +4978,17 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (plan.splitHiddenKey()) {
             if (callerKeyLocal == null) {
                 throw new IllegalStateException(
-                    "Missing caller key for methodParameterObfuscation target " +
+                "Missing caller key for methodParameterObfuscation target " +
                         plan.owner() + "." + plan.finalName() + plan.packedDesc()
                 );
             }
-            VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-            out.add(keyLoad);
-            cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+            if (carrierKeys == null) {
+                VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
+                out.add(keyLoad);
+                cffKeyLoadTargetSeeds(pctx).put(keyLoad, seedForPlan(pctx, plan));
+            } else {
+                out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
+            }
         }
         emitPackedSuffixArguments(pctx, out, plan, callerKeyLocal, "target");
         JvmKeyDispatchPass.markGenerated(pctx, out);
@@ -3984,6 +5118,19 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return carrierAttestationSiteSeed(pctx, plan, callerOwner, caller, site, siteKind);
     }
 
+    private static void seedEmptyCarrierAttestationSites(PipelineContext pctx) {
+        for (MethodPlan plan : planByFinalKey(pctx).values()) {
+            if (packedHiddenKeyArgumentIndex(plan) < 0) continue;
+            if (!plan.carrierAttestationSiteSeeds().isEmpty()) continue;
+            long seed = JvmPassBytecode.mix(
+                carrierAttestationPlanSeed(pctx, plan),
+                0x4E4F43414C4C314CL
+            );
+            seed = JvmPassBytecode.mix(seed, finalKey(plan).hashCode());
+            plan.addCarrierAttestationSiteSeed(seed == 0L ? CARRIER_ATTEST_SITE_DOMAIN : seed);
+        }
+    }
+
     private static String methodHandleAttestationSiteKind(
         PipelineContext pctx,
         MethodPlan plan,
@@ -3999,6 +5146,21 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return carrierAttestationSiteSeeds(pctx).containsKey(runtime)
             ? "MethodHandle runtime target"
             : "MethodHandle target";
+    }
+
+    private static String reflectiveAttestationSiteKind(
+        PipelineContext pctx,
+        MethodPlan plan,
+        AbstractInsnNode site,
+        String exactKind,
+        String runtimeKind
+    ) {
+        CarrierAttestationSiteKey exact = new CarrierAttestationSiteKey(finalKey(plan), site, exactKind);
+        if (carrierAttestationSiteSeeds(pctx).containsKey(exact)) {
+            return exactKind;
+        }
+        CarrierAttestationSiteKey runtime = new CarrierAttestationSiteKey(finalKey(plan), site, runtimeKind);
+        return carrierAttestationSiteSeeds(pctx).containsKey(runtime) ? runtimeKind : exactKind;
     }
 
     private static long recordCarrierAttestationSite(
@@ -4107,6 +5269,34 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     }
 
     @SuppressWarnings("unchecked")
+    public static Set<String> cffPackedVirtualEntryKeys(PipelineContext pctx) {
+        Set<String> set = pctx.getPassData(CFF_PACKED_VIRTUAL_ENTRY_KEYS);
+        if (set == null) {
+            set = new java.util.LinkedHashSet<>();
+            pctx.putPassData(CFF_PACKED_VIRTUAL_ENTRY_KEYS, set);
+        }
+        return set;
+    }
+
+    public static boolean isCffPackedVirtualEntry(
+        PipelineContext pctx,
+        String owner,
+        String name,
+        String desc
+    ) {
+        Set<String> entries = pctx.getPassData(CFF_PACKED_VIRTUAL_ENTRY_KEYS);
+        return entries != null && entries.contains(key(owner, name, desc));
+    }
+
+    private static boolean isPackedVirtualEntry(MethodNode mn, MethodPlan plan) {
+        if (mn == null) return false;
+        if ("<init>".equals(mn.name) || "<clinit>".equals(mn.name)) return false;
+        if ((mn.access & Opcodes.ACC_STATIC) != 0) return false;
+        if ((mn.access & Opcodes.ACC_PRIVATE) != 0) return false;
+        return packedHiddenKeyArgumentIndex(plan) >= 0;
+    }
+
+    @SuppressWarnings("unchecked")
     private static Map<String, Set<Integer>> cffDataDigestExcludedArgumentLocals(PipelineContext pctx) {
         Map<String, Set<Integer>> map = pctx.getPassData(CFF_DATA_DIGEST_EXCLUDED_ARGUMENT_LOCALS);
         if (map == null) {
@@ -4202,7 +5392,12 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return map;
     }
 
-    private static CarrierIndexPlan createCarrierIndexPlan(MethodPlan plan, long targetSeed, String carrierFamily) {
+    private static CarrierIndexPlan createCarrierIndexPlan(
+        MethodPlan plan,
+        long targetSeed,
+        String carrierFamily,
+        String anchorOwner
+    ) {
         int count = carrierArgumentCount(plan);
         long seed = JvmPassBytecode.mix(targetSeed ^ CARRIER_INDEX_DOMAIN, carrierFamily.hashCode());
         seed = JvmPassBytecode.mix(seed, plan.packedDesc().hashCode());
@@ -4212,7 +5407,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int encodedStep = step ^ carrierIndexWord(seed, 0x53544550);
         int encodedCount = count ^ carrierIndexWord(seed, 0x434F554E);
         int classKeyIdentity = carrierIndexWord(seed, 0x4B594944)
-            ^ plan.owner().hashCode()
+            ^ anchorOwner.hashCode()
+            ^ carrierFamily.hashCode()
             ^ plan.packedDesc().hashCode();
         int classWordIndex = Math.floorMod(
             carrierIndexWord(seed ^ classKeyIdentity, 0x574F5244),
@@ -4231,7 +5427,16 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 guardMask | 1
             );
         }
-        return new CarrierIndexPlan(count, seed, encodedCount, encodedStep, classKeyIdentity, classWordIndex, cells);
+        return new CarrierIndexPlan(
+            count,
+            seed,
+            encodedCount,
+            encodedStep,
+            classKeyIdentity,
+            classWordIndex,
+            cells,
+            anchorOwner
+        );
     }
 
     private static int carrierPermutationStep(int count, long seed) {
@@ -4276,6 +5481,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 if (site == null) {
                     throw new IllegalStateException("Unregistered carrier index decode marker");
                 }
+                ControlFlowFlatteningPass.CffClassKeyTable anchorTable =
+                    ControlFlowFlatteningPass.classKeyTable(pctx, site.plan().anchorOwner());
+                if (anchorTable == null) {
+                    throw new IllegalStateException(
+                        "Missing carrier index anchor class-key table for " + site.plan().anchorOwner()
+                    );
+                }
                 InsnList replacement = new InsnList();
                 emitDecodedCarrierIndex(
                     pctx,
@@ -4285,7 +5497,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     site.keyLocal() < 0 ? keyLocal : site.keyLocal(),
                     site.keyLocal() >= 0,
                     site.rewriteKeyToTarget(),
-                    table,
+                    anchorTable,
                     site.targetSeed()
                 );
                 JvmKeyDispatchPass.markGenerated(pctx, replacement);
@@ -4321,24 +5533,15 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             throw new IllegalStateException("Carrier index decoding requires a live method key local");
         }
         CarrierIndexCell cell = plan.cell(logicalIndex);
-        int classWord = table.values()[cell.classWordIndex()];
-        long expectedKey = useLiveKey ? JvmKeyDispatchPass.incomingRawForCanonical(targetSeed) : targetSeed;
-        int mask = carrierIndexRuntimeMask(plan, cell, classWord, expectedKey, useLiveKey);
-        JvmPassBytecode.pushInt(out, cell.physicalSlot() ^ mask);
-        emitCarrierIndexRuntimeMask(pctx, out, plan, cell, keyLocal, useLiveKey, rewriteKeyToTarget, table, targetSeed);
-        out.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(out, cell.physicalSlot());
+        emitCarrierIndexRuntimeOffset(out, plan, table);
+        out.add(new InsnNode(Opcodes.IADD));
     }
 
-    private static void emitCarrierIndexRuntimeMask(
-        PipelineContext pctx,
+    private static void emitCarrierIndexRuntimeOffset(
         InsnList out,
         CarrierIndexPlan plan,
-        CarrierIndexCell cell,
-        int keyLocal,
-        boolean useLiveKey,
-        boolean rewriteKeyToTarget,
-        ControlFlowFlatteningPass.CffClassKeyTable table,
-        long targetSeed
+        ControlFlowFlatteningPass.CffClassKeyTable table
     ) {
         out.add(new FieldInsnNode(
             Opcodes.GETSTATIC,
@@ -4349,70 +5552,28 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(out, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SLOT);
         out.add(new InsnNode(Opcodes.AALOAD));
         out.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
-        JvmPassBytecode.pushInt(out, cell.classWordIndex());
+        JvmPassBytecode.pushInt(out, plan.classWordIndex());
         out.add(new InsnNode(Opcodes.IALOAD));
         JvmPassBytecode.pushInt(out, ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL);
         out.add(new InsnNode(Opcodes.IXOR));
-        JvmPassBytecode.pushInt(out, cell.mixSalt());
+        JvmPassBytecode.pushInt(out, carrierIndexWord(plan.seed(), 0x4F464653));
         out.add(new InsnNode(Opcodes.IXOR));
-        if (useLiveKey) {
-            VarInsnNode lowKeyLoad = new VarInsnNode(Opcodes.LLOAD, keyLocal);
-            out.add(lowKeyLoad);
-            if (rewriteKeyToTarget) {
-                cffKeyLoadTargetSeeds(pctx).put(lowKeyLoad, targetSeed);
-            }
-            out.add(new InsnNode(Opcodes.L2I));
-        } else {
-            JvmPassBytecode.pushInt(out, (int) targetSeed);
-        }
+        JvmPassBytecode.pushInt(out, plan.classKeyIdentity());
         out.add(new InsnNode(Opcodes.IADD));
         out.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(out, 13);
         out.add(new InsnNode(Opcodes.IUSHR));
         out.add(new InsnNode(Opcodes.IXOR));
-        if (useLiveKey) {
-            VarInsnNode highKeyLoad = new VarInsnNode(Opcodes.LLOAD, keyLocal);
-            out.add(highKeyLoad);
-            if (rewriteKeyToTarget) {
-                cffKeyLoadTargetSeeds(pctx).put(highKeyLoad, targetSeed);
-            }
-            JvmPassBytecode.pushInt(out, 32);
-            out.add(new InsnNode(Opcodes.LUSHR));
-            out.add(new InsnNode(Opcodes.L2I));
-        } else {
-            JvmPassBytecode.pushInt(out, (int) (targetSeed >>> 32));
-        }
-        JvmPassBytecode.pushInt(out, carrierIndexWord(plan.seed(), 0x48494748));
+        JvmPassBytecode.pushInt(out, plan.encodedCount() ^ carrierIndexWord(plan.seed(), 0x434F554E));
         out.add(new InsnNode(Opcodes.IXOR));
-        out.add(new InsnNode(Opcodes.IADD));
-        JvmPassBytecode.pushInt(out, cell.guardMask());
+        JvmPassBytecode.pushInt(out, plan.encodedStep() ^ carrierIndexWord(plan.seed(), 0x53544550));
         out.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(out, carrierIndexWord(plan.seed() ^ plan.classKeyIdentity(), 0x47554152) | 1);
         out.add(new InsnNode(Opcodes.IMUL));
-        JvmPassBytecode.pushInt(out, plan.encodedStep() ^ carrierIndexWord(plan.seed(), 0x53544550));
-        out.add(new InsnNode(Opcodes.IXOR));
         out.add(new InsnNode(Opcodes.DUP));
         JvmPassBytecode.pushInt(out, 17);
         out.add(new InsnNode(Opcodes.IUSHR));
         out.add(new InsnNode(Opcodes.IADD));
-    }
-
-    private static int carrierIndexRuntimeMask(
-        CarrierIndexPlan plan,
-        CarrierIndexCell cell,
-        int classWord,
-        long key,
-        boolean useLiveKey
-    ) {
-        int x = classWord ^ cell.mixSalt();
-        x += (int) key;
-        x ^= x >>> 13;
-        x += ((int) (key >>> 32)) ^ carrierIndexWord(plan.seed(), 0x48494748);
-        x ^= cell.guardMask();
-        x *= carrierIndexWord(plan.seed() ^ plan.classKeyIdentity(), 0x47554152) | 1;
-        x ^= plan.encodedStep() ^ carrierIndexWord(plan.seed(), 0x53544550);
-        x += x >>> 17;
-        return x;
     }
 
     private MethodPlan resolvePlan(PipelineContext pctx, String owner, String name, String desc) {
@@ -4465,7 +5626,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         long targetSeed
     ) {
         out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
-        emitCarrierIndexDecodeMarker(pctx, out, plan, logicalIndex, keyLocal, rewriteKeyToTarget, targetSeed);
+        emitBoundedCarrierIndexForArrayOnStack(pctx, out, plan, logicalIndex, keyLocal, rewriteKeyToTarget, targetSeed);
         out.add(new InsnNode(Opcodes.AALOAD));
     }
 
@@ -4480,12 +5641,24 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         long targetSeed
     ) {
         out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+        emitBoundedCarrierIndexForArrayOnStack(pctx, out, plan, logicalIndex, keyLocal, rewriteKeyToTarget, targetSeed);
+        out.add(new InsnNode(Opcodes.AALOAD));
+    }
+
+    private static void emitBoundedCarrierIndexForArrayOnStack(
+        PipelineContext pctx,
+        InsnList out,
+        MethodPlan plan,
+        int logicalIndex,
+        int keyLocal,
+        boolean rewriteKeyToTarget,
+        long targetSeed
+    ) {
+        out.add(new InsnNode(Opcodes.DUP));
         emitCarrierIndexDecodeMarker(pctx, out, plan, logicalIndex, keyLocal, rewriteKeyToTarget, targetSeed);
-        out.add(new InsnNode(Opcodes.DUP2));
-        out.add(new InsnNode(Opcodes.POP));
+        out.add(new InsnNode(Opcodes.SWAP));
         out.add(new InsnNode(Opcodes.ARRAYLENGTH));
         out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Math", "floorMod", "(II)I", false));
-        out.add(new InsnNode(Opcodes.AALOAD));
     }
 
     private static void emitCarrierShapeValidation(InsnList out, int argsLocal, MethodPlan plan) {
@@ -4568,46 +5741,99 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         out.add(ok);
     }
 
+    private static CarrierCallsiteKeys materializeCarrierCallsiteKeys(
+        PipelineContext pctx,
+        MethodNode mn,
+        InsnList out,
+        MethodPlan plan,
+        Integer callerKeyLocal,
+        String targetKind
+    ) {
+        if (packedHiddenKeyArgumentIndex(plan) < 0) return null;
+        if (callerKeyLocal == null) {
+            throw new IllegalStateException(
+                "Missing caller key for methodParameterObfuscation carrier keys " + targetKind + " " +
+                    plan.owner() + "." + plan.finalName() + plan.packedDesc()
+            );
+        }
+        int targetKeyLocal = allocateLocal(mn, Type.LONG_TYPE);
+        int carrierIndexKeyLocal = allocateLocal(mn, Type.LONG_TYPE);
+        emitCallerKeyForTarget(pctx, out, callerKeyLocal, seedForPlan(pctx, plan));
+        out.add(new VarInsnNode(Opcodes.LSTORE, targetKeyLocal));
+        emitCallerKeyForTarget(pctx, out, callerKeyLocal, plan.carrierIndexKeySeed());
+        out.add(new VarInsnNode(Opcodes.LSTORE, carrierIndexKeyLocal));
+        return new CarrierCallsiteKeys(targetKeyLocal, carrierIndexKeyLocal);
+    }
+
+    private static int carrierStoreKeyLocal(Integer callerKeyLocal, CarrierCallsiteKeys carrierKeys) {
+        if (carrierKeys != null) return carrierKeys.carrierIndexKeyLocal();
+        if (callerKeyLocal == null) return -1;
+        return callerKeyLocal;
+    }
+
     private static void emitCarrierAttestationStores(
         PipelineContext pctx,
         InsnList out,
         MethodPlan plan,
         Integer callerKeyLocal,
+        CarrierCallsiteKeys carrierKeys,
         long siteSeed,
         String targetKind
     ) {
         if (packedHiddenKeyArgumentIndex(plan) < 0) return;
-        if (callerKeyLocal == null) {
+        if (callerKeyLocal == null && carrierKeys == null) {
             throw new IllegalStateException(
                 "Missing caller key for methodParameterObfuscation carrier attestation " + targetKind + " " +
                     plan.owner() + "." + plan.finalName() + plan.packedDesc()
             );
         }
         out.add(new InsnNode(Opcodes.DUP));
-        emitCarrierIndexDecodeMarker(
+        emitBoundedCarrierIndexForArrayOnStack(
             pctx,
             out,
             plan,
             carrierAttestationTokenLogicalIndex(plan),
-            callerKeyLocal,
-            true,
+            carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+            carrierKeys == null,
             plan.carrierIndexKeySeed()
         );
-        emitCarrierAttestationTokenFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
+        if (carrierKeys == null) {
+            emitCarrierAttestationTokenFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
+        } else {
+            emitCarrierAttestationTokenFromLocals(
+                pctx,
+                out,
+                plan,
+                carrierKeys.targetKeyLocal(),
+                carrierKeys.carrierIndexKeyLocal(),
+                siteSeed
+            );
+        }
         emitBox(out, Type.LONG_TYPE);
         out.add(new InsnNode(Opcodes.AASTORE));
 
         out.add(new InsnNode(Opcodes.DUP));
-        emitCarrierIndexDecodeMarker(
+        emitBoundedCarrierIndexForArrayOnStack(
             pctx,
             out,
             plan,
             carrierAttestationTagLogicalIndex(plan),
-            callerKeyLocal,
-            true,
+            carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+            carrierKeys == null,
             plan.carrierIndexKeySeed()
         );
-        emitCarrierAttestationTagFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
+        if (carrierKeys == null) {
+            emitCarrierAttestationTagFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
+        } else {
+            emitCarrierAttestationTagFromLocals(
+                pctx,
+                out,
+                plan,
+                carrierKeys.targetKeyLocal(),
+                carrierKeys.carrierIndexKeyLocal(),
+                siteSeed
+            );
+        }
         emitBox(out, Type.LONG_TYPE);
         out.add(new InsnNode(Opcodes.AASTORE));
     }
@@ -4617,42 +5843,65 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         InsnList out,
         MethodPlan plan,
         Integer callerKeyLocal,
+        CarrierCallsiteKeys carrierKeys,
         int carrierLocal,
         long siteSeed,
         String targetKind
     ) {
         if (packedHiddenKeyArgumentIndex(plan) < 0) return;
-        if (callerKeyLocal == null) {
+        if (callerKeyLocal == null && carrierKeys == null) {
             throw new IllegalStateException(
                 "Missing caller key for methodParameterObfuscation carrier attestation " + targetKind + " " +
                     plan.owner() + "." + plan.finalName() + plan.packedDesc()
             );
         }
         out.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
-        emitCarrierIndexDecodeMarker(
+        emitBoundedCarrierIndexForArrayOnStack(
             pctx,
             out,
             plan,
             carrierAttestationTokenLogicalIndex(plan),
-            callerKeyLocal,
-            true,
+            carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+            carrierKeys == null,
             plan.carrierIndexKeySeed()
         );
-        emitCarrierAttestationTokenFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
+        if (carrierKeys == null) {
+            emitCarrierAttestationTokenFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
+        } else {
+            emitCarrierAttestationTokenFromLocals(
+                pctx,
+                out,
+                plan,
+                carrierKeys.targetKeyLocal(),
+                carrierKeys.carrierIndexKeyLocal(),
+                siteSeed
+            );
+        }
         emitBox(out, Type.LONG_TYPE);
         out.add(new InsnNode(Opcodes.AASTORE));
 
         out.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
-        emitCarrierIndexDecodeMarker(
+        emitBoundedCarrierIndexForArrayOnStack(
             pctx,
             out,
             plan,
             carrierAttestationTagLogicalIndex(plan),
-            callerKeyLocal,
-            true,
+            carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
+            carrierKeys == null,
             plan.carrierIndexKeySeed()
         );
-        emitCarrierAttestationTagFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
+        if (carrierKeys == null) {
+            emitCarrierAttestationTagFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
+        } else {
+            emitCarrierAttestationTagFromLocals(
+                pctx,
+                out,
+                plan,
+                carrierKeys.targetKeyLocal(),
+                carrierKeys.carrierIndexKeyLocal(),
+                siteSeed
+            );
+        }
         emitBox(out, Type.LONG_TYPE);
         out.add(new InsnNode(Opcodes.AASTORE));
     }
@@ -4683,6 +5932,27 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         emitRotatedCallerKey(pctx, out, callerKeyLocal, seedForPlan(pctx, plan), 29);
         out.add(new InsnNode(Opcodes.LADD));
         emitRotatedCallerKey(pctx, out, callerKeyLocal, plan.carrierIndexKeySeed(), 17);
+        out.add(new InsnNode(Opcodes.LXOR));
+        emitLiveSeededLongMaterial(
+            out,
+            carrierAttestationTagSeed(pctx, plan),
+            JvmPassBytecode.mix(carrierAttestationPlanSeed(pctx, plan), CARRIER_ATTEST_TAG_DOMAIN)
+        );
+        emitAttestationDomainSeal(out, carrierAttestationTagSeed(pctx, plan));
+    }
+
+    private static void emitCarrierAttestationTagFromLocals(
+        PipelineContext pctx,
+        InsnList out,
+        MethodPlan plan,
+        int incomingKeyLocal,
+        int carrierIndexKeyLocal,
+        long siteSeed
+    ) {
+        emitCarrierAttestationTokenFromLocals(pctx, out, plan, incomingKeyLocal, carrierIndexKeyLocal, siteSeed);
+        emitRotatedLocalLong(out, incomingKeyLocal, 29);
+        out.add(new InsnNode(Opcodes.LADD));
+        emitRotatedLocalLong(out, carrierIndexKeyLocal, 17);
         out.add(new InsnNode(Opcodes.LXOR));
         emitLiveSeededLongMaterial(
             out,
@@ -4796,17 +6066,18 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         InsnList out,
         MethodPlan plan,
         Integer callerKeyLocal,
+        CarrierCallsiteKeys carrierKeys,
         String targetKind
     ) {
         if (packedHiddenKeyArgumentIndex(plan) < 0) return;
-        if (callerKeyLocal == null) {
+        if (callerKeyLocal == null && carrierKeys == null) {
             throw new IllegalStateException(
                 "Missing caller key for methodParameterObfuscation carrier index key " + targetKind + " " +
                     plan.owner() + "." + plan.finalName() + plan.packedDesc()
             );
         }
         out.add(new InsnNode(Opcodes.DUP));
-        emitCarrierIndexDecodeMarker(
+        emitBoundedCarrierIndexForArrayOnStack(
             pctx,
             out,
             plan,
@@ -4815,9 +6086,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             false,
             plan.carrierIndexKeySeed()
         );
-        VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-        out.add(keyLoad);
-        cffKeyLoadTargetSeeds(pctx).put(keyLoad, plan.carrierIndexKeySeed());
+        if (carrierKeys == null) {
+            VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
+            out.add(keyLoad);
+            cffKeyLoadTargetSeeds(pctx).put(keyLoad, plan.carrierIndexKeySeed());
+        } else {
+            out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.carrierIndexKeyLocal()));
+        }
         emitBox(out, Type.LONG_TYPE);
         out.add(new InsnNode(Opcodes.AASTORE));
     }
@@ -4827,18 +6102,19 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         InsnList out,
         MethodPlan plan,
         Integer callerKeyLocal,
+        CarrierCallsiteKeys carrierKeys,
         int carrierLocal,
         String targetKind
     ) {
         if (packedHiddenKeyArgumentIndex(plan) < 0) return;
-        if (callerKeyLocal == null) {
+        if (callerKeyLocal == null && carrierKeys == null) {
             throw new IllegalStateException(
                 "Missing caller key for methodParameterObfuscation carrier index key " + targetKind + " " +
                     plan.owner() + "." + plan.finalName() + plan.packedDesc()
             );
         }
         out.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
-        emitCarrierIndexDecodeMarker(
+        emitBoundedCarrierIndexForArrayOnStack(
             pctx,
             out,
             plan,
@@ -4847,9 +6123,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             false,
             plan.carrierIndexKeySeed()
         );
-        VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
-        out.add(keyLoad);
-        cffKeyLoadTargetSeeds(pctx).put(keyLoad, plan.carrierIndexKeySeed());
+        if (carrierKeys == null) {
+            VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);
+            out.add(keyLoad);
+            cffKeyLoadTargetSeeds(pctx).put(keyLoad, plan.carrierIndexKeySeed());
+        } else {
+            out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.carrierIndexKeyLocal()));
+        }
         emitBox(out, Type.LONG_TYPE);
         out.add(new InsnNode(Opcodes.AASTORE));
     }
@@ -4949,6 +6229,18 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int local = mn.maxLocals;
         mn.maxLocals += type.getSize();
         return local;
+    }
+
+    private static List<AbstractInsnNode> instructionNodes(InsnList insns) {
+        List<AbstractInsnNode> nodes = new ArrayList<>();
+        for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
+            nodes.add(insn);
+        }
+        return nodes;
+    }
+
+    private static void markGeneratedNodes(PipelineContext pctx, List<AbstractInsnNode> nodes) {
+        JvmKeyDispatchPass.generatedNodes(pctx).addAll(nodes);
     }
 
     private static AbstractInsnNode firstRealInstruction(MethodNode mn) {
@@ -5101,7 +6393,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int encodedStep,
         int classKeyIdentity,
         int classWordIndex,
-        CarrierIndexCell[] cells
+        CarrierIndexCell[] cells,
+        String anchorOwner
     ) {
         CarrierIndexCell cell(int logicalIndex) {
             if (logicalIndex < 0 || logicalIndex >= cells.length) {
@@ -5121,6 +6414,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int guardMask
     ) {}
 
+    private record CarrierCallsiteKeys(int targetKeyLocal, int carrierIndexKeyLocal) {}
+
     public record CarrierIndexDecodeSite(
         CarrierIndexPlan plan,
         int logicalIndex,
@@ -5133,6 +6428,16 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     ) {}
 
     private record CarrierAttestationSiteKey(String targetKey, AbstractInsnNode site, String siteKind) {}
+
+    private record ReflectiveSourcePlans(boolean known, List<MethodPlan> plans) {
+        static ReflectiveSourcePlans unknown() {
+            return new ReflectiveSourcePlans(false, List.of());
+        }
+
+        static ReflectiveSourcePlans known(List<MethodPlan> plans) {
+            return new ReflectiveSourcePlans(true, plans);
+        }
+    }
 
     private record MethodHandleLookupTarget(String owner, String name, String lookupKind, Type[] parameterTypes) {
         MethodHandleLookupTarget(String owner, String name, String lookupKind) {

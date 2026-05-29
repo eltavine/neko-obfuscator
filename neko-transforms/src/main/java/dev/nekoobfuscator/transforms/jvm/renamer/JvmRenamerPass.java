@@ -7,6 +7,7 @@ import dev.nekoobfuscator.api.transform.TransformPhase;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -20,6 +21,13 @@ import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.TypeInsnNode;
+import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.analysis.Analyzer;
+import org.objectweb.asm.tree.analysis.AnalyzerException;
+import org.objectweb.asm.tree.analysis.Frame;
+import org.objectweb.asm.tree.analysis.SourceInterpreter;
+import org.objectweb.asm.tree.analysis.SourceValue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -258,7 +266,7 @@ public final class JvmRenamerPass implements TransformPass {
         for (L1Class clazz : classes) {
             Set<String> occupied = new HashSet<>();
             for (FieldNode field : clazz.asmNode().fields) {
-                if (!canRenameField(field)) {
+                if (!canRenameField(clazz, field)) {
                     occupied.add(field.name);
                 }
             }
@@ -266,7 +274,7 @@ public final class JvmRenamerPass implements TransformPass {
             List<FieldNode> fields = new ArrayList<>(clazz.asmNode().fields);
             fields.sort(Comparator.comparing((FieldNode f) -> f.name).thenComparing(f -> f.desc));
             for (FieldNode field : fields) {
-                if (!canRenameField(field)) continue;
+                if (!canRenameField(clazz, field)) continue;
                 String newName;
                 do {
                     newName = fieldNames.nextSimpleName();
@@ -431,10 +439,12 @@ public final class JvmRenamerPass implements TransformPass {
             && (method.access & Opcodes.ACC_STATIC) != 0) {
             return false;
         }
+        if (JvmRecordAbi.isRecordComponentAccessor(clazz, method)) return false;
         return !overridesExternalMethod(pctx, clazz, method, method.desc);
     }
 
-    private boolean canRenameField(FieldNode field) {
+    private boolean canRenameField(L1Class clazz, FieldNode field) {
+        if (JvmRecordAbi.isRecordComponentField(clazz, field)) return false;
         return true;
     }
 
@@ -476,6 +486,7 @@ public final class JvmRenamerPass implements TransformPass {
         List<Map.Entry<String, String>> packageStrings = packageMap(classes);
         for (MethodNode method : node.methods) {
             if (method.instructions == null) continue;
+            Frame<SourceValue>[] frames = null;
             for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                 if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String value) {
                     String mapped = classStrings.get(value);
@@ -489,11 +500,41 @@ public final class JvmRenamerPass implements TransformPass {
                 }
                 if (!(insn instanceof MethodInsnNode call)) continue;
                 if (isMethodReflectionLookup(call)) {
-                    rewritePreviousNameLiteral(call, methodNames);
-                } else if (isMethodHandleLookup(call)) {
-                    rewritePreviousMethodHandleNameLiteral(call, methodNames);
+                    RewriteNameResult result = rewriteClassReflectionNameLiteral(method, frames, call, classes, methodNames);
+                    if (result == RewriteNameResult.UNKNOWN) {
+                        frames = analyzeSourceValuesQuietly(method);
+                        result = rewriteClassReflectionNameLiteral(method, frames, call, classes, methodNames);
+                    }
+                    if (result == RewriteNameResult.UNKNOWN) {
+                        rewritePreviousNameLiteral(call, methodNames);
+                    }
+                } else if (isMethodHandleMethodLookup(call)) {
+                    RewriteNameResult result = rewriteMethodHandleNameLiteral(method, frames, call, classes, methodNames);
+                    if (result == RewriteNameResult.UNKNOWN) {
+                        frames = analyzeSourceValuesQuietly(method);
+                        result = rewriteMethodHandleNameLiteral(method, frames, call, classes, methodNames);
+                    }
+                    if (result == RewriteNameResult.UNKNOWN) {
+                        rewritePreviousMethodHandleNameLiteral(call, methodNames);
+                    }
                 } else if (isFieldReflectionLookup(call)) {
-                    rewritePreviousNameLiteral(call, fieldNames);
+                    RewriteNameResult result = rewriteClassReflectionNameLiteral(method, frames, call, classes, fieldNames);
+                    if (result == RewriteNameResult.UNKNOWN) {
+                        frames = analyzeSourceValuesQuietly(method);
+                        result = rewriteClassReflectionNameLiteral(method, frames, call, classes, fieldNames);
+                    }
+                    if (result == RewriteNameResult.UNKNOWN) {
+                        rewritePreviousNameLiteral(call, fieldNames);
+                    }
+                } else if (isMethodHandleFieldLookup(call)) {
+                    RewriteNameResult result = rewriteMethodHandleNameLiteral(method, frames, call, classes, fieldNames);
+                    if (result == RewriteNameResult.UNKNOWN) {
+                        frames = analyzeSourceValuesQuietly(method);
+                        result = rewriteMethodHandleNameLiteral(method, frames, call, classes, fieldNames);
+                    }
+                    if (result == RewriteNameResult.UNKNOWN) {
+                        rewritePreviousMethodHandleNameLiteral(call, fieldNames);
+                    }
                 }
             }
         }
@@ -563,12 +604,99 @@ public final class JvmRenamerPass implements TransformPass {
             && "(Ljava/lang/String;)Ljava/lang/reflect/Field;".equals(call.desc);
     }
 
-    private boolean isMethodHandleLookup(MethodInsnNode call) {
+    private boolean isMethodHandleMethodLookup(MethodInsnNode call) {
         return "java/lang/invoke/MethodHandles$Lookup".equals(call.owner)
             && ("findStatic".equals(call.name)
                 || "findVirtual".equals(call.name)
                 || "findSpecial".equals(call.name))
             && call.desc.startsWith("(Ljava/lang/Class;Ljava/lang/String;");
+    }
+
+    private boolean isMethodHandleFieldLookup(MethodInsnNode call) {
+        return "java/lang/invoke/MethodHandles$Lookup".equals(call.owner)
+            && ("findGetter".equals(call.name)
+                || "findSetter".equals(call.name)
+                || "findStaticGetter".equals(call.name)
+                || "findStaticSetter".equals(call.name)
+                || "findVarHandle".equals(call.name)
+                || "findStaticVarHandle".equals(call.name))
+            && call.desc.startsWith("(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/Class;)");
+    }
+
+    private RewriteNameResult rewriteClassReflectionNameLiteral(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode call,
+        Map<String, String> classes,
+        Map<String, Map<String, String>> namesByOwner
+    ) {
+        if (frames == null) return RewriteNameResult.UNKNOWN;
+        int index = method.instructions.indexOf(call);
+        if (index < 0 || index >= frames.length) return RewriteNameResult.UNKNOWN;
+        Frame<SourceValue> frame = frames[index];
+        Type[] args = Type.getArgumentTypes(call.desc);
+        if (frame == null || frame.getStackSize() < args.length + 1) return RewriteNameResult.UNKNOWN;
+        int receiverIndex = frame.getStackSize() - args.length - 1;
+        String owner = sourceClassObjectOwner(method, frames, frame.getStack(receiverIndex), 0);
+        SourceValue nameValue = frame.getStack(receiverIndex + 1);
+        String oldName = sourceString(method, frames, nameValue, 0);
+        if (owner == null || oldName == null) return RewriteNameResult.UNKNOWN;
+
+        String originalOwner = originalOwnerName(owner, classes);
+        if (originalOwner == null) {
+            return RewriteNameResult.OWNER_KNOWN_UNCHANGED;
+        }
+        Map<String, String> ownerNames = namesByOwner.get(originalOwner);
+        if (ownerNames == null) return RewriteNameResult.OWNER_KNOWN_UNCHANGED;
+        String mapped = ownerNames.get(oldName);
+        if (mapped == null || mapped.equals(oldName)) return RewriteNameResult.OWNER_KNOWN_UNCHANGED;
+        LdcInsnNode literal = sourceStringLiteral(method, frames, nameValue, oldName, 0);
+        if (literal == null) return RewriteNameResult.UNKNOWN;
+        literal.cst = mapped;
+        return RewriteNameResult.REWRITTEN;
+    }
+
+    private RewriteNameResult rewriteMethodHandleNameLiteral(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode call,
+        Map<String, String> classes,
+        Map<String, Map<String, String>> namesByOwner
+    ) {
+        if (frames == null) return RewriteNameResult.UNKNOWN;
+        int index = method.instructions.indexOf(call);
+        if (index < 0 || index >= frames.length) return RewriteNameResult.UNKNOWN;
+        Frame<SourceValue> frame = frames[index];
+        Type[] args = Type.getArgumentTypes(call.desc);
+        if (frame == null || frame.getStackSize() < args.length + 1 || args.length < 2) {
+            return RewriteNameResult.UNKNOWN;
+        }
+        int base = frame.getStackSize() - args.length;
+        String owner = sourceClassObjectOwner(method, frames, frame.getStack(base), 0);
+        SourceValue nameValue = frame.getStack(base + 1);
+        String oldName = sourceString(method, frames, nameValue, 0);
+        if (owner == null || oldName == null) return RewriteNameResult.UNKNOWN;
+
+        String originalOwner = originalOwnerName(owner, classes);
+        if (originalOwner == null) {
+            return RewriteNameResult.OWNER_KNOWN_UNCHANGED;
+        }
+        Map<String, String> ownerNames = namesByOwner.get(originalOwner);
+        if (ownerNames == null) return RewriteNameResult.OWNER_KNOWN_UNCHANGED;
+        String mapped = ownerNames.get(oldName);
+        if (mapped == null || mapped.equals(oldName)) return RewriteNameResult.OWNER_KNOWN_UNCHANGED;
+        LdcInsnNode literal = sourceStringLiteral(method, frames, nameValue, oldName, 0);
+        if (literal == null) return RewriteNameResult.UNKNOWN;
+        literal.cst = mapped;
+        return RewriteNameResult.REWRITTEN;
+    }
+
+    private String originalOwnerName(String owner, Map<String, String> classes) {
+        if (classes.containsKey(owner)) return owner;
+        for (Map.Entry<String, String> entry : classes.entrySet()) {
+            if (entry.getValue().equals(owner)) return entry.getKey();
+        }
+        return null;
     }
 
     private void rewritePreviousNameLiteral(MethodInsnNode call, Map<String, Map<String, String>> namesByOwner) {
@@ -595,6 +723,146 @@ public final class JvmRenamerPass implements TransformPass {
         }
         if (mapped == null) mapped = uniqueGlobalMemberName(namesByOwner, oldName);
         if (mapped != null) nameInsn.cst = mapped;
+    }
+
+    private String sourceClassObjectOwner(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 8) return null;
+        String owner = null;
+        for (AbstractInsnNode insn : value.insns) {
+            String sourced = null;
+            if (insn instanceof LdcInsnNode ldc
+                && ldc.cst instanceof Type type
+                && type.getSort() == Type.OBJECT) {
+                sourced = type.getInternalName();
+            } else if (insn instanceof MethodInsnNode call && isClassForName(call)) {
+                sourced = sourceClassForNameOwner(mn, frames, call, depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceClassObjectOwner(mn, frames, loadedLocalValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceClassObjectOwner(mn, frames, storedValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceClassObjectOwner(mn, frames, castInputValue(mn, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (owner != null && !owner.equals(sourced)) return null;
+            owner = sourced;
+        }
+        return owner;
+    }
+
+    private boolean isClassForName(MethodInsnNode call) {
+        return call.getOpcode() == Opcodes.INVOKESTATIC
+            && "java/lang/Class".equals(call.owner)
+            && "forName".equals(call.name)
+            && ("(Ljava/lang/String;)Ljava/lang/Class;".equals(call.desc)
+                || "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;".equals(call.desc));
+    }
+
+    private String sourceClassForNameOwner(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode call,
+        int depth
+    ) {
+        int index = mn.instructions.indexOf(call);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null) return null;
+        Type[] args = Type.getArgumentTypes(call.desc);
+        if (frame.getStackSize() < args.length) return null;
+        String binaryName = sourceString(mn, frames, frame.getStack(frame.getStackSize() - args.length), depth);
+        return binaryClassNameToInternal(binaryName);
+    }
+
+    private String binaryClassNameToInternal(String binaryName) {
+        if (binaryName == null || binaryName.isEmpty() || binaryName.charAt(0) == '[') return null;
+        return binaryName.replace('.', '/');
+    }
+
+    private String sourceString(MethodNode mn, Frame<SourceValue>[] frames, SourceValue value, int depth) {
+        if (value == null || depth > 8) return null;
+        String result = null;
+        for (AbstractInsnNode insn : value.insns) {
+            String sourced = null;
+            if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String text) {
+                sourced = text;
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceString(mn, frames, loadedLocalValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceString(mn, frames, storedValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceString(mn, frames, castInputValue(mn, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && !result.equals(sourced)) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private LdcInsnNode sourceStringLiteral(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        String expected,
+        int depth
+    ) {
+        if (value == null || depth > 8) return null;
+        LdcInsnNode result = null;
+        for (AbstractInsnNode insn : value.insns) {
+            LdcInsnNode sourced = null;
+            if (insn instanceof LdcInsnNode ldc && Objects.equals(ldc.cst, expected)) {
+                sourced = ldc;
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceStringLiteral(mn, frames, loadedLocalValue(mn, frames, var), expected, depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceStringLiteral(mn, frames, storedValue(mn, frames, var), expected, depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceStringLiteral(mn, frames, castInputValue(mn, frames, type), expected, depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && result != sourced) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private SourceValue loadedLocalValue(MethodNode mn, Frame<SourceValue>[] frames, VarInsnNode load) {
+        int index = mn.instructions.indexOf(load);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || load.var >= frame.getLocals()) return null;
+        return frame.getLocal(load.var);
+    }
+
+    private SourceValue storedValue(MethodNode mn, Frame<SourceValue>[] frames, VarInsnNode store) {
+        int index = mn.instructions.indexOf(store);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < 1) return null;
+        return frame.getStack(frame.getStackSize() - 1);
+    }
+
+    private SourceValue castInputValue(MethodNode mn, Frame<SourceValue>[] frames, TypeInsnNode cast) {
+        int index = mn.instructions.indexOf(cast);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < 1) return null;
+        return frame.getStack(frame.getStackSize() - 1);
+    }
+
+    private Frame<SourceValue>[] analyzeSourceValuesQuietly(MethodNode mn) {
+        try {
+            mn.maxStack = Math.max(mn.maxStack, 256);
+            return new Analyzer<>(new SourceInterpreter()).analyze("java/lang/Object", mn);
+        } catch (AnalyzerException | RuntimeException ignored) {
+            return null;
+        }
     }
 
     private void rewritePreviousMethodHandleNameLiteral(
@@ -634,6 +902,12 @@ public final class JvmRenamerPass implements TransformPass {
             mapped = candidate;
         }
         return mapped;
+    }
+
+    private enum RewriteNameResult {
+        UNKNOWN,
+        OWNER_KNOWN_UNCHANGED,
+        REWRITTEN
     }
 
     private boolean overridesExternalMethod(PipelineContext pctx, L1Class clazz, MethodNode mn, String desc) {
@@ -1016,6 +1290,8 @@ public final class JvmRenamerPass implements TransformPass {
 
         @Override
         public String mapRecordComponentName(String owner, String name, String descriptor) {
+            L1Class clazz = classes.get(owner);
+            if (JvmRecordAbi.isRecordComponent(clazz, name, descriptor)) return name;
             String mapped = memberMap.get(MemberKey.field(owner, name, descriptor));
             return mapped == null ? name : mapped;
         }

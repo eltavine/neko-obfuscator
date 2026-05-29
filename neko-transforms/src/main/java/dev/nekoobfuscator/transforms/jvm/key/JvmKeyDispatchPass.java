@@ -10,6 +10,7 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -18,6 +19,7 @@ import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
@@ -28,6 +30,11 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.analysis.Analyzer;
+import org.objectweb.asm.tree.analysis.AnalyzerException;
+import org.objectweb.asm.tree.analysis.Frame;
+import org.objectweb.asm.tree.analysis.SourceInterpreter;
+import org.objectweb.asm.tree.analysis.SourceValue;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -258,25 +265,73 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return (mn.access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) == 0;
     }
 
-    private static String virtualFamilyOwner(PipelineContext pctx, L1Class clazz, String name, String desc) {
+    public static String virtualFamilyOwner(PipelineContext pctx, L1Class clazz, String name, String desc) {
+        String lookupDesc = virtualFamilyLookupDescriptor(pctx, clazz.name(), name, desc);
+        return virtualFamilyOwnerByLookupDescriptor(pctx, clazz, name, lookupDesc);
+    }
+
+    private static String virtualFamilyOwnerByLookupDescriptor(
+        PipelineContext pctx,
+        L1Class clazz,
+        String name,
+        String lookupDesc
+    ) {
         String best = null;
-        best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, clazz.superName(), name, desc));
+        best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, clazz.superName(), name, lookupDesc));
         for (String iface : clazz.interfaces()) {
-            best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, iface, name, desc));
+            best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, iface, name, lookupDesc));
         }
         return best == null ? clazz.name() : best;
     }
 
-    private static String virtualFamilyOwnerIn(PipelineContext pctx, String owner, String name, String desc) {
+    private static String virtualFamilyOwnerIn(PipelineContext pctx, String owner, String name, String lookupDesc) {
         if (owner == null) return null;
         L1Class clazz = pctx.classMap().get(owner);
         if (clazz == null) return null;
-        String best = declaresAsmMethod(clazz, name, desc) ? clazz.name() : null;
-        best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, clazz.superName(), name, desc));
+        String best = declaresVirtualFamilyMethod(pctx, clazz, name, lookupDesc) ? clazz.name() : null;
+        best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, clazz.superName(), name, lookupDesc));
         for (String iface : clazz.interfaces()) {
-            best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, iface, name, desc));
+            best = betterVirtualRoot(best, virtualFamilyOwnerIn(pctx, iface, name, lookupDesc));
         }
         return best;
+    }
+
+    private static String virtualFamilyLookupDescriptor(
+        PipelineContext pctx,
+        String owner,
+        String name,
+        String desc
+    ) {
+        String original = originalDescriptorForCurrentDescriptor(pctx, owner, name, desc);
+        return original == null ? desc : original;
+    }
+
+    private static String originalDescriptorForCurrentDescriptor(
+        PipelineContext pctx,
+        String owner,
+        String name,
+        String desc
+    ) {
+        String prefix = owner + "." + name;
+        for (Map.Entry<String, String> entry : keyedDescMap(pctx).entrySet()) {
+            if (!desc.equals(entry.getValue())) continue;
+            String key = entry.getKey();
+            if (key.startsWith(prefix) && key.length() > prefix.length() && key.charAt(prefix.length()) == '(') {
+                return key.substring(prefix.length());
+            }
+        }
+        return null;
+    }
+
+    private static boolean declaresVirtualFamilyMethod(
+        PipelineContext pctx,
+        L1Class clazz,
+        String name,
+        String lookupDesc
+    ) {
+        if (declaresAsmMethod(clazz, name, lookupDesc)) return true;
+        String keyedDesc = keyedDescMap(pctx).get(coverageKey(clazz.name(), name, lookupDesc));
+        return keyedDesc != null && declaresAsmMethod(clazz, name, keyedDesc);
     }
 
     private static boolean declaresAsmMethod(L1Class clazz, String name, String desc) {
@@ -465,6 +520,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
             for (L1Method method : clazz.methods()) {
                 if (TransformGuards.isRuntimeClass(clazz) || TransformGuards.isGeneratedMethod(method)) continue;
                 if (clazz.isAnnotation() || !canReceiveLongKey(method) || method.isNative()) continue;
+                if (JvmRecordAbi.isRecordComponentAccessor(clazz, method)) continue;
                 if (overridesExternalMethod(pctx, clazz, method.asmNode(), method.descriptor())) continue;
                 if (indySamTargets.contains(coverageKey(clazz.name(), method.name(), method.descriptor()))) continue;
                 String original = method.descriptor();
@@ -692,13 +748,16 @@ public final class JvmKeyDispatchPass implements TransformPass {
             if (!(insn instanceof MethodInsnNode call)) continue;
             census.recordBoundaryCall(methodKey, call);
             if (isMethodLookup(call)) {
+                if (!methodLookupNeedsKey(pctx, mn, call)) continue;
                 rewriteMethodLookup(pctx, mn, call);
                 census.recordMethodLookupRewrite(methodKey);
                 transfers++;
                 continue;
             }
             if (isMethodInvoke(call)) {
-                rewriteMethodInvoke(pctx, mn, call, keyLocal);
+                Long targetSeed = reflectiveInvokeTargetSeed(pctx, mn, call);
+                if (targetSeed == null) continue;
+                rewriteMethodInvoke(pctx, mn, call, keyLocal, targetSeed);
                 census.recordReflectiveInvokeRewrite(methodKey);
                 transfers++;
                 continue;
@@ -936,6 +995,113 @@ public final class JvmKeyDispatchPass implements TransformPass {
             && "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;".equals(call.desc);
     }
 
+    private static boolean methodLookupNeedsKey(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
+        ReflectiveLookup lookup = sourceReflectiveLookupTarget(pctx, mn, call);
+        if (lookup == null) return true;
+        if (!pctx.classMap().containsKey(lookup.owner())) return false;
+        Type[] parameterTypes = lookup.parameterTypes();
+        if (parameterTypes == null) return true;
+        MethodLookupKeyState state = methodLookupKeyState(
+            pctx,
+            lookup.owner(),
+            lookup.name(),
+            parameterTypes,
+            "getMethod".equals(call.name),
+            new java.util.HashSet<>()
+        );
+        return state == MethodLookupKeyState.KEYED;
+    }
+
+    private static MethodLookupKeyState methodLookupKeyState(
+        PipelineContext pctx,
+        String owner,
+        String name,
+        Type[] parameterTypes,
+        boolean publicLookup,
+        Set<String> visited
+    ) {
+        if (owner == null || !visited.add(owner)) return MethodLookupKeyState.UNKNOWN;
+        L1Class clazz = pctx.classMap().get(owner);
+        if (clazz == null) return MethodLookupKeyState.UNKNOWN;
+        boolean foundPlain = false;
+        for (L1Method method : clazz.methods()) {
+            MethodNode node = method.asmNode();
+            if (!method.name().equals(name)) continue;
+            if (publicLookup && (node.access & Opcodes.ACC_PUBLIC) == 0) continue;
+            Type[] args = Type.getArgumentTypes(method.descriptor());
+            boolean currentDescriptorAlreadyKeyed = matchesWithTrailingLong(args, parameterTypes);
+            if (!sameTypes(args, parameterTypes) && !currentDescriptorAlreadyKeyed) continue;
+            if (currentDescriptorAlreadyKeyed
+                || actualKeyedEntries(pctx).contains(coverageKey(clazz.name(), method.name(), method.descriptor()))
+                || keyedDescMap(pctx).containsKey(coverageKey(clazz.name(), method.name(), method.descriptor()))) {
+                return MethodLookupKeyState.KEYED;
+            }
+            foundPlain = true;
+        }
+        if (foundPlain) return MethodLookupKeyState.PLAIN;
+        if (publicLookup) {
+            MethodLookupKeyState fromSuper = methodLookupKeyState(
+                pctx,
+                clazz.superName(),
+                name,
+                parameterTypes,
+                true,
+                visited
+            );
+            if (fromSuper != MethodLookupKeyState.UNKNOWN) return fromSuper;
+            for (String iface : clazz.interfaces()) {
+                MethodLookupKeyState fromInterface = methodLookupKeyState(
+                    pctx,
+                    iface,
+                    name,
+                    parameterTypes,
+                    true,
+                    visited
+                );
+                if (fromInterface != MethodLookupKeyState.UNKNOWN) return fromInterface;
+            }
+        }
+        return MethodLookupKeyState.UNKNOWN;
+    }
+
+    private static Integer intConstant(AbstractInsnNode insn) {
+        if (insn == null) return null;
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_0 && opcode <= Opcodes.ICONST_5) {
+            return opcode - Opcodes.ICONST_0;
+        }
+        if (insn instanceof IntInsnNode intInsn && (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH)) {
+            return intInsn.operand;
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer value) {
+            return value;
+        }
+        return null;
+    }
+
+    private static boolean sameTypes(Type[] left, Type[] right) {
+        if (left.length != right.length) return false;
+        for (int i = 0; i < left.length; i++) {
+            if (!left[i].equals(right[i])) return false;
+        }
+        return true;
+    }
+
+    private static boolean matchesWithTrailingLong(Type[] currentArgs, Type[] visibleArgs) {
+        if (currentArgs.length != visibleArgs.length + 1) return false;
+        if (!Type.LONG_TYPE.equals(currentArgs[currentArgs.length - 1])) return false;
+        for (int i = 0; i < visibleArgs.length; i++) {
+            if (!currentArgs[i].equals(visibleArgs[i])) return false;
+        }
+        return true;
+    }
+
+    private enum MethodLookupKeyState {
+        UNKNOWN,
+        PLAIN,
+        KEYED
+    }
+
     private static void rewriteMethodLookup(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
         recordLiteralReflectiveTargets(pctx, call);
 
@@ -1057,15 +1223,23 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return null;
     }
 
-    private record ReflectiveLookup(String owner, String name) {
+    private record ReflectiveLookup(String owner, String name, Type[] parameterTypes) {
+        ReflectiveLookup(String owner, String name) {
+            this(owner, name, null);
+        }
     }
 
-    private static void rewriteMethodInvoke(PipelineContext pctx, MethodNode mn, MethodInsnNode call, int keyLocal) {
+    private static void rewriteMethodInvoke(
+        PipelineContext pctx,
+        MethodNode mn,
+        MethodInsnNode call,
+        int keyLocal,
+        long targetSeed
+    ) {
         int argsLocal = allocateLocal(mn, Type.getType(Object[].class));
         int targetLocal = allocateLocal(mn, Type.getType(Object.class));
         int methodLocal = allocateLocal(mn, Type.getType(Object.class));
         int newArgsLocal = allocateLocal(mn, Type.getType(Object[].class));
-        Long targetSeed = reflectiveInvokeTargetSeed(pctx, call);
         LabelNode copyExisting = new LabelNode();
         LabelNode storeKey = new LabelNode();
         InsnList before = new InsnList();
@@ -1104,9 +1278,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         before.add(new InsnNode(Opcodes.ISUB));
         VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, keyLocal);
         before.add(keyLoad);
-        if (targetSeed != null) {
-            cffKeyLoadTargetSeeds(pctx).put(keyLoad, targetSeed);
-        }
+        cffKeyLoadTargetSeeds(pctx).put(keyLoad, targetSeed);
         before.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf",
             "(J)Ljava/lang/Long;", false));
         before.add(new InsnNode(Opcodes.AASTORE));
@@ -1118,10 +1290,8 @@ public final class JvmKeyDispatchPass implements TransformPass {
         mn.instructions.insertBefore(call, before);
     }
 
-    private static Long reflectiveInvokeTargetSeed(PipelineContext pctx, MethodInsnNode invokeCall) {
-        MethodInsnNode lookupCall = previousReflectiveLookup(invokeCall);
-        if (lookupCall == null) return null;
-        ReflectiveLookup lookup = reflectiveLookupTarget(lookupCall);
+    private static Long reflectiveInvokeTargetSeed(PipelineContext pctx, MethodNode mn, MethodInsnNode invokeCall) {
+        ReflectiveLookup lookup = sourceReflectiveInvokeLookup(pctx, mn, invokeCall);
         if (lookup == null) return null;
         L1Class clazz = pctx.classMap().get(lookup.owner());
         if (clazz == null) return null;
@@ -1129,7 +1299,19 @@ public final class JvmKeyDispatchPass implements TransformPass {
         for (L1Method method : clazz.methods()) {
             if (!method.name().equals(lookup.name()) || !method.hasCode()) continue;
             Type[] args = Type.getArgumentTypes(method.descriptor());
-            if (args.length == 0 || !Type.LONG_TYPE.equals(args[args.length - 1])) continue;
+            if (lookup.parameterTypes() != null) {
+                boolean currentDescriptorAlreadyKeyed = matchesWithTrailingLong(args, lookup.parameterTypes());
+                boolean actualDescriptorAlreadyKeyed = sameTypes(args, lookup.parameterTypes())
+                    && actualKeyedEntries(pctx).contains(coverageKey(clazz.name(), method.name(), method.descriptor()));
+                if (!sameTypes(args, lookup.parameterTypes()) && !currentDescriptorAlreadyKeyed) continue;
+                if (!currentDescriptorAlreadyKeyed
+                    && !actualDescriptorAlreadyKeyed
+                    && !keyedDescMap(pctx).containsKey(coverageKey(clazz.name(), method.name(), method.descriptor()))) {
+                    continue;
+                }
+            } else if (args.length == 0 || !Type.LONG_TYPE.equals(args[args.length - 1])) {
+                continue;
+            }
             if (matched == null || method.descriptor().compareTo(matched.descriptor()) < 0) {
                 matched = method;
             }
@@ -1139,35 +1321,253 @@ public final class JvmKeyDispatchPass implements TransformPass {
         return seed != null ? seed : methodSeed(pctx, clazz, matched, matched.asmNode());
     }
 
-    private static MethodInsnNode previousReflectiveLookup(MethodInsnNode invokeCall) {
-        int scanned = 0;
-        for (AbstractInsnNode scan = invokeCall.getPrevious(); scan != null && scanned++ < 256; scan = scan.getPrevious()) {
-            if (!(scan instanceof MethodInsnNode call)) continue;
-            if ("java/lang/Class".equals(call.owner)
-                && ("getMethod".equals(call.name) || "getDeclaredMethod".equals(call.name))
-                && "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;".equals(call.desc)) {
-                return call;
-            }
+    private static ReflectiveLookup sourceReflectiveInvokeLookup(
+        PipelineContext pctx,
+        MethodNode mn,
+        MethodInsnNode invokeCall
+    ) {
+        int index = mn.instructions.indexOf(invokeCall);
+        if (index < 0) return null;
+        try {
+            Frame<SourceValue>[] frames = analyzeSourceValues(mn);
+            Frame<SourceValue> frame = frames[index];
+            if (frame == null || frame.getStackSize() < 3) return null;
+            return sourceReflectiveMethodLookup(pctx, mn, frames, frame.getStack(frame.getStackSize() - 3), 0);
+        } catch (AnalyzerException | RuntimeException ignored) {
+            return null;
         }
-        return null;
     }
 
-    private static ReflectiveLookup reflectiveLookupTarget(MethodInsnNode lookupCall) {
-        String name = null;
-        String owner = null;
-        int scanned = 0;
-        for (AbstractInsnNode scan = lookupCall.getPrevious(); scan != null && scanned++ < 96; scan = scan.getPrevious()) {
-            if (!(scan instanceof LdcInsnNode ldc)) continue;
-            if (name == null && ldc.cst instanceof String value) {
-                name = value;
-                continue;
-            }
-            if (name != null && owner == null && ldc.cst instanceof Type type && type.getSort() == Type.OBJECT) {
-                owner = type.getInternalName();
-            }
-            if (name != null && owner != null) break;
+    private static ReflectiveLookup sourceReflectiveLookupTarget(
+        PipelineContext pctx,
+        MethodNode mn,
+        MethodInsnNode lookupCall
+    ) {
+        int index = mn.instructions.indexOf(lookupCall);
+        if (index < 0) return null;
+        try {
+            Frame<SourceValue>[] frames = analyzeSourceValues(mn);
+            return sourceReflectiveLookupTarget(pctx, mn, frames, lookupCall);
+        } catch (AnalyzerException | RuntimeException ignored) {
+            return null;
         }
-        return name != null && owner != null ? new ReflectiveLookup(owner, name) : null;
+    }
+
+    private static ReflectiveLookup sourceReflectiveLookupTarget(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode lookupCall
+    ) {
+        int index = mn.instructions.indexOf(lookupCall);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < 3) return null;
+        int top = frame.getStackSize();
+        String owner = sourceClassObjectOwner(mn, frames, frame.getStack(top - 3), 0);
+        String name = sourceString(mn, frames, frame.getStack(top - 2), 0);
+        Type[] parameterTypes = sourceMethodLookupParameterTypes(mn, frames, frame.getStack(top - 1), 0);
+        return owner == null || name == null ? null : new ReflectiveLookup(owner, name, parameterTypes);
+    }
+
+    private static ReflectiveLookup sourceReflectiveMethodLookup(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 8) return null;
+        ReflectiveLookup result = null;
+        for (AbstractInsnNode insn : value.insns) {
+            ReflectiveLookup sourced = null;
+            if (insn instanceof MethodInsnNode call && isMethodLookup(call)) {
+                sourced = sourceReflectiveLookupTarget(pctx, mn, frames, call);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceReflectiveMethodLookup(pctx, mn, frames, loadedLocalValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceReflectiveMethodLookup(pctx, mn, frames, storedValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceReflectiveMethodLookup(pctx, mn, frames, castInputValue(mn, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && !sameLookup(result, sourced)) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private static String sourceClassObjectOwner(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 8) return null;
+        String owner = null;
+        for (AbstractInsnNode insn : value.insns) {
+            String sourced = null;
+            if (insn instanceof LdcInsnNode ldc
+                && ldc.cst instanceof Type type
+                && type.getSort() == Type.OBJECT) {
+                sourced = type.getInternalName();
+            } else if (insn instanceof MethodInsnNode call && isClassForName(call)) {
+                sourced = sourceClassForNameOwner(mn, frames, call, depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceClassObjectOwner(mn, frames, loadedLocalValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceClassObjectOwner(mn, frames, storedValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceClassObjectOwner(mn, frames, castInputValue(mn, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (owner != null && !owner.equals(sourced)) return null;
+            owner = sourced;
+        }
+        return owner;
+    }
+
+    private static boolean isClassForName(MethodInsnNode call) {
+        return call.getOpcode() == Opcodes.INVOKESTATIC
+            && "java/lang/Class".equals(call.owner)
+            && "forName".equals(call.name)
+            && ("(Ljava/lang/String;)Ljava/lang/Class;".equals(call.desc)
+                || "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;".equals(call.desc));
+    }
+
+    private static String sourceClassForNameOwner(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode call,
+        int depth
+    ) {
+        int index = mn.instructions.indexOf(call);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null) return null;
+        Type[] args = Type.getArgumentTypes(call.desc);
+        if (frame.getStackSize() < args.length) return null;
+        String binaryName = sourceString(mn, frames, frame.getStack(frame.getStackSize() - args.length), depth);
+        return binaryClassNameToInternal(binaryName);
+    }
+
+    private static String binaryClassNameToInternal(String binaryName) {
+        if (binaryName == null || binaryName.isEmpty() || binaryName.charAt(0) == '[') return null;
+        return binaryName.replace('.', '/');
+    }
+
+    private static String sourceString(MethodNode mn, Frame<SourceValue>[] frames, SourceValue value, int depth) {
+        if (value == null || depth > 8) return null;
+        String result = null;
+        for (AbstractInsnNode insn : value.insns) {
+            String sourced = null;
+            if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String text) {
+                sourced = text;
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceString(mn, frames, loadedLocalValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceString(mn, frames, storedValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceString(mn, frames, castInputValue(mn, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && !result.equals(sourced)) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private static Type[] sourceMethodLookupParameterTypes(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 8) return null;
+        Type[] result = null;
+        for (AbstractInsnNode insn : value.insns) {
+            Type[] sourced = null;
+            if (insn.getOpcode() == Opcodes.ACONST_NULL) {
+                sourced = new Type[0];
+            } else if (insn instanceof TypeInsnNode array
+                && array.getOpcode() == Opcodes.ANEWARRAY
+                && "java/lang/Class".equals(array.desc)) {
+                Integer length = sourceAnewarrayLength(mn, frames, array);
+                if (length != null && length == 0) sourced = new Type[0];
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceMethodLookupParameterTypes(mn, frames, loadedLocalValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceMethodLookupParameterTypes(mn, frames, storedValue(mn, frames, var), depth + 1);
+            } else if (insn instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceMethodLookupParameterTypes(mn, frames, castInputValue(mn, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && !sameTypes(result, sourced)) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private static Integer sourceAnewarrayLength(MethodNode mn, Frame<SourceValue>[] frames, TypeInsnNode array) {
+        int index = mn.instructions.indexOf(array);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < 1) return null;
+        return sourceInt(mn, frames, frame.getStack(frame.getStackSize() - 1), 0);
+    }
+
+    private static Integer sourceInt(MethodNode mn, Frame<SourceValue>[] frames, SourceValue value, int depth) {
+        if (value == null || depth > 8) return null;
+        Integer result = null;
+        for (AbstractInsnNode insn : value.insns) {
+            Integer sourced = intConstant(insn);
+            if (sourced == null && insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ILOAD) {
+                sourced = sourceInt(mn, frames, loadedLocalValue(mn, frames, var), depth + 1);
+            } else if (sourced == null && insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ISTORE) {
+                sourced = sourceInt(mn, frames, storedValue(mn, frames, var), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && !result.equals(sourced)) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private static SourceValue loadedLocalValue(MethodNode mn, Frame<SourceValue>[] frames, VarInsnNode load) {
+        int index = mn.instructions.indexOf(load);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || load.var >= frame.getLocals()) return null;
+        return frame.getLocal(load.var);
+    }
+
+    private static SourceValue storedValue(MethodNode mn, Frame<SourceValue>[] frames, VarInsnNode store) {
+        int index = mn.instructions.indexOf(store);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < 1) return null;
+        return frame.getStack(frame.getStackSize() - 1);
+    }
+
+    private static SourceValue castInputValue(MethodNode mn, Frame<SourceValue>[] frames, TypeInsnNode cast) {
+        int index = mn.instructions.indexOf(cast);
+        if (index < 0 || index >= frames.length) return null;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < 1) return null;
+        return frame.getStack(frame.getStackSize() - 1);
+    }
+
+    private static boolean sameLookup(ReflectiveLookup left, ReflectiveLookup right) {
+        if (!left.owner().equals(right.owner()) || !left.name().equals(right.name())) return false;
+        Type[] leftTypes = left.parameterTypes();
+        Type[] rightTypes = right.parameterTypes();
+        if (leftTypes == null || rightTypes == null) return leftTypes == rightTypes;
+        return sameTypes(leftTypes, rightTypes);
+    }
+
+    private static Frame<SourceValue>[] analyzeSourceValues(MethodNode mn) throws AnalyzerException {
+        mn.maxStack = Math.max(mn.maxStack, 256);
+        return new Analyzer<>(new SourceInterpreter()).analyze("java/lang/Object", mn);
     }
 
     @SuppressWarnings("unchecked")
