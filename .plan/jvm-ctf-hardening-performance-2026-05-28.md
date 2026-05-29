@@ -1793,6 +1793,39 @@ This plan will refresh that evidence before changing CFF performance code.
   - Fresh combined regression passed:
     `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serializationMagicMembersSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParametersMetadataSurvivesFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
+### [ ] JCP-4E9A: Normalize Varargs Metadata After Descriptor Packing
+
+- Scope: repair transformed `ACC_VARARGS` methods whose final JVM descriptor no
+  longer ends in an array after hidden-key or packed-carrier rewriting. This is
+  a metadata consistency fix for transformed methods; it must not preserve the
+  original descriptor, remove hidden keys, remove packed carriers, add adapters,
+  or special-case any fixture.
+- Required evidence before editing: collect source and bytecode proof that the
+  current failure is stale `ACC_VARARGS` metadata on a descriptor whose final
+  parameter is no longer an array, and prove the failure happens through a JDK
+  MethodHandle lookup path rather than through an application-specific branch.
+- Evidence before editing: fresh no-quick `full.jar` run failed
+  `features.jvm.unsafe-varhandle-deep` with
+  `IllegalAccessException: cannot make variable arity: a.ie.le(Object[],long)Object/invokeStatic does not have a trailing array parameter`
+  and `perf.unsafe-varhandle.deep` with the same failure on `a.rg.le`.
+  Static `javap -p -v` on the fresh full-obfuscated artifact shows both
+  methods as `static java.lang.Object le(java.lang.Object..., long)` with
+  descriptor `([Ljava/lang/Object;J)Ljava/lang/Object;` and flags
+  `ACC_STATIC, ACC_VARARGS`. Original bytecode for
+  `UnsafeVarHandleDeepFeatureTest$UnsafeAccess.invoke` has descriptor
+  `(Ljava/lang/Object;Ljava/lang/String;[Ljava/lang/Class;[Ljava/lang/Object;)Ljava/lang/Object;`
+  and flags `ACC_STATIC, ACC_VARARGS`; after packing, the final descriptor
+  parameter is the hidden `long`, not an array. Therefore the failing invariant
+  is stale varargs metadata after generic descriptor rewriting.
+- Validation command or runtime target: add a focused full-profile regression
+  for a varargs method reached through `MethodHandles.Lookup.findStatic`, rerun
+  the relevant MethodHandle/parameter regression group, regenerate `full.jar`
+  without quick mode, and run `features.jvm.unsafe-varhandle-deep` plus
+  `perf.unsafe-varhandle.deep` without `quick` / `--quick`.
+- Completion criteria: descriptor-packed methods no longer expose invalid
+  `ACC_VARARGS`; MethodHandle lookup of transformed varargs targets succeeds;
+  hidden-key and packed-carrier rewriting remain active for those methods.
+
 ### [ ] JCP-4E9: Preserve Name-Sensitive Reflection Contracts
 
 - Scope: repair remaining documented name-sensitive reflection contracts after
