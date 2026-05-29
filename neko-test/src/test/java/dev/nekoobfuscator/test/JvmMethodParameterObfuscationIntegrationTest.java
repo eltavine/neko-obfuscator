@@ -206,6 +206,28 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void bridgeMethodsSurviveFullProfileAbiRewriting() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-bridge-abi"));
+        Path source = work.resolve("BridgeAbiEntry.java");
+        Files.writeString(source, bridgeAbiSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("bridge-abi-entry.jar");
+        writeJar(inputJar, classes, "BridgeAbiEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("bridge-abi-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("BRIDGE ABI OK"), obfuscated);
+    }
+
+    @Test
     void packedInterfaceEntrySurvivesCrossClassStringTailDecode() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cross-class-string-tail"));
@@ -1498,6 +1520,61 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                         throw new AssertionError("nested-default:" + nestedDefault.value());
                     }
                     System.out.println("ANNOTATION ENUM DEFAULT OK");
+                }
+            }
+            """;
+    }
+
+    private String bridgeAbiSourceText() {
+        return """
+            import java.lang.reflect.Method;
+            import java.util.Arrays;
+
+            public class BridgeAbiEntry {
+                static class Parent {
+                    Number value() {
+                        return 1;
+                    }
+                }
+
+                static final class Child extends Parent {
+                    Integer value() {
+                        return 42;
+                    }
+                }
+
+                interface Getter<T> {
+                    T get();
+                }
+
+                static final class StringGetter implements Getter<String> {
+                    public String get() {
+                        return "bridge";
+                    }
+                }
+
+                public static void main(String[] args) {
+                    Parent parent = new Child();
+                    if (parent.value().intValue() != 42) {
+                        throw new AssertionError("covariant-dispatch");
+                    }
+                    Getter<String> getter = new StringGetter();
+                    if (!"bridge".equals(getter.get())) {
+                        throw new AssertionError("generic-dispatch");
+                    }
+                    if (!hasBridge(Child.class, "value")) {
+                        throw new AssertionError("covariant-bridge");
+                    }
+                    if (!hasBridge(StringGetter.class, "get")) {
+                        throw new AssertionError("generic-bridge");
+                    }
+                    System.out.println("BRIDGE ABI OK");
+                }
+
+                static boolean hasBridge(Class<?> type, String name) {
+                    return Arrays.stream(type.getDeclaredMethods())
+                        .filter(method -> method.getName().equals(name))
+                        .anyMatch(Method::isBridge);
                 }
             }
             """;

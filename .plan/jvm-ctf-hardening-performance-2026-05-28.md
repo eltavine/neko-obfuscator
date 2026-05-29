@@ -1506,7 +1506,7 @@ This plan will refresh that evidence before changing CFF performance code.
     again timed out after 600 seconds after `perf.crypto.rsa-oaep` without a
     `perf.crypto.xor` result.
 
-### [ ] JCP-4E5: Preserve Synthetic Bridge Method ABI
+### [x] JCP-4E5: Preserve Synthetic Bridge Method ABI
 
 - Scope: repair generic bridge method visibility and descriptor surfaces needed
   by JVM dispatch, generic signatures, and reflection.
@@ -1520,6 +1520,44 @@ This plan will refresh that evidence before changing CFF performance code.
 - Completion criteria: bridge methods required by JVM and reflection remain
   visible with correct ABI descriptors; non-bridge application methods remain
   fully transformed.
+- Implementation/evidence:
+  - Fresh focused `full.jar` no-quick bridge run failed before this repair:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.jvm.covariant-bridge --include features.generics.bridge-signature --verbose`,
+    with `FAIL features.jvm.covariant-bridge AssertionError: covariant bridge method missing`
+    and `FAIL features.generics.bridge-signature AssertionError: bridge method missing`.
+    Original bytecode contained `ACC_BRIDGE, ACC_SYNTHETIC` methods
+    `Child.value()Ljava/lang/Number;` and `StringGetter.get()Ljava/lang/Object;`.
+    The failing obfuscated bytecode still contained bridge bodies, but their
+    JVM ABI names/descriptors had been rewritten to packed `Object[]` methods
+    such as `r([Ljava/lang/Object;)Ljava/lang/Number;` and
+    `va([Ljava/lang/Object;)Ljava/lang/Object;`, so reflection by the original
+    bridge name could no longer observe the JVM bridge contract.
+  - Added generic `JvmBridgeAbi` detection for `ACC_BRIDGE` methods and related
+    bridge-family methods across the application inheritance/interface graph.
+    `JvmRenamerPass`, `JvmKeyDispatchPass`, and
+    `JvmMethodParameterObfuscationPass` now preserve only those true bridge ABI
+    families from renaming, hidden-key descriptor injection, and packed
+    `Object[]` carrier rewriting. Other unrelated application methods remain
+    eligible for the full transform set.
+  - Added a full-profile bridge regression fixture covering covariant return
+    bridges, generic interface bridges, normal virtual/interface dispatch, and
+    reflective `Method.isBridge()` discovery by original bridge name.
+  - Implementation review note: the active multi-agent tool contract still
+    prevents spawning a sub-agent review without an explicit user request. The
+    nearest equivalent review was a scoped static diff audit plus the fresh
+    JUnit/runtime evidence listed here. Review result: PASS for JCP-4E5 bridge
+    ABI scope; remaining full-suite failures are separate recorded surfaces.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting`.
+  - Fresh full-profile `full.jar` obfuscation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`,
+    writing 319 classes and 9 resources.
+  - Fresh no-quick focused `full.jar` bridge validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.jvm.covariant-bridge --include features.generics.bridge-signature --verbose`,
+    with `PASS features.jvm.covariant-bridge 4.990 ms` and
+    `PASS features.generics.bridge-signature 3.232 ms`.
+  - Fresh combined regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
 ### [ ] JCP-4E6: Preserve Service Provider Construction ABI
 

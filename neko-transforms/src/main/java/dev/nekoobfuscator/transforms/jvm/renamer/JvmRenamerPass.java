@@ -7,6 +7,7 @@ import dev.nekoobfuscator.api.transform.TransformPhase;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmBridgeAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmEnumAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -437,6 +438,7 @@ public final class JvmRenamerPass implements TransformPass {
         if ("<init>".equals(method.name) || "<clinit>".equals(method.name)) return false;
         if ((method.access & Opcodes.ACC_NATIVE) != 0) return false;
         if (clazz.isAnnotation()) return false;
+        if (JvmBridgeAbi.isBridgeFamilyMethod(pctx, clazz, method)) return false;
         if (JvmEnumAbi.isEnumValuesMethod(clazz, method) || JvmEnumAbi.isEnumValueOfMethod(clazz, method)) return false;
         if ("main".equals(method.name)
             && "([Ljava/lang/String;)V".equals(method.desc)

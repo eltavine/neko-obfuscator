@@ -11,6 +11,7 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmBridgeAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmEnumAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
@@ -791,6 +792,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if ("main".equals(method.name()) && "([Ljava/lang/String;)V".equals(method.descriptor()) && method.isStatic()) {
             return false;
         }
+        if (JvmBridgeAbi.isBridgeFamilyMethod(pctx, clazz, method)) return false;
         if (JvmEnumAbi.isEnumAbiMethod(clazz, method)) return false;
         if (JvmRecordAbi.isRecordAbiMethod(clazz, method)) return false;
         if (!method.isConstructor() && overridesExternalMethod(pctx, clazz, method.asmNode(), method.descriptor())) return false;
