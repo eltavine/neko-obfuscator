@@ -716,22 +716,304 @@ This plan will refresh that evidence before changing CFF performance code.
   tied back to the actual reflective member source locals and is not the
   rejected MethodHandle or stored-local fallback path.
 
-### [ ] JCP-3: Scatter Reversible Validation Helpers And Table Checks
+### [x] JCP-3: Scatter Reversible Validation Helpers And Table Checks
 
 - Scope: harden small reversible helper chains such as standalone byte/int
   transforms and table-compare validators. Route table loads, transform steps,
   and final compares through multiple CFF-bound stages and existing indy
   callsite material rather than one clean helper plus one static table compare.
+  This subtask also includes the generic CFF helper-relocation,
+  transition-material, and transition-outliner repairs required by that
+  hardening path to generate and run under full JVM obfuscation without
+  weakening block coverage, key propagation, or transition semantics.
 - Required evidence before editing: source and artifact proof of the current
   `j -> l -> table compare` solver path in `ctf-obf.jar`; identification of a
   generic transform surface that applies to application validation code without
   fixture-specific matching.
+- Fresh evidence before editing: original `test-jars/ctf.jar` bytecode in
+  `Vault.accepts(String)` has the compact validation chain: UTF-8 bytes are
+  length-checked against 15, each byte is mixed with `MASK[i]`, adjusted by
+  `31 + 17 * i`, passed through the standalone reversible
+  `rotateLeft8(int,int)` helper, accumulated as
+  `acc |= rotated ^ state ^ CHECK[i]`, and the final boolean is `acc == 0`.
+  The source artifact was captured in
+  `build/tmp/ctf-vault-original-jcp3-evidence.javap.txt`; the key sequence is
+  the `baload`, `MASK` `iaload`, `rotateLeft8:(II)I`, `CHECK` `iaload`,
+  `ixor`, `ior`, and final `ifne`/`ireturn` path. The current regenerated
+  `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar` no longer exposes plaintext
+  primitive arrays or accepts forged packed carriers after JCP-1/JCP-2, but
+  `javap -c -p a.c` still exposes a distinct packed private
+  `j(Object[], long)` validation method and a distinct packed private
+  `l(Object[], long)` integer helper. The `j` bytecode still contains the
+  validation-loop shape through protected `baload`/`iaload` table loads,
+  accumulator-style integer mixing, and later `ireturn` exits, while `l`
+  remains an independently analyzable integer transform method. The current
+  transform surface is also incomplete in source: `JvmValidationSinkHardeningPass`
+  only recognizes fixed `String.equals` validation sinks. It does not recognize
+  primitive table-compare validators such as `acc |= expression ^ table[i]`,
+  even though that shape is generic application validation code and is not
+  tied to `ctf.jar`, class names, method names, passphrases, or table values.
+- In-progress failure evidence: the first primitive-table implementation
+  replaced one accumulator `IXOR` in the application method with four staged
+  calls (`entry`, `guard`, `data`, `final`) so the final stage could be
+  transformed by invokeDynamic in the same application method. The focused
+  validation-sink fixture passed, but the full JCP-3 Gradle validation failed
+  during the `test21.jar` CFF-only-stack ablation write:
+  `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`
+  with `estimatedCodeBytes=80521`, and the same log recorded
+  `validationSinkHardening appliedFull=1`. This proves the repair path must
+  keep primitive validation hardening but move final-stage indy protection back
+  into generated helper code instead of expanding large application methods
+  with multiple extra callsites.
+- Repair approach evidence: invokeDynamic already has a generated-helper
+  size-pressure guard, while `siteSpec` explicitly permits generated validation
+  final-stage calls and rejects other generated-name calls. Therefore the
+  generic repair is to leave only one live-keyed primitive entry call in the
+  application method, keep the split `value`/`guard`/`data`/`final` helper
+  stages, and allow generated helpers under size pressure to run invokeDynamic
+  only when they contain validation final-stage calls. This preserves
+  obfuscation strength and coverage without weakening CFF block construction or
+  adding fixture-specific skips.
+- Final implementation evidence: generated-helper final-stage indy cannot be
+  used as the primitive-table proof point because generated CFF helpers in the
+  current pipeline have no flow-key metadata (`Control-flow generated helpers
+  missing flow keys: candidates=44 keyed=0` in the focused fixture, and
+  `candidates=61 keyed=0` in `test21.jar`). The final implementation therefore
+  protects the single primitive validation entry callsite itself with
+  invokeDynamic, descriptor `(IIJJJ)I`, while the generated entry helper still
+  splits the computation through live-keyed `value`, `data`, `guard`, and
+  `final` stages. The application method receives only one extra protected
+  callsite for each matched table accumulator, so the transform does not add
+  multi-call staged growth to large methods.
+- Current validation evidence: after the validation-sink/key-data repair, the
+  minimized invokeDynamic reference fixture exposed an independent generic
+  constructor path failure in the `methodParameterObfuscation` + CFF
+  interaction. Fresh generated `IndyReferenceShapes$Inner.<init>` bytecode
+  showed the incoming raw key first decoded correctly into the canonical method
+  key, but `rewriteFirstKeyDispatchLoad` then overwrote the active key local
+  with a fallback expression that omitted the final incoming-key xor. The
+  concrete observed values were: full mix produced target seed
+  `4435259575852332461`, while the fallback overwrite produced
+  `3932239884164406260`. The repair is generic: the fallback now discards the
+  old stack value and delegates to `JvmKeyDispatchPass.emitIncomingKeyMix(...)`
+  instead of hand-emitting a shortened expression. The same constructor audit
+  also proved CFF entry data digest had been reading method-parameter synthetic
+  packed ABI locals; those hidden-key/suffix transport locals are now recorded
+  by method-parameter planning and excluded from CFF's primitive argument data
+  digest.
+- Historical CFF size-blocker evidence: the failing
+  `build/test-jvm-runtime-ablation/obfusjack-cff-only-stack.obfuscate.stdout.log`
+  records `a/a.main([Ljava/lang/String;)V` with 168 CFF island helpers,
+  126 trivial candidates, no fake helpers, 42 multi-real helpers, 255 real
+  blocks, 255 result tokens, 168 poison rows, and finalizer
+  `estimatedCodeBytes=80396`. Source inspection shows that in outliner mode
+  `insertIslandDispatchers` routes every group, including single-block/no-fake
+  groups, through a generated group dispatch helper and caller-side result
+  router. That caller glue is generic CFF dispatcher overhead, not validation
+  fixture logic. A tested repair attempt kept full block coverage and live
+  `pc/data/key` token validation while emitting compact inline dispatch for
+  single-block/no-fake groups. The focused CFF regression passed, but fresh
+  `test21.jar` cff-only-stack regeneration increased the largest method
+  estimate from `80396` to `82883`, proving the existing helper/result-router
+  path is smaller than inline token validation for this caller. That attempt
+  was reverted; the size repair must instead reduce duplicated caller-side
+  state glue or move equivalent state restoration into an existing keyed helper
+  path.
+- Prior regenerated CTF evidence: `/mnt/d/Code/Reverse/NekoOBF/m/ctf-obf.jar` was
+  freshly regenerated at 18:33:08 Asia/Taipei with full JVM obfuscation.
+  Coverage reported `validationSinkHardening appliedFull=1`,
+  `invokeDynamic appliedFull=18`, `constantObfuscation appliedFull=10`, and
+  `stringObfuscation appliedFull=5`. `ReflectDump a.c` reports `c=0`,
+  `d=null`, `a=null`, `e=null`, `b=null`, and non-null `f`; stale direct
+  `CallCore` wrappers for both `test` and `swing-gate-0427` throw
+  `SecurityException`; `ForgedCore` prints `FORGED CARRIER REJECTED`.
+  Bytecode audit in `build/tmp/ctf-ac-jcp3-after.javap.txt` shows the primitive
+  validation accumulator in `j(Object[], long)` no longer remains a clean
+  `value ^ table` path: immediately before the accumulator `ior`, it routes
+  through an indy-protected primitive entry
+  `InvokeDynamic ... (IIJJJ)I`, and the surrounding loop still receives live
+  packed/CFF state and protected array material rather than plaintext static
+  tables.
+- Historical outlined-indy runtime blocker evidence: the generic CFF size repairs now allow
+  `test21.jar` `full-no-const-string` to generate successfully without
+  `MethodTooLargeException`; the freshly generated
+  `build/test-jvm-runtime-ablation/obfusjack-current-full-no-const-string.jar`
+  has `a/a.main([Ljava/lang/String;)V` at code length `65068`. Runtime still
+  fails deterministically at the first outlined indy site with
+  `StringIndexOutOfBoundsException: Range [0, -1) out of bounds for length 46`
+  in the indy resolver path `a.b.e -> a.ja.tja -> a.a.main`, proving the
+  encrypted payload is decoded with mismatched live callsite material rather
+  than a target lookup failure. Bytecode inspection shows the caller computes
+  the live flow word at the original CFF site with
+  `a/b.o:(IIIII[Ljava/lang/Object;IJ)J`, then calls relocated helper
+  `a/ja.tja:(JJ)Ljava/io/PrintStream;`; the helper contains only
+  `lload_0`, `lload_2`, and the embedded indy `(JJ)Ljava/io/PrintStream;`.
+  The helper bootstrap still carries resolver slot `19` and the original
+  material handle `REF_getStatic a/a.i:[Ljava/lang/Object;`. The mapping file
+  proves this helper originated as
+  `a/a.__neko_indysite$...(JJ)Ljava/io/PrintStream; -> tja`, while source
+  inspection proves `appendRelocatableRenamedGeneratedHelpers` relocates
+  renamed generated helpers that are not referenced by a `Handle`. Therefore
+  outlined indy-site helpers are callsite-bound generated methods whose
+  internal indy receives a different VM-provided bootstrap `Lookup` after CFF
+  helper relocation. The repair scope is to keep only `__neko_indysite$`
+  outlined callsite helpers in their declaring owner while retaining their
+  renaming, indy protection, live key/flow arguments, and relocation of true
+  CFF/material helpers.
+- Historical generated-material size evidence: after rebuilding the CLI from the
+  current sources, fresh `test21.jar` `full-no-const-string` generation now
+  reaches output writing and fails on relocated helper host `a/la` with
+  `MethodTooLargeException: Method too large: a/la.yha ()V`. The mapping file
+  identifies `yha` as the renamed `a/a.__neko_indyinit$()V` method. The writer
+  diagnostic shows the failing method starts by constructing encoded indy
+  material arrays, including `BIPUSH 10`, `NEWARRAY 11`, `LDC <long>`, and
+  `LASTORE`; the largest-method estimate is `65657` bytes. This proves the
+  current blocker is a single generated indy material initializer, not an
+  application method, CFF block count, or outlined callsite lookup path.
+  The repair scope is to split the existing generated indy material init surface
+  into bounded generated chunk helpers that fill the same live carrier table,
+  while preserving the same encoded per-site material, bootstrap handles,
+  callsite seeds, and generated-helper relocation/renaming behavior.
+- Historical validation-sink semantic evidence: after indy material-init chunking
+  and shared indy key decoding, fresh fixed-seed `test21.jar`
+  `full-no-const-string` generation completes and the runtime no longer throws
+  in the indy resolver path. The output still diverges from original semantics:
+  the string-switch row that prints `42` in the original and prior obfuscated
+  artifact now prints `-1`; `area(circle)` prints `0.0` instead of
+  `12.566370614359172`; clone hash output prints `7` instead of `3820`.
+  Targeted resolver instrumentation proved the first string-switch failure is
+  not encrypted indy payload corruption: the `java/lang/String.hashCode()I`
+  payload resolves first, followed by the generated validation final-stage
+  callsite `a/a.__neko_vsend1$35(JJI)Z`, and the final-stage result returns
+  false. Source inspection of `JvmValidationSinkHardeningPass.liveWord` and
+  `emitLiveWord` identifies the exact invariant gap: transform-time masks mix
+  `metadata.classKeyTable().values()[idx]`, while runtime masks re-read the
+  mutable sealed class-key word table. That table is intentionally perturbed by
+  runtime class-load state, so validation-sink decoding can diverge from the
+  transform-time mask even when the indy resolver payload and target lookup are
+  correct. The generic repair target is the validation-sink mask formula:
+  preserve live CFF/key/data binding, but remove the unstable runtime class-key
+  table dependency from this generated validation material unless it is stored
+  as stable per-site protected material.
+- Repair evidence after validation-sink live-data binding fix: the generated
+  validation live word no longer rereads the runtime sealed class-key word
+  table. Instead, the table selector contributes a deterministic per-site
+  index-derived word at transform time and in emitted bytecode, while the
+  remaining mask terms still consume live CFF state, path/block/guard data,
+  pc/data words, and the method key. A second targeted probe showed that the
+  string-switch final-stage failure persisted after removing the unstable
+  class-key-table dependency because the inserted validation helper arguments
+  were still encoded with a branch-local CFF live mask that did not match the
+  helper-side data word. The final repair now encodes the seed/tag arguments
+  from the live canonical method key plus the validation data word: compile
+  time stores `value ^ argumentKeyMask(methodKey, siteSeed, domain)`, runtime
+  recomputes the same method-key mask from the live hidden-key local, then
+  applies the existing validation-data mask so the helper receives values bound
+  to live method-entry material and current CFF data.
+- Fresh validation evidence after final cleanup: `env
+  GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home
+  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp
+  ./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests
+  dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest` passed
+  on 2026-05-29 after removing temporary `DEBUG-JCP3` / `DEBUG-KXFER`
+  instrumentation and test bisection switches. A source grep for
+  `DEBUG-JCP3`, `DEBUG-KXFER`, `neko.debug`, and `neko.test.*.enabled`
+  returns no matches in the JVM transform sources or the invokeDynamic
+  integration test. The invokeDynamic integration audit was updated to verify
+  the real shared bootstrap helper owner instead of assuming helpers must live
+  on the reference-site owner class.
+- Fresh test21 semantic evidence after final cleanup: `env
+  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp
+  neko-cli/build/install/neko-cli/bin/neko-cli obfuscate --config
+  build/test-jvm-runtime-ablation/configs/full-no-const-string.yml --input
+  test-jars/test21.jar --output
+  build/test-jvm-runtime-ablation/obfusjack-current-full-no-const-string.jar`
+  completed on 2026-05-29. A direct
+  `java -XX:-UsePerfData -Djava.io.tmpdir=... -jar` run of that fresh artifact
+  exited 0 and includes `GREEN`, `42`, `Inner.value=106`,
+  `area(circle)=12.566370614359172`, and
+  `clone equal? true hash1=3820 hash2=3820`. The same run reports
+  `Platform threads: 145 ms`, `Virtual threads: 162 ms`, `Seq: 546 ms`,
+  `Parallel: 837 ms`, and `VThreads: 857 ms`; these timings remain JCP-4+
+  performance work and are not treated as JCP-3 semantic completion evidence.
+- Fresh CTF artifact evidence after final cleanup: `env
+  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp
+  neko-cli/build/install/neko-cli/bin/neko-cli obfuscate --config
+  test-jars/full-jvm-obf.yml --input test-jars/ctf.jar --output
+  build/test-jvm-runtime-ablation/ctf-current-full.jar` completed on
+  2026-05-29. Coverage reported `validationSinkHardening appliedFull=1`,
+  `invokeDynamic appliedFull=18`, `constantObfuscation appliedFull=10`, and
+  `stringObfuscation appliedFull=5`. Fresh `ReflectDump a.c` reports `c=0`,
+  `d=null`, `a=null`, `e=null`, `b=null`, and non-null `f`; stale direct
+  `CallCore` wrappers for both `test` and `swing-gate-0427` throw
+  `SecurityException`; `ForgedCore` prints `FORGED CARRIER REJECTED`.
+  Bytecode audit in `build/tmp/ctf-ac-current-jcp3-final.javap.txt` still
+  shows the primitive validation entry protected by an invokedynamic descriptor
+  `(IIJJJ)I`, while the surrounding primitive arrays are accessed as protected
+  object-carrier material rather than plaintext static array values.
+- Review-scope correction evidence: final review
+  `019e71d9-5cb5-7650-be9f-8e0146445a9c` returned FAIL because the proposed
+  JCP-3 review scope omitted executable CFF files that directly contributed to
+  the fresh `test21` and CTF evidence. Those files are now explicitly included
+  in this JCP-3 scope: `CffClassSetup` relocates generated CFF helpers by
+  method count or estimated host code size and keeps outlined indy callsite
+  helpers in their declaring owner; `CffMaterialTables` extends transition
+  material rows so transition PC state is bound to the current CFF data digest;
+  `CffTransitionOutliner`, `CffDispatchEmitter`, `CffSharedState`, and
+  `ControlFlowFlatteningPass` preserve full transition semantics while moving
+  duplicated caller-side state restoration into keyed material/helper paths and
+  sharing poison/result routing where equivalent. These changes are not final
+  performance acceptance for JCP-4+; they are part of the JCP-3 correctness and
+  size evidence because the freshly validated artifacts were generated with
+  them present.
+- Final review evidence: after the scope correction, subagent review
+  `019e71d9-5cb5-7650-be9f-8e0146445a9c` returned PASS for the expanded JCP-3
+  diff. No blocking issues were found in the corrected scope.
+- Superseded validation evidence retained for history: `env
+  GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home
+  JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp
+  ./gradlew :neko-test:test --tests
+  dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests
+  dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest` passed
+  on 2026-05-29. A fresh fixed-seed `test21.jar` `full-no-const-string`
+  artifact generated successfully at
+  `build/test-jvm-runtime-ablation/obfusjack-current-full-no-const-string.jar`;
+  direct runtime output now includes `GREEN`, `42`,
+  `area(circle)=12.566370614359172`, and
+  `clone equal? true hash1=3820 hash2=3820`, with no `DEBUG-JCP3` or
+  `neko.debug` markers in the transform sources. The same run still reports
+  performance rows around `Platform threads: 140 ms`, `Virtual threads: 172 ms`,
+  `Seq: 496 ms`, `Parallel: 830 ms`, and `VThreads: 911 ms`, so performance
+  remains deferred to JCP-4 and later measurement/repair tasks rather than
+  treated as JCP-3 semantic evidence.
+- Fresh CTF artifact evidence after the same repair: `ctf.jar` full JVM
+  obfuscation generated successfully to
+  `build/test-jvm-runtime-ablation/ctf-current-full.jar` on 2026-05-29.
+  Coverage again reported `validationSinkHardening appliedFull=1`,
+  `invokeDynamic appliedFull=18`, `constantObfuscation appliedFull=10`, and
+  `stringObfuscation appliedFull=5`. `ReflectDump a.c` reports `c=0`,
+  `d=null`, `a=null`, `e=null`, `b=null`, and non-null `f`; stale `CallCore`
+  direct-entry wrappers for both `test` and `swing-gate-0427` throw
+  `SecurityException`; `ForgedCore swing-gate-0427` prints
+  `FORGED CARRIER REJECTED`. Bytecode audit in
+  `build/tmp/ctf-ac-current-jcp3-final.javap.txt` shows the primitive
+  validation entry is protected through an invokedynamic descriptor
+  `(IIJJJ)I`, while static primitive arrays remain protected material rather
+  than plaintext reflective fields.
 - Validation command or runtime target:
-  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`
-  plus regenerated `ctf-obf.jar` bytecode audit.
+  focused JCP-3 Gradle regressions for CFF algebra and invokeDynamic
+  integration, plus regenerated `test21.jar` `full-no-const-string` and
+  regenerated `ctf.jar` full-JVM runtime/bytecode audits.
 - Completion criteria: regenerated validation no longer presents a single
   reversible helper/table-compare chain; final decision remains live-key and
-  CFF-data bound; performance does not regress against the JCP baseline.
+  CFF-data bound; JCP-3 itself adds only one primitive entry indy callsite per
+  matched accumulator; constructor/method-parameter key transfer preserves the
+  canonical method key before CFF dispatch; CFF transition material remains
+  bound to live data digest while helper relocation/outlining preserves full
+  CFF semantics; and the focused JCP-3 command plus regenerated CTF/test21
+  semantic audits pass freshly. Full performance thresholds remain open in
+  JCP-4 and later subtasks.
 
 ### [ ] JCP-4: Add Measurement-Only Performance Gate Harness
 

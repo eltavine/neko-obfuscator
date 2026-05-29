@@ -253,23 +253,31 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             blocks,
             handlerBridges
         );
+        int outlinerCodePressure = estimatedOutlinerCodePressure(
+            mn,
+            blocks,
+            handlerBridges
+        );
         boolean outlineTransitions = useTransitionOutliner(
             mn,
             blocks,
             handlerBridges
         );
-        boolean materializeDirectIslandTransitions =
-            estimatedOutlinerCodePressure(mn, blocks, handlerBridges) >=
-                TRANSITION_OUTLINER_ESTIMATED_CODE_PRESSURE;
+        boolean compactTransitionWrappers =
+            outlinerCodePressure >= COMPACT_TRANSITION_WRAPPER_CODE_PRESSURE;
         boolean outlineDispatchers = outlineTransitions;
         int transitionOutLocal = outlineDispatchers ? mn.maxLocals++ : -1;
+        int compactTransitionStateLocal = outlineDispatchers && compactTransitionWrappers
+            ? mn.maxLocals++
+            : -1;
         CffTransitionOutliner.TransitionOutliner dispatcherOutliner = outlineDispatchers
             ? new TransitionOutliner(
                 pctx,
                 clazz,
                 transitionOutLocal,
+                compactTransitionStateLocal,
                 smallTokenDispatchCases,
-                materializeDirectIslandTransitions,
+                compactTransitionWrappers,
                 syntheticNoiseBudget
             )
             : null;
@@ -444,6 +452,12 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             dispatchPlan,
             zeroStackLabels,
             exceptionLocal,
+            JvmMethodParameterObfuscationPass.cffDataDigestExcludedArgumentLocals(
+                pctx,
+                clazz.name(),
+                method.name(),
+                method.descriptor()
+            ),
             externalEntrySeed,
             methodSeed,
             salt,

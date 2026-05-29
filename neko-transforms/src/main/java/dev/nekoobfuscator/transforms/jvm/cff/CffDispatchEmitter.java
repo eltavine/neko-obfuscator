@@ -72,6 +72,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         DispatchPlan dispatchPlan,
         Set<LabelNode> zeroStackLabels,
         int exceptionLocal,
+        Set<Integer> dataDigestExcludedArgumentLocals,
         boolean externalEntrySeed,
         long methodSeed,
         long salt,
@@ -83,15 +84,22 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         List<IslandGroup> outlinedGroups = dispatchPlan.groups();
         Map<DispatchTarget, Long> dispatchSeedByTarget =
             buildDispatchSeedByTarget(dispatchPlan, keyStateByLabel);
+        boolean sharedPoisonSink = !"<init>".equals(mn.name);
+        LabelNode sharedPoison = sharedPoisonSink ? new LabelNode() : null;
+        boolean sharedPoisonEmitted = false;
+        long sharedPoisonSeed = JvmPassBytecode.mix(
+            salt ^ methodSeed,
+            0x504F49534F4E5348L
+        );
         for (int groupIndex = 0; groupIndex < outlinedGroups.size(); groupIndex++) {
             IslandGroup group = outlinedGroups.get(groupIndex);
             Block entryBlock = group.blocks().get(0);
             InsnList insns = new InsnList();
-            LabelNode poison = new LabelNode();
+            LabelNode poison = sharedPoisonSink ? sharedPoison : new LabelNode();
 
             if (entryBlock == firstNonHandler(blocks)) {
                 if (dispatcherOutliner != null) {
-                    emitInitTransitionOut(insns, dispatcherOutliner.outLocal());
+                    dispatcherOutliner.emitInitOutLocals(insns);
                 }
                 if (exceptionLocal >= 0) {
                     insns.add(new InsnNode(Opcodes.ACONST_NULL));
@@ -123,6 +131,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     pathKeyLocal,
                     blockKeyLocal,
                     dataLocal,
+                    dataDigestExcludedArgumentLocals,
                     entrySeed ^ 0x4441544144494731L
                 );
                 if (methodSeedLocal >= 0) {
@@ -229,6 +238,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     dataLocal,
                     keyTmpLocal,
                     poison,
+                    sharedPoisonSink && sharedPoisonEmitted,
                     methodSeed,
                     salt
                 ));
@@ -304,22 +314,28 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     )
                 );
             }
-            insns.add(poison);
-            long poisonSeed = edgeSeed(
-                salt,
-                entryBlock.label(),
-                entryBlock.label(),
-                0x504F49534F4E4B31L
-            );
-            emitStepKeys(
-                insns,
-                keyLocal,
-                guardLocal,
-                pathKeyLocal,
-                blockKeyLocal,
-                poisonSeed,
-                EdgeRole.POISON
-            );
+            boolean emitPoisonBody = !sharedPoisonSink || !sharedPoisonEmitted;
+            if (emitPoisonBody) {
+                insns.add(poison);
+                long poisonSeed = sharedPoisonSink
+                    ? sharedPoisonSeed
+                    : edgeSeed(
+                        salt,
+                        entryBlock.label(),
+                        entryBlock.label(),
+                        0x504F49534F4E4B31L
+                    );
+                emitStepKeys(
+                    insns,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    poisonSeed,
+                    EdgeRole.POISON
+                );
+                sharedPoisonEmitted |= sharedPoisonSink;
+            }
             if ("<init>".equals(mn.name)) {
                 emitPoisonDiversion(
                     insns,
@@ -337,7 +353,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
                     methodSeed,
                     salt
                 );
-            } else {
+            } else if (emitPoisonBody) {
                 emitPoisonMethodExit(
                     insns,
                     mn,
@@ -359,6 +375,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int pathKeyLocal,
         int blockKeyLocal,
         int dataLocal,
+        Set<Integer> excludedArgumentLocals,
         long seed
     ) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
@@ -381,6 +398,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         int argIndex = 0;
         for (Type arg : Type.getArgumentTypes(mn.desc)) {
             if (isDigestiblePrimitiveArgument(arg)
+                && !excludedArgumentLocals.contains(local)
                 && !overlapsDigestKeyLocal(local, arg.getSize(), keyLocal)) {
                 emitPrimitiveArgumentDigestValue(insns, arg, local);
                 emitFoldDataDigestValue(

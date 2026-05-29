@@ -17,8 +17,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
-import org.objectweb.asm.tree.FieldInsnNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
@@ -28,15 +28,15 @@ import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 
 /**
- * Replaces fixed String.equals validation sinks with CFF-live keyed tag checks.
+ * Replaces compact validation sinks with CFF-live keyed staged checks.
  */
 public final class JvmValidationSinkHardeningPass implements TransformPass {
     public static final String ID = "validationSinkHardening";
     private static final String HELPERS = "validationSinkHardening.helpers";
+    private static final String PRIMITIVE_HELPERS = "validationSinkHardening.primitiveHelpers";
     private static final String PLACEHOLDERS = "validationSinkHardening.placeholders";
     private static final String VARIANT_COUNTERS = "validationSinkHardening.variantCounters";
     private static final long TAG_MUL = 0x100000001B3L;
@@ -47,8 +47,20 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
     private static final String SEED_STAGE_DESC = "(JII)J";
     private static final String CHAR_STAGE_DESC = "(Ljava/lang/String;JIII)J";
     private static final String FINAL_STAGE_DESC = "(JJI)Z";
+    public static final String PRIMITIVE_ENTRY_PREFIX = "__neko_vsx";
+    public static final String PRIMITIVE_ENTRY_DESC = "(IIJ)I";
+    public static final String PRIMITIVE_FINAL_STAGE_PREFIX = "__neko_vsxend";
+    public static final String PRIMITIVE_FINAL_STAGE_DESC = "(JJ)I";
+    private static final String PRIMITIVE_VALUE_STAGE_DESC = "(IIJ)J";
+    private static final String PRIMITIVE_GUARD_STAGE_DESC = "(J)J";
+    private static final String PRIMITIVE_DATA_STAGE_DESC = "(J)I";
     private static final long LENGTH_STAGE_DOMAIN = 0x5653484C454E3031L;
     private static final long HASH_STAGE_DOMAIN = 0x5653484841534831L;
+    private static final long PRIMITIVE_SEED_DOMAIN = 0x5653505345454431L;
+    private static final long PRIMITIVE_PAIR_DOMAIN = 0x5653505041495231L;
+    private static final long PRIMITIVE_FINAL_DOMAIN = 0x56535046494E3031L;
+    private static final long PRIMITIVE_SIDE_MUL = 0xD6E8FEB86659FD93L;
+    private static final long PRIMITIVE_SIDE_ADD = 0xA5A3564E27F2A9B1L;
     private static final int VARIANT_COUNT = 2;
 
     @Override
@@ -123,7 +135,33 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
             mn.instructions.remove(insn);
             placeholders.put(placeholder, new ValidationPlaceholder(target, transformed++));
         }
+        int hiddenKeyLocal = hiddenKeyLocal(mn);
+        int primitiveOrdinal = 0;
+        if (hiddenKeyLocal >= 0) {
+            for (AbstractInsnNode insn : mn.instructions.toArray()) {
+                if (!isPrimitiveTableAccumulatorXor(insn)) continue;
+                int variant = nextVariant(pctx, clazz);
+                long siteSeed = primitivePreCffSiteSeed(pctx.masterSeed(), clazz, method, primitiveOrdinal);
+                PrimitiveValidationStages stages = ensurePrimitiveHelper(pctx, clazz, variant, siteSeed);
+                InsnList replacement = new InsnList();
+                replacement.add(new VarInsnNode(Opcodes.LLOAD, hiddenKeyLocal));
+                replacement.add(new MethodInsnNode(
+                    Opcodes.INVOKESTATIC,
+                    clazz.name(),
+                    stages.entry(),
+                    PRIMITIVE_ENTRY_DESC,
+                    clazz.isInterface()
+                ));
+                mn.instructions.insertBefore(insn, replacement);
+                mn.instructions.remove(insn);
+                primitiveOrdinal++;
+                transformed++;
+            }
+        }
         if (transformed == 0) return false;
+        if (primitiveOrdinal > 0) {
+            markCoverage(pctx, clazz, method, 0, primitiveOrdinal);
+        }
         clazz.markDirty();
         pctx.invalidate(method);
         return true;
@@ -193,7 +231,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
             transformed++;
         }
         if (transformed == 0) return false;
-        markCoverage(pctx, clazz, method, transformed);
+        markCoverage(pctx, clazz, method, transformed, 0);
         return true;
     }
 
@@ -264,7 +302,7 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         }
 
         if (transformed > 0) {
-            markCoverage(pctx, clazz, method, transformed);
+            markCoverage(pctx, clazz, method, transformed, 0);
             return true;
         }
         return false;
@@ -292,11 +330,11 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         replacement.add(new VarInsnNode(Opcodes.ASTORE, receiverLocal));
         emitValidationDataWord(replacement, metadata, state, siteSeed);
         replacement.add(new VarInsnNode(Opcodes.ISTORE, dataWordArgLocal));
-        emitDecodedLong(replacement, metadata, state, siteSeed, liveMaskHighLocal, dataWordArgLocal,
+        emitEncodedLongArgument(replacement, metadata, state, siteSeed, dataWordArgLocal,
             0x5653485345454431L,
             seedValue);
         replacement.add(new VarInsnNode(Opcodes.LSTORE, seedArgLocal));
-        emitDecodedLong(replacement, metadata, state, siteSeed, liveMaskHighLocal, dataWordArgLocal,
+        emitEncodedLongArgument(replacement, metadata, state, siteSeed, dataWordArgLocal,
             0x5653485441473031L,
             tag(target, seedValue, variant));
         replacement.add(new VarInsnNode(Opcodes.LSTORE, expectedArgLocal));
@@ -332,13 +370,20 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         pctx.invalidate(method);
     }
 
-    private void markCoverage(PipelineContext pctx, L1Class clazz, L1Method method, int transformed) {
+    private void markCoverage(
+        PipelineContext pctx,
+        L1Class clazz,
+        L1Method method,
+        int stringTransformed,
+        int primitiveTransformed
+    ) {
         JvmObfuscationCoverage.get(pctx).full(
             ID,
             clazz.name(),
             method.name(),
             method.descriptor(),
-            "cff-keyed-string-validation-sinks-" + transformed
+            "cff-keyed-validation-sinks-string-" + stringTransformed +
+                "-primitive-" + primitiveTransformed
         );
     }
 
@@ -365,6 +410,33 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
             if (cursor.getOpcode() >= 0) return cursor;
         }
         return null;
+    }
+
+    private AbstractInsnNode nextReal(AbstractInsnNode insn) {
+        for (AbstractInsnNode cursor = insn; cursor != null; cursor = cursor.getNext()) {
+            if (cursor.getOpcode() >= 0) return cursor;
+        }
+        return null;
+    }
+
+    private boolean isPrimitiveTableAccumulatorXor(AbstractInsnNode insn) {
+        if (insn == null || insn.getOpcode() != Opcodes.IXOR) return false;
+        AbstractInsnNode previous = previousReal(insn.getPrevious());
+        if (previous == null || previous.getOpcode() != Opcodes.IALOAD) return false;
+        AbstractInsnNode next = nextReal(insn.getNext());
+        if (next == null || next.getOpcode() != Opcodes.IOR) return false;
+        AbstractInsnNode afterOr = nextReal(next.getNext());
+        return afterOr instanceof VarInsnNode store && store.getOpcode() == Opcodes.ISTORE;
+    }
+
+    private int hiddenKeyLocal(MethodNode mn) {
+        Type[] args = Type.getArgumentTypes(mn.desc);
+        if (args.length == 0 || args[args.length - 1] != Type.LONG_TYPE) return -1;
+        int local = (mn.access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        for (int i = 0; i < args.length - 1; i++) {
+            local += args[i].getSize();
+        }
+        return local;
     }
 
     @SuppressWarnings("unchecked")
@@ -422,6 +494,66 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         return stages;
     }
 
+    @SuppressWarnings("unchecked")
+    private PrimitiveValidationStages ensurePrimitiveHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        int variant,
+        long siteSeed
+    ) {
+        Map<String, PrimitiveValidationStages> helpers = pctx.getPassData(PRIMITIVE_HELPERS);
+        if (helpers == null) {
+            helpers = new LinkedHashMap<>();
+            pctx.putPassData(PRIMITIVE_HELPERS, helpers);
+        }
+        String key = clazz.name() + '#' + variant + '#' + Long.toUnsignedString(siteSeed, 36);
+        PrimitiveValidationStages existing = helpers.get(key);
+        if (existing != null) return existing;
+
+        PrimitiveValidationStages stages = new PrimitiveValidationStages(
+            uniqueMethodName(clazz, "__neko_vsx" + variant + "$"),
+            uniqueMethodName(clazz, "__neko_vsxval" + variant + "$"),
+            uniqueMethodName(clazz, "__neko_vsxguard" + variant + "$"),
+            uniqueMethodName(clazz, "__neko_vsxdata" + variant + "$"),
+            uniqueMethodName(clazz, PRIMITIVE_FINAL_STAGE_PREFIX + variant + "$")
+        );
+        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+        access |= clazz.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
+
+        MethodNode entry = new MethodNode(access, stages.entry(), PRIMITIVE_ENTRY_DESC, null, null);
+        emitPrimitiveEntryBody(entry.instructions, stages, clazz.name(), clazz.isInterface(), siteSeed);
+        entry.maxLocals = 11;
+        entry.maxStack = 22;
+
+        MethodNode valueStage = new MethodNode(access, stages.value(), PRIMITIVE_VALUE_STAGE_DESC, null, null);
+        emitPrimitiveValueStageBody(valueStage.instructions, variant, siteSeed);
+        valueStage.maxLocals = 4;
+        valueStage.maxStack = 16;
+
+        MethodNode guardStage = new MethodNode(access, stages.guard(), PRIMITIVE_GUARD_STAGE_DESC, null, null);
+        emitPrimitiveGuardStageBody(guardStage.instructions, stages, clazz.name(), clazz.isInterface(), siteSeed);
+        guardStage.maxLocals = 3;
+        guardStage.maxStack = 16;
+
+        MethodNode dataStage = new MethodNode(access, stages.data(), PRIMITIVE_DATA_STAGE_DESC, null, null);
+        emitPrimitiveDataStageBody(dataStage.instructions, siteSeed);
+        dataStage.maxLocals = 2;
+        dataStage.maxStack = 10;
+
+        MethodNode finalStage = new MethodNode(access, stages.finish(), PRIMITIVE_FINAL_STAGE_DESC, null, null);
+        emitPrimitiveFinalStageBody(finalStage.instructions, stages, clazz.name(), clazz.isInterface(), siteSeed);
+        finalStage.maxLocals = 7;
+        finalStage.maxStack = 10;
+
+        for (MethodNode generated : new MethodNode[] { entry, valueStage, guardStage, dataStage, finalStage }) {
+            JvmKeyDispatchPass.markGenerated(pctx, generated.instructions);
+            clazz.asmNode().methods.add(generated);
+        }
+        clazz.markDirty();
+        helpers.put(key, stages);
+        return stages;
+    }
+
     private void emitHelperBody(InsnList insns, ValidationStages stages, String owner, boolean interfaceOwner) {
         int stringLocal = 0;
         int seedLocal = 1;
@@ -467,6 +599,159 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(done);
         insns.add(new VarInsnNode(Opcodes.LLOAD, hashLocal));
         insns.add(new InsnNode(Opcodes.LRETURN));
+    }
+
+    private void emitPrimitiveEntryBody(
+        InsnList insns,
+        PrimitiveValidationStages stages,
+        String owner,
+        boolean interfaceOwner,
+        long siteSeed
+    ) {
+        int valueLocal = 0;
+        int expectedLocal = 1;
+        int keyLocal = 2;
+        int dataWordLocal = 4;
+        int leftLocal = 5;
+        int rightLocal = 7;
+        int pairLocal = 9;
+
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            owner,
+            stages.data(),
+            PRIMITIVE_DATA_STAGE_DESC,
+            interfaceOwner
+        ));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dataWordLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, valueLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            owner,
+            stages.value(),
+            PRIMITIVE_VALUE_STAGE_DESC,
+            interfaceOwner
+        ));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, leftLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, expectedLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            owner,
+            stages.value(),
+            PRIMITIVE_VALUE_STAGE_DESC,
+            interfaceOwner
+        ));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, rightLocal));
+
+        insns.add(new VarInsnNode(Opcodes.LLOAD, leftLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, rightLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitValidationDataLongMask(insns, dataWordLocal, PRIMITIVE_PAIR_DOMAIN);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, pairLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, pairLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            owner,
+            stages.finish(),
+            PRIMITIVE_FINAL_STAGE_DESC,
+            interfaceOwner
+        ));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+    }
+
+    private void emitPrimitiveGuardStageBody(
+        InsnList insns,
+        PrimitiveValidationStages stages,
+        String owner,
+        boolean interfaceOwner,
+        long siteSeed
+    ) {
+        int keyLocal = 0;
+        int dataWordLocal = 2;
+        emitPrimitiveKeyDataWord(insns, keyLocal, siteSeed);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dataWordLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            owner,
+            stages.value(),
+            PRIMITIVE_VALUE_STAGE_DESC,
+            interfaceOwner
+        ));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            owner,
+            stages.value(),
+            PRIMITIVE_VALUE_STAGE_DESC,
+            interfaceOwner
+        ));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitValidationDataLongMask(insns, dataWordLocal, PRIMITIVE_FINAL_DOMAIN);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+    }
+
+    private void emitPrimitiveDataStageBody(InsnList insns, long siteSeed) {
+        emitPrimitiveKeyDataWord(insns, 0, siteSeed);
+        insns.add(new InsnNode(Opcodes.IRETURN));
+    }
+
+    private void emitPrimitiveValueStageBody(InsnList insns, int variant, long siteSeed) {
+        int valueLocal = 0;
+        int sideLocal = 1;
+        int keyLocal = 2;
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, valueLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        emitPrimitiveKeyedSideGuard(insns, keyLocal, sideLocal, variant, siteSeed);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+    }
+
+    private void emitPrimitiveFinalStageBody(
+        InsnList insns,
+        PrimitiveValidationStages stages,
+        String owner,
+        boolean interfaceOwner,
+        long siteSeed
+    ) {
+        int pairLocal = 0;
+        int keyLocal = 2;
+        int dataWordLocal = 4;
+        int guardLocal = 5;
+        emitPrimitiveKeyDataWord(insns, keyLocal, siteSeed);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, dataWordLocal));
+        emitDecodeLongArgument(insns, pairLocal, dataWordLocal, PRIMITIVE_PAIR_DOMAIN);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            owner,
+            stages.guard(),
+            PRIMITIVE_GUARD_STAGE_DESC,
+            interfaceOwner
+        ));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, guardLocal));
+        emitDecodeLongArgument(insns, guardLocal, dataWordLocal, PRIMITIVE_FINAL_DOMAIN);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, pairLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, guardLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IRETURN));
     }
 
     private void emitLengthStageBody(InsnList insns) {
@@ -612,6 +897,61 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.LXOR));
     }
 
+    private void emitPrimitiveKeyedSideGuard(
+        InsnList insns,
+        int keyLocal,
+        int sideLocal,
+        int variant,
+        long siteSeed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushLong(insns, siteSeed ^ PRIMITIVE_SEED_DOMAIN);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 33);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, PRIMITIVE_SIDE_MUL | 1L);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        JvmPassBytecode.pushLong(insns, PRIMITIVE_SIDE_ADD ^ ((long) variant << 32));
+        insns.add(new InsnNode(Opcodes.LADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sideLocal));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, PRIMITIVE_SIDE_MUL);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 17 + variant);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, TAG_MUL ^ ((long) (variant + 1) * 0x56535031L));
+        insns.add(new InsnNode(Opcodes.LMUL));
+        JvmPassBytecode.pushLong(insns, TAG_ADD ^ PRIMITIVE_SIDE_ADD);
+        insns.add(new InsnNode(Opcodes.LXOR));
+    }
+
+    private void emitPrimitiveKeyDataWord(InsnList insns, int keyLocal, long siteSeed) {
+        long seed = JvmPassBytecode.mix(siteSeed ^ PRIMITIVE_PAIR_DOMAIN, PRIMITIVE_FINAL_DOMAIN);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushLong(insns, seed);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5653504441544131L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 11));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5653504441544132L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5653504441544133L)));
+        insns.add(new InsnNode(Opcodes.IADD));
+    }
+
     private void emitDecodedLong(
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
@@ -645,6 +985,61 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
+    private void emitEncodedLongArgument(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        long siteSeed,
+        int dataWordLocal,
+        long domain,
+        long value
+    ) {
+        long mask = argumentKeyMask(state.methodKey(), siteSeed, domain);
+        JvmPassBytecode.pushLong(insns, value ^ mask);
+        emitArgumentKeyMask(insns, metadata.keyLocal(), siteSeed, dataWordLocal, domain);
+        insns.add(new InsnNode(Opcodes.LXOR));
+    }
+
+    private long argumentKeyMask(long methodKey, long siteSeed, long domain) {
+        long x = methodKey ^ JvmPassBytecode.mix(siteSeed ^ domain, 0x5653484152474D31L);
+        x ^= x >>> 33;
+        x *= 0xFF51AFD7ED558CCDL;
+        x ^= x >>> 29;
+        x *= 0xC4CEB9FE1A85EC53L;
+        x ^= x >>> 32;
+        return x;
+    }
+
+    private void emitArgumentKeyMask(
+        InsnList insns,
+        int keyLocal,
+        long siteSeed,
+        int dataWordLocal,
+        long domain
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushLong(insns, JvmPassBytecode.mix(siteSeed ^ domain, 0x5653484152474D31L));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 33);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xFF51AFD7ED558CCDL);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 29);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        JvmPassBytecode.pushLong(insns, 0xC4CEB9FE1A85EC53L);
+        insns.add(new InsnNode(Opcodes.LMUL));
+        insns.add(new InsnNode(Opcodes.DUP2));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        emitValidationDataLongMask(insns, dataWordLocal, domain);
+        insns.add(new InsnNode(Opcodes.LXOR));
+    }
+
     private long liveMask(
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
         ControlFlowFlatteningPass.CffInstructionState state,
@@ -673,10 +1068,17 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         x += state.pcToken() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x5653485043544F4BL));
         int idx = (x ^ state.state() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x5653485441424958L))) &
             (metadata.classKeyTable().values().length - 1);
-        x ^= metadata.classKeyTable().values()[idx] +
+        x ^= validationIndexWord(seed, idx) +
             nonZeroInt(JvmPassBytecode.mix(seed, 0x565348544142564CL));
         x += x >>> shift(seed, 19);
         return x ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x56534846494E414CL));
+    }
+
+    private int validationIndexWord(long seed, int idx) {
+        int x = idx ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x5653484944583031L));
+        x ^= x >>> shift(seed, 13);
+        x *= nonZeroInt(JvmPassBytecode.mix(seed, 0x5653484944583032L)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x5653484944583033L));
     }
 
     private void emitLiveMask(
@@ -746,20 +1148,16 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(insns, metadata.classKeyTable().values().length - 1);
         insns.add(new InsnNode(Opcodes.IAND));
-        insns.add(new FieldInsnNode(
-            Opcodes.GETSTATIC,
-            metadata.classKeyTable().owner(),
-            metadata.classKeyTable().objectFieldName(),
-            "[Ljava/lang/Object;"
-        ));
-        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SLOT);
-        insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
-        insns.add(new InsnNode(Opcodes.SWAP));
-        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
-            insns,
-            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
-        );
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5653484944583031L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 13));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5653484944583032L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x5653484944583033L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x565348544142564CL)));
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.IXOR));
@@ -959,6 +1357,18 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         return JvmPassBytecode.mix(h, ordinal);
     }
 
+    private long primitivePreCffSiteSeed(
+        long masterSeed,
+        L1Class clazz,
+        L1Method method,
+        int ordinal
+    ) {
+        long h = JvmPassBytecode.mix(masterSeed ^ 0x5653504F42465331L, clazz.name().hashCode());
+        h = JvmPassBytecode.mix(h, method.name().hashCode());
+        h = JvmPassBytecode.mix(h, method.descriptor().hashCode());
+        return JvmPassBytecode.mix(h, ordinal);
+    }
+
     private String uniqueMethodName(L1Class clazz, String base) {
         String candidate = base + Integer.toUnsignedString(clazz.asmNode().methods.size(), 36);
         int suffix = 0;
@@ -995,6 +1405,14 @@ public final class JvmValidationSinkHardeningPass implements TransformPass {
         String length,
         String seed,
         String character,
+        String finish
+    ) {}
+
+    private record PrimitiveValidationStages(
+        String entry,
+        String value,
+        String guard,
+        String data,
         String finish
     ) {}
 }

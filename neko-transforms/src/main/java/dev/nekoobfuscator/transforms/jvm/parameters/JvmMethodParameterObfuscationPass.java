@@ -62,6 +62,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     private static final String INDY_SAM_TARGETS = "methodParameterObfuscation.indySamTargets";
     public static final String CFF_KEY_LOAD_TARGET_SEED = "controlFlowFlattening.generatedKeyLoadTargetSeed";
     public static final String CFF_PACKED_CALL_TARGET_SEED = "controlFlowFlattening.packedCallTargetSeed";
+    public static final String CFF_DATA_DIGEST_EXCLUDED_ARGUMENT_LOCALS =
+        "controlFlowFlattening.dataDigestExcludedArgumentLocals";
     public static final String CARRIER_INDEX_PLAN_BY_FINAL_KEY = "methodParameterObfuscation.carrierIndexPlanByFinalKey";
     public static final String CARRIER_INDEX_DECODE_SITES = "methodParameterObfuscation.carrierIndexDecodeSites";
     private static final String CARRIER_ATTESTATION_SITE_SEEDS = "methodParameterObfuscation.carrierAttestationSiteSeeds";
@@ -76,6 +78,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     private static final long CARRIER_ATTEST_DOMAIN = 0x415454455354314CL;
     private static final long CARRIER_ATTEST_SITE_DOMAIN = 0x53495445314CL;
     private static final long CARRIER_ATTEST_TAG_DOMAIN = 0x54414731314CL;
+    private static final int SOURCE_ANALYSIS_MIN_MAX_STACK = 64;
+    private static final int SOURCE_ANALYSIS_MAX_MAX_STACK = 4096;
 
     @Override
     public String id() {
@@ -323,6 +327,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             plan.carrierIndexPlan(carrierIndexPlan);
             plan.carrierIndexKeySeed(carrierIndexKeySeed(carrierIndexPlan));
             carrierIndexPlans(pctx).put(finalKey, carrierIndexPlan);
+            recordCffDataDigestExcludedArgumentLocals(pctx, plan, mn.access);
         }
         collectEscapedReflectiveParameterCandidates(pctx);
         collectCarrierAttestationSites(pctx);
@@ -427,8 +432,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 MethodNode mn = method.asmNode();
                 if (mn == null || mn.instructions == null) continue;
                 try {
-                    Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-                    Frame<SourceValue>[] frames = analyzer.analyze(clazz.name(), mn);
+                    Frame<SourceValue>[] frames = analyzeSourceValues(clazz.name(), mn);
                     for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
                         if (!(insn instanceof MethodInsnNode call)) continue;
                         List<MethodPlan> callees = escapedReflectiveCalleePlans(pctx, call);
@@ -596,6 +600,43 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return (methodMember ? "M:" : "C:") + methodKey + "#" + argumentIndex;
     }
 
+    private static Frame<SourceValue>[] analyzeSourceValues(String owner, MethodNode mn) throws AnalyzerException {
+        ensureAnalysisMaxStack(mn);
+        while (true) {
+            try {
+                return new Analyzer<>(new SourceInterpreter()).analyze(owner, mn);
+            } catch (AnalyzerException ex) {
+                if (!raiseAnalysisMaxStackAfter(ex, mn)) throw ex;
+            }
+        }
+    }
+
+    private static Frame<BasicValue>[] analyzeBasicValues(String owner, MethodNode mn) throws AnalyzerException {
+        ensureAnalysisMaxStack(mn);
+        while (true) {
+            try {
+                return new Analyzer<>(new BasicInterpreter()).analyze(owner, mn);
+            } catch (AnalyzerException ex) {
+                if (!raiseAnalysisMaxStackAfter(ex, mn)) throw ex;
+            }
+        }
+    }
+
+    private static void ensureAnalysisMaxStack(MethodNode mn) {
+        if (mn.maxStack < SOURCE_ANALYSIS_MIN_MAX_STACK) {
+            mn.maxStack = SOURCE_ANALYSIS_MIN_MAX_STACK;
+        }
+    }
+
+    private static boolean raiseAnalysisMaxStackAfter(AnalyzerException ex, MethodNode mn) {
+        String message = ex.getMessage();
+        if (message == null || !message.contains("Insufficient maximum stack size")) return false;
+        int current = Math.max(mn.maxStack, SOURCE_ANALYSIS_MIN_MAX_STACK);
+        if (current >= SOURCE_ANALYSIS_MAX_MAX_STACK) return false;
+        mn.maxStack = Math.min(SOURCE_ANALYSIS_MAX_MAX_STACK, Math.max(current + 1, current << 1));
+        return true;
+    }
+
     private static String carrierIndexFamily(MethodPlan plan, int access, String finalKey) {
         if ((access & (Opcodes.ACC_STATIC | Opcodes.ACC_PRIVATE)) != 0) {
             return "M:" + finalKey;
@@ -756,8 +797,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(call);
         if (index < 0) return null;
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             return sourceMethodHandleLookupTarget(pctx, mn, frames, call);
         } catch (AnalyzerException | RuntimeException ignored) {
             return null;
@@ -844,8 +884,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(methodTypeCall);
         if (index < 0) return null;
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null) return null;
             Type[] args = Type.getArgumentTypes(methodTypeCall.desc);
@@ -1017,8 +1056,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(call);
         if (index < 0) return null;
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() == 0) return null;
             return sourceClassArrayParameterTypes(
@@ -1317,8 +1355,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(call);
         if (index < 0) return null;
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() < 3) return null;
             int top = frame.getStackSize();
@@ -1792,15 +1829,16 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 }
                 InsnList mix = new InsnList();
                 mix.add(new InsnNode(Opcodes.POP2));
-                emitIncomingKeyMixValue(
+                JvmKeyDispatchPass.emitIncomingKeyMix(
                     mix,
                     incomingKeyTemp,
+                    activeKeyLocal,
                     seed,
                     JvmKeyDispatchPass.INCOMING_KEY_MIX_MASK
                 );
                 JvmKeyDispatchPass.markGenerated(pctx, mix);
                 mn.instructions.insertBefore(insn, mix);
-                var.var = activeKeyLocal;
+                mn.instructions.remove(insn);
                 return;
             }
         }
@@ -1819,19 +1857,6 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 var.var = incomingKeyTemp;
             }
         }
-    }
-
-    private static void emitIncomingKeyMixValue(
-        InsnList insns,
-        int sourceLocal,
-        long seed,
-        long mask
-    ) {
-        insns.add(new VarInsnNode(Opcodes.LLOAD, sourceLocal));
-        JvmPassBytecode.pushLong(insns, seed ^ mask);
-        insns.add(new InsnNode(Opcodes.LXOR));
-        JvmPassBytecode.pushLong(insns, mask);
-        insns.add(new InsnNode(Opcodes.LADD));
     }
 
     private static boolean replaceStaticKeyInit(
@@ -2054,6 +2079,27 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (plan == null) return false;
         boolean specialLookup = "findSpecial".equals(target.lookupKind());
         boolean constructorLookup = "findConstructor".equals(target.lookupKind());
+        if (!specialLookup) {
+            InsnList before = new InsnList();
+            before.add(new MethodInsnNode(
+                Opcodes.INVOKEVIRTUAL,
+                "java/lang/invoke/MethodType",
+                "returnType",
+                "()Ljava/lang/Class;",
+                false
+            ));
+            emitParameterTypes(before, Type.getArgumentTypes(plan.packedDesc()));
+            before.add(new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                "java/lang/invoke/MethodType",
+                "methodType",
+                "(Ljava/lang/Class;[Ljava/lang/Class;)Ljava/lang/invoke/MethodType;",
+                false
+            ));
+            JvmKeyDispatchPass.markGenerated(pctx, before);
+            mn.instructions.insertBefore(call, before);
+            return true;
+        }
         int specialCallerLocal = specialLookup ? allocateLocal(mn, Type.getType(Class.class)) : -1;
         int methodTypeLocal = allocateLocal(mn, Type.getType("Ljava/lang/invoke/MethodType;"));
         int nameLocal = constructorLookup ? -1 : allocateLocal(mn, Type.getType(String.class));
@@ -2635,8 +2681,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(invokeCall);
         if (index < 0) return null;
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             int argCount = Type.getArgumentTypes(invokeCall.desc).length;
             int handleIndex = frame == null ? -1 : frame.getStackSize() - argCount - 1;
@@ -2807,8 +2852,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(call);
         if (index < 0) return null;
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() < 2) return null;
             String sourced = literalObjectClass(mn, frames, frame.getStack(frame.getStackSize() - 2), 0);
@@ -3083,8 +3127,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(call);
         if (index < 0) return List.of();
         try {
-            Analyzer<BasicValue> analyzer = new Analyzer<>(new BasicInterpreter());
-            Frame<BasicValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<BasicValue>[] frames = analyzeBasicValues("java/lang/Object", mn);
             Frame<BasicValue> frame = frames[index];
             if (frame == null || frame.getStackSize() <= invokeOperandValues) return List.of();
             int prefixSize = frame.getStackSize() - invokeOperandValues;
@@ -3394,8 +3437,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(invokeCall);
         if (index < 0) return List.of();
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() < invokeOperandValues) return List.of();
             SourceValue member = frame.getStack(frame.getStackSize() - invokeOperandValues);
@@ -3413,8 +3455,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(invokeCall);
         if (index < 0) return List.of();
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() < invokeOperandValues) return List.of();
             SourceValue member = frame.getStack(frame.getStackSize() - invokeOperandValues);
@@ -3585,8 +3626,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int index = mn.instructions.indexOf(invokeCall);
         if (index < 0) return null;
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             Frame<SourceValue> frame = frames[index];
             if (frame == null || frame.getStackSize() < invokeOperandValues) return null;
             SourceValue member = frame.getStack(frame.getStackSize() - invokeOperandValues);
@@ -3660,8 +3700,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     ) {
         if (mn == null || mn.instructions == null) return null;
         try {
-            Analyzer<SourceValue> analyzer = new Analyzer<>(new SourceInterpreter());
-            Frame<SourceValue>[] frames = analyzer.analyze("java/lang/Object", mn);
+            Frame<SourceValue>[] frames = analyzeSourceValues("java/lang/Object", mn);
             return sourceReflectionArrayLookupOwner(mn, frames, call);
         } catch (AnalyzerException | RuntimeException ignored) {
             return null;
@@ -4065,6 +4104,49 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             pctx.putPassData(CFF_PACKED_CALL_TARGET_SEED, map);
         }
         return map;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Set<Integer>> cffDataDigestExcludedArgumentLocals(PipelineContext pctx) {
+        Map<String, Set<Integer>> map = pctx.getPassData(CFF_DATA_DIGEST_EXCLUDED_ARGUMENT_LOCALS);
+        if (map == null) {
+            map = new LinkedHashMap<>();
+            pctx.putPassData(CFF_DATA_DIGEST_EXCLUDED_ARGUMENT_LOCALS, map);
+        }
+        return map;
+    }
+
+    public static Set<Integer> cffDataDigestExcludedArgumentLocals(
+        PipelineContext pctx,
+        String owner,
+        String name,
+        String desc
+    ) {
+        Map<String, Set<Integer>> map = pctx.getPassData(CFF_DATA_DIGEST_EXCLUDED_ARGUMENT_LOCALS);
+        if (map == null) return Set.of();
+        return map.getOrDefault(key(owner, name, desc), Set.of());
+    }
+
+    private static void recordCffDataDigestExcludedArgumentLocals(
+        PipelineContext pctx,
+        MethodPlan plan,
+        int access
+    ) {
+        Set<Integer> excluded = new java.util.LinkedHashSet<>();
+        Type[] packedArgs = Type.getArgumentTypes(plan.packedDesc());
+        int local = (access & Opcodes.ACC_STATIC) == 0 ? 1 : 0;
+        int suffixStart = 1 + (plan.splitHiddenKey() ? 1 : 0);
+        for (int i = 0; i < packedArgs.length; i++) {
+            boolean hiddenTransport = plan.splitHiddenKey() && i == 1;
+            boolean constructorSuffix = i >= suffixStart && i < suffixStart + plan.packedSuffixTypes().length;
+            if (hiddenTransport || constructorSuffix) {
+                excluded.add(local);
+            }
+            local += packedArgs[i].getSize();
+        }
+        if (!excluded.isEmpty()) {
+            cffDataDigestExcludedArgumentLocals(pctx).put(finalKey(plan), Set.copyOf(excluded));
+        }
     }
 
     private static void emitLiveSeededLongMaterial(InsnList out, long seed, long domain) {

@@ -73,6 +73,12 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     private static final String VALIDATION_CHAR_STAGE_DESC = "(Ljava/lang/String;JIII)J";
     private static final String VALIDATION_FINAL_STAGE_DESC = "(JJI)Z";
     private static final String VALIDATION_FINAL_STAGE_INDY_DESC = "(JJIJJ)Z";
+    private static final String VALIDATION_PRIMITIVE_ENTRY_DESC = "(IIJ)I";
+    private static final String VALIDATION_PRIMITIVE_ENTRY_INDY_DESC = "(IIJJJ)I";
+    private static final String VALIDATION_PRIMITIVE_VALUE_STAGE_DESC = "(IIJ)J";
+    private static final String VALIDATION_PRIMITIVE_GUARD_STAGE_DESC = "(J)J";
+    private static final String VALIDATION_PRIMITIVE_DATA_STAGE_DESC = "(J)I";
+    private static final String VALIDATION_PRIMITIVE_FINAL_STAGE_DESC = "(JJ)I";
 
     @Test
     void symbolicAuditRecognizesSelfCancelingAndLinearKeyShapes() {
@@ -1239,6 +1245,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertValidationSinkHelperHasNoPlainTarget(clazz, helperName);
         assertValidationSinkUsesFormulaVariants(clazz);
         assertValidationSinkHasNoStandaloneTargetCarriers(clazz);
+        assertPrimitiveValidationTableCompareIsStaged(clazz);
     }
 
     private static void assertValidationSinkHelperHasNoPlainTarget(L1Class clazz, String helperName) {
@@ -1391,6 +1398,17 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         return false;
     }
 
+    private static boolean stageLoadsLong(MethodNode method, int local) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.LLOAD
+                && load.var == local) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void assertValidationFinalStageUsesInvokeDynamic(L1Class clazz) {
         int checked = 0;
         for (MethodNode method : clazz.asmNode().methods) {
@@ -1429,6 +1447,112 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             checked++;
         }
         assertTrue(checked >= 2, "validation sink fixture did not expose both indy-protected final stages");
+    }
+
+    private static void assertPrimitiveValidationTableCompareIsStaged(L1Class clazz) {
+        boolean sawEntryStage = false;
+        boolean sawValueStage = false;
+        boolean sawGuardStage = false;
+        boolean sawDataStage = false;
+        boolean sawFinalStage = false;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.name.startsWith("__neko_vsx") && VALIDATION_PRIMITIVE_ENTRY_DESC.equals(method.desc)) {
+                sawEntryStage = true;
+                assertTrue(
+                    stageLoadsLong(method, 2),
+                    "primitive validation entry did not consume live key: " + method.name + method.desc
+                );
+            }
+            if (method.name.startsWith("__neko_vsxval") &&
+                VALIDATION_PRIMITIVE_VALUE_STAGE_DESC.equals(method.desc)) {
+                sawValueStage = true;
+                assertTrue(
+                    stageLoadsLong(method, 2),
+                    "primitive validation value stage did not consume live key: " + method.name + method.desc
+                );
+            }
+            if (method.name.startsWith("__neko_vsxguard") &&
+                VALIDATION_PRIMITIVE_GUARD_STAGE_DESC.equals(method.desc)) {
+                sawGuardStage = true;
+                assertTrue(
+                    stageLoadsLong(method, 0),
+                    "primitive validation guard stage did not consume live key: " + method.name + method.desc
+                );
+            }
+            if (method.name.startsWith("__neko_vsxdata") &&
+                VALIDATION_PRIMITIVE_DATA_STAGE_DESC.equals(method.desc)) {
+                sawDataStage = true;
+                assertTrue(
+                    stageLoadsLong(method, 0),
+                    "primitive validation data stage did not consume live key: " + method.name + method.desc
+                );
+            }
+            if (method.name.startsWith("__neko_vsxend") &&
+                VALIDATION_PRIMITIVE_FINAL_STAGE_DESC.equals(method.desc)) {
+                sawFinalStage = true;
+                assertTrue(
+                    stageLoadsLong(method, 2),
+                    "primitive validation final stage did not consume live key: " + method.name + method.desc
+                );
+            }
+        }
+        assertTrue(sawEntryStage, "primitive validation table compare did not emit entry stage");
+        assertTrue(sawValueStage, "primitive validation table compare did not emit value stage");
+        assertTrue(sawGuardStage, "primitive validation table compare did not emit guard stage");
+        assertTrue(sawDataStage, "primitive validation table compare did not emit data stage");
+        assertTrue(sawFinalStage, "primitive validation table compare did not emit final stage");
+
+        boolean sawApplicationPrimitiveEntry = false;
+        boolean sawPrimitiveEntryIndy = false;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            boolean applicationMethod = !method.name.startsWith("__neko_");
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof MethodInsnNode call
+                    && call.getOpcode() == Opcodes.INVOKESTATIC
+                    && "java/lang/Integer".equals(call.owner)
+                    && "sum".equals(call.name)
+                    && "(II)I".equals(call.desc)) {
+                    throw new AssertionError("primitive validation retained placeholder Integer.sum");
+                }
+                if (insn instanceof MethodInsnNode call
+                    && call.getOpcode() == Opcodes.INVOKESTATIC
+                    && "ValidationSinkShape".equals(call.owner)
+                    && call.name.startsWith("__neko_vsx")
+                    && VALIDATION_PRIMITIVE_ENTRY_DESC.equals(call.desc)) {
+                    if (applicationMethod) {
+                        throw new AssertionError("primitive validation entry remained direct invokestatic");
+                    }
+                }
+                if (insn instanceof MethodInsnNode call
+                    && applicationMethod
+                    && call.getOpcode() == Opcodes.INVOKESTATIC
+                    && "ValidationSinkShape".equals(call.owner)
+                    && call.name.startsWith("__neko_vsxend")
+                    && VALIDATION_PRIMITIVE_FINAL_STAGE_DESC.equals(call.desc)) {
+                    throw new AssertionError("primitive validation final stage remained direct application call");
+                }
+                if (!(insn instanceof InvokeDynamicInsnNode indy)
+                    || !VALIDATION_PRIMITIVE_ENTRY_INDY_DESC.equals(indy.desc)) {
+                    continue;
+                }
+                sawApplicationPrimitiveEntry |= applicationMethod;
+                sawPrimitiveEntryIndy = true;
+                assertTrue(
+                    indy.bsm.getOwner().equals("ValidationSinkShape")
+                        && indy.bsm.getName().startsWith("__neko_indy_bsm"),
+                    "primitive validation entry did not use existing indy bootstrap"
+                );
+            }
+        }
+        assertTrue(
+            sawApplicationPrimitiveEntry,
+            "primitive validation fixture did not expose a protected table compare"
+        );
+        assertTrue(
+            sawPrimitiveEntryIndy,
+            "primitive validation table compare did not route entry through invokedynamic"
+        );
     }
 
     private static void assertValidationIndyArgsHideFinalStageMaterial(InvokeDynamicInsnNode indy) {
@@ -1677,6 +1801,8 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     private static String validationSinkSourceText() {
         return """
             public class ValidationSinkShape {
+                private static final int[] TABLE_CHECK = {24, 112, 64, 248, 128};
+
                 public static void main(String[] args) {
                     if (!check("swordfish-validated-flow")) {
                         throw new AssertionError("accepted value rejected");
@@ -1689,6 +1815,18 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                     }
                     if (checkAlt("swordfish-variant-too")) {
                         throw new AssertionError("wrong variant accepted");
+                    }
+                    if (checkSwitch("case42") != 42) {
+                        throw new AssertionError("string switch accepted value rejected");
+                    }
+                    if (checkSwitch("case43") != -1) {
+                        throw new AssertionError("string switch wrong value accepted");
+                    }
+                    if (!checkTable(new int[] {18, 44, 91, 123, 5})) {
+                        throw new AssertionError("table value rejected");
+                    }
+                    if (checkTable(new int[] {18, 44, 91, 124, 5})) {
+                        throw new AssertionError("wrong table value accepted");
                     }
                     System.out.println("VALIDATION SINK OK");
                 }
@@ -1707,6 +1845,28 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                         noise ^= 0x2468ACE0;
                     }
                     return value.equals("swordfish-variant-two");
+                }
+
+                static int checkSwitch(String value) {
+                    switch (value) {
+                        case "case42":
+                            return 42;
+                        default:
+                            return -1;
+                    }
+                }
+
+                static boolean checkTable(int[] values) {
+                    if (values == null || values.length != TABLE_CHECK.length) {
+                        return false;
+                    }
+                    int acc = 0;
+                    for (int i = 0; i < values.length; i++) {
+                        int mixed = (values[i] ^ (0x31 + i * 17)) & 255;
+                        mixed = Integer.rotateLeft(mixed, 3) & 255;
+                        acc |= mixed ^ TABLE_CHECK[i];
+                    }
+                    return acc == 0;
                 }
             }
             """;

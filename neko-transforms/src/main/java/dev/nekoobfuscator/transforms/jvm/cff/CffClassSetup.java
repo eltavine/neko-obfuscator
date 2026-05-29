@@ -64,6 +64,7 @@ abstract class CffClassSetup extends CffSharedState {
     private static final String CLASS_CODE_INTEGRITY_FINALIZED =
         "controlFlowFlattening.classCodeIntegrityFinalized";
     private static final int RELOCATED_CFF_HELPERS_PER_HOST = 64;
+    private static final int RELOCATED_CFF_HELPER_HOST_CODE_BUDGET = 180_000;
 
     protected void logIslandDryRunMethodStats(PipelineContext pctx, String methodKey) {
         CffIslandDryRunStats stats = pctx.getPassData(CFF_ISLAND_DRY_RUN_STATS);
@@ -2119,14 +2120,14 @@ abstract class CffClassSetup extends CffSharedState {
                 handleReferencedMethods,
                 relocatable
             );
-            if (relocatable.size() < RELOCATED_CFF_HELPERS_PER_HOST) continue;
+            if (!shouldRelocateCffHelpers(relocatable)) continue;
             String nestHost = relocationNestHost(pctx, clazz);
             boolean useNestmates = nestHost != null && supportsNestmates(clazz.asmNode());
             if (!useNestmates) {
                 relaxReferencedSyntheticOwnerAccess(clazz, relocatable);
             }
-            for (int start = 0; start < relocatable.size(); start += RELOCATED_CFF_HELPERS_PER_HOST) {
-                int end = Math.min(start + RELOCATED_CFF_HELPERS_PER_HOST, relocatable.size());
+            for (int start = 0; start < relocatable.size();) {
+                int end = relocatedCffHelperChunkEnd(relocatable, start);
                 List<MethodNode> chunk = relocatable.subList(start, end);
                 String hostName = uniqueCffHelperHostName(pctx, clazz.name());
                 ClassNode hostNode = new ClassNode();
@@ -2154,6 +2155,7 @@ abstract class CffClassSetup extends CffSharedState {
                 hosts.add(host);
                 pctx.classMap().put(host.name(), host);
                 hierarchy.addClass(host);
+                start = end;
             }
             clazz.asmNode().methods.removeAll(relocatable);
             clazz.markDirty();
@@ -2170,6 +2172,30 @@ abstract class CffClassSetup extends CffSharedState {
             hosts.size(),
             relocatedHelpers.size()
         );
+    }
+
+    private boolean shouldRelocateCffHelpers(List<MethodNode> helpers) {
+        if (helpers.size() >= RELOCATED_CFF_HELPERS_PER_HOST) return true;
+        int estimatedBytes = 0;
+        for (MethodNode helper : helpers) {
+            estimatedBytes += Math.max(1, JvmCodeSizeEstimator.estimateMethodBytes(helper));
+            if (estimatedBytes >= RELOCATED_CFF_HELPER_HOST_CODE_BUDGET) return true;
+        }
+        return false;
+    }
+
+    private int relocatedCffHelperChunkEnd(List<MethodNode> helpers, int start) {
+        int estimatedBytes = 0;
+        int end = start;
+        while (end < helpers.size() && end - start < RELOCATED_CFF_HELPERS_PER_HOST) {
+            int methodBytes = Math.max(1, JvmCodeSizeEstimator.estimateMethodBytes(helpers.get(end)));
+            if (end > start && estimatedBytes + methodBytes > RELOCATED_CFF_HELPER_HOST_CODE_BUDGET) {
+                break;
+            }
+            estimatedBytes += methodBytes;
+            end++;
+        }
+        return end == start ? start + 1 : end;
     }
 
     private String relocationNestHost(PipelineContext pctx, L1Class clazz) {
@@ -2326,13 +2352,19 @@ abstract class CffClassSetup extends CffSharedState {
             String oldName = ownerAndName.substring(split + 1);
             if (!TransformGuards.isGeneratedName(oldName)) continue;
             if (oldName.startsWith("__neko_class_integrity")) continue;
+            if (oldName.startsWith("__neko_indysite$")) continue;
             keys.add(owner + "." + newName + desc);
         }
         return keys;
     }
 
     private boolean isRelocatableCffHelper(MethodNode method) {
-        if ("(JIIIII[J)J".equals(method.desc) || "(JIIIIII[J)J".equals(method.desc)) {
+        if (
+            "(JIIII[J)J".equals(method.desc) ||
+                "(JIIII[J[I)J".equals(method.desc) ||
+                "(JIIIII[J)J".equals(method.desc) ||
+                "(JIIIIII[J)J".equals(method.desc)
+        ) {
             return true;
         }
         if (!"([Ljava/lang/Object;)V".equals(method.desc)) return false;

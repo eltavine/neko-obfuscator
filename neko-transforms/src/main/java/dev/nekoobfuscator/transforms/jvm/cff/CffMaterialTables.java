@@ -1214,11 +1214,13 @@ abstract class CffMaterialTables extends CffClassSetup {
         int blockLocal = 4;
         int objectMaterialLocal = 5;
         int rowLocal = 6;
-        int domainLocal = 7;
+        int dataLocal = 7;
         int outLocal = 8;
         int pcLocal = 9;
         int materialLocal = 10;
         int baseLocal = 11;
+        int domainLocal = 12;
+        int multiplierLocal = 13;
         InsnList insns = helper.instructions;
         insns.add(new VarInsnNode(Opcodes.ALOAD, objectMaterialLocal));
         JvmPassBytecode.pushInt(insns, TRANSITION_MATERIAL_SLOT);
@@ -1315,6 +1317,16 @@ abstract class CffMaterialTables extends CffClassSetup {
             rowCursor
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, domainLocal));
+        emitBindTransitionMaterialPcToDataDigest(
+            insns,
+            materialLocal,
+            rowLocal,
+            baseLocal,
+            pcLocal,
+            dataLocal,
+            multiplierLocal,
+            rowCursor
+        );
         emitTransitionOutStores(
             insns,
             outLocal,
@@ -1327,7 +1339,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         );
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 11;
+        helper.maxLocals = 14;
         helper.maxStack = 32;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
@@ -1338,6 +1350,75 @@ abstract class CffMaterialTables extends CffClassSetup {
             TRANSITION_MATERIAL_HELPER_DESC,
             keyLocal
         );
+    }
+
+    protected void emitBindTransitionMaterialPcToDataDigest(
+        InsnList insns,
+        int materialLocal,
+        int rowLocal,
+        int baseLocal,
+        int pcLocal,
+        int dataLocal,
+        int multiplierLocal,
+        TransitionMaterialRowCursor rowCursor
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        emitTransitionMaterialDecodedWord(
+            insns,
+            materialLocal,
+            rowLocal,
+            baseLocal,
+            TRANSITION_MATERIAL_DISPATCH_ADD_WORD,
+            rowCursor
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitTransitionMaterialDecodedWord(
+            insns,
+            materialLocal,
+            rowLocal,
+            baseLocal,
+            TRANSITION_MATERIAL_DISPATCH_SHIFT_A_WORD,
+            rowCursor
+        );
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitTransitionMaterialDecodedWord(
+            insns,
+            materialLocal,
+            rowLocal,
+            baseLocal,
+            TRANSITION_MATERIAL_DISPATCH_MUL_WORD,
+            rowCursor
+        );
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitTransitionMaterialDecodedWord(
+            insns,
+            materialLocal,
+            rowLocal,
+            baseLocal,
+            TRANSITION_MATERIAL_DISPATCH_SHIFT_B_WORD,
+            rowCursor
+        );
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitTransitionMaterialDecodedWord(
+            insns,
+            materialLocal,
+            rowLocal,
+            baseLocal,
+            TRANSITION_MATERIAL_DISPATCH_FINAL_ADD_WORD,
+            rowCursor
+        );
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, multiplierLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, multiplierLocal));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
     }
 
     protected void installKeyTransferMaterialHelper(
@@ -1838,6 +1919,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         CffBlockKeyState targetKeys,
         long methodSeed,
         long stepSeed,
+        long targetDispatchSeed,
         EdgeRole role
     ) {
         int index = table.transitionMaterialCounter()[0]++;
@@ -1855,6 +1937,7 @@ abstract class CffMaterialTables extends CffClassSetup {
             targetKeys,
             methodSeed,
             stepSeed,
+            targetDispatchSeed,
             role
         );
         MethodNode initHelper = transitionMaterialInitHelper(
@@ -1901,6 +1984,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         CffBlockKeyState targetKeys,
         long methodSeed,
         long stepSeed,
+        long targetDispatchSeed,
         EdgeRole role
     ) {
         int[] values = new int[TRANSITION_MATERIAL_ROW_WORDS];
@@ -1976,6 +2060,41 @@ abstract class CffMaterialTables extends CffClassSetup {
             target.domainToken(),
             sourceBase,
             target.domainSeed() ^ target.island() ^ 0x444F4D544F4B31L
+        );
+        putTransitionMaterialWord(
+            values,
+            TRANSITION_MATERIAL_DISPATCH_ADD_WORD,
+            nonZeroInt(JvmPassBytecode.mix(targetDispatchSeed, 0x4454444D554C4131L)),
+            sourceBase,
+            targetDispatchSeed ^ stepSeed ^ 0x4454444D41544431L
+        );
+        putTransitionMaterialWord(
+            values,
+            TRANSITION_MATERIAL_DISPATCH_SHIFT_A_WORD,
+            shift(targetDispatchSeed, 3),
+            sourceBase,
+            targetDispatchSeed ^ stepSeed ^ 0x4454444D41545331L
+        );
+        putTransitionMaterialWord(
+            values,
+            TRANSITION_MATERIAL_DISPATCH_MUL_WORD,
+            nonZeroInt(JvmPassBytecode.mix(targetDispatchSeed, 0x4454444D554C4D31L)) | 1,
+            sourceBase,
+            targetDispatchSeed ^ stepSeed ^ 0x4454444D4D554C31L
+        );
+        putTransitionMaterialWord(
+            values,
+            TRANSITION_MATERIAL_DISPATCH_SHIFT_B_WORD,
+            shift(targetDispatchSeed, 19),
+            sourceBase,
+            targetDispatchSeed ^ stepSeed ^ 0x4454444D42545331L
+        );
+        putTransitionMaterialWord(
+            values,
+            TRANSITION_MATERIAL_DISPATCH_FINAL_ADD_WORD,
+            nonZeroInt(JvmPassBytecode.mix(targetDispatchSeed, 0x4454444D554C4631L)),
+            sourceBase,
+            targetDispatchSeed ^ stepSeed ^ 0x4454444D46414431L
         );
         return values;
     }

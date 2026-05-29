@@ -105,6 +105,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         config.setOutputJar(output);
         Map<String, TransformConfig> transforms = new LinkedHashMap<>();
         transforms.put("keyDispatch", new TransformConfig(true, 1.0));
+        transforms.put("methodParameterObfuscation", new TransformConfig(true, 1.0));
         transforms.put("controlFlowFlattening", new TransformConfig(true, 1.0));
         transforms.put("invokeDynamic", new TransformConfig(true, 1.0));
         config.setTransforms(transforms);
@@ -153,74 +154,77 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         )) {
             helperCounts.put(helper, 0);
         }
-        for (var field : clazz.asmNode().fields) {
-            if ("Ljava/util/concurrent/ConcurrentHashMap;".equals(field.desc)) {
-                sawCacheField = true;
+        for (var ownerClass : input.classMap().values()) {
+            for (var field : ownerClass.asmNode().fields) {
+                if ("Ljava/util/concurrent/ConcurrentHashMap;".equals(field.desc)) {
+                    sawCacheField = true;
+                }
+            }
+            for (var method : ownerClass.asmNode().methods) {
+                for (String helper : helperCounts.keySet()) {
+                    if (method.name.startsWith(helper)) {
+                        helperCounts.put(helper, helperCounts.get(helper) + 1);
+                    }
+                }
+                assertFalse(method.name.startsWith("__neko_indy_mix"), "indy mix helper should be inlined");
+                assertFalse(method.name.startsWith("__neko_indy_decode"), "indy decode helper should be inlined into resolver");
+                assertFalse(method.name.startsWith("__neko_indy_filter_methods"), "indy Method[] filter helper should be inlined into resolver");
+                assertFalse(method.name.startsWith("__neko_indy_filter_fields"), "indy Field[] filter helper should be inlined into resolver");
+                if (method.name.startsWith("__neko_indy_resolve")) {
+                    sawResolverNewDesc |= RESOLVER_DESC.equals(method.desc);
+                    sawResolverOldDesc |= OLD_RESOLVER_DESC.equals(method.desc);
+                    sawInlineResolverDecode |= resolverInlinesDecode(method);
+                    sawResolverLoadsCacheSlot |= methodLoadsMaterialSlot(method, INDY_CACHE_SLOT);
+                    sawResolverGetsStaticCarrier |= methodGetsStatic(method, "[Ljava/lang/Object;");
+                    sawResolverGetsStaticCache |= methodGetsStatic(method, "Ljava/util/concurrent/ConcurrentHashMap;");
+                    sawResolverSetTarget |= methodCalls(
+                        method,
+                        "java/lang/invoke/MutableCallSite",
+                        "setTarget",
+                        "(Ljava/lang/invoke/MethodHandle;)V"
+                    );
+                    sawResolverGuardWithTest |= methodCalls(
+                        method,
+                        "java/lang/invoke/MethodHandles",
+                        "guardWithTest",
+                        "(Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/MethodHandle;"
+                    );
+                    sawResolverPrimitiveGuardHandle |= methodLoadsHandle(
+                        method,
+                        ownerClass.name(),
+                        "__neko_indy_guard",
+                        "(JJ)Z"
+                    );
+                    sawResolverBoxedEqualsGuard |= methodLoadsString(method, "equals");
+                    sawResolverGetTarget |= methodCalls(
+                        method,
+                        "java/lang/invoke/CallSite",
+                        "getTarget",
+                        "()Ljava/lang/invoke/MethodHandle;"
+                    );
+                }
+                if (method.name.startsWith("__neko_indy_flow")) {
+                    sawFlowThinDesc |= FLOW_DESC.equals(method.desc);
+                    sawFlowOldThinDesc |= OLD_FLOW_THIN_DESC.equals(method.desc);
+                    sawFlowOldStateDesc |= OLD_FLOW_STATE_DESC.equals(method.desc);
+                    sawFlowHelperConsumesDataWord |= flowHelperConsumesDataWord(method);
+                    sawFlowHelperLoadsIndyMaterialSelectorSlot |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SELECTOR_SLOT);
+                    sawFlowHelperDirectIndyMaterialSlotLoad |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SLOT);
+                    sawFlowHelperLoadsClassKeySelectorSlot |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SELECTOR_SLOT);
+                    sawFlowHelperDirectClassKeySlotLoad |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SLOT);
+                }
             }
         }
         for (var method : clazz.asmNode().methods) {
-            for (String helper : helperCounts.keySet()) {
-                if (method.name.startsWith(helper)) {
-                    helperCounts.put(helper, helperCounts.get(helper) + 1);
-                }
-            }
-            assertFalse(method.name.startsWith("__neko_indy_mix"), "indy mix helper should be inlined");
-            assertFalse(method.name.startsWith("__neko_indy_decode"), "indy decode helper should be inlined into resolver");
-            assertFalse(method.name.startsWith("__neko_indy_filter_methods"), "indy Method[] filter helper should be inlined into resolver");
-            assertFalse(method.name.startsWith("__neko_indy_filter_fields"), "indy Field[] filter helper should be inlined into resolver");
-            if (method.name.startsWith("__neko_indy_resolve")) {
-                sawResolverNewDesc |= RESOLVER_DESC.equals(method.desc);
-                sawResolverOldDesc |= OLD_RESOLVER_DESC.equals(method.desc);
-                sawInlineResolverDecode |= resolverInlinesDecode(method);
-                sawResolverLoadsCacheSlot |= methodLoadsMaterialSlot(method, INDY_CACHE_SLOT);
-                sawResolverGetsStaticCarrier |= methodGetsStatic(method, "[Ljava/lang/Object;");
-                sawResolverGetsStaticCache |= methodGetsStatic(method, "Ljava/util/concurrent/ConcurrentHashMap;");
-                sawResolverSetTarget |= methodCalls(
-                    method,
-                    "java/lang/invoke/MutableCallSite",
-                    "setTarget",
-                    "(Ljava/lang/invoke/MethodHandle;)V"
-                );
-                sawResolverGuardWithTest |= methodCalls(
-                    method,
-                    "java/lang/invoke/MethodHandles",
-                    "guardWithTest",
-                    "(Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/MethodHandle;"
-                );
-                sawResolverPrimitiveGuardHandle |= methodLoadsHandle(
-                    method,
-                    clazz.name(),
-                    "__neko_indy_guard",
-                    "(JJ)Z"
-                );
-                sawResolverBoxedEqualsGuard |= methodLoadsString(method, "equals");
-                sawResolverGetTarget |= methodCalls(
-                    method,
-                    "java/lang/invoke/CallSite",
-                    "getTarget",
-                    "()Ljava/lang/invoke/MethodHandle;"
-                );
-            }
-            if (method.name.startsWith("__neko_indy_flow")) {
-                sawFlowThinDesc |= FLOW_DESC.equals(method.desc);
-                sawFlowOldThinDesc |= OLD_FLOW_THIN_DESC.equals(method.desc);
-                sawFlowOldStateDesc |= OLD_FLOW_STATE_DESC.equals(method.desc);
-                sawFlowHelperConsumesDataWord |= flowHelperConsumesDataWord(method);
-                sawFlowHelperLoadsIndyMaterialSelectorSlot |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SELECTOR_SLOT);
-                sawFlowHelperDirectIndyMaterialSlotLoad |= methodLoadsMaterialSlot(method, INDY_MATERIAL_SLOT);
-                sawFlowHelperLoadsClassKeySelectorSlot |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SELECTOR_SLOT);
-                sawFlowHelperDirectClassKeySlotLoad |= methodLoadsMaterialSlot(method, CLASS_KEY_WORDS_SLOT);
-            }
             if (method.instructions == null || method.name.startsWith("__neko_")) continue;
             AbstractInsnNode[] insns = method.instructions.toArray();
             for (int i = 0; i < insns.length; i++) {
                 AbstractInsnNode insn = insns[i];
                 if (insn instanceof InvokeDynamicInsnNode indy
-                    && indy.bsm != null
-                    && "IndyReferenceShapes".equals(indy.bsm.getOwner())) {
+                    && isNekoIndyBootstrap(input, indy)) {
                     sawIndy = true;
                     indySites++;
-                    bootstrapHelpers.add(indy.bsm.getName());
+                    bootstrapHelpers.add(indy.bsm.getOwner() + "." + indy.bsm.getName());
                     sawLongLongDescriptor |= indy.desc.contains("JJ)");
                     for (Object arg : indy.bsmArgs) {
                         if (arg instanceof String value) {
@@ -232,12 +236,10 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
                     }
                 }
                 if (insn instanceof MethodInsnNode call
-                    && "IndyReferenceShapes".equals(call.owner)
-                    && "(JJ)J".equals(call.desc)) {
+                    && call.name.startsWith("__neko_indy_mix")) {
                     sawMixCall = true;
                 }
                 if (insn instanceof MethodInsnNode call
-                    && "IndyReferenceShapes".equals(call.owner)
                     && call.name.startsWith("__neko_indy_flow")
                     && FLOW_DESC.equals(call.desc)) {
                     assertTrue(
@@ -264,7 +266,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertTrue(sawIndy, "no invokeDynamic reference sites found");
         assertTrue(indySites > 1, "fixture should exercise multiple indy sites");
         assertTrue(checkedDataBoundFlowCalls > 0, "indy replacement should pass dataLocal-derived flow transport material");
-        assertEquals(1, bootstrapHelpers.size(), "indy sites should share one per-class bootstrap helper");
+        assertEquals(1, bootstrapHelpers.size(), "indy sites should share one bootstrap helper");
         for (var entry : helperCounts.entrySet()) {
             assertEquals(1, entry.getValue(), "indy helper should be per-class, not per-site: " + entry.getKey());
         }
@@ -300,13 +302,9 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         MethodNode resolverHelper = null;
         Set<String> layoutFingerprints = new LinkedHashSet<>();
         int materialCells = 0;
-        for (var method : clazz.asmNode().methods) {
-            if (method.name.startsWith("__neko_indy_flow")) {
-                flowHelper = method;
-            }
-            if (method.name.startsWith("__neko_indy_resolve")) {
-                resolverHelper = method;
-            }
+        for (var method : allMethods(input)) {
+            if (method.name.startsWith("__neko_indy_flow")) flowHelper = method;
+            if (method.name.startsWith("__neko_indy_resolve")) resolverHelper = method;
             for (long[] cell : literalLongArrays(method)) {
                 if (!isIndyMaterialCell(cell)) continue;
                 long descriptor = cell[0];
@@ -315,11 +313,12 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
                 layoutFingerprints.add(layoutId + ":" + Long.toUnsignedString(fingerprint));
                 materialCells++;
             }
+        }
+        for (var method : clazz.asmNode().methods) {
             if (method.instructions == null || method.name.startsWith("__neko_")) continue;
             for (AbstractInsnNode insn : method.instructions.toArray()) {
                 if (insn instanceof InvokeDynamicInsnNode indy
-                    && indy.bsm != null
-                    && "IndyReferenceShapes".equals(indy.bsm.getOwner())) {
+                    && isNekoIndyBootstrap(input, indy)) {
                     indySites++;
                 }
             }
@@ -347,14 +346,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private void assertIndyResolverSeedsArePerSiteDerived(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
         var clazz = input.classMap().get("IndyReferenceShapes");
-        MethodNode resolverHelper = null;
-        for (var method : clazz.asmNode().methods) {
-            if (method.name.startsWith("__neko_indy_resolve")) {
-                resolverHelper = method;
-                break;
-            }
-        }
-        assertTrue(resolverHelper != null, "resolver helper missing");
+        MethodNode resolverHelper = resolverHelper(input);
         AbstractInsnNode[] insns = resolverHelper.instructions.toArray();
         int firstDecode = firstCall(insns, "java/lang/String", "toCharArray", "()[C");
         int seedStore = firstVarStore(insns, Opcodes.LSTORE, RESOLVER_SEED_LOCAL, 0);
@@ -370,22 +362,14 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         assertResolverSeedSlice(insns, 0, seedStore, "seed");
         assertResolverSeedSlice(insns, seedStore + 1, saltStore, "salt");
         assertTrue(
-            hiddenIndyArgumentsAreMethodKeyAndFlow(clazz.asmNode().methods),
+            hiddenIndyArgumentsAreMethodKeyAndFlow(input, clazz.asmNode().methods),
             "indy callsites should pass live method key before the final flow guard word"
         );
     }
 
     private void assertIndyPayloadMasksArePerSiteDerived(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
-        var clazz = input.classMap().get("IndyReferenceShapes");
-        MethodNode resolverHelper = null;
-        for (var method : clazz.asmNode().methods) {
-            if (method.name.startsWith("__neko_indy_resolve")) {
-                resolverHelper = method;
-                break;
-            }
-        }
-        assertTrue(resolverHelper != null, "resolver helper missing");
+        MethodNode resolverHelper = resolverHelper(input);
         AbstractInsnNode[] insns = resolverHelper.instructions.toArray();
         int loopStart = firstCall(insns, "java/lang/String", "toCharArray", "()[C");
         int caload = firstOpcode(insns, Opcodes.CALOAD, loopStart);
@@ -407,8 +391,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
 
     private void assertIndyPayloadAndCacheMaterialIsPerSite(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
-        var clazz = input.classMap().get("IndyReferenceShapes");
-        MethodNode resolverHelper = resolverHelper(clazz.asmNode().methods);
+        MethodNode resolverHelper = resolverHelper(input);
         AbstractInsnNode[] insns = resolverHelper.instructions.toArray();
         int cacheLookup = firstCall(insns, CONCURRENT_HASH_MAP, "get", "(Ljava/lang/Object;)Ljava/lang/Object;");
         int firstCacheKeyStore = firstVarStore(insns, Opcodes.ASTORE, RESOLVER_CACHE_KEY_LOCAL, 0);
@@ -424,8 +407,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
 
     private void assertIndyProtectedMaterialIsDerived(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
-        var clazz = input.classMap().get("IndyReferenceShapes");
-        MethodNode resolverHelper = resolverHelper(clazz.asmNode().methods);
+        MethodNode resolverHelper = resolverHelper(input);
         AbstractInsnNode[] insns = resolverHelper.instructions.toArray();
         int firstCacheKeyStore = firstVarStore(insns, Opcodes.ASTORE, RESOLVER_CACHE_KEY_LOCAL, 0);
         int start = cacheKeyMaterialStart(insns, firstCacheKeyStore);
@@ -435,8 +417,8 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         );
     }
 
-    private static MethodNode resolverHelper(List<MethodNode> methods) {
-        for (var method : methods) {
+    private static MethodNode resolverHelper(JarInput input) {
+        for (var method : allMethods(input)) {
             if (method.name.startsWith("__neko_indy_resolve")) {
                 return method;
             }
@@ -518,15 +500,28 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
         );
     }
 
-    private static boolean hiddenIndyArgumentsAreMethodKeyAndFlow(List<MethodNode> methods) {
+    private static List<MethodNode> allMethods(JarInput input) {
+        List<MethodNode> methods = new ArrayList<>();
+        for (var clazz : input.classMap().values()) {
+            methods.addAll(clazz.asmNode().methods);
+        }
+        return methods;
+    }
+
+    private static boolean isNekoIndyBootstrap(JarInput input, InvokeDynamicInsnNode indy) {
+        return indy.bsm != null
+            && indy.bsm.getName().startsWith("__neko_indy_bsm")
+            && input.classMap().containsKey(indy.bsm.getOwner());
+    }
+
+    private static boolean hiddenIndyArgumentsAreMethodKeyAndFlow(JarInput input, List<MethodNode> methods) {
         int checked = 0;
         for (MethodNode method : methods) {
             if (method.instructions == null || method.name.startsWith("__neko_")) continue;
             AbstractInsnNode[] insns = method.instructions.toArray();
             for (int i = 0; i < insns.length; i++) {
                 if (!(insns[i] instanceof InvokeDynamicInsnNode indy)
-                    || indy.bsm == null
-                    || !"IndyReferenceShapes".equals(indy.bsm.getOwner())) {
+                    || !isNekoIndyBootstrap(input, indy)) {
                     continue;
                 }
                 Type[] args = Type.getArgumentTypes(indy.desc);
@@ -831,7 +826,6 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
     private static int previousFlowHelperCall(AbstractInsnNode[] insns, int index) {
         for (int i = index - 1; i >= 0 && i >= index - 96; i--) {
             if (insns[i] instanceof MethodInsnNode call
-                && "IndyReferenceShapes".equals(call.owner)
                 && call.name.startsWith("__neko_indy_flow")
                 && FLOW_DESC.equals(call.desc)) {
                 return i;
@@ -1102,6 +1096,18 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
                 static int staticValue = 7;
                 int value = 5;
 
+                final class Inner {
+                    final int seen;
+
+                    Inner(int base) {
+                        seen = base + value;
+                        int observed = seen;
+                        if (observed != 13) {
+                            throw new AssertionError("inner-ctor:" + observed + ":" + seen);
+                        }
+                    }
+                }
+
                 static int staticAdd(int left, int right) {
                     return left + right + staticValue;
                 }
@@ -1119,6 +1125,7 @@ public class JvmInvokeDynamicObfuscationIntegrationTest {
                     staticValue = 9;
                     value = 6;
                     total += value;
+                    total += new Inner(7).seen;
                     System.out.println(new StringBuilder().append("INDY REF OK ").append(total).toString());
                     return total;
                 }

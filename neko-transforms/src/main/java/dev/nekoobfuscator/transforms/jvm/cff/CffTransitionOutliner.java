@@ -58,13 +58,16 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
 
     protected final class TransitionOutliner {
         private static final String DESC = "(JIIIIII[J)J";
+        private static final String COMPACT_TRANSITION_DESC = "(JIIII[J)J";
+        private static final String COMPACT_STATE_TRANSITION_DESC = "(JIIII[J[I)J";
         private final PipelineContext pctx;
         private final L1Class clazz;
         private final String owner;
         private final boolean interfaceOwner;
         private final int outLocal;
+        private final int compactStateOutLocal;
         private final int smallTokenDispatchCases;
-        private final boolean materializeDirectIslandTransitions;
+        private final boolean compactTransitionWrappers;
         private final SyntheticNoiseBudget syntheticNoiseBudget;
         private final Map<IslandGroup, RouterState> routers = new IdentityHashMap<>();
         private final Map<IslandGroup, String> groupDispatchHelpers = new IdentityHashMap<>();
@@ -75,8 +78,9 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             PipelineContext pctx,
             L1Class clazz,
             int outLocal,
+            int compactStateOutLocal,
             int smallTokenDispatchCases,
-            boolean materializeDirectIslandTransitions,
+            boolean compactTransitionWrappers,
             SyntheticNoiseBudget syntheticNoiseBudget
         ) {
             this.pctx = pctx;
@@ -84,13 +88,23 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             this.owner = clazz.asmNode().name;
             this.interfaceOwner = clazz.isInterface();
             this.outLocal = outLocal;
+            this.compactStateOutLocal = compactStateOutLocal;
             this.smallTokenDispatchCases = smallTokenDispatchCases;
-            this.materializeDirectIslandTransitions = materializeDirectIslandTransitions;
+            this.compactTransitionWrappers = compactTransitionWrappers;
             this.syntheticNoiseBudget = syntheticNoiseBudget;
         }
 
         int outLocal() {
             return outLocal;
+        }
+
+        void emitInitOutLocals(InsnList insns) {
+            emitInitTransitionOut(insns, outLocal);
+            if (compactStateOutLocal >= 0) {
+                JvmPassBytecode.pushInt(insns, 5);
+                insns.add(new IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_INT));
+                insns.add(new VarInsnNode(Opcodes.ASTORE, compactStateOutLocal));
+            }
         }
 
         InsnList emitGroupDispatchCall(
@@ -106,6 +120,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int dataLocal,
             int keyTmpLocal,
             LabelNode poison,
+            boolean allowSingleResultFallthrough,
             long methodSeed,
             long salt
         ) {
@@ -137,17 +152,29 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 )
             );
             insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
-            emitTransitionOutLoads(
+            RouterState router = router(group);
+            boolean inlineSingleResultFallthrough =
+                canInlineSingleResultFallthrough(group, router, allowSingleResultFallthrough);
+            emitOutlinedDispatchLoads(
                 insns,
                 outLocal,
                 guardLocal,
                 pathKeyLocal,
                 blockKeyLocal,
                 pcLocal,
-                domainLocal
+                domainLocal,
+                !inlineSingleResultFallthrough && routerHasHubResult(router, group.hub()),
+                router.denseResultRouter
             );
-            emitTransitionOutLowLoad(insns, outLocal, 2, keyTmpLocal);
-            insns.add(new JumpInsnNode(Opcodes.GOTO, router(group).label));
+            if (inlineSingleResultFallthrough) {
+                emitTransitionOutLowBranchNonZero(insns, outLocal, 2, poison);
+                router.inlineSingleResultFallthrough = true;
+            } else {
+                emitTransitionOutLowLoad(insns, outLocal, 2, keyTmpLocal);
+            }
+            if (!inlineSingleResultFallthrough && hasGroupedIslandEntry(group)) {
+                insns.add(new JumpInsnNode(Opcodes.GOTO, router.label));
+            }
             JvmKeyDispatchPass.markGenerated(pctx, insns);
             return insns;
         }
@@ -169,6 +196,68 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
         boolean needsGroupedIslandEntry(IslandGroup group, int island) {
             BitSet entries = directIslandEntries.get(group.hub());
             return entries != null && entries.get(island);
+        }
+
+        private boolean hasGroupedIslandEntry(IslandGroup group) {
+            for (int island = 0; island < group.islandLabels().length; island++) {
+                if (needsGroupedIslandEntry(group, island)) return true;
+            }
+            return false;
+        }
+
+        private boolean routerHasHubResult(RouterState router, LabelNode hub) {
+            for (LabelNode label : router.resultCases.values()) {
+                if (label == hub) return true;
+            }
+            return false;
+        }
+
+        private boolean canInlineSingleResultFallthrough(
+            IslandGroup group,
+            RouterState router,
+            boolean allowed
+        ) {
+            if (!allowed || router.denseResultRouter || hasGroupedIslandEntry(group)) return false;
+            if (router.resultCases.size() != 1 || group.blocks().size() != 1) return false;
+            Map.Entry<Integer, LabelNode> result = router.resultCases.firstEntry();
+            return result != null &&
+                result.getKey() == 0 &&
+                result.getValue() == group.blocks().get(0).label();
+        }
+
+        private void emitTransitionOutLowBranchNonZero(
+            InsnList insns,
+            int outLocal,
+            int index,
+            LabelNode target
+        ) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+            JvmPassBytecode.pushInt(insns, index);
+            insns.add(new InsnNode(Opcodes.LALOAD));
+            insns.add(new InsnNode(Opcodes.L2I));
+            insns.add(new JumpInsnNode(Opcodes.IFNE, target));
+        }
+
+        private void emitOutlinedDispatchLoads(
+            InsnList insns,
+            int outLocal,
+            int guardLocal,
+            int pathKeyLocal,
+            int blockKeyLocal,
+            int pcLocal,
+            int domainLocal,
+            boolean includePc,
+            boolean includeDomain
+        ) {
+            emitTransitionOutPairLoad(insns, outLocal, 0, guardLocal, pathKeyLocal);
+            if (includePc) {
+                emitTransitionOutPairLoad(insns, outLocal, 1, blockKeyLocal, pcLocal);
+            } else {
+                emitTransitionOutHighLoad(insns, outLocal, 1, blockKeyLocal);
+            }
+            if (includeDomain) {
+                emitTransitionOutHighLoad(insns, outLocal, 2, domainLocal);
+            }
         }
 
         InsnList emitIslandDispatchCall(
@@ -197,9 +286,17 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             router.denseResultRouter = denseResultRouter;
             Map<LabelNode, Integer> resultTokens = new IdentityHashMap<>();
             long resultMaskSeed = resultRouteMaskSeed(group);
+            boolean singleSparseFallthrough = singleSparseFallthroughCandidate(
+                group,
+                islandBlocks,
+                fakeCount,
+                denseResultRouter
+            );
             for (int i = 0; i < islandBlocks.size(); i++) {
                 Block block = islandBlocks.get(i);
-                int token = denseResultRouter
+                int token = singleSparseFallthrough
+                    ? addZeroResultCase(router, block.label())
+                    : denseResultRouter
                     ? addResultCase(router, block.label())
                     : uniqueResultToken(
                         router,
@@ -209,14 +306,17 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                     );
                 resultTokens.put(block.label(), token);
             }
-            int bounceToken = denseResultRouter
-                ? addResultCase(router, group.hub())
-                : uniqueResultToken(
-                    router,
-                    resultMaskSeed ^ 0x424F554E43454B31L ^ island,
-                    group.hub(),
-                    fakeCount ^ firstState
-                );
+            int bounceToken = fakeCount == 0 ? 0 : (
+                denseResultRouter
+                    ? addResultCase(router, group.hub())
+                    : uniqueResultToken(
+                        router,
+                        resultMaskSeed ^ 0x424F554E43454B31L ^ island,
+                        group.hub(),
+                        fakeCount ^ firstState
+                    )
+            );
+            int poisonToken = singleSparseFallthrough ? 1 : (denseResultRouter ? -1 : 0);
             IslandDispatchHelperPlan helperPlan = createIslandDispatchHelper(
                 group,
                 island,
@@ -228,6 +328,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 keyStateByLabel,
                 resultTokens,
                 bounceToken,
+                poisonToken,
                 methodSeed,
                 salt,
                 resultMaskSeed,
@@ -255,14 +356,16 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 )
             );
             insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
-            emitTransitionOutLoads(
+            emitOutlinedDispatchLoads(
                 insns,
                 outLocal,
                 guardLocal,
                 pathKeyLocal,
                 blockKeyLocal,
                 pcLocal,
-                domainLocal
+                domainLocal,
+                fakeCount > 0,
+                denseResultRouter
             );
             emitTransitionOutLowLoad(insns, outLocal, 2, keyTmpLocal);
             insns.add(new JumpInsnNode(Opcodes.GOTO, router.label));
@@ -301,14 +404,6 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             boolean denseResultRouter = useDenseResultRouter(group);
             router.denseResultRouter = denseResultRouter;
             long resultMaskSeed = resultRouteMaskSeed(group);
-            int poisonToken = denseResultRouter
-                ? addResultCase(router, poison)
-                : uniqueResultToken(
-                    router,
-                    resultMaskSeed ^ 0x475250504F49534FL,
-                    poison,
-                    group.blocks().size()
-                );
 
             String groupHelperName = nextHelperName();
             int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
@@ -332,6 +427,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             TreeMap<Integer, LabelNode> domainCases = new TreeMap<>();
             List<LabelNode> islandLabels = new ArrayList<>();
             List<String> islandHelpers = new ArrayList<>();
+            int groupPoisonToken = denseResultRouter ? -1 : 0;
             for (int island = 0; island < group.islandLabels().length; island++) {
                 List<Block> islandBlocks = blocksForIsland(group, island);
                 if (islandBlocks.isEmpty()) continue;
@@ -344,9 +440,17 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 Map<LabelNode, Integer> resultTokens = new IdentityHashMap<>();
                 for (int i = 0; i < islandBlocks.size(); i++) {
                     Block block = islandBlocks.get(i);
-                    int token = denseResultRouter
-                        ? addResultCase(router, block.label())
-                        : uniqueResultToken(
+                    boolean singleSparseFallthrough = singleSparseFallthroughCandidate(
+                        group,
+                        islandBlocks,
+                        fakeCount,
+                        denseResultRouter
+                    );
+                    int token = singleSparseFallthrough
+                        ? addZeroResultCase(router, block.label())
+                        : denseResultRouter
+                            ? addResultCase(router, block.label())
+                            : uniqueResultToken(
                             router,
                             resultMaskSeed ^ island,
                             block.label(),
@@ -354,14 +458,31 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         );
                     resultTokens.put(block.label(), token);
                 }
-                int bounceToken = denseResultRouter
-                    ? addResultCase(router, group.hub())
-                    : uniqueResultToken(
-                        router,
-                        resultMaskSeed ^ 0x424F554E43454B31L ^ island,
-                        group.hub(),
-                        fakeCount ^ firstState
-                    );
+                boolean singleSparseFallthrough = singleSparseFallthroughCandidate(
+                    group,
+                    islandBlocks,
+                    fakeCount,
+                    denseResultRouter
+                );
+                int bounceToken = fakeCount == 0 ? 0 : (
+                    denseResultRouter
+                        ? addResultCase(router, group.hub())
+                        : uniqueResultToken(
+                            router,
+                            resultMaskSeed ^ 0x424F554E43454B31L ^ island,
+                            group.hub(),
+                            fakeCount ^ firstState
+                        )
+                );
+                int poisonToken = singleSparseFallthroughCandidate(
+                    group,
+                    islandBlocks,
+                    fakeCount,
+                    denseResultRouter
+                )
+                    ? 1
+                    : (denseResultRouter ? -1 : 0);
+                groupPoisonToken = poisonToken;
                 IslandDispatchHelperPlan helperPlan = createIslandDispatchHelper(
                     group,
                     island,
@@ -373,6 +494,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                     keyStateByLabel,
                     resultTokens,
                     bounceToken,
+                    poisonToken,
                     methodSeed,
                     salt,
                     resultMaskSeed,
@@ -444,7 +566,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 helperPcLocal,
                 helperDomainLocal,
                 helperOutLocal,
-                poisonToken,
+                groupPoisonToken,
                 resultMaskSeed,
                 denseResultRouter
             );
@@ -499,6 +621,14 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             return token;
         }
 
+        private int addZeroResultCase(RouterState router, LabelNode label) {
+            if (router.resultCases.containsKey(0)) {
+                throw new IllegalStateException("CFF zero result token collision");
+            }
+            router.resultCases.put(0, label);
+            return 0;
+        }
+
         private int uniqueResultToken(
             RouterState router,
             long seed,
@@ -535,15 +665,16 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             InsnList insns = new InsnList();
             RouterState router = routers.get(group);
             if (router == null || router.resultCases.isEmpty()) return insns;
-            LabelNode[] labels = new LabelNode[router.resultCases.size()];
-            int index = 0;
-            for (Map.Entry<Integer, LabelNode> entry : router.resultCases.entrySet()) {
-                labels[index] = entry.getValue();
-                index++;
-            }
+            if (router.inlineSingleResultFallthrough) return insns;
             insns.add(router.label);
-            insns.add(new VarInsnNode(Opcodes.ILOAD, keyTmpLocal));
             if (router.denseResultRouter) {
+                LabelNode[] labels = new LabelNode[router.resultCases.size()];
+                int index = 0;
+                for (Map.Entry<Integer, LabelNode> entry : router.resultCases.entrySet()) {
+                    labels[index] = entry.getValue();
+                    index++;
+                }
+                insns.add(new VarInsnNode(Opcodes.ILOAD, keyTmpLocal));
                 emitResultRouteMask(
                     insns,
                     keyLocal,
@@ -556,16 +687,49 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 );
                 insns.add(new InsnNode(Opcodes.IXOR));
                 insns.add(new TableSwitchInsnNode(0, labels.length - 1, poison, labels));
+            } else if (router.resultCases.size() <= 6) {
+                emitSmallSparseResultRouter(insns, keyTmpLocal, router, poison);
             } else {
                 int[] keys = new int[router.resultCases.size()];
-                index = 0;
+                LabelNode[] labels = new LabelNode[router.resultCases.size()];
+                int index = 0;
                 for (Map.Entry<Integer, LabelNode> entry : router.resultCases.entrySet()) {
-                    keys[index++] = entry.getKey();
+                    keys[index] = entry.getKey();
+                    labels[index] = entry.getValue();
+                    index++;
                 }
+                insns.add(new VarInsnNode(Opcodes.ILOAD, keyTmpLocal));
                 insns.add(new LookupSwitchInsnNode(poison, keys, labels));
             }
             JvmKeyDispatchPass.markGenerated(pctx, insns);
             return insns;
+        }
+
+        private void emitSmallSparseResultRouter(
+            InsnList insns,
+            int keyTmpLocal,
+            RouterState router,
+            LabelNode poison
+        ) {
+            if (router.resultCases.size() == 1 && router.resultCases.firstKey() == 0) {
+                LabelNode result = router.resultCases.firstEntry().getValue();
+                insns.add(new VarInsnNode(Opcodes.ILOAD, keyTmpLocal));
+                insns.add(new JumpInsnNode(Opcodes.IFNE, poison));
+                insns.add(new JumpInsnNode(Opcodes.GOTO, result));
+                return;
+            }
+            int index = 0;
+            int size = router.resultCases.size();
+            for (Map.Entry<Integer, LabelNode> entry : router.resultCases.entrySet()) {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, keyTmpLocal));
+                JvmPassBytecode.pushInt(insns, entry.getKey());
+                if (++index == size) {
+                    insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, poison));
+                    insns.add(new JumpInsnNode(Opcodes.GOTO, entry.getValue()));
+                } else {
+                    insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, entry.getValue()));
+                }
+            }
         }
 
         private long resultRouteMaskSeed(IslandGroup group) {
@@ -579,6 +743,19 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             return group.blocks().size() >= 32;
         }
 
+        private boolean singleSparseFallthroughCandidate(
+            IslandGroup group,
+            List<Block> islandBlocks,
+            int fakeCount,
+            boolean denseResultRouter
+        ) {
+            return !denseResultRouter &&
+                fakeCount == 0 &&
+                group.blocks().size() == 1 &&
+                islandBlocks.size() == 1 &&
+                group.islandLabels().length == 1;
+        }
+
         private IslandDispatchHelperPlan createIslandDispatchHelper(
             IslandGroup group,
             int island,
@@ -590,6 +767,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             Map<LabelNode, CffBlockKeyState> keyStateByLabel,
             Map<LabelNode, Integer> resultTokens,
             int bounceToken,
+            int poisonToken,
             long methodSeed,
             long salt,
             long resultMaskSeed,
@@ -817,8 +995,8 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 poisonSeed,
                 EdgeRole.POISON
             );
-            finishOutlinedDispatchReturn(
-                helper.instructions,
+                finishOutlinedDispatchReturn(
+                    helper.instructions,
                 helperKeyLocal,
                 helperGuardLocal,
                 helperPathLocal,
@@ -826,7 +1004,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 helperPcLocal,
                 helperDomainLocal,
                 helperOutLocal,
-                denseResultRouter ? Integer.MAX_VALUE : 0,
+                denseResultRouter ? Integer.MAX_VALUE : poisonToken,
                 resultMaskSeed,
                 denseResultRouter
             );
@@ -1601,34 +1779,25 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                     .computeIfAbsent(target.hub(), ignored -> new BitSet())
                     .set(target.island());
             }
-            boolean materialTransition = true;
+            boolean materialTransition = !compactTransitionWrappers;
             CffClassKeyTable table = null;
             int rowBase = -1;
             String helperName = null;
-            if (materialTransition) {
-                table = ensureClassKeyTable(pctx, clazz);
-                rowBase = registerTransitionMaterialRow(
-                    table,
-                    state,
-                    target,
-                    edgeKind,
-                    sourceKeys,
-                    targetKeys,
-                    methodSeed,
-                    stepSeed,
-                    role
-                );
-            } else {
-                helperName = createHelper(
-                    state,
-                    target,
-                    edgeKind,
-                    sourceKeys,
-                    targetKeys,
-                    methodSeed,
-                    stepSeed,
-                    role
-                );
+            table = ensureClassKeyTable(pctx, clazz);
+            rowBase = registerTransitionMaterialRow(
+                table,
+                state,
+                target,
+                edgeKind,
+                sourceKeys,
+                targetKeys,
+                methodSeed,
+                stepSeed,
+                targetDispatchSeed,
+                role
+            );
+            if (!materialTransition) {
+                helperName = createCompactTransitionWrapper(table, rowBase);
             }
             InsnList insns = new InsnList();
             insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
@@ -1643,15 +1812,26 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                     "[Ljava/lang/Object;"
                 ));
                 JvmPassBytecode.pushInt(insns, rowBase);
-            } else {
-                insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
             }
-            insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
             if (!materialTransition) {
-                insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
-            }
-            insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
-            if (materialTransition) {
+                insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+                if (compactStateOutLocal >= 0) {
+                    insns.add(new VarInsnNode(Opcodes.ALOAD, compactStateOutLocal));
+                }
+                insns.add(
+                    new MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        owner,
+                        helperName,
+                        compactStateOutLocal >= 0
+                            ? COMPACT_STATE_TRANSITION_DESC
+                            : COMPACT_TRANSITION_DESC,
+                        interfaceOwner
+                    )
+                );
+            } else {
+                insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
                 insns.add(
                     new MethodInsnNode(
                         Opcodes.INVOKESTATIC,
@@ -1661,37 +1841,197 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                         table.transitionMaterialHelperInterfaceOwner()
                     )
                 );
-            } else {
-                insns.add(
-                    new MethodInsnNode(
-                        Opcodes.INVOKESTATIC,
-                        owner,
-                        helperName,
-                        DESC,
-                        interfaceOwner
-                    )
-                );
             }
             insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
-            emitTransitionOutLoads(
-                insns,
-                outLocal,
-                guardLocal,
-                pathKeyLocal,
-                blockKeyLocal,
-                pcLocal,
-                domainLocal,
-                edgeKind != EdgeKind.DIRECT_ISLAND
-            );
-            emitBindDispatchPcToDataDigest(
-                insns,
-                pcLocal,
-                dataLocal,
-                targetDispatchSeed
-            );
+            if (!materialTransition && compactStateOutLocal >= 0) {
+                emitCompactTransitionStateLoads(
+                    insns,
+                    compactStateOutLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    edgeKind != EdgeKind.DIRECT_ISLAND
+                );
+            } else {
+                emitTransitionOutLoads(
+                    insns,
+                    outLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    edgeKind != EdgeKind.DIRECT_ISLAND
+                );
+            }
             insns.add(new JumpInsnNode(Opcodes.GOTO, jumpTarget));
             JvmKeyDispatchPass.markGenerated(pctx, insns);
             return insns;
+        }
+
+        private void emitCompactTransitionStateLoads(
+            InsnList insns,
+            int stateOutLocal,
+            int guardLocal,
+            int pathKeyLocal,
+            int blockKeyLocal,
+            int pcLocal,
+            int domainLocal,
+            boolean includeDomain
+        ) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, stateOutLocal));
+            emitCompactTransitionStateLoad(insns, 0, guardLocal);
+            emitCompactTransitionStateLoad(insns, 1, pathKeyLocal);
+            emitCompactTransitionStateLoad(insns, 2, blockKeyLocal);
+            emitCompactTransitionStateLoad(insns, 3, pcLocal);
+            if (includeDomain) {
+                emitCompactTransitionStateLoad(insns, 4, domainLocal);
+            }
+            insns.add(new InsnNode(Opcodes.POP));
+        }
+
+        private void emitCompactTransitionStateLoad(
+            InsnList insns,
+            int index,
+            int local
+        ) {
+            insns.add(new InsnNode(Opcodes.DUP));
+            JvmPassBytecode.pushInt(insns, index);
+            insns.add(new InsnNode(Opcodes.IALOAD));
+            insns.add(new VarInsnNode(Opcodes.ISTORE, local));
+        }
+
+        private String createCompactTransitionWrapper(
+            CffClassKeyTable table,
+            int rowBase
+        ) {
+            String helperName = nextHelperName();
+            int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+            access |= interfaceOwner ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
+            MethodNode helper = new MethodNode(
+                access,
+                helperName,
+                compactStateOutLocal >= 0
+                    ? COMPACT_STATE_TRANSITION_DESC
+                    : COMPACT_TRANSITION_DESC,
+                null,
+                null
+            );
+            int helperKeyLocal = 0;
+            int helperGuardLocal = 2;
+            int helperPathLocal = 3;
+            int helperBlockLocal = 4;
+            int helperDataLocal = 5;
+            int helperOutLocal = 6;
+            int helperStateOutLocal = 7;
+            int helperResultKeyLocal = compactStateOutLocal >= 0 ? 8 : -1;
+            int helperPackedLocal = compactStateOutLocal >= 0 ? 10 : -1;
+            helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
+            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperGuardLocal));
+            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperPathLocal));
+            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperBlockLocal));
+            helper.instructions.add(new FieldInsnNode(
+                Opcodes.GETSTATIC,
+                table.owner(),
+                table.objectFieldName(),
+                "[Ljava/lang/Object;"
+            ));
+            JvmPassBytecode.pushInt(helper.instructions, rowBase);
+            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDataLocal));
+            helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, helperOutLocal));
+            helper.instructions.add(
+                new MethodInsnNode(
+                    Opcodes.INVOKESTATIC,
+                    table.transitionMaterialHelperOwner(),
+                    table.transitionMaterialHelperName(),
+                    TRANSITION_MATERIAL_HELPER_DESC,
+                    table.transitionMaterialHelperInterfaceOwner()
+                )
+            );
+            if (compactStateOutLocal >= 0) {
+                helper.instructions.add(new VarInsnNode(Opcodes.LSTORE, helperResultKeyLocal));
+                emitCompactTransitionStateStores(
+                    helper.instructions,
+                    helperOutLocal,
+                    helperStateOutLocal,
+                    helperPackedLocal
+                );
+                helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperResultKeyLocal));
+            }
+            helper.instructions.add(new InsnNode(Opcodes.LRETURN));
+            helper.maxLocals = compactStateOutLocal >= 0 ? 12 : 7;
+            helper.maxStack = 32;
+            JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+            clazz.asmNode().methods.add(helper);
+            clazz.markDirty();
+            publishGeneratedHelperFlowKey(
+                pctx,
+                owner,
+                helperName,
+                compactStateOutLocal >= 0
+                    ? COMPACT_STATE_TRANSITION_DESC
+                    : COMPACT_TRANSITION_DESC,
+                helperKeyLocal
+            );
+            return helperName;
+        }
+
+        private void emitCompactTransitionStateStores(
+            InsnList insns,
+            int transitionOutLocal,
+            int stateOutLocal,
+            int packedLocal
+        ) {
+            emitCompactTransitionStatePairStore(insns, transitionOutLocal, stateOutLocal, packedLocal, 0, 0, 1);
+            emitCompactTransitionStatePairStore(insns, transitionOutLocal, stateOutLocal, packedLocal, 1, 2, 3);
+            emitCompactTransitionStateHighStore(insns, transitionOutLocal, stateOutLocal, 2, 4);
+        }
+
+        private void emitCompactTransitionStatePairStore(
+            InsnList insns,
+            int transitionOutLocal,
+            int stateOutLocal,
+            int packedLocal,
+            int sourceIndex,
+            int highIndex,
+            int lowIndex
+        ) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, transitionOutLocal));
+            JvmPassBytecode.pushInt(insns, sourceIndex);
+            insns.add(new InsnNode(Opcodes.LALOAD));
+            insns.add(new VarInsnNode(Opcodes.LSTORE, packedLocal));
+            insns.add(new VarInsnNode(Opcodes.ALOAD, stateOutLocal));
+            JvmPassBytecode.pushInt(insns, highIndex);
+            insns.add(new VarInsnNode(Opcodes.LLOAD, packedLocal));
+            JvmPassBytecode.pushInt(insns, 32);
+            insns.add(new InsnNode(Opcodes.LUSHR));
+            insns.add(new InsnNode(Opcodes.L2I));
+            insns.add(new InsnNode(Opcodes.IASTORE));
+            insns.add(new VarInsnNode(Opcodes.ALOAD, stateOutLocal));
+            JvmPassBytecode.pushInt(insns, lowIndex);
+            insns.add(new VarInsnNode(Opcodes.LLOAD, packedLocal));
+            insns.add(new InsnNode(Opcodes.L2I));
+            insns.add(new InsnNode(Opcodes.IASTORE));
+        }
+
+        private void emitCompactTransitionStateHighStore(
+            InsnList insns,
+            int transitionOutLocal,
+            int stateOutLocal,
+            int sourceIndex,
+            int highIndex
+        ) {
+            insns.add(new VarInsnNode(Opcodes.ALOAD, stateOutLocal));
+            JvmPassBytecode.pushInt(insns, highIndex);
+            insns.add(new VarInsnNode(Opcodes.ALOAD, transitionOutLocal));
+            JvmPassBytecode.pushInt(insns, sourceIndex);
+            insns.add(new InsnNode(Opcodes.LALOAD));
+            JvmPassBytecode.pushInt(insns, 32);
+            insns.add(new InsnNode(Opcodes.LUSHR));
+            insns.add(new InsnNode(Opcodes.L2I));
+            insns.add(new InsnNode(Opcodes.IASTORE));
         }
 
         private String createHelper(
@@ -1702,6 +2042,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             CffBlockKeyState targetKeys,
             long methodSeed,
             long stepSeed,
+            long targetDispatchSeed,
             EdgeRole role
         ) {
             CffClassKeyTable table = ensureClassKeyTable(pctx, clazz);
@@ -1714,6 +2055,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 targetKeys,
                 methodSeed,
                 stepSeed,
+                targetDispatchSeed,
                 role
             );
             String helperName = nextHelperName();
@@ -1745,7 +2087,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 "[Ljava/lang/Object;"
             ));
             JvmPassBytecode.pushInt(helper.instructions, rowBase);
-            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDomainLocal));
+            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDataLocal));
             helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, helperOutLocal));
             helper.instructions.add(
                 new MethodInsnNode(
@@ -1770,6 +2112,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             final LabelNode label = new LabelNode();
             final TreeMap<Integer, LabelNode> resultCases = new TreeMap<>();
             boolean denseResultRouter;
+            boolean inlineSingleResultFallthrough;
         }
 
         private String nextHelperName() {
@@ -1783,7 +2126,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
 
         private boolean helperExists(String name) {
             for (MethodNode method : clazz.asmNode().methods) {
-                if (name.equals(method.name) && DESC.equals(method.desc)) {
+                if (name.equals(method.name)) {
                     return true;
                 }
             }

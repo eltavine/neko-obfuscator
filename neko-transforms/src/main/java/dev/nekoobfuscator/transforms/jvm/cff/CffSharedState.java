@@ -90,7 +90,7 @@ abstract class CffSharedState {
     protected static final int TOKEN_MATERIAL_ROW_WORDS = 13;
     protected static final int TOKEN_MATERIAL_ROW_LONGS = (TOKEN_MATERIAL_ROW_WORDS + 1) / 2;
     protected static final int TRANSITION_MATERIAL_TABLE_SIZE = 16_384;
-    protected static final int TRANSITION_MATERIAL_ROW_WORDS = 37;
+    protected static final int TRANSITION_MATERIAL_ROW_WORDS = 57;
     protected static final int TRANSITION_MATERIAL_ROW_LONGS = (TRANSITION_MATERIAL_ROW_WORDS + 1) / 2;
     protected static final int TOKEN_MATERIAL_WORDS_SLOT = CLASS_KEY_TABLE_SIZE;
     public static final int CLASS_KEY_WORDS_SLOT = CLASS_KEY_TABLE_SIZE + 1;
@@ -109,7 +109,7 @@ abstract class CffSharedState {
     public static final int RUNTIME_VARIABLE_FRAME_SLOT = CLASS_KEY_TABLE_SIZE + 14;
     protected static final int TOKEN_MATERIAL_CARRIER_SIZE = CLASS_KEY_TABLE_SIZE + 15;
     protected static final int TOKEN_MATERIAL_INIT_CHUNK_SIZE = 1024;
-    protected static final int TRANSITION_MATERIAL_INIT_CHUNK_SIZE = 192;
+    protected static final int TRANSITION_MATERIAL_INIT_CHUNK_SIZE = 96;
     protected static final int STEP_MATERIAL_TABLE_SIZE = 8_192;
     protected static final int STEP_MATERIAL_ROW_WORDS = 8;
     protected static final int STEP_MATERIAL_ROW_LONGS = STEP_MATERIAL_ROW_WORDS / 2;
@@ -174,6 +174,11 @@ abstract class CffSharedState {
     protected static final int TRANSITION_MATERIAL_METHOD_HIGH_WORD = 4;
     protected static final int TRANSITION_MATERIAL_METHOD_LOW_WORD = 5;
     protected static final int TRANSITION_MATERIAL_DOMAIN_WORD = 6;
+    protected static final int TRANSITION_MATERIAL_DISPATCH_ADD_WORD = 7;
+    protected static final int TRANSITION_MATERIAL_DISPATCH_SHIFT_A_WORD = 8;
+    protected static final int TRANSITION_MATERIAL_DISPATCH_MUL_WORD = 9;
+    protected static final int TRANSITION_MATERIAL_DISPATCH_SHIFT_B_WORD = 10;
+    protected static final int TRANSITION_MATERIAL_DISPATCH_FINAL_ADD_WORD = 11;
     protected static final int TRANSITION_MATERIAL_ENCRYPTED = 0;
     protected static final int TRANSITION_MATERIAL_MASK = 1;
     protected static final int TRANSITION_MATERIAL_ADD = 2;
@@ -183,6 +188,7 @@ abstract class CffSharedState {
     protected static final int DISPATCH_OUTLINER_EDGE_THRESHOLD = 16;
     protected static final int DISPATCH_OUTLINER_HANDLER_THRESHOLD = 4;
     protected static final int TRANSITION_OUTLINER_ESTIMATED_CODE_PRESSURE = 24_000;
+    protected static final int COMPACT_TRANSITION_WRAPPER_CODE_PRESSURE = 60_000;
     protected static final int TRANSITION_OUTLINER_BLOCK_THRESHOLD = 48;
     protected static final int TRANSITION_OUTLINER_EDGE_THRESHOLD = 80;
     protected static final int TRANSITION_OUTLINER_HANDLER_THRESHOLD = 8;
@@ -949,6 +955,7 @@ abstract class CffSharedState {
         CffBlockKeyState targetKeys,
         long methodSeed,
         long stepSeed,
+        long targetDispatchSeed,
         EdgeRole role
     );
     protected abstract void emitPackedMaterialLongStores(
@@ -965,6 +972,7 @@ abstract class CffSharedState {
         CffBlockKeyState targetKeys,
         long methodSeed,
         long stepSeed,
+        long targetDispatchSeed,
         EdgeRole role
     );
     protected abstract void putTransitionMaterialWord(
@@ -1249,6 +1257,7 @@ abstract class CffSharedState {
         DispatchPlan dispatchPlan,
         Set<LabelNode> zeroStackLabels,
         int exceptionLocal,
+        Set<Integer> dataDigestExcludedArgumentLocals,
         boolean externalEntrySeed,
         long methodSeed,
         long salt,
