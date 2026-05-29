@@ -518,7 +518,11 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
                 entry.label(),
                 keyStateByLabel.get(entry.label())
             );
+            int preservedEntryKeyLocal = mn.maxLocals;
+            mn.maxLocals = Math.max(mn.maxLocals, preservedEntryKeyLocal + 2);
             InsnList init = new InsnList();
+            init.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+            init.add(new VarInsnNode(Opcodes.LSTORE, preservedEntryKeyLocal));
             emitInitKeys(
                 init,
                 guardLocal,
@@ -552,6 +556,12 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             );
             JvmKeyDispatchPass.markGenerated(pctx, init);
             mn.instructions.insertBefore(anchor, init);
+
+            InsnList restore = new InsnList();
+            restore.add(new VarInsnNode(Opcodes.LLOAD, preservedEntryKeyLocal));
+            restore.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
+            JvmKeyDispatchPass.markGenerated(pctx, restore);
+            mn.instructions.insertBefore(protectedStart, restore);
             return;
         }
     }

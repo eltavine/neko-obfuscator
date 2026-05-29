@@ -353,6 +353,58 @@ public class JvmMethodParameterObfuscationIntegrationTest {
         assertTrue(obfuscated.contains("STRING TAIL ENTRY OK"), obfuscated);
     }
 
+    @Test
+    void packedConstructorStringTailUsesLiveCffState() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-constructor-string-tail"));
+        Path source = work.resolve("ConstructorStringTailEntry.java");
+        Files.writeString(source, constructorStringTailSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("constructor-string-tail-entry.jar");
+        writeJar(
+            inputJar,
+            classes,
+            "ConstructorStringTailEntry",
+            List.of(
+                "ConstructorStringTailBase.class",
+                "ConstructorStringTailChild.class"
+            )
+        );
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("constructor-string-tail-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("CONSTRUCTOR STRING TAIL OK"), obfuscated);
+    }
+
+    @Test
+    void packedConcurrentStringTailDecodeIsThreadSafe() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-concurrent-string-tail"));
+        Path source = work.resolve("ConcurrentStringTailEntry.java");
+        Files.writeString(source, concurrentStringTailSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("concurrent-string-tail-entry.jar");
+        writeJar(inputJar, classes, "ConcurrentStringTailEntry", List.of());
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("concurrent-string-tail-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("CONCURRENT STRING TAIL OK"), obfuscated);
+    }
+
     private void runFullProfileObfuscation(Path input, Path output) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
@@ -2038,6 +2090,132 @@ public class JvmMethodParameterObfuscationIntegrationTest {
             interface PackedStringTailCaseLike {
                 String id();
                 Set<String> tags();
+            }
+            """;
+    }
+
+    private String constructorStringTailSourceText() {
+        return """
+            public class ConstructorStringTailEntry {
+                public static void main(String[] args) {
+                    ConstructorStringTailChild second = new ConstructorStringTailChild();
+                    String out = second.constructorName() + ":" + second.methodName() + ":" + ConstructorStringTailChild.staticName();
+                    System.out.println(out);
+                    if (!out.equals("child-field:child-method:child-static")) {
+                        throw new AssertionError(out);
+                    }
+                    System.out.println("CONSTRUCTOR STRING TAIL OK");
+                }
+            }
+
+            class ConstructorStringTailBase {
+                ConstructorStringTailBase() {
+                    String value = "base-field";
+                    if (!value.equals("base-field")) {
+                        throw new AssertionError(value);
+                    }
+                }
+
+                String baseName() {
+                    return "base-field";
+                }
+
+                String methodName() {
+                    return "base-method";
+                }
+
+                static String staticName() {
+                    return "base-static";
+                }
+            }
+
+            final class ConstructorStringTailChild extends ConstructorStringTailBase {
+                ConstructorStringTailChild() {
+                    super();
+                    String value = "child-field";
+                    if (!value.equals("child-field")) {
+                        throw new AssertionError(value);
+                    }
+                }
+
+                String constructorName() {
+                    return "child-field";
+                }
+
+                String methodName() {
+                    return "child-method";
+                }
+
+                static String staticName() {
+                    return "child-static";
+                }
+            }
+            """;
+    }
+
+    private String concurrentStringTailSourceText() {
+        return """
+            import java.util.concurrent.atomic.AtomicReference;
+
+            public class ConcurrentStringTailEntry {
+                private static final int THREADS = 8;
+                private static final int ITERATIONS = 1500;
+
+                public static void main(String[] args) throws Exception {
+                    AtomicReference<Throwable> error = new AtomicReference<>();
+                    Thread[] threads = new Thread[THREADS];
+                    for (int t = 0; t < THREADS; t++) {
+                        final int id = t;
+                        threads[t] = new Thread(() -> {
+                            try {
+                                long sum = 0;
+                                for (int i = 0; i < ITERATIONS; i++) {
+                                    String first = firstValue(i, id);
+                                    String second = secondValue(id, i);
+                                    if (!first.equals("shared-alpha")) {
+                                        throw new AssertionError(first);
+                                    }
+                                    if (!second.equals("shared-beta")) {
+                                        throw new AssertionError(second);
+                                    }
+                                    sum += first.length() + second.length();
+                                    if ((i & 7) == 0) {
+                                        Thread.yield();
+                                    }
+                                }
+                                long expected = (long) ITERATIONS * ("shared-alpha".length() + "shared-beta".length());
+                                if (sum != expected) {
+                                    throw new AssertionError(Long.toString(sum));
+                                }
+                            } catch (Throwable ex) {
+                                error.compareAndSet(null, ex);
+                            }
+                        }, "neko-string-tail-" + t);
+                        threads[t].start();
+                    }
+                    for (Thread thread : threads) {
+                        thread.join();
+                    }
+                    Throwable failure = error.get();
+                    if (failure != null) {
+                        throw new AssertionError("concurrent string tail", failure);
+                    }
+                    System.out.println("CONCURRENT STRING TAIL OK");
+                }
+
+                private static String firstValue(int i, int id) {
+                    if ((i ^ id) == -1) {
+                        return "never-alpha";
+                    }
+                    return "shared-alpha";
+                }
+
+                private static String secondValue(int id, int i) {
+                    if ((id + i) == -1) {
+                        return "never-beta";
+                    }
+                    return "shared-beta";
+                }
             }
             """;
     }

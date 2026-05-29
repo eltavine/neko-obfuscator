@@ -2353,6 +2353,7 @@ abstract class CffClassSetup extends CffSharedState {
             if (!TransformGuards.isGeneratedName(oldName)) continue;
             if (oldName.startsWith("__neko_class_integrity")) continue;
             if (oldName.startsWith("__neko_indysite$")) continue;
+            if (oldName.startsWith("__neko_strtail$")) continue;
             keys.add(owner + "." + newName + desc);
         }
         return keys;

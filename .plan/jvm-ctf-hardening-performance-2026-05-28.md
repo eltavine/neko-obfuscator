@@ -1906,7 +1906,7 @@ This plan will refresh that evidence before changing CFF performance code.
     permitted review was a scoped static diff audit plus the fresh runtime and
     regression evidence above. Review result: PASS for JCP-4E9A/JCP-4E9B scope.
 
-### [-] JCP-4E10: Repair Runtime String Tail Owner And Live-Word Binding
+### [x] JCP-4E10: Repair Runtime String Tail Owner And Live-Word Binding
 
 - Scope: repair the remaining generic runtime string decode failures exposed by
   full-profile `test-jars/full.jar` after the varargs/runtime-reflection
@@ -1948,6 +1948,66 @@ This plan will refresh that evidence before changing CFF performance code.
   derive the same full canonical live word as transform-time encryption;
   runtime string encryption, per-site seeds, CFF live key binding, and packed
   carrier hardening stay enabled.
+- Implementation/evidence:
+  - Pre-repair instrumentation showed two independent state mismatches. In a
+    constructor string-tail regression, the child constructor after-super
+    runtime state did not match the transform-time CFF state until
+    pre-protected constructor key transfer preserved and restored the original
+    method-entry key before protected CFF initialization. In the full `TEST`
+    artifact, `a/b.__neko_strtail$` had matching guard/path/block/methodKey
+    but a different raw pc token at runtime, proving raw `pcLocal` could be
+    perturbed inside a block while the canonical instruction token remained the
+    correct encryption input.
+  - CFF pre-protected key transfer now saves the original entry key before
+    constructor pre-super transfer and restores it before protected CFF entry
+    initialization. String callsites and string method-seed transfer now pass a
+    canonical pc token derived from live guard/path/block/method key material
+    and the transform-time instruction token rather than the mutable runtime
+    raw pc local.
+  - Generated string-tail helpers are excluded from relocated generated-helper
+    key sets so owner-bound string material and owner carriers remain aligned
+    after final generated-member remapping.
+  - Fresh post-canonical-pc `full.jar` no-quick evidence still failed only the
+    concurrent TLS string-tail path:
+    `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only perf --include perf.tls.concurrent-decrypt --verbose`
+    reported `StringIndexOutOfBoundsException` at `a.kg.ej`. Static source
+    inspection identified the remaining invariant: the string tail shared a
+    mutable key-cell `Object[]`, rotating epoch fields, shared cache table, and
+    cached `Cipher` instances across threads without a monitor. The failing
+    original path is `TlsConcurrentDecryptPerfTest.lambda$runRound$1` calling
+    `engineRoundTrip` from multiple platform threads, so concurrent decode of
+    the same protected string site could interleave key-cell rotation and
+    cipher use.
+  - The string tail now enters a monitor on the per-site key cell before
+    reading the key-cell descriptor/epoch/site metadata and exits after cache
+    read/write; an exception handler releases the monitor on all throwable
+    paths. This serializes only the mutable shared string decode state while
+    preserving encrypted payloads, live CFF/key inputs, per-site seeds, dynamic
+    key-cell rotation, and cache/fingerprint validation.
+  - Added focused regressions for constructor after-super string tails and
+    concurrent string-tail decode under the full JVM profile.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.packedConcurrentStringTailDecodeIsThreadSafe --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.packedConstructorStringTailUsesLiveCffState --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.packedInterfaceEntrySurvivesCrossClassStringTailDecode`.
+  - Fresh no-quick full-profile `full.jar` regeneration passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-obf.jar`,
+    writing 311 classes and 9 resources.
+  - Fresh no-quick focused full.jar targets passed:
+    `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.oop.inheritance-polymorphism --verbose`
+    reported `PASS features.oop.inheritance-polymorphism 29.657 ms`; and
+    `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only perf --include perf.tls.concurrent-decrypt --verbose`
+    reported `PERF perf.tls.concurrent-decrypt measure=116.562 ms`.
+  - Fresh combined JCP-4 ABI/string regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.packedConcurrentStringTailDecodeIsThreadSafe --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.packedConstructorStringTailUsesLiveCffState --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.packedInterfaceEntrySurvivesCrossClassStringTailDecode --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.varargsMetadataIsConsistentAfterFullProfilePacking --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serializationMagicMembersSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParametersMetadataSurvivesFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
+  - Cleanup evidence: `rg -n "DEBUG-JCP4E10|neko.debug.stringtail|StringTailDebug|appendDebugInt" neko-transforms/src/main/java/dev/nekoobfuscator/transforms/jvm neko-test/src/test/java/dev/nekoobfuscator/test .plan`
+    returned no matches.
+  - Implementation review note: the active multi-agent tool contract exposes
+    subagents but forbids spawning them unless the user explicitly asks for
+    sub-agents. The nearest permitted review was a scoped static diff audit
+    plus the fresh runtime and regression evidence above. Review result: PASS
+    for JCP-4E10 scope. The only noted tradeoff is intentional serialization
+    of mutable per-site string decode state; it preserves dynamic key-cell
+    rotation and shared-cache semantics and is evidence-backed by the
+    previously failing concurrent TLS target.
 
 ### [ ] JCP-4E9: Preserve Name-Sensitive Reflection Contracts
 
