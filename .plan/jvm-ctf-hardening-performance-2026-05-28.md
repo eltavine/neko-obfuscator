@@ -1187,6 +1187,207 @@ This plan will refresh that evidence before changing CFF performance code.
   no-quick full-profile run advanced to independent Java 21 ABI/metadata
   failures recorded under JCP-4E.
 
+### [ ] JCP-4E: Honor JVM Metadata ABI Surfaces Under Full Profile
+
+- Scope: parent task for generic JVM ABI and metadata surfaces that must keep
+  VM-defined shape while the rest of the class remains fully obfuscated. This
+  parent task records the observed fresh Java 21 failure surface; each ABI
+  family below must be repaired, reviewed, validated, and committed as its own
+  bounded high-risk subtask.
+- Required evidence before editing any child subtask: after JCP-4D's per-owner
+  string tail repair, fresh `test-jars/full.jar` obfuscation with
+  `test-jars/full-jvm-obf.yml` succeeds and
+  `java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --list`
+  succeeds without `quick` / `--quick`. The same fresh artifact run with no
+  application arguments reaches the Java 21 runner but emits independent
+  failures in record metadata, annotation defaults, external JDK reflective
+  lookups, service construction, serialization, enum switch/name behavior,
+  bridge methods, classfile metadata, and name-sensitive reflection.
+- Validation command or runtime target: after each child subtask, rerun its
+  focused regression, regenerate the fresh full-profile `full.jar`, and run
+  the relevant focused `--only features --include ...` target. After all child
+  subtasks pass, run the full artifact without `quick` / `--quick`.
+- Completion criteria: all JCP-4E child subtasks are complete; fresh full JVM
+  `full.jar` no-quick run no longer fails on JVM ABI/metadata surfaces;
+  eligible non-ABI application methods, constants, strings, CFF blocks, and
+  callsites remain fully transformed without fallback, skip-on-error, or
+  original bytecode rescue.
+
+### [ ] JCP-4E1: Preserve Record Metadata And Canonical Constructor ABI
+
+- Scope: first bounded JCP-4E repair slice. Preserve JVM record component
+  metadata, accessor naming, and canonical constructor ABI for record classes
+  as true JVM metadata/serialization surfaces, while preserving full
+  obfuscation for non-record-ABI methods and callsites in the same classes.
+- Required evidence before editing: a focused no-quick run
+  `java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.records.reflection`
+  exits 1 with `record component name expected <name> but got <b>`.
+  The original record class
+  `com/java21test/features/RecordsFeatureTest$Person` has `Record:` entries
+  `java.lang.String name` and `int age`, accessor methods `name()` and
+  `age()`, and public canonical constructor `(Ljava/lang/String;I)V` with
+  `MethodParameters` `name` and `age`. In the fresh full-obfuscated artifact,
+  the corresponding record class has `Record:` entries `java.lang.String a`
+  and `int b`, accessor methods renamed to packed `Object[]` entry methods,
+  and the public constructor shape changed to `([Ljava/lang/Object;J)V`.
+  Source inspection shows `JvmRenamerPass.Renamer.mapRecordComponentName`
+  explicitly maps record component names through the field member map, and
+  `JvmMethodParameterObfuscationPass.isEligible(...)` currently includes
+  original application record constructors in packed-parameter rewriting.
+- Validation command or runtime target: add a focused integration regression
+  for a record with reflected component names/accessors, canonical constructor
+  lookup/invocation, and serialization round trip under the full JVM transform
+  set; rerun
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest`;
+  regenerate `test-jars/full.jar` with `test-jars/full-jvm-obf.yml`; run
+  `java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.records.reflection`
+  and the record-canonical-constructor focused serialization regression
+  without `quick` / `--quick`. The broad
+  `java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.serialization.roundtrip`
+  target is non-blocking for JCP-4E1 unless bytecode evidence proves the
+  remaining failure is caused by record canonical constructor or record
+  metadata rather than the separate serialization-magic ABI surface assigned to
+  JCP-4E8.
+- Completion criteria: record component names/accessors and canonical
+  constructors reflect the JVM record ABI and the focused record/serialization
+  targets pass; non-record-ABI methods in record classes remain eligible for
+  CFF, string/constant/indy hardening, method-key propagation, and packed
+  carrier rewriting; no general constructor fallback or original-bytecode path
+  is introduced.
+
+### [ ] JCP-4E2: Preserve Annotation Default And Annotation Element ABI
+
+- Scope: repair annotation metadata surfaces separately from record metadata.
+  Annotation element methods and default values must remain valid JVM
+  annotation metadata while other eligible application code remains fully
+  transformed.
+- Required evidence before editing: collect source and bytecode proof for the
+  fresh focused failure
+  `features.jvm.annotation-defaults -> AnnotationFormatError: Invalid default`,
+  identifying the exact transform path that rewrites the annotation enum/type
+  default into invalid metadata.
+- Validation command or runtime target: add focused annotation-default
+  regression under the full JVM transform set, rerun the relevant integration
+  tests, regenerate full `full.jar`, and run the focused annotation target
+  without `quick` / `--quick`.
+- Completion criteria: annotation defaults and element lookups remain valid
+  JVM metadata; no broad annotation-class skip beyond true annotation ABI
+  surfaces is introduced.
+
+### [ ] JCP-4E3: Preserve External Reflection And MethodHandle ABI Boundaries
+
+- Scope: repair generic detection of external JDK/library members so
+  reflection and MethodHandle lookup descriptors for non-application targets
+  are not rewritten as packed application ABIs.
+- Required evidence before editing: collect source and bytecode proof for the
+  fresh focused failure
+  `features.jvm.tooling-jmx-jfr -> NoSuchMethodException:
+  jdk.jfr.Recording.start([Ljava.lang.Object;)`, identifying where an external
+  no-arg method lookup was rewritten to the internal packed descriptor.
+- Validation command or runtime target: add focused external-reflection and
+  external-MethodHandle regression, rerun relevant integration tests,
+  regenerate full `full.jar`, and run the tooling/JFR focused target without
+  `quick` / `--quick`.
+- Completion criteria: external JDK/library reflection and MethodHandle
+  descriptors preserve their true ABI; original application reflection paths
+  remain rewritten to the final obfuscated ABI.
+
+### [ ] JCP-4E4: Preserve Enum Class, Constant, And Switch ABI
+
+- Scope: repair enum-specific JVM ABI surfaces: enum class shape, constant
+  names/ordinals, synthetic switch map expectations, and `Enum.valueOf` /
+  `Class.isEnum` behavior.
+- Required evidence before editing: collect source and bytecode proof for the
+  fresh focused failures in enum switch/name behavior, including the exact
+  transform path that changes enum shape or corrupts switch helper state.
+- Validation command or runtime target: add focused enum regression under the
+  full JVM transform set, rerun relevant integration tests, regenerate full
+  `full.jar`, and run the enum focused targets without `quick` / `--quick`.
+- Completion criteria: enum ABI behavior passes focused targets; non-enum
+  application methods in enum-owning classes remain fully transformed where
+  JVM ABI permits.
+
+### [ ] JCP-4E5: Preserve Synthetic Bridge Method ABI
+
+- Scope: repair generic bridge method visibility and descriptor surfaces needed
+  by JVM dispatch, generic signatures, and reflection.
+- Required evidence before editing: collect source and bytecode proof for the
+  fresh focused bridge failures, including whether renaming, descriptor
+  packing, generated-member filtering, or signature rewriting hides the bridge.
+- Validation command or runtime target: add focused bridge/generic-signature
+  regression under the full JVM transform set, rerun relevant integration
+  tests, regenerate full `full.jar`, and run the bridge focused target without
+  `quick` / `--quick`.
+- Completion criteria: bridge methods required by JVM and reflection remain
+  visible with correct ABI descriptors; non-bridge application methods remain
+  fully transformed.
+
+### [ ] JCP-4E6: Preserve Service Provider Construction ABI
+
+- Scope: repair service-provider public no-arg construction and service
+  resource compatibility while retaining class/resource renaming and protected
+  method bodies where ABI permits.
+- Required evidence before editing: collect source and bytecode proof for the
+  fresh focused service-loader failure, including whether constructor packing,
+  access changes, resource rewriting, or provider class renaming caused
+  `ServiceLoader` to miss a public no-arg constructor.
+- Validation command or runtime target: add focused service-loader regression
+  under the full JVM transform set, rerun relevant integration tests,
+  regenerate full `full.jar`, and run the service focused target without
+  `quick` / `--quick`.
+- Completion criteria: service providers load and instantiate through the JDK
+  `ServiceLoader` ABI; provider implementation methods remain fully
+  obfuscated where JVM/library ABI permits.
+
+### [ ] JCP-4E7: Preserve Classfile MethodParameters Metadata ABI
+
+- Scope: repair method-parameter metadata surfaces that code can observe via
+  reflection, without exposing plaintext for non-ABI application lookup data.
+- Required evidence before editing: collect source and bytecode proof for the
+  fresh focused classfile metadata failure, identifying the exact pass that
+  removes or corrupts required `MethodParameters` attributes.
+- Validation command or runtime target: add focused `MethodParameters`
+  reflection regression under the full JVM transform set, rerun relevant
+  integration tests, regenerate full `full.jar`, and run the classfile metadata
+  focused target without `quick` / `--quick`.
+- Completion criteria: required `MethodParameters` metadata remains valid for
+  ABI surfaces; non-ABI reflective lookup data remains protected or rewritten
+  to the final obfuscated ABI.
+
+### [ ] JCP-4E8: Preserve Serialization Magic Member ABI
+
+- Scope: repair Java serialization magic surfaces such as `serialVersionUID`,
+  `serialPersistentFields`, `readResolve`, `writeReplace`, `readObject`,
+  `writeObject`, and record serialization constructor expectations.
+- Required evidence before editing: collect source and bytecode proof for the
+  fresh focused serialization failures, separating record canonical constructor
+  fallout already covered by JCP-4E1 from serialization-specific magic member
+  lookup or descriptor failures.
+- Validation command or runtime target: add focused serialization regression
+  under the full JVM transform set, rerun relevant integration tests,
+  regenerate full `full.jar`, and run serialization focused targets without
+  `quick` / `--quick`.
+- Completion criteria: Java serialization magic members and descriptors remain
+  discoverable by the JDK serialization runtime; ordinary application methods
+  remain fully transformed.
+
+### [ ] JCP-4E9: Preserve Name-Sensitive Reflection Contracts
+
+- Scope: repair remaining documented name-sensitive reflection contracts after
+  the ABI-specific subtasks above, including declared-member lookup results,
+  record component names, enum names, and explicitly stable names.
+- Required evidence before editing: collect source and bytecode proof for each
+  remaining focused name-sensitive failure after JCP-4E1 through JCP-4E8 have
+  passed, and classify whether the failure belongs to an existing ABI family or
+  needs a separate stable-name metadata rule.
+- Validation command or runtime target: add or update focused name-sensitive
+  reflection regressions under the full JVM transform set, rerun relevant
+  integration tests, regenerate full `full.jar`, and run name-sensitive focused
+  targets without `quick` / `--quick`.
+- Completion criteria: required name-sensitive reflection contracts pass while
+  non-contract reflective application data remains protected, rewritten, or
+  dynamically derived rather than emitted as plaintext fallback.
+
 ### [ ] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
 
 - Scope: collect fresh profiler/topology evidence for current full-obfuscated
