@@ -277,6 +277,28 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void serializationMagicMembersSurviveFullProfileAbiRewriting() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-serialization-abi"));
+        Path source = work.resolve("SerializationAbiEntry.java");
+        Files.writeString(source, serializationAbiSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("serialization-abi-entry.jar");
+        writeJar(inputJar, classes, "SerializationAbiEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("serialization-abi-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("SERIALIZATION ABI OK"), obfuscated);
+    }
+
+    @Test
     void packedInterfaceEntrySurvivesCrossClassStringTailDecode() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cross-class-string-tail"));
@@ -1732,6 +1754,140 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                         throw new AssertionError(value);
                     }
                     System.out.println("METHOD PARAMETERS ABI OK");
+                }
+            }
+            """;
+    }
+
+    private String serializationAbiSourceText() {
+        return """
+            import java.io.ByteArrayInputStream;
+            import java.io.ByteArrayOutputStream;
+            import java.io.InvalidObjectException;
+            import java.io.IOException;
+            import java.io.ObjectInputStream;
+            import java.io.ObjectOutputStream;
+            import java.io.ObjectStreamClass;
+            import java.io.ObjectStreamException;
+            import java.io.Serializable;
+            import java.util.Arrays;
+
+            public class SerializationAbiEntry {
+                static final class CustomData implements Serializable {
+                    private static final long serialVersionUID = 221L;
+                    private final String kept;
+                    private transient String transientValue;
+
+                    CustomData(String kept, String transientValue) {
+                        this.kept = kept;
+                        this.transientValue = transientValue;
+                    }
+
+                    String value() {
+                        return kept + ":" + transientValue;
+                    }
+
+                    private void writeObject(ObjectOutputStream out) throws IOException {
+                        out.defaultWriteObject();
+                        out.writeUTF(transientValue);
+                    }
+
+                    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+                        in.defaultReadObject();
+                        transientValue = in.readUTF();
+                    }
+                }
+
+                static final class CanonicalSingleton implements Serializable {
+                    static final CanonicalSingleton INSTANCE = new CanonicalSingleton();
+                    private static final long serialVersionUID = 222L;
+
+                    private Object readResolve() throws ObjectStreamException {
+                        return INSTANCE;
+                    }
+                }
+
+                static final class ProxyData implements Serializable {
+                    private static final long serialVersionUID = 223L;
+                    private final String value;
+
+                    ProxyData(String value) {
+                        this.value = value;
+                    }
+
+                    String value() {
+                        return value;
+                    }
+
+                    private Object writeReplace() {
+                        return new Proxy(value);
+                    }
+
+                    private void readObject(ObjectInputStream ignored) throws IOException {
+                        throw new InvalidObjectException("proxy required");
+                    }
+                }
+
+                static final class Proxy implements Serializable {
+                    private static final long serialVersionUID = 224L;
+                    private final String value;
+
+                    Proxy(String value) {
+                        this.value = value;
+                    }
+
+                    private Object readResolve() {
+                        return new ProxyData(value);
+                    }
+                }
+
+                static final class DefaultFields implements Serializable {
+                    private static final long serialVersionUID = 225L;
+                    public String publicValue = "public-field";
+                    private int privateNumber = 21;
+                    private transient int ignored = 7;
+                }
+
+                public static void main(String[] args) throws Exception {
+                    ObjectStreamClass streamClass = ObjectStreamClass.lookup(DefaultFields.class);
+                    if (streamClass.getSerialVersionUID() != 225L) {
+                        throw new AssertionError("serialVersionUID=" + streamClass.getSerialVersionUID());
+                    }
+                    if (!Arrays.stream(streamClass.getFields()).anyMatch(field -> "publicValue".equals(field.getName()))) {
+                        throw new AssertionError("publicValue");
+                    }
+                    if (!Arrays.stream(streamClass.getFields()).anyMatch(field -> "privateNumber".equals(field.getName()))) {
+                        throw new AssertionError("privateNumber");
+                    }
+                    if (Arrays.stream(streamClass.getFields()).anyMatch(field -> "ignored".equals(field.getName()))) {
+                        throw new AssertionError("ignored");
+                    }
+
+                    CustomData custom = (CustomData) roundTrip(new CustomData("head", "tail"));
+                    if (!"head:tail".equals(custom.value())) {
+                        throw new AssertionError(custom.value());
+                    }
+
+                    if (roundTrip(CanonicalSingleton.INSTANCE) != CanonicalSingleton.INSTANCE) {
+                        throw new AssertionError("readResolve");
+                    }
+
+                    ProxyData proxy = (ProxyData) roundTrip(new ProxyData("secret"));
+                    if (!"secret".equals(proxy.value())) {
+                        throw new AssertionError(proxy.value());
+                    }
+
+                    System.out.println("SERIALIZATION ABI OK");
+                }
+
+                private static Object roundTrip(Serializable value) throws Exception {
+                    ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                    try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+                        out.writeObject(value);
+                    }
+                    try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+                        return in.readObject();
+                    }
                 }
             }
             """;

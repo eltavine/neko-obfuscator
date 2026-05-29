@@ -10,6 +10,7 @@ import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmBridgeAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmEnumAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmSerializationAbi;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -270,7 +271,7 @@ public final class JvmRenamerPass implements TransformPass {
         for (L1Class clazz : classes) {
             Set<String> occupied = new HashSet<>();
             for (FieldNode field : clazz.asmNode().fields) {
-                if (!canRenameField(clazz, field)) {
+                if (!canRenameField(pctx, clazz, field)) {
                     occupied.add(field.name);
                 }
             }
@@ -278,7 +279,7 @@ public final class JvmRenamerPass implements TransformPass {
             List<FieldNode> fields = new ArrayList<>(clazz.asmNode().fields);
             fields.sort(Comparator.comparing((FieldNode f) -> f.name).thenComparing(f -> f.desc));
             for (FieldNode field : fields) {
-                if (!canRenameField(clazz, field)) continue;
+                if (!canRenameField(pctx, clazz, field)) continue;
                 String newName;
                 do {
                     newName = fieldNames.nextSimpleName();
@@ -440,6 +441,7 @@ public final class JvmRenamerPass implements TransformPass {
         if (clazz.isAnnotation()) return false;
         if (JvmBridgeAbi.isBridgeFamilyMethod(pctx, clazz, method)) return false;
         if (JvmEnumAbi.isEnumValuesMethod(clazz, method) || JvmEnumAbi.isEnumValueOfMethod(clazz, method)) return false;
+        if (JvmSerializationAbi.isSerializationMagicMethod(pctx, clazz, method)) return false;
         if ("main".equals(method.name)
             && "([Ljava/lang/String;)V".equals(method.desc)
             && (method.access & Opcodes.ACC_STATIC) != 0) {
@@ -449,9 +451,10 @@ public final class JvmRenamerPass implements TransformPass {
         return !overridesExternalMethod(pctx, clazz, method, method.desc);
     }
 
-    private boolean canRenameField(L1Class clazz, FieldNode field) {
+    private boolean canRenameField(PipelineContext pctx, L1Class clazz, FieldNode field) {
         if (JvmEnumAbi.isEnumConstantField(clazz, field)) return false;
         if (JvmRecordAbi.isRecordComponentField(clazz, field)) return false;
+        if (JvmSerializationAbi.isSerializationAbiField(pctx, clazz, field)) return false;
         return true;
     }
 

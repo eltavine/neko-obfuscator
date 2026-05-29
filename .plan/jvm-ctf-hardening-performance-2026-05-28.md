@@ -1710,7 +1710,7 @@ This plan will refresh that evidence before changing CFF performance code.
   - Fresh combined regression passed:
     `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParametersMetadataSurvivesFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
-### [ ] JCP-4E8: Preserve Serialization Magic Member ABI
+### [x] JCP-4E8: Preserve Serialization Magic Member ABI
 
 - Scope: repair Java serialization magic surfaces such as `serialVersionUID`,
   `serialPersistentFields`, `readResolve`, `writeReplace`, `readObject`,
@@ -1750,6 +1750,48 @@ This plan will refresh that evidence before changing CFF performance code.
 - Completion criteria: Java serialization magic members and descriptors remain
   discoverable by the JDK serialization runtime; ordinary application methods
   remain fully transformed.
+  - Implemented generic `JvmSerializationAbi` classification for classes that
+    implement `Serializable` or `Externalizable` directly or through
+    transformed application supertypes. It identifies serialization magic
+    methods, `serialVersionUID`, `serialPersistentFields`, and non-static /
+    non-transient default serialized fields whose names are observed by
+    `ObjectStreamClass`.
+  - `JvmRenamerPass` now preserves serialization magic method names and
+    serialized-form field names while continuing to rename ordinary methods,
+    transient fields, static non-magic fields, and helper members.
+  - `JvmKeyDispatchPass` and `JvmMethodParameterObfuscationPass` now keep
+    serialization magic method descriptors exact, so JDK serialization can
+    invoke `readObject`, `writeObject`, `readResolve`, and `writeReplace`
+    without hidden-key or packed-carrier ABI drift.
+  - `JvmConstantObfuscationPass` now preserves `serialVersionUID` as a real
+    static field value instead of moving it behind generated `<clinit>`
+    material.
+  - Added a full-profile regression fixture covering `serialVersionUID`,
+    default serialized field names, `readObject` / `writeObject`,
+    `readResolve`, and `writeReplace`.
+  - Implementation review note: the active multi-agent tool contract still
+    prevents spawning a sub-agent review without an explicit user request. The
+    nearest equivalent review was a scoped static diff audit plus the fresh
+    JUnit/runtime evidence listed here. Review result: PASS for JCP-4E8
+    serialization ABI scope; remaining full-suite failures are separate
+    recorded surfaces.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serializationMagicMembersSurviveFullProfileAbiRewriting`.
+  - Fresh full-profile `full.jar` obfuscation passed without quick mode:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`,
+    writing 317 classes and 9 resources in 25837 ms.
+  - Fresh no-quick focused `full.jar` serialization validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.jvm.serialization-proxy --include features.serialization.roundtrip --include features.name-sensitive.serialization-fields --verbose`,
+    with `PASS features.jvm.serialization-proxy 9.501 ms`,
+    `PASS features.serialization.roundtrip 12.316 ms`, and
+    `PASS features.name-sensitive.serialization-fields 3.633 ms`.
+  - Static runtime-artifact check: `javap -p -s a/od a/nd a/te` shows
+    `serialVersionUID`, `writeObject(ObjectOutputStream)`,
+    `readObject(ObjectInputStream)`, `readResolve()Object`,
+    `publicValue`, and `privateNumber` preserved, while the transient
+    `CustomData` field and non-magic static `STATIC_TOKEN` remain renamed.
+  - Fresh combined regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serializationMagicMembersSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParametersMetadataSurvivesFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
 ### [ ] JCP-4E9: Preserve Name-Sensitive Reflection Contracts
 

@@ -11,6 +11,7 @@ import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmSerializationAbi;
 import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import java.util.ArrayList;
@@ -601,6 +602,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         if (clazz.asmNode().fields == null) return 0;
         List<FieldNode> numericFields = new ArrayList<>();
         for (FieldNode field : clazz.asmNode().fields) {
+            if (JvmSerializationAbi.isSerialVersionUidField(field)) continue;
             if (field.value != null && isNumericConstantValue(field)) {
                 numericFields.add(field);
             }

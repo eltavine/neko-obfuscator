@@ -16,6 +16,7 @@ import dev.nekoobfuscator.transforms.jvm.internal.JvmEnumAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmMethodParametersAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmSerializationAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmServiceAbi;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import org.objectweb.asm.Handle;
@@ -797,6 +798,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (JvmServiceAbi.isServiceProviderNoArgConstructor(pctx, clazz, method)) return false;
         if (JvmBridgeAbi.isBridgeFamilyMethod(pctx, clazz, method)) return false;
         if (JvmMethodParametersAbi.isObservedMethodParametersMethod(pctx, clazz, method)) return false;
+        if (JvmSerializationAbi.isSerializationMagicMethod(pctx, clazz, method)) return false;
         if (JvmEnumAbi.isEnumAbiMethod(clazz, method)) return false;
         if (JvmRecordAbi.isRecordAbiMethod(clazz, method)) return false;
         if (!method.isConstructor() && overridesExternalMethod(pctx, clazz, method.asmNode(), method.descriptor())) return false;
