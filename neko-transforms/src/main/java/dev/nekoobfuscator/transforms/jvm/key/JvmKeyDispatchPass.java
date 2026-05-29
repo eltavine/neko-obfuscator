@@ -11,6 +11,7 @@ import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmBridgeAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmEnumAbi;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmMethodParametersAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
@@ -523,6 +524,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
                 if (TransformGuards.isRuntimeClass(clazz) || TransformGuards.isGeneratedMethod(method)) continue;
                 if (clazz.isAnnotation() || !canReceiveLongKey(method) || method.isNative()) continue;
                 if (JvmBridgeAbi.isBridgeFamilyMethod(pctx, clazz, method)) continue;
+                if (JvmMethodParametersAbi.isObservedMethodParametersMethod(pctx, clazz, method)) continue;
                 if (JvmEnumAbi.isEnumValuesMethod(clazz, method) || JvmEnumAbi.isEnumValueOfMethod(clazz, method)) continue;
                 if (JvmRecordAbi.isRecordComponentAccessor(clazz, method)) continue;
                 if (overridesExternalMethod(pctx, clazz, method.asmNode(), method.descriptor())) continue;
@@ -1004,7 +1006,26 @@ public final class JvmKeyDispatchPass implements TransformPass {
         if (lookup == null) return true;
         if (!pctx.classMap().containsKey(lookup.owner())) return false;
         Type[] parameterTypes = lookup.parameterTypes();
+        if (JvmMethodParametersAbi.isMethodParametersObserverLookup(
+            pctx,
+            mn,
+            lookup.owner(),
+            lookup.name(),
+            parameterTypes,
+            "getMethod".equals(call.name)
+        )) {
+            return false;
+        }
         if (parameterTypes == null) return true;
+        if (JvmMethodParametersAbi.isObservedMethodParametersLookup(
+            pctx,
+            lookup.owner(),
+            lookup.name(),
+            parameterTypes,
+            "getMethod".equals(call.name)
+        )) {
+            return false;
+        }
         MethodLookupKeyState state = methodLookupKeyState(
             pctx,
             lookup.owner(),

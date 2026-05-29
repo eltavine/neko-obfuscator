@@ -255,6 +255,28 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void methodParametersMetadataSurvivesFullProfileAbiRewriting() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-method-parameters-abi"));
+        Path source = work.resolve("MethodParametersAbiEntry.java");
+        Files.writeString(source, methodParametersAbiSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-parameters", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("method-parameters-abi-entry.jar");
+        writeJar(inputJar, classes, "MethodParametersAbiEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("method-parameters-abi-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("METHOD PARAMETERS ABI OK"), obfuscated);
+    }
+
+    @Test
     void packedInterfaceEntrySurvivesCrossClassStringTailDecode() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cross-class-string-tail"));
@@ -1661,6 +1683,55 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                         throw new AssertionError("provider constructor arity");
                     }
                     System.out.println("SERVICE ABI OK");
+                }
+            }
+            """;
+    }
+
+    private String methodParametersAbiSourceText() {
+        return """
+            import java.lang.reflect.Constructor;
+            import java.lang.reflect.Method;
+            import java.lang.reflect.Parameter;
+
+            public class MethodParametersAbiEntry {
+                static final class Target {
+                    private final String seed;
+
+                    Target(String seedName) {
+                        this.seed = seedName;
+                    }
+
+                    public String combine(String leftPart, int rightCount) {
+                        return seed + ":" + leftPart + ":" + rightCount;
+                    }
+                }
+
+                public static void main(String[] args) throws Exception {
+                    Method method = Target.class.getDeclaredMethod("combine", String.class, int.class);
+                    Parameter[] methodParameters = method.getParameters();
+                    if (methodParameters.length != 2
+                        || !methodParameters[0].isNamePresent()
+                        || !methodParameters[1].isNamePresent()
+                        || !"leftPart".equals(methodParameters[0].getName())
+                        || !"rightCount".equals(methodParameters[1].getName())) {
+                        throw new AssertionError("method-parameters");
+                    }
+
+                    Constructor<Target> constructor = Target.class.getDeclaredConstructor(String.class);
+                    Parameter[] constructorParameters = constructor.getParameters();
+                    if (constructorParameters.length != 1
+                        || !constructorParameters[0].isNamePresent()
+                        || !"seedName".equals(constructorParameters[0].getName())) {
+                        throw new AssertionError("constructor-parameters");
+                    }
+
+                    Target target = constructor.newInstance("seed");
+                    String value = (String) method.invoke(target, "value", 7);
+                    if (!"seed:value:7".equals(value)) {
+                        throw new AssertionError(value);
+                    }
+                    System.out.println("METHOD PARAMETERS ABI OK");
                 }
             }
             """;

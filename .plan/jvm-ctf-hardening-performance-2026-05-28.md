@@ -1632,13 +1632,34 @@ This plan will refresh that evidence before changing CFF performance code.
   - Fresh combined regression passed:
     `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
-### [ ] JCP-4E7: Preserve Classfile MethodParameters Metadata ABI
+### [x] JCP-4E7: Preserve Classfile MethodParameters Metadata ABI
 
 - Scope: repair method-parameter metadata surfaces that code can observe via
   reflection, without exposing plaintext for non-ABI application lookup data.
 - Required evidence before editing: collect source and bytecode proof for the
   fresh focused classfile metadata failure, identifying the exact pass that
   removes or corrupts required `MethodParameters` attributes.
+- Evidence before editing: the fresh no-quick focused run on the current
+  full-profile artifact failed with
+  `FAIL features.jvm.classfile-attributes AssertionError: classfile attribute MethodParameters missing in a/re.class`
+  and
+  `FAIL features.name-sensitive.method-parameters AssertionError: method parameter names not present; compile with -parameters`.
+  The fresh map shows
+  `com/java21test/features/namesensitive/ParameterNameFixture -> a/re` and
+  `ParameterNameFixture.combine(Ljava/lang/String;I)Ljava/lang/String; -> ue`.
+  Original `javap -v` shows `ParameterNameFixture.combine(String,int)` has a
+  `MethodParameters` attribute with `leftPart` and `rightCount`; the
+  full-obfuscated bytecode changed the method to
+  `public java.lang.String ue(java.lang.Object[])` and no
+  `MethodParameters` attribute remains. Source inspection identifies the exact
+  destructive path: `JvmKeyDispatchPass.prepareKeyedDescriptors(...)` can first
+  add a hidden `long` ABI to eligible methods, then
+  `JvmMethodParameterObfuscationPass.prepare(...)` packs the descriptor and
+  calls `cleanupParameterMetadata(mn)`, which sets `mn.parameters = null`.
+  Therefore any method whose parameter metadata is observed through an exact
+  reflective `Executable.getParameters()` path must be treated as a JVM
+  metadata ABI surface before both key-dispatch descriptor injection and
+  packed-carrier rewriting.
 - Validation command or runtime target: add focused `MethodParameters`
   reflection regression under the full JVM transform set, rerun relevant
   integration tests, regenerate full `full.jar`, and run the classfile metadata
@@ -1646,6 +1667,48 @@ This plan will refresh that evidence before changing CFF performance code.
 - Completion criteria: required `MethodParameters` metadata remains valid for
   ABI surfaces; non-ABI reflective lookup data remains protected or rewritten
   to the final obfuscated ABI.
+  - Implemented generic `JvmMethodParametersAbi` source-proven observer
+    analysis. It records only methods or constructors whose
+    `MethodParameters` metadata is observed through a resolved
+    `Executable.getParameters()` path, including exact
+    `getMethod`/`getDeclaredMethod` and constructor lookups with class-array
+    provenance.
+  - `JvmKeyDispatchPass` now preserves the original descriptor for those
+    observed metadata ABI surfaces before hidden `long` key injection, and it
+    avoids appending hidden key parameters to same-observer reflective lookups
+    whose target metadata surface is proven even when the pre-existing
+    parameter-array analyser cannot resolve every non-empty class array.
+  - `JvmMethodParameterObfuscationPass` now keeps those observed metadata ABI
+    surfaces out of packed-carrier descriptor rewriting and constructor suffix
+    injection. Ordinary methods without proven `getParameters()` observation
+    remain eligible for parameter packing and hidden-key propagation.
+  - Added a full-profile regression fixture compiled with `javac -parameters`.
+    It verifies reflective method and constructor parameter names with
+    `getParameters()`, then invokes the same members after obfuscation.
+  - Implementation review note: the active multi-agent tool contract still
+    prevents spawning a sub-agent review without an explicit user request. The
+    nearest equivalent review was a scoped static diff audit plus the fresh
+    JUnit/runtime evidence listed here. Review result: PASS for JCP-4E7
+    metadata ABI scope; remaining full-suite failures are separate recorded
+    surfaces.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParametersMetadataSurvivesFullProfileAbiRewriting`.
+  - Fresh full-profile `full.jar` obfuscation passed without quick mode:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`,
+    writing 314 classes and 9 resources in 27305 ms.
+  - Fresh no-quick focused `full.jar` metadata validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.jvm.classfile-attributes --include features.name-sensitive.method-parameters --verbose`,
+    with `PASS features.jvm.classfile-attributes 9.569 ms`,
+    `PASS features.name-sensitive.method-parameters 4.720 ms`, and
+    `Feature summary: passed=2 failed=0 skipped=59 nameSensitiveFailed=0`.
+  - Static runtime-artifact check: the fresh map shows
+    `ParameterNameFixture -> a/re` and `combine(Ljava/lang/String;I)Ljava/lang/String; -> ue`;
+    `javap -p -v a/re` shows
+    `public java.lang.String ue(java.lang.String, int)`,
+    descriptor `(Ljava/lang/String;I)Ljava/lang/String;`, and
+    `MethodParameters` names `leftPart` and `rightCount`.
+  - Fresh combined regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParametersMetadataSurvivesFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
 ### [ ] JCP-4E8: Preserve Serialization Magic Member ABI
 

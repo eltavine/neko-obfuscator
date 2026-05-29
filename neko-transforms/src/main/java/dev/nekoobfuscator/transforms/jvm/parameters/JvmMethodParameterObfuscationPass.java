@@ -13,6 +13,7 @@ import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.cff.ControlFlowFlatteningPass;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmBridgeAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmEnumAbi;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmMethodParametersAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmServiceAbi;
@@ -795,6 +796,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
         if (JvmServiceAbi.isServiceProviderNoArgConstructor(pctx, clazz, method)) return false;
         if (JvmBridgeAbi.isBridgeFamilyMethod(pctx, clazz, method)) return false;
+        if (JvmMethodParametersAbi.isObservedMethodParametersMethod(pctx, clazz, method)) return false;
         if (JvmEnumAbi.isEnumAbiMethod(clazz, method)) return false;
         if (JvmRecordAbi.isRecordAbiMethod(clazz, method)) return false;
         if (!method.isConstructor() && overridesExternalMethod(pctx, clazz, method.asmNode(), method.descriptor())) return false;
@@ -809,6 +811,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             for (L1Method method : clazz.methods()) {
                 if (!method.isConstructor() || method.isNative() || TransformGuards.isGeneratedMethod(method)) continue;
                 if (JvmServiceAbi.isServiceProviderNoArgConstructor(pctx, clazz, method)) continue;
+                if (JvmMethodParametersAbi.isObservedMethodParametersMethod(pctx, clazz, method)) continue;
                 if (JvmEnumAbi.isEnumConstructor(clazz, method)) continue;
                 if (JvmRecordAbi.isRecordCanonicalConstructor(clazz, method)) continue;
                 constructors.add(method);
