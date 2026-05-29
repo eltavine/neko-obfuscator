@@ -18,6 +18,7 @@ import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmSerializationAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmServiceAbi;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmVarargsMetadata;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
@@ -364,6 +365,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             if (mn == null) continue;
             mn.name = plan.finalName();
             mn.desc = plan.packedDesc();
+            JvmVarargsMetadata.normalizeAfterDescriptorRewrite(mn);
             cleanupParameterMetadata(mn);
             clazz.markDirty();
         }

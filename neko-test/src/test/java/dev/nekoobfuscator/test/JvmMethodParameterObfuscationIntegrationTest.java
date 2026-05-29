@@ -3,6 +3,7 @@ package dev.nekoobfuscator.test;
 import dev.nekoobfuscator.api.config.ObfuscationConfig;
 import dev.nekoobfuscator.api.config.TransformConfig;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
+import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.jar.JarInput;
 import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
@@ -299,6 +300,29 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void varargsMetadataIsConsistentAfterFullProfilePacking() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-varargs-metadata-abi"));
+        Path source = work.resolve("VarargsMetadataAbiEntry.java");
+        Files.writeString(source, varargsMetadataAbiSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("varargs-metadata-abi-entry.jar");
+        writeJar(inputJar, classes, "VarargsMetadataAbiEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("varargs-metadata-abi-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("VARARGS METADATA ABI OK"), obfuscated);
+        assertNoInvalidVarargsMetadata(outputJar);
+    }
+
+    @Test
     void packedInterfaceEntrySurvivesCrossClassStringTailDecode() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-cross-class-string-tail"));
@@ -515,6 +539,21 @@ public class JvmMethodParameterObfuscationIntegrationTest {
             }
         }
         assertTrue(guardedPackedMethods > 0, "no packed carrier attestation guards were found");
+    }
+
+    private void assertNoInvalidVarargsMetadata(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        for (L1Class clazz : input.classMap().values()) {
+            for (L1Method method : clazz.methods()) {
+                MethodNode mn = method.asmNode();
+                if ((mn.access & Opcodes.ACC_VARARGS) == 0) continue;
+                Type[] args = Type.getArgumentTypes(mn.desc);
+                assertTrue(
+                    args.length > 0 && args[args.length - 1].getSort() == Type.ARRAY,
+                    () -> "invalid ACC_VARARGS metadata in " + clazz.name() + "." + mn.name + mn.desc
+                );
+            }
+        }
     }
 
     private void assertForgedCarrierFails(Path work, Path jar) throws Exception {
@@ -1519,6 +1558,15 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     Method charAt = stringType.getDeclaredMethod("charAt", int.class);
                     int code = ((Character) charAt.invoke("abc", 1)).charValue();
 
+                    Method substring = runtimeExternalMethod(
+                        "abcdef",
+                        "substring",
+                        new Class<?>[] {int.class, int.class}
+                    );
+                    if (!"bcd".equals(substring.invoke("abcdef", 1, 4))) {
+                        throw new AssertionError("runtime-external-substring");
+                    }
+
                     Method callableCall = callableType.getMethod("call");
                     Callable<String> callable = () -> "external-call";
                     if (!"external-call".equals(callableCall.invoke(callable))) {
@@ -1555,6 +1603,11 @@ public class JvmMethodParameterObfuscationIntegrationTest {
 
                 static String call() {
                     return "local-call";
+                }
+
+                static Method runtimeExternalMethod(Object target, String name, Class<?>[] parameterTypes)
+                    throws Exception {
+                    return target.getClass().getMethod(name, parameterTypes);
                 }
             }
             """;
@@ -1888,6 +1941,43 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                     try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
                         return in.readObject();
                     }
+                }
+            }
+            """;
+    }
+
+    private String varargsMetadataAbiSourceText() {
+        return """
+            import java.lang.invoke.MethodHandle;
+            import java.lang.invoke.MethodHandles;
+            import java.lang.invoke.MethodType;
+            import java.lang.reflect.Method;
+
+            public class VarargsMetadataAbiEntry {
+                static final class Target {
+                    static Object join(String prefix, Object... values) {
+                        return prefix + ":" + values.length + ":" + values[0];
+                    }
+                }
+
+                public static void main(String[] args) throws Throwable {
+                    MethodHandle handle = MethodHandles.lookup().findStatic(
+                        Target.class,
+                        "join",
+                        MethodType.methodType(Object.class, String.class, Object[].class)
+                    );
+                    Object handleValue = handle.invokeExact("mh", new Object[] {"x", Integer.valueOf(7)});
+                    if (!"mh:2:x".equals(handleValue)) {
+                        throw new AssertionError(handleValue);
+                    }
+
+                    Method reflected = Target.class.getDeclaredMethod("join", String.class, Object[].class);
+                    Object reflectedValue = reflected.invoke(null, "rf", new Object[] {"y", Integer.valueOf(9)});
+                    if (!"rf:2:y".equals(reflectedValue)) {
+                        throw new AssertionError(reflectedValue);
+                    }
+
+                    System.out.println("VARARGS METADATA ABI OK");
                 }
             }
             """;

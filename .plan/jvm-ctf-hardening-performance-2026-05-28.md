@@ -1793,7 +1793,7 @@ This plan will refresh that evidence before changing CFF performance code.
   - Fresh combined regression passed:
     `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serializationMagicMembersSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParametersMetadataSurvivesFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
 
-### [ ] JCP-4E9A: Normalize Varargs Metadata After Descriptor Packing
+### [x] JCP-4E9A: Normalize Varargs Metadata After Descriptor Packing
 
 - Scope: repair transformed `ACC_VARARGS` methods whose final JVM descriptor no
   longer ends in an array after hidden-key or packed-carrier rewriting. This is
@@ -1825,6 +1825,86 @@ This plan will refresh that evidence before changing CFF performance code.
 - Completion criteria: descriptor-packed methods no longer expose invalid
   `ACC_VARARGS`; MethodHandle lookup of transformed varargs targets succeeds;
   hidden-key and packed-carrier rewriting remain active for those methods.
+- Implementation/evidence:
+  - Added `JvmVarargsMetadata.normalizeAfterDescriptorRewrite(...)` and call it
+    immediately after hidden-key descriptor injection and packed-carrier
+    descriptor rewriting. The helper clears `ACC_VARARGS` only when the final
+    descriptor no longer ends in an array; it does not preserve original
+    descriptors, remove hidden keys, remove packed carriers, or add adapters.
+  - Added a full-profile regression whose transformed varargs target is found
+    through `MethodHandles.Lookup.findStatic` and through reflection, and whose
+    output jar is statically audited for invalid `ACC_VARARGS` descriptors.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.varargsMetadataIsConsistentAfterFullProfilePacking`.
+  - Fresh no-quick full-profile obfuscation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData' neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-current-seed-invariant.jar`,
+    writing 313 classes and 9 resources.
+  - Static runtime-artifact check: `javap -classpath build/test-jvm-full-obf-perf/full-current-seed-invariant.jar -p a.ie a.rg`
+    shows `le(java.lang.Object[], long)` for both previously failing methods;
+    neither method is rendered as `Object...`, proving stale `ACC_VARARGS` is
+    absent on the final packed/keyed descriptor.
+
+### [x] JCP-4E9B: Bound Runtime Reflection Hidden-Key Injection To Proven Application Targets
+
+- Scope: repair runtime `Class.getMethod` / `getDeclaredMethod` callsites whose
+  lookup owner, name, or parameter array cannot be statically proven. These
+  sites must not receive a static hidden-key parameter-array rewrite unless the
+  transform can prove the lookup resolves to a keyed application ABI. This must
+  not preserve exact application reflection lookups, remove hidden keys from
+  proven application methods, add original-bytecode fallback, or special-case a
+  fixture.
+- Required evidence before editing: after the JCP-4E9A varargs metadata repair,
+  fresh no-quick `full.jar` validation advanced past the prior
+  `IllegalAccessException: cannot make variable arity` failure and exposed
+  `NoSuchMethodException: sun.misc.Unsafe.objectFieldOffset(java.lang.reflect.Field,long)`
+  in both `features.jvm.unsafe-varhandle-deep` and
+  `perf.unsafe-varhandle.deep`. Original bytecode for
+  `UnsafeVarHandleDeepFeatureTest$UnsafeAccess.invoke` shows a generic runtime
+  helper shape: `target.getClass().getMethod(name, parameterTypes)` followed by
+  `Method.invoke(target, args)`, where the owner, name, and parameter array are
+  method inputs rather than exact application constants. Current
+  `JvmKeyDispatchPass.methodLookupNeedsKey(...)` returns true when
+  `sourceReflectiveLookupTarget(...)` cannot prove the lookup, so it appends
+  `Long.TYPE` to an unproven runtime parameter array even though
+  `reflectiveInvokeTargetSeed(...)` cannot transfer a live application key for
+  that same unproven `Method.invoke` path. The failing external JDK lookup
+  proves the hidden-key parameter rewrite crossed the JVM/application ABI
+  boundary without a proven application target.
+- Validation command or runtime target: add a focused full-profile regression
+  for an external runtime reflection helper whose owner/name/parameter array are
+  passed through method inputs, rerun the external-reflection and varargs
+  regression group, regenerate `full.jar` without quick mode, and run
+  `features.jvm.unsafe-varhandle-deep` plus `perf.unsafe-varhandle.deep`
+  without `quick` / `--quick`.
+- Completion criteria: unproven runtime reflection helpers preserve external
+  JDK/library lookup descriptors; exact proven application reflection lookups
+  continue to receive the final obfuscated keyed ABI and live key transfer.
+- Implementation/evidence:
+  - `JvmKeyDispatchPass.methodLookupNeedsKey(...)` now returns false when
+    `sourceReflectiveLookupTarget(...)` cannot prove an owner/name/parameter
+    tuple. Proven application owners still flow through `methodLookupKeyState`
+    and receive hidden-key parameter-array rewriting only when the resolved
+    application ABI is keyed. Proven external owners still preserve their true
+    ABI.
+  - Extended the external-reflection full-profile regression with a runtime
+    helper that receives `Object target`, method name, and parameter array as
+    method inputs, then calls `target.getClass().getMethod(...)`; this covers
+    the same unproven runtime reflection shape as the full.jar Unsafe helper
+    without special-casing `Unsafe`.
+  - Fresh focused regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.varargsMetadataIsConsistentAfterFullProfilePacking`.
+  - Fresh no-quick full-profile `full.jar` validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.jvm.unsafe-varhandle-deep --verbose`,
+    with `PASS features.jvm.unsafe-varhandle-deep 26.719 ms`.
+  - Fresh no-quick perf target passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' timeout 120s java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only perf --include perf.unsafe-varhandle.deep --verbose`,
+    with `PERF perf.unsafe-varhandle.deep measure=4,240.002 ms`.
+  - Fresh combined regression passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/.gradle-user-home JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.varargsMetadataIsConsistentAfterFullProfilePacking --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serializationMagicMembersSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParametersMetadataSurvivesFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.serviceProviderConstructorsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.bridgeMethodsSurviveFullProfileAbiRewriting --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.annotationEnumDefaultsSurviveFullProfileRenaming --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.recordMetadataAndCanonicalConstructorSurviveFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.methodParameterObfuscationPacksEligibleMethodsIntoObjectArray --tests dev.nekoobfuscator.test.CffStrongEntrySeedRegressionTest.exactCalleesUseExternalEntrySeedWhileReflectiveEntriesRemainCanonical`.
+  - Implementation review note: the active multi-agent tool contract allows
+    spawning only when the user explicitly requests sub-agents. The nearest
+    permitted review was a scoped static diff audit plus the fresh runtime and
+    regression evidence above. Review result: PASS for JCP-4E9A/JCP-4E9B scope.
 
 ### [ ] JCP-4E9: Preserve Name-Sensitive Reflection Contracts
 

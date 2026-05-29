@@ -15,6 +15,7 @@ import dev.nekoobfuscator.transforms.jvm.internal.JvmMethodParametersAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmSerializationAbi;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmVarargsMetadata;
 import dev.nekoobfuscator.transforms.jvm.parameters.JvmMethodParameterObfuscationPass;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -123,6 +124,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
         if (keyedDescriptor) {
             int keyIndex = keyIndexMap(ctx).getOrDefault(originalMethodKey, Type.getArgumentTypes(originalDesc).length);
             incomingKeyLocal = addLongParameter(clazz, mn, keyIndex);
+            JvmVarargsMetadata.normalizeAfterDescriptorRewrite(mn);
             actualKeyedEntries(ctx).add(coverageKey(clazz.name(), mn.name, mn.desc));
             if (lambdaKeyIndexes(pctx).containsKey(originalMethodKey)) {
                 reusableKeyedEntries(ctx).add(coverageKey(clazz.name(), mn.name, mn.desc));
@@ -1005,7 +1007,7 @@ public final class JvmKeyDispatchPass implements TransformPass {
 
     private static boolean methodLookupNeedsKey(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
         ReflectiveLookup lookup = sourceReflectiveLookupTarget(pctx, mn, call);
-        if (lookup == null) return true;
+        if (lookup == null) return false;
         if (!pctx.classMap().containsKey(lookup.owner())) return false;
         Type[] parameterTypes = lookup.parameterTypes();
         if (JvmMethodParametersAbi.isMethodParametersObserverLookup(
