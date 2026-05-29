@@ -1906,6 +1906,49 @@ This plan will refresh that evidence before changing CFF performance code.
     permitted review was a scoped static diff audit plus the fresh runtime and
     regression evidence above. Review result: PASS for JCP-4E9A/JCP-4E9B scope.
 
+### [-] JCP-4E10: Repair Runtime String Tail Owner And Live-Word Binding
+
+- Scope: repair the remaining generic runtime string decode failures exposed by
+  full-profile `test-jars/full.jar` after the varargs/runtime-reflection
+  repairs. Runtime string decode tails must stay bound to the caller owner's
+  CFF carrier and must reconstruct the same canonical live word used when the
+  payload and string key material were generated. This subtask must not disable
+  string obfuscation, fall back to plaintext literals, preserve original
+  bytecode, reduce CFF coverage, or special-case a feature class.
+- Required evidence before editing: a fresh no-quick full-profile artifact
+  generated from current sources still fails the focused OOP target:
+  `java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only features --include features.oop.inheritance-polymorphism --verbose`
+  exits 1 with `StringIndexOutOfBoundsException: Range [4, 4 + 16934907) out
+  of bounds for length 16` at `a.nc.r`, where the map identifies
+  `a/nc.__neko_strtail$([Ljava/lang/Object;JIIIIII)Ljava/lang/String; -> r`.
+  The focused TLS perf target also fails without `quick`:
+  `java -jar build/test-jvm-full-obf-perf/full-current-seed-invariant.jar --only perf --include perf.tls.concurrent-decrypt --verbose`
+  reports `TLS concurrent decrypt failed`, caused by
+  `ArrayIndexOutOfBoundsException: Index 64276856 out of bounds for length 50`
+  at `a.jk.ej`. The map identifies the original generated helper as
+  `a/kg.__neko_strtail$([Ljava/lang/Object;JIIIIII)Ljava/lang/String; -> ej`,
+  but the runtime stack owner is `a.jk`, proving that large-helper relocation
+  can still move renamed generated string-tail helpers away from their caller
+  owner. Static source inspection of `CffClassSetup.renamedGeneratedMethodKeys`
+  shows relocation excludes `__neko_class_integrity*` and
+  `__neko_indysite$*`, but not `__neko_strtail$*`. Static bytecode inspection
+  also shows `a.nc.r` remains in its owner and fails independently, so the
+  repair must additionally prove and fix the canonical live-word mismatch for
+  non-relocated string tails rather than only excluding relocation.
+- Validation command or runtime target: add or update a focused regression for
+  relocated/generated string-tail ownership or live-word reconstruction if a
+  correct repository seam exists; rerun the string/CFF regression group;
+  regenerate `test-jars/full.jar` with `test-jars/full-jvm-obf.yml`; run
+  `features.oop.inheritance-polymorphism` and `perf.tls.concurrent-decrypt`
+  without `quick` / `--quick`; and include the JCP-4E combined ABI regression
+  group before committing.
+- Completion criteria: fresh full-profile `full.jar` no-quick focused OOP and
+  TLS targets no longer fail in `__neko_strtail$`; relocated helper hosts no
+  longer break owner-bound string-tail material; non-relocated string tails
+  derive the same full canonical live word as transform-time encryption;
+  runtime string encryption, per-site seeds, CFF live key binding, and packed
+  carrier hardening stay enabled.
+
 ### [ ] JCP-4E9: Preserve Name-Sensitive Reflection Contracts
 
 - Scope: repair remaining documented name-sensitive reflection contracts after
