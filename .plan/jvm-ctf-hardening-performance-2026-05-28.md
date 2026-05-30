@@ -2084,7 +2084,7 @@ This plan will refresh that evidence before changing CFF performance code.
   nearest permitted review before implementation is this scoped static evidence
   audit plus the fresh runtime validation above.
 
-### [ ] JCP-4E12: Remap Proven Dynamic-Proxy Handler Method Name Views
+### [x] JCP-4E12: Remap Proven Dynamic-Proxy Handler Method Name Views
 
 - Scope: repair `java.lang.reflect.Proxy` invocation-handler method-name
   comparisons after application interface method renaming and parameter packing.
@@ -2114,10 +2114,67 @@ This plan will refresh that evidence before changing CFF performance code.
   `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.dynamic-proxy --verbose`
   without `quick` / `--quick`.
 - Completion criteria: proven application proxy interface method-name
-  comparisons match final obfuscated names and the dynamic-proxy focused
-  full.jar target passes; unproven/external `Method.getName()` comparisons keep
-  their true ABI names; string/constant protection and invokeDynamic protection
-  still process the rewritten constants.
+  comparisons match final obfuscated names; unproven/external
+  `Method.getName()` comparisons keep their true ABI names; string/constant
+  protection and invokeDynamic protection still process the rewritten
+  constants. The original full.jar dynamic-proxy target is not marked complete
+  by this subtask because the fresh post-fix evidence advances to a distinct
+  packed-argument handler-array failure, recorded below as JCP-4E13.
+- Plan-intake review note: the active multi-agent tool contract forbids
+  spawning a subagent unless the user explicitly requests sub-agents. The
+  nearest permitted review before implementation is this scoped static evidence
+  audit plus the fresh runtime validation above.
+- Completion evidence: `JvmRenamerPass` now builds a provenance map from
+  `Proxy.newProxyInstance` sites to LambdaMetafactory invocation-handler
+  implementation methods. For each proven handler local that receives the
+  `java.lang.reflect.Method` argument, it rewrites only string literals that
+  are dataflow-proven to compare against `Method.getName()` for the proxied
+  application interface owner set. A focused full-profile regression
+  `JvmRenamerDynamicProxyIntegrationTest.dynamicProxyHandlerMethodGetNameUsesRenamedApplicationInterfaceNameUnderFullProfile`
+  passed under the full JVM profile with renamer, keyDispatch,
+  methodParameterObfuscation, CFF, validation-sink hardening, invokeDynamic,
+  constant obfuscation, and string obfuscation enabled.
+- Validation evidence: fresh command
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRenamerDynamicProxyIntegrationTest.dynamicProxyHandlerMethodGetNameUsesRenamedApplicationInterfaceNameUnderFullProfile --no-daemon`
+  passed. A layered runtime diagnostic on the same minimal fixture showed the
+  failure mode changes from method-name mismatch to
+  `ClassCastException: class [Ljava.lang.Object; cannot be cast to class java.lang.Integer`
+  after the handler enters the correct branch and reads `values[0]`. This
+  proves the remaining dynamic-proxy failure belongs to packed argument-array
+  view adaptation, not the method-name remap.
+
+### [ ] JCP-4E13: Adapt Proven Dynamic-Proxy Handler Argument Arrays To Packed Application ABI
+
+- Scope: repair `java.lang.reflect.Proxy` invocation-handler argument-array
+  views for proven application interface calls after method-parameter
+  obfuscation packs interface parameters into an `Object[]` carrier and hidden
+  key material. The repair must be provenance-driven from the same
+  `Proxy.newProxyInstance` interface `Class[]` and LambdaMetafactory handler
+  implementation evidence used by JCP-4E12. It must adapt handler reads of the
+  `Object[] args` local so original source-level argument indexing observes the
+  unpacked application arguments, while preserving packed ABI at the actual
+  proxy method boundary and without adding fallback bridges or preserving
+  original descriptors.
+- Required evidence before editing: after JCP-4E12, layered full-profile
+  dynamic-proxy validation no longer throws
+  `UnsupportedOperationException` for the renamed method. It now fails with
+  `ClassCastException: class [Ljava.lang.Object; cannot be cast to class java.lang.Integer`
+  inside the invocation handler because the JDK proxy supplies the final
+  interface ABI argument array, whose first element is the packed carrier
+  `Object[]`, while the original handler bytecode still treats `args[0]` and
+  `args[1]` as the original `Integer` arguments.
+- Validation command or runtime target: add or extend a focused full-profile
+  dynamic-proxy regression whose handler reads multiple original arguments from
+  the `Object[] args` local; rerun the focused renamer/proxy and method
+  parameter regression targets; regenerate `test-jars/full.jar` with
+  `test-jars/full-jvm-obf.yml`; run
+  `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.dynamic-proxy --verbose`
+  without `quick` / `--quick`.
+- Completion criteria: proven application dynamic-proxy invocation handlers
+  observe the original argument-array view while the proxied interface keeps
+  its final obfuscated packed ABI; external/unproven proxy handlers keep true
+  JDK argument-array semantics; dynamic-proxy focused full.jar target passes
+  with full JVM transforms enabled and no fallback or descriptor preservation.
 - Plan-intake review note: the active multi-agent tool contract forbids
   spawning a subagent unless the user explicitly requests sub-agents. The
   nearest permitted review before implementation is this scoped static evidence

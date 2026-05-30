@@ -13,6 +13,7 @@ import dev.nekoobfuscator.transforms.jvm.internal.JvmRecordAbi;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmSerializationAbi;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.commons.ClassRemapper;
 import org.objectweb.asm.commons.Remapper;
@@ -134,6 +135,8 @@ public final class JvmRenamerPass implements TransformPass {
         Map<MemberKey, String> membersByOldKey = buildMemberMap(pctx, renameClasses);
         Map<String, Map<String, String>> methodNameMap = methodNameMap(membersByOldKey);
         Map<String, Map<String, String>> fieldNameMap = fieldNameMap(membersByOldKey);
+        Map<MemberKey, Map<Integer, Set<String>>> proxyHandlerMethodOwners =
+            dynamicProxyHandlerMethodOwners(pctx, remapClasses);
 
         Renamer remapper = new Renamer(pctx.classMap(), classesByOldName, membersByOldKey);
         var coverage = dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage.get(pctx);
@@ -142,7 +145,13 @@ public final class JvmRenamerPass implements TransformPass {
         for (L1Class clazz : remapClasses) {
             String originalName = clazz.name();
             originalNames.put(clazz, originalName);
-            rewriteReflectiveStrings(clazz.asmNode(), classesByOldName, methodNameMap, fieldNameMap);
+            rewriteReflectiveStrings(
+                clazz.asmNode(),
+                classesByOldName,
+                methodNameMap,
+                fieldNameMap,
+                proxyHandlerMethodOwners
+            );
             rewriteAnnotationEnumValueNames(clazz.asmNode(), membersByOldKey);
             ClassNode remapped = new ClassNode();
             clazz.asmNode().accept(new ClassRemapper(remapped, remapper));
@@ -484,7 +493,8 @@ public final class JvmRenamerPass implements TransformPass {
         ClassNode node,
         Map<String, String> classes,
         Map<String, Map<String, String>> methodNames,
-        Map<String, Map<String, String>> fieldNames
+        Map<String, Map<String, String>> fieldNames,
+        Map<MemberKey, Map<Integer, Set<String>>> proxyHandlerMethodOwners
     ) {
         Map<String, String> classStrings = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : classes.entrySet()) {
@@ -547,7 +557,350 @@ public final class JvmRenamerPass implements TransformPass {
                     }
                 }
             }
+            if (proxyHandlerMethodOwners.containsKey(MemberKey.method(node.name, method.name, method.desc))) {
+                if (frames == null) {
+                    frames = analyzeSourceValuesQuietly(method);
+                }
+                rewriteDynamicProxyMethodNameComparisons(
+                    node.name,
+                    method,
+                    frames,
+                    proxyHandlerMethodOwners,
+                    methodNames
+                );
+            }
         }
+    }
+
+    private Map<MemberKey, Map<Integer, Set<String>>> dynamicProxyHandlerMethodOwners(
+        PipelineContext pctx,
+        List<L1Class> classes
+    ) {
+        Map<MemberKey, Map<Integer, Set<String>>> out = new LinkedHashMap<>();
+        for (L1Class clazz : classes) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                Frame<SourceValue>[] frames = analyzeSourceValuesQuietly(method);
+                if (frames == null) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof MethodInsnNode call) || !isProxyNewProxyInstance(call)) continue;
+                    int index = method.instructions.indexOf(call);
+                    if (index < 0 || index >= frames.length) continue;
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame == null || frame.getStackSize() < 3) continue;
+                    int base = frame.getStackSize() - 3;
+                    Set<String> interfaces = sourceProxyInterfaceOwners(
+                        pctx,
+                        method,
+                        frames,
+                        frame.getStack(base + 1),
+                        0
+                    );
+                    if (interfaces.isEmpty()) {
+                        interfaces = nearbyProxyInterfaceOwners(pctx, method, call);
+                    }
+                    if (interfaces.isEmpty()) continue;
+                    Handle implementation = sourceLambdaImplementationHandle(
+                        method,
+                        frames,
+                        frame.getStack(base + 2),
+                        0
+                    );
+                    if (implementation == null) {
+                        implementation = nearbyInvocationHandlerLambdaImplementation(method, call);
+                    }
+                    if (implementation == null || implementation.getTag() != Opcodes.H_INVOKESTATIC) continue;
+                    if (!pctx.classMap().containsKey(implementation.getOwner())) continue;
+                    int methodLocal = reflectiveMethodArgumentLocal(implementation);
+                    if (methodLocal < 0) continue;
+                    out.computeIfAbsent(
+                            MemberKey.method(
+                                implementation.getOwner(),
+                                implementation.getName(),
+                                implementation.getDesc()
+                            ),
+                            ignored -> new LinkedHashMap<>()
+                        )
+                        .computeIfAbsent(methodLocal, ignored -> new LinkedHashSet<>())
+                        .addAll(interfaces);
+                }
+            }
+        }
+        return out;
+    }
+
+    private boolean isProxyNewProxyInstance(MethodInsnNode call) {
+        return call.getOpcode() == Opcodes.INVOKESTATIC
+            && "java/lang/reflect/Proxy".equals(call.owner)
+            && "newProxyInstance".equals(call.name)
+            && "(Ljava/lang/ClassLoader;[Ljava/lang/Class;Ljava/lang/reflect/InvocationHandler;)Ljava/lang/Object;"
+                .equals(call.desc);
+    }
+
+    private Set<String> sourceProxyInterfaceOwners(
+        PipelineContext pctx,
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 8) return Set.of();
+        Set<String> owners = new LinkedHashSet<>();
+        for (AbstractInsnNode source : value.insns) {
+            if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                owners.addAll(sourceProxyInterfaceOwners(pctx, method, frames, loadedLocalValue(method, frames, var), depth + 1));
+                continue;
+            }
+            if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                owners.addAll(sourceProxyInterfaceOwners(pctx, method, frames, storedValue(method, frames, var), depth + 1));
+                continue;
+            }
+            if (source instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                owners.addAll(sourceProxyInterfaceOwners(pctx, method, frames, castInputValue(method, frames, type), depth + 1));
+                continue;
+            }
+            if (source.getOpcode() == Opcodes.AASTORE) {
+                int index = method.instructions.indexOf(source);
+                if (index < 0 || index >= frames.length) continue;
+                Frame<SourceValue> frame = frames[index];
+                if (frame == null || frame.getStackSize() < 3) continue;
+                String owner = sourceClassObjectOwner(method, frames, frame.getStack(frame.getStackSize() - 1), depth + 1);
+                addProxyInterfaceOwner(pctx, owners, owner);
+            }
+        }
+        return owners;
+    }
+
+    private Set<String> nearbyProxyInterfaceOwners(PipelineContext pctx, MethodNode method, MethodInsnNode call) {
+        Set<String> owners = new LinkedHashSet<>();
+        int scanned = 0;
+        for (AbstractInsnNode scan = call.getPrevious(); scan != null && scanned++ < 64; scan = scan.getPrevious()) {
+            if (scan instanceof LdcInsnNode ldc
+                && ldc.cst instanceof Type type
+                && type.getSort() == Type.OBJECT) {
+                addProxyInterfaceOwner(pctx, owners, type.getInternalName());
+            }
+            if (scan instanceof MethodInsnNode previous
+                && "java/lang/reflect/Proxy".equals(previous.owner)
+                && "newProxyInstance".equals(previous.name)) {
+                break;
+            }
+            if (method.instructions.indexOf(scan) == 0) break;
+        }
+        return owners;
+    }
+
+    private void addProxyInterfaceOwner(PipelineContext pctx, Set<String> owners, String owner) {
+        if (owner == null) return;
+        L1Class clazz = pctx.classMap().get(owner);
+        if (clazz == null || !clazz.isInterface()) return;
+        if (!owners.add(owner)) return;
+        for (String parent : clazz.interfaces()) {
+            addProxyInterfaceOwner(pctx, owners, parent);
+        }
+    }
+
+    private Handle sourceLambdaImplementationHandle(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 8) return null;
+        Handle result = null;
+        for (AbstractInsnNode source : value.insns) {
+            Handle sourced = null;
+            if (source instanceof InvokeDynamicInsnNode indy) {
+                sourced = lambdaImplementationHandle(indy);
+            } else if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceLambdaImplementationHandle(method, frames, loadedLocalValue(method, frames, var), depth + 1);
+            } else if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceLambdaImplementationHandle(method, frames, storedValue(method, frames, var), depth + 1);
+            } else if (source instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceLambdaImplementationHandle(method, frames, castInputValue(method, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && !sameHandle(result, sourced)) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private Handle nearbyInvocationHandlerLambdaImplementation(MethodNode method, MethodInsnNode call) {
+        int scanned = 0;
+        for (AbstractInsnNode scan = call.getPrevious(); scan != null && scanned++ < 32; scan = scan.getPrevious()) {
+            if (scan instanceof InvokeDynamicInsnNode indy && isInvocationHandlerLambda(indy)) {
+                return lambdaImplementationHandle(indy);
+            }
+            if (scan instanceof MethodInsnNode) break;
+            if (method.instructions.indexOf(scan) == 0) break;
+        }
+        return null;
+    }
+
+    private boolean isInvocationHandlerLambda(InvokeDynamicInsnNode indy) {
+        Handle handle = lambdaImplementationHandle(indy);
+        if (handle == null) return false;
+        Type returnType = Type.getReturnType(indy.desc);
+        return returnType.getSort() == Type.OBJECT
+            && "java/lang/reflect/InvocationHandler".equals(returnType.getInternalName());
+    }
+
+    private boolean sameHandle(Handle left, Handle right) {
+        return left.getTag() == right.getTag()
+            && left.isInterface() == right.isInterface()
+            && left.getOwner().equals(right.getOwner())
+            && left.getName().equals(right.getName())
+            && left.getDesc().equals(right.getDesc());
+    }
+
+    private Handle lambdaImplementationHandle(InvokeDynamicInsnNode indy) {
+        if (indy.bsm == null
+            || !"java/lang/invoke/LambdaMetafactory".equals(indy.bsm.getOwner())
+            || (!"metafactory".equals(indy.bsm.getName()) && !"altMetafactory".equals(indy.bsm.getName()))
+            || indy.bsmArgs.length < 2
+            || !(indy.bsmArgs[1] instanceof Handle handle)) {
+            return null;
+        }
+        return handle;
+    }
+
+    private int reflectiveMethodArgumentLocal(Handle implementation) {
+        Type[] args = Type.getArgumentTypes(implementation.getDesc());
+        int local = 0;
+        for (Type arg : args) {
+            if (arg.getSort() == Type.OBJECT && "java/lang/reflect/Method".equals(arg.getInternalName())) {
+                return local;
+            }
+            local += arg.getSize();
+        }
+        return -1;
+    }
+
+    private void rewriteDynamicProxyMethodNameComparisons(
+        String owner,
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        Map<MemberKey, Map<Integer, Set<String>>> proxyHandlerMethodOwners,
+        Map<String, Map<String, String>> methodNames
+    ) {
+        if (frames == null) return;
+        Map<Integer, Set<String>> ownersByLocal = proxyHandlerMethodOwners.get(
+            MemberKey.method(owner, method.name, method.desc)
+        );
+        if (ownersByLocal == null || ownersByLocal.isEmpty()) return;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (!(insn instanceof MethodInsnNode call) || !isStringEquals(call)) continue;
+            int index = method.instructions.indexOf(call);
+            if (index < 0 || index >= frames.length) continue;
+            Frame<SourceValue> frame = frames[index];
+            if (frame == null || frame.getStackSize() < 2) continue;
+            SourceValue receiver = frame.getStack(frame.getStackSize() - 2);
+            SourceValue argument = frame.getStack(frame.getStackSize() - 1);
+            if (!rewriteDynamicProxyMethodNameComparison(method, frames, receiver, argument, ownersByLocal, methodNames)) {
+                rewriteDynamicProxyMethodNameComparison(method, frames, argument, receiver, ownersByLocal, methodNames);
+            }
+        }
+    }
+
+    private boolean rewriteDynamicProxyMethodNameComparison(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        SourceValue literalValue,
+        SourceValue methodNameValue,
+        Map<Integer, Set<String>> ownersByLocal,
+        Map<String, Map<String, String>> methodNames
+    ) {
+        String oldName = sourceString(method, frames, literalValue, 0);
+        if (oldName == null) return false;
+        Integer methodLocal = sourceMethodGetNameLocal(method, frames, methodNameValue, 0);
+        if (methodLocal == null) return false;
+        Set<String> owners = ownersByLocal.get(methodLocal);
+        if (owners == null || owners.isEmpty()) return false;
+        String mapped = uniqueProxyMethodName(owners, methodNames, oldName);
+        if (mapped == null || mapped.equals(oldName)) return false;
+        LdcInsnNode literal = sourceStringLiteral(method, frames, literalValue, oldName, 0);
+        if (literal == null) return false;
+        literal.cst = mapped;
+        return true;
+    }
+
+    private boolean isStringEquals(MethodInsnNode call) {
+        return "java/lang/String".equals(call.owner)
+            && "equals".equals(call.name)
+            && "(Ljava/lang/Object;)Z".equals(call.desc);
+    }
+
+    private Integer sourceMethodGetNameLocal(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 8) return null;
+        Integer result = null;
+        for (AbstractInsnNode source : value.insns) {
+            Integer sourced = null;
+            if (source instanceof MethodInsnNode call && isReflectiveMethodGetName(call)) {
+                int index = method.instructions.indexOf(call);
+                if (index < 0 || index >= frames.length) return null;
+                Frame<SourceValue> frame = frames[index];
+                if (frame == null || frame.getStackSize() < 1) return null;
+                sourced = sourceLoadLocal(method, frames, frame.getStack(frame.getStackSize() - 1), depth + 1);
+            } else if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceMethodGetNameLocal(method, frames, loadedLocalValue(method, frames, var), depth + 1);
+            } else if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceMethodGetNameLocal(method, frames, storedValue(method, frames, var), depth + 1);
+            } else if (source instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceMethodGetNameLocal(method, frames, castInputValue(method, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && !result.equals(sourced)) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private boolean isReflectiveMethodGetName(MethodInsnNode call) {
+        return "java/lang/reflect/Method".equals(call.owner)
+            && "getName".equals(call.name)
+            && "()Ljava/lang/String;".equals(call.desc);
+    }
+
+    private Integer sourceLoadLocal(MethodNode method, Frame<SourceValue>[] frames, SourceValue value, int depth) {
+        if (value == null || depth > 8) return null;
+        Integer result = null;
+        for (AbstractInsnNode source : value.insns) {
+            Integer sourced = null;
+            if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = var.var;
+            } else if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                sourced = sourceLoadLocal(method, frames, storedValue(method, frames, var), depth + 1);
+            } else if (source instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                sourced = sourceLoadLocal(method, frames, castInputValue(method, frames, type), depth + 1);
+            }
+            if (sourced == null) return null;
+            if (result != null && !result.equals(sourced)) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private String uniqueProxyMethodName(
+        Set<String> owners,
+        Map<String, Map<String, String>> methodNames,
+        String oldName
+    ) {
+        String mapped = null;
+        for (String owner : owners) {
+            Map<String, String> ownerNames = methodNames.get(owner);
+            if (ownerNames == null) continue;
+            String candidate = ownerNames.get(oldName);
+            if (candidate == null) continue;
+            if (mapped != null && !mapped.equals(candidate)) return null;
+            mapped = candidate;
+        }
+        return mapped;
     }
 
     private void rewriteLambdaName(
