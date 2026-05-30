@@ -2084,6 +2084,45 @@ This plan will refresh that evidence before changing CFF performance code.
   nearest permitted review before implementation is this scoped static evidence
   audit plus the fresh runtime validation above.
 
+### [ ] JCP-4E12: Remap Proven Dynamic-Proxy Handler Method Name Views
+
+- Scope: repair `java.lang.reflect.Proxy` invocation-handler method-name
+  comparisons after application interface method renaming and parameter packing.
+  The repair must be provenance-driven: derive the proxied application
+  interfaces from the `Proxy.newProxyInstance` interface `Class[]`, derive the
+  LambdaMetafactory implementation method that receives the
+  `java.lang.reflect.Method` argument, and rewrite only the proven
+  `Method.getName()` comparison constants for those interface methods to the
+  final obfuscated names. It must not globally rewrite same-spelled strings,
+  preserve original interface method names/descriptors, special-case
+  `DynamicProxyFeatureTest`, or alter external/JDK proxy handlers.
+- Required evidence before editing: fresh no-quick
+  `build/test-jvm-full-obf-perf/full-obf.jar` focused validation of
+  `features.dynamic-proxy` fails with
+  `UnsupportedOperationException: public abstract int a.z.y(java.lang.Object[])`.
+  Original `DynamicProxyFeatureTest.lambda$run$0(Object, Method, Object[])`
+  compares `ldc "add"` with `Method.getName()`, while the proxied application
+  interface method `Calculator.add(int,int)` is renamed and packed to
+  `a.z.y(Object[])`; the runtime `Method` therefore reports the final name
+  `y`, but the handler still compares against the old string.
+- Validation command or runtime target: add a focused full-profile dynamic proxy
+  regression that uses `Proxy.newProxyInstance` with a lambda
+  `InvocationHandler` comparing `Method.getName()` for an application interface
+  method and for an external/Object method; rerun the focused renamer/proxy
+  regression; regenerate `test-jars/full.jar` with `test-jars/full-jvm-obf.yml`;
+  run
+  `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.dynamic-proxy --verbose`
+  without `quick` / `--quick`.
+- Completion criteria: proven application proxy interface method-name
+  comparisons match final obfuscated names and the dynamic-proxy focused
+  full.jar target passes; unproven/external `Method.getName()` comparisons keep
+  their true ABI names; string/constant protection and invokeDynamic protection
+  still process the rewritten constants.
+- Plan-intake review note: the active multi-agent tool contract forbids
+  spawning a subagent unless the user explicitly requests sub-agents. The
+  nearest permitted review before implementation is this scoped static evidence
+  audit plus the fresh runtime validation above.
+
 ### [x] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
 
 - Scope: collect fresh profiler/topology evidence for current full-obfuscated
