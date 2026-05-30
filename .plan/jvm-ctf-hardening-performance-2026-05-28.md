@@ -2026,6 +2026,43 @@ This plan will refresh that evidence before changing CFF performance code.
   non-contract reflective application data remains protected, rewritten, or
   dynamically derived rather than emitted as plaintext fallback.
 
+### [ ] JCP-4E11: Propagate Lambda-Captured Reflective Method Targets
+
+- Scope: repair escaped reflective `Method` provenance through
+  LambdaMetafactory capture sites. When a proven application `Method` object is
+  captured by a lambda implementation method, the lambda implementation's
+  reflective `Method.invoke` call must receive the same target plan used to
+  rewrite the original lookup, so packed `Object[]` carriers and hidden-key
+  suffixes are applied to the invocation arguments. This must not rewrite
+  unproven runtime/external reflection, preserve original application
+  descriptors, add adapters, or special-case a fixture.
+- Required evidence before editing: fresh no-quick
+  `build/test-jvm-full-obf-perf/full-obf.jar` focused validation of
+  `perf.reflection.method-invoke` exits with
+  `IllegalArgumentException: wrong number of arguments: 2 expected: 1`.
+  Original bytecode for `ReflectionPerfTest.run` obtains
+  `Target.add(int,int)` by `Class.getMethod`, captures that `Method` into a
+  LambdaMetafactory `LongOperation`, and invokes it inside
+  `lambda$run$0(int, Method, Target)`. The obfuscated runtime error proves the
+  lookup side resolved a packed one-argument reflective method while the lambda
+  implementation still supplied the original two-element argument array.
+- Validation command or runtime target: add a focused full-profile regression
+  for a lambda-captured `Method` invoke path, rerun the relevant method
+  parameter/reflection regression group, regenerate `test-jars/full.jar` with
+  `test-jars/full-jvm-obf.yml`, and run
+  `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only perf --include perf.reflection.method-invoke --verbose`
+  without `quick` / `--quick`.
+- Completion criteria: lambda-captured application `Method` objects propagate
+  exact reflective target candidates into the lambda implementation; the fresh
+  focused full.jar reflection perf target no longer reports wrong argument
+  count; external/unproven reflection keeps its true ABI; packed carriers,
+  hidden keys, CFF, string/constant protection, and invokeDynamic protection
+  remain enabled.
+- Plan-intake review note: the active multi-agent tool contract forbids
+  spawning a subagent unless the user explicitly requests sub-agents. The
+  nearest permitted review before implementation is this scoped static evidence
+  audit plus the fresh runtime validation above.
+
 ### [x] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
 
 - Scope: collect fresh profiler/topology evidence for current full-obfuscated
@@ -2343,6 +2380,16 @@ This plan will refresh that evidence before changing CFF performance code.
     block-index selector, original-bytecode fallback, CFF block-boundary
     change, descriptor-only/static key recomputation, or unbound control-flow
     state is introduced.
+  - Attempt result: a source edit implementing this static-affine decode was
+    tested and reverted before commit. Fresh focused CFF algebraic audit failed
+    four tests: normal transformed fixtures rejected valid table values, direct
+    protected method integrity fixtures executed the wrong result, and
+    `cffOutputDoesNotExposeLinearOrSelfCancelingDispatcherAlgebra` reported
+    additive self-cancellation findings. This proves the static-affine restore
+    formula violates the recorded non-linear dispatcher/key invariant and is
+    not a valid repair path. After reverting the uncommitted source edit, the
+    same focused audit passed again with
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
