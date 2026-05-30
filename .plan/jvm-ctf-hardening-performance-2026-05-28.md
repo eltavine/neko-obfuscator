@@ -2282,6 +2282,22 @@ This plan will refresh that evidence before changing CFF performance code.
     assigned to JCP-7 rather than hidden by a stale artifact. No small-dispatch
     case is converted to static dispatch, no token mask is removed, and no CFF
     block granularity or coverage is changed.
+  - Iteration evidence before the second edit: the first single-decode edit
+    passed the focused CFF algebraic audit and the fresh regenerated
+    `test21.jar` CFF/MPO-only artifact ran correctly, but three direct runs
+    produced about `Seq: 479-480 ms`, `Parallel: 653-728 ms`, and
+    `VThreads: 642-730 ms`. That proves selector caching alone is not a
+    sufficient completion point. Fresh disassembly of the same artifact shows
+    the hot `a.a.x(...)` and `a.a.y(...)` loop methods contain repeated
+    `lookupswitch` dispatches with three or four cases. Source inspection of
+    `CffBlockBuilder.smallTokenDispatchCaseLimit` shows loop-shaped methods
+    above the JIT bytecode budget force `JIT_BUDGET_TOKEN_DISPATCH_CASES = 2`,
+    so those three/four-case hot dispatches cannot use the cached small-token
+    path. The next edit in this same subtask may raise that JIT-budget small
+    case limit to the normal cached-small-dispatch width, because the cached
+    selector removes the previous repeated-decode cost while preserving the
+    same live data multiplier, token mask, fake/poison routing, and block
+    coverage.
   - Plan-intake review note: the active multi-agent tool contract forbids
     spawning a subagent unless the user explicitly asks for sub-agents. The
     nearest permitted review before implementation is a scoped static
