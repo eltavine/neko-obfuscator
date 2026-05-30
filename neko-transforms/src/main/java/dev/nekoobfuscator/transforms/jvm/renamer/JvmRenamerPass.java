@@ -503,7 +503,9 @@ public final class JvmRenamerPass implements TransformPass {
             classStrings.put(entry.getKey() + ".class", entry.getValue() + ".class");
             classStrings.put("/" + entry.getKey() + ".class", "/" + entry.getValue() + ".class");
         }
+        Map<String, String> simpleClassStrings = uniqueSimpleClassStrings(classes);
         List<Map.Entry<String, String>> packageStrings = packageMap(classes);
+        Set<MemberKey> stackWalkerNamePredicates = stackWalkerNamePredicateMethods(node);
         for (MethodNode method : node.methods) {
             if (method.instructions == null) continue;
             Frame<SourceValue>[] frames = null;
@@ -556,6 +558,21 @@ public final class JvmRenamerPass implements TransformPass {
                         rewritePreviousMethodHandleNameLiteral(call, fieldNames);
                     }
                 }
+                if (!simpleClassStrings.isEmpty()
+                    && mayConsumeNameSensitiveString(call)) {
+                    if (frames == null) {
+                        frames = analyzeSourceValuesQuietly(method);
+                    }
+                    rewriteNameSensitiveSimpleClassNameLiterals(
+                        node.name,
+                        method,
+                        frames,
+                        call,
+                        classes,
+                        simpleClassStrings,
+                        stackWalkerNamePredicates
+                    );
+                }
             }
             if (proxyHandlerMethodOwners.containsKey(MemberKey.method(node.name, method.name, method.desc))) {
                 if (frames == null) {
@@ -570,6 +587,281 @@ public final class JvmRenamerPass implements TransformPass {
                 );
             }
         }
+    }
+
+    private Map<String, String> uniqueSimpleClassStrings(Map<String, String> classes) {
+        Map<String, String> out = new LinkedHashMap<>();
+        Set<String> ambiguous = new LinkedHashSet<>();
+        for (Map.Entry<String, String> entry : classes.entrySet()) {
+            String oldSimple = classSimpleName(entry.getKey());
+            String newSimple = classSimpleName(entry.getValue());
+            if (oldSimple.isEmpty() || newSimple.isEmpty() || oldSimple.equals(newSimple)) continue;
+            String previous = out.putIfAbsent(oldSimple, newSimple);
+            if (previous != null && !previous.equals(newSimple)) {
+                ambiguous.add(oldSimple);
+            }
+        }
+        for (String value : ambiguous) {
+            out.remove(value);
+        }
+        return out;
+    }
+
+    private String classSimpleName(String internalName) {
+        if (internalName == null || internalName.isEmpty()) return "";
+        int slash = internalName.lastIndexOf('/');
+        String simple = slash < 0 ? internalName : internalName.substring(slash + 1);
+        int dollar = simple.lastIndexOf('$');
+        if (dollar >= 0) {
+            simple = simple.substring(dollar + 1);
+        }
+        if (simple.isEmpty()) return "";
+        boolean numeric = true;
+        for (int i = 0; i < simple.length(); i++) {
+            if (!Character.isDigit(simple.charAt(i))) {
+                numeric = false;
+                break;
+            }
+        }
+        return numeric ? "" : simple;
+    }
+
+    private Set<MemberKey> stackWalkerNamePredicateMethods(ClassNode node) {
+        Set<MemberKey> out = new LinkedHashSet<>();
+        for (MethodNode method : node.methods) {
+            if (method.instructions == null) continue;
+            boolean stackFrameNamePipeline = false;
+            List<Handle> applicationLambdas = new ArrayList<>();
+            for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                if (insn instanceof MethodInsnNode call && isStackFrameClassNameCall(call)) {
+                    stackFrameNamePipeline = true;
+                }
+                if (!(insn instanceof InvokeDynamicInsnNode indy)) continue;
+                Handle handle = lambdaImplementationHandle(indy);
+                if (handle == null) continue;
+                if (isStackFrameClassNameHandle(handle)) {
+                    stackFrameNamePipeline = true;
+                } else if (node.name.equals(handle.getOwner())) {
+                    applicationLambdas.add(handle);
+                }
+            }
+            if (!stackFrameNamePipeline) continue;
+            for (Handle handle : applicationLambdas) {
+                out.add(MemberKey.method(handle.getOwner(), handle.getName(), handle.getDesc()));
+            }
+        }
+        return out;
+    }
+
+    private boolean isStackFrameClassNameHandle(Handle handle) {
+        return "java/lang/StackWalker$StackFrame".equals(handle.getOwner())
+            && "getClassName".equals(handle.getName())
+            && "()Ljava/lang/String;".equals(handle.getDesc());
+    }
+
+    private boolean mayConsumeNameSensitiveString(MethodInsnNode call) {
+        if (isStringNameComparison(call)) return true;
+        Type returnType = Type.getReturnType(call.desc);
+        if (returnType.getSort() == Type.VOID || returnType.getSort() == Type.BOOLEAN) return true;
+        for (Type arg : Type.getArgumentTypes(call.desc)) {
+            if (arg.getSort() == Type.OBJECT
+                && ("java/lang/String".equals(arg.getInternalName())
+                    || "java/lang/Object".equals(arg.getInternalName()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void rewriteNameSensitiveSimpleClassNameLiterals(
+        String owner,
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode call,
+        Map<String, String> classes,
+        Map<String, String> simpleClassStrings,
+        Set<MemberKey> stackWalkerNamePredicates
+    ) {
+        if (frames == null) return;
+        int index = method.instructions.indexOf(call);
+        if (index < 0 || index >= frames.length) return;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null) return;
+        Type[] args = Type.getArgumentTypes(call.desc);
+        boolean isStatic = call.getOpcode() == Opcodes.INVOKESTATIC;
+        int receiverSlots = isStatic ? 0 : 1;
+        if (frame.getStackSize() < args.length + receiverSlots) return;
+        int base = frame.getStackSize() - args.length - receiverSlots;
+        boolean stackWalkerPredicate = stackWalkerNamePredicates.contains(
+            MemberKey.method(owner, method.name, method.desc)
+        );
+
+        if (isStringNameComparison(call) && frame.getStackSize() >= 2) {
+            SourceValue receiver = frame.getStack(frame.getStackSize() - 2);
+            SourceValue argument = frame.getStack(frame.getStackSize() - 1);
+            rewriteSimpleClassNameLiteralAgainstNameSource(
+                method,
+                frames,
+                receiver,
+                argument,
+                classes,
+                simpleClassStrings,
+                stackWalkerPredicate
+            );
+            rewriteSimpleClassNameLiteralAgainstNameSource(
+                method,
+                frames,
+                argument,
+                receiver,
+                classes,
+                simpleClassStrings,
+                stackWalkerPredicate
+            );
+            return;
+        }
+
+        List<SourceValue> operands = new ArrayList<>(args.length + receiverSlots);
+        if (!isStatic) {
+            operands.add(frame.getStack(base));
+        }
+        for (int i = 0; i < args.length; i++) {
+            operands.add(frame.getStack(base + receiverSlots + i));
+        }
+        boolean[] nameSensitive = new boolean[operands.size()];
+        boolean anyNameSensitive = false;
+        for (int i = 0; i < operands.size(); i++) {
+            nameSensitive[i] = sourceNameSensitiveString(method, frames, operands.get(i), classes, 0);
+            anyNameSensitive |= nameSensitive[i];
+        }
+        if (!anyNameSensitive) return;
+        for (int i = receiverSlots; i < operands.size(); i++) {
+            if (nameSensitive[i]) continue;
+            rewriteSimpleClassNameLiteral(
+                method,
+                frames,
+                operands.get(i),
+                simpleClassStrings
+            );
+        }
+    }
+
+    private boolean rewriteSimpleClassNameLiteralAgainstNameSource(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        SourceValue literalValue,
+        SourceValue nameValue,
+        Map<String, String> classes,
+        Map<String, String> simpleClassStrings,
+        boolean stackWalkerPredicate
+    ) {
+        if (!stackWalkerPredicate
+            && !sourceNameSensitiveString(method, frames, nameValue, classes, 0)) {
+            return false;
+        }
+        return rewriteSimpleClassNameLiteral(method, frames, literalValue, simpleClassStrings);
+    }
+
+    private boolean rewriteSimpleClassNameLiteral(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        SourceValue literalValue,
+        Map<String, String> simpleClassStrings
+    ) {
+        String oldName = sourceString(method, frames, literalValue, 0);
+        if (oldName == null) return false;
+        String mapped = simpleClassStrings.get(oldName);
+        if (mapped == null || mapped.equals(oldName)) return false;
+        LdcInsnNode literal = sourceStringLiteral(method, frames, literalValue, oldName, 0);
+        if (literal == null) return false;
+        literal.cst = mapped;
+        return true;
+    }
+
+    private boolean sourceNameSensitiveString(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        Map<String, String> classes,
+        int depth
+    ) {
+        if (value == null || depth > 8) return false;
+        for (AbstractInsnNode source : value.insns) {
+            if (source instanceof MethodInsnNode call) {
+                if (isRuntimeClassNameStringCall(call)) {
+                    return true;
+                }
+                if (isClassValueGetCall(call)
+                    && classValueGetApplicationClass(method, frames, call, classes)) {
+                    return true;
+                }
+            } else if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                if (sourceNameSensitiveString(method, frames, loadedLocalValue(method, frames, var), classes, depth + 1)) {
+                    return true;
+                }
+            } else if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ASTORE) {
+                if (sourceNameSensitiveString(method, frames, storedValue(method, frames, var), classes, depth + 1)) {
+                    return true;
+                }
+            } else if (source instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                if (sourceNameSensitiveString(method, frames, castInputValue(method, frames, type), classes, depth + 1)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean isStringNameComparison(MethodInsnNode call) {
+        if (!"java/lang/String".equals(call.owner)) return false;
+        return ("endsWith".equals(call.name)
+                || "startsWith".equals(call.name)
+                || "contains".equals(call.name))
+            && "(Ljava/lang/String;)Z".equals(call.desc)
+            || "equals".equals(call.name)
+                && "(Ljava/lang/Object;)Z".equals(call.desc);
+    }
+
+    private boolean isRuntimeClassNameStringCall(MethodInsnNode call) {
+        if ("java/lang/Class".equals(call.owner)) {
+            return ("getName".equals(call.name)
+                    || "getSimpleName".equals(call.name)
+                    || "getCanonicalName".equals(call.name))
+                && "()Ljava/lang/String;".equals(call.desc);
+        }
+        if ("java/lang/StackWalker$StackFrame".equals(call.owner)
+            || "java/lang/StackTraceElement".equals(call.owner)) {
+            return "getClassName".equals(call.name)
+                && "()Ljava/lang/String;".equals(call.desc);
+        }
+        return "java/lang/StackWalker".equals(call.owner)
+            && "walk".equals(call.name)
+            && "(Ljava/util/function/Function;)Ljava/lang/Object;".equals(call.desc);
+    }
+
+    private boolean isStackFrameClassNameCall(MethodInsnNode call) {
+        return "java/lang/StackWalker$StackFrame".equals(call.owner)
+            && "getClassName".equals(call.name)
+            && "()Ljava/lang/String;".equals(call.desc);
+    }
+
+    private boolean isClassValueGetCall(MethodInsnNode call) {
+        return "java/lang/ClassValue".equals(call.owner)
+            && "get".equals(call.name)
+            && "(Ljava/lang/Class;)Ljava/lang/Object;".equals(call.desc);
+    }
+
+    private boolean classValueGetApplicationClass(
+        MethodNode method,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode call,
+        Map<String, String> classes
+    ) {
+        int index = method.instructions.indexOf(call);
+        if (index < 0 || index >= frames.length) return false;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < 2) return false;
+        String owner = sourceClassObjectOwner(method, frames, frame.getStack(frame.getStackSize() - 1), 0);
+        return owner != null && classes.containsKey(owner);
     }
 
     private Map<MemberKey, Map<Integer, Set<String>>> dynamicProxyHandlerMethodOwners(

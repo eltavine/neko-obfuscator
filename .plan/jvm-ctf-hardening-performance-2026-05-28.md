@@ -2615,6 +2615,62 @@ This plan will refresh that evidence before changing CFF performance code.
   transform/runtime change and freshly validated, or remains open with a
   concrete evidence-backed blocker; no task is marked complete from stale
   generated jars or compile-only results.
+- [x] JCP-6E1 implementation subtask: rewrite name-sensitive simple class-name
+  literals under renaming.
+  - Scope: extend the renamer's existing reflective string rewrite to cover
+    string literals that are semantically tied to JVM runtime class-name
+    surfaces such as `StackWalker.StackFrame.getClassName`,
+    `StackTraceElement.getClassName`, `Class.getName`, `Class.getSimpleName`,
+    `Class.getCanonicalName`, `StackWalker.walk`, and `ClassValue.get` when
+    the compared/checked value is tied to an application class. The rewrite
+    must use the final renamer class map and only rewrite unique application
+    simple-name literals in name-sensitive dataflow/comparison contexts.
+  - Required evidence before editing:
+    fresh no-quick `build/test-jvm-full-obf-perf/full-obf.jar` fails
+    `--only features --include features.stackwalker-classvalue --verbose` with
+    `AssertionError: stack walker class name`. Original bytecode for
+    `StackWalkerClassValueFeatureTest.run` compares stack-walker class names
+    and `ClassValue.get(StackWalkerClassValueFeatureTest.class)` against the
+    literal `StackWalkerClassValueFeatureTest`. The renamer currently rewrites
+    full internal/binary class-name strings and resource paths, but does not
+    rewrite simple class-name literals tied to those runtime name APIs, so the
+    runtime returns the renamed simple name while the expected literal remains
+    old.
+  - Validation command or runtime target:
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRenamerNameSensitiveIntegrationTest`
+    plus fresh no-quick `test-jars/full.jar` regeneration and direct run of
+    `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.stackwalker-classvalue --verbose`.
+  - Completion criteria: a focused renamer regression using StackWalker and
+    ClassValue passes after renaming; fresh full-profile `full-obf.jar` passes
+    `features.stackwalker-classvalue`; old simple class-name literals are not
+    left as plaintext in the focused renamed fixture; no global simple-name
+    blanket rewrite, fixture-specific string, fallback, or transform coverage
+    reduction is introduced.
+  - Review note: the active multi-agent tool contract forbids spawning a
+    subagent unless the user explicitly asks for sub-agents. The nearest
+    permitted review before implementation is scoped static plan/diff audit
+    against this recorded evidence, followed by the fresh validation commands
+    above before committing implementation.
+  - Fresh validation evidence after implementation: the focused regression
+    command
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmRenamerNameSensitiveIntegrationTest --no-daemon`
+    passed after first failing before the fix with
+    `AssertionError: stack walker class name`. The broader renamer regression
+    command with `JvmRenamerIntegrationTest`,
+    `JvmRenamerDynamicProxyIntegrationTest`, and
+    `JvmRenamerNameSensitiveIntegrationTest` also passed. Fresh no-quick
+    full-profile `test-jars/full.jar` regeneration passed with
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-obf.jar`,
+    writing 315 classes and 9 resources. Fresh focused full.jar runtime
+    validation passed with
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.stackwalker-classvalue --verbose`,
+    producing `PASS features.stackwalker-classvalue 3.989 ms`.
+  - Static diff review result: PASS for the bounded JCP-6E1 scope. The
+    production diff extends renamer string rewriting only for proven
+    name-sensitive class-name dataflow/comparison contexts and unique
+    application simple names. It does not add a global simple-name rewrite,
+    sample-name special case, fallback path, original-name preservation, or
+    transform coverage reduction.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
