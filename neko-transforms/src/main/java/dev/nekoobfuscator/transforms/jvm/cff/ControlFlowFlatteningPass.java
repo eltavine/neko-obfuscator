@@ -378,6 +378,7 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             pctx,
             mn,
             blocks,
+            blockAliases,
             keyLocal,
             dataLocal,
             salt
@@ -600,13 +601,17 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         PipelineContext pctx,
         MethodNode mn,
         List<Block> blocks,
+        Map<LabelNode, LabelNode> blockAliases,
         int keyLocal,
         int dataLocal,
         long salt
     ) {
         List<DataDigestObservation> observations = new ArrayList<>();
+        Map<Integer, Integer> cyclicRegions = cyclicBlockRegions(mn, blocks, blockAliases);
         int ordinal = 0;
-        for (Block block : blocks) {
+        for (int blockIndex = 0; blockIndex < blocks.size(); blockIndex++) {
+            Block block = blocks.get(blockIndex);
+            int cyclicRegion = cyclicRegions.getOrDefault(blockIndex, -1);
             for (
                 AbstractInsnNode insn = block.label();
                 insn != null && insn != block.endExclusive();
@@ -619,7 +624,9 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
                     insn,
                     keyLocal,
                     ordinal++,
-                    salt
+                    salt,
+                    blockIndex,
+                    cyclicRegion
                 );
                 if (observation != null) {
                     observations.add(observation);
@@ -655,7 +662,9 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         AbstractInsnNode insn,
         int keyLocal,
         int ordinal,
-        long salt
+        long salt,
+        int blockIndex,
+        int cyclicRegion
     ) {
         PrimitiveDigestKind kind = primitiveDigestKind(insn, keyLocal);
         if (kind == null) return null;
@@ -667,7 +676,67 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             salt ^ 0x44415441464C4F57L,
             (long) ordinal << 32 ^ insn.getOpcode() ^ kind.ordinal()
         );
-        return new DataDigestObservation(insn, after, kind, digestObservationLocal(insn), seed);
+        return new DataDigestObservation(
+            insn,
+            after,
+            kind,
+            digestObservationLocal(insn),
+            seed,
+            blockIndex,
+            cyclicRegion,
+            ordinal
+        );
+    }
+
+    private Map<Integer, Integer> cyclicBlockRegions(
+        MethodNode mn,
+        List<Block> blocks,
+        Map<LabelNode, LabelNode> blockAliases
+    ) {
+        if (blocks.size() < 2) return Map.of();
+        Map<LabelNode, Integer> blockIndex = new IdentityHashMap<>();
+        Map<LabelNode, LabelNode> nextByLabel = new IdentityHashMap<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            blockIndex.put(blocks.get(i).label(), i);
+            if (i + 1 < blocks.size()) {
+                nextByLabel.put(blocks.get(i).label(), blocks.get(i + 1).label());
+            }
+        }
+        List<LoopInterval> intervals = new ArrayList<>();
+        for (int i = 0; i < blocks.size(); i++) {
+            Block block = blocks.get(i);
+            if (block.handler()) continue;
+            for (LabelNode successor : blockSuccessors(mn, block, nextByLabel)) {
+                Integer target = blockIndex.get(canonicalLabel(successor, blockAliases));
+                if (target == null || target > i) continue;
+                intervals.add(new LoopInterval(target, i));
+            }
+        }
+        if (intervals.isEmpty()) return Map.of();
+        intervals.sort((left, right) -> Integer.compare(left.start(), right.start()));
+        List<LoopInterval> merged = new ArrayList<>();
+        int start = intervals.get(0).start();
+        int end = intervals.get(0).end();
+        for (int i = 1; i < intervals.size(); i++) {
+            LoopInterval interval = intervals.get(i);
+            if (interval.start() <= end) {
+                end = Math.max(end, interval.end());
+            } else {
+                merged.add(new LoopInterval(start, end));
+                start = interval.start();
+                end = interval.end();
+            }
+        }
+        merged.add(new LoopInterval(start, end));
+
+        Map<Integer, Integer> regionByBlock = new HashMap<>();
+        for (int region = 0; region < merged.size(); region++) {
+            LoopInterval interval = merged.get(region);
+            for (int block = interval.start(); block <= interval.end(); block++) {
+                regionByBlock.put(block, region);
+            }
+        }
+        return regionByBlock;
     }
 
     private int digestObservationLocal(AbstractInsnNode insn) {
@@ -912,6 +981,62 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         List<DataDigestObservation> observations,
         int budget
     ) {
+        boolean hasCyclicObservation = false;
+        for (DataDigestObservation observation : observations) {
+            if (observation.cyclic()) {
+                hasCyclicObservation = true;
+                break;
+            }
+        }
+        if (observations.size() <= budget && !hasCyclicObservation) return observations;
+        if (!hasCyclicObservation) {
+            return selectUniformPrimitiveDataDigestObservations(observations, budget);
+        }
+
+        Map<Integer, DataDigestObservation> cyclicByRegion = new LinkedHashMap<>();
+        List<DataDigestObservation> nonCyclic = new ArrayList<>();
+        for (DataDigestObservation observation : observations) {
+            if (!observation.cyclic()) {
+                nonCyclic.add(observation);
+                continue;
+            }
+            cyclicByRegion.merge(
+                observation.cyclicRegion(),
+                observation,
+                this::preferredCyclicDataDigestObservation
+            );
+        }
+
+        List<DataDigestObservation> selected = new ArrayList<>(budget);
+        Set<DataDigestObservation> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        List<DataDigestObservation> cyclic = new ArrayList<>(cyclicByRegion.values());
+        int cyclicBudget = Math.min(
+            cyclic.size(),
+            Math.max(1, Math.min(budget, (budget * 2) / 3))
+        );
+        addSelectedPrimitiveDataDigestObservations(
+            selected,
+            seen,
+            selectUniformPrimitiveDataDigestObservations(cyclic, cyclicBudget)
+        );
+        int nonCyclicBudget = Math.min(
+            budget - selected.size(),
+            Math.min(nonCyclic.size(), Math.max(4, budget / 4))
+        );
+        addSelectedPrimitiveDataDigestObservations(
+            selected,
+            seen,
+            selectRankedPrimitiveDataDigestObservations(nonCyclic, nonCyclicBudget)
+        );
+        selected.sort((left, right) -> Integer.compare(left.ordinal(), right.ordinal()));
+        return selected;
+    }
+
+    private List<DataDigestObservation> selectUniformPrimitiveDataDigestObservations(
+        List<DataDigestObservation> observations,
+        int budget
+    ) {
+        if (budget <= 0 || observations.isEmpty()) return List.of();
         if (observations.size() <= budget) return observations;
         List<DataDigestObservation> selected = new ArrayList<>(budget);
         for (int i = 0; i < budget; i++) {
@@ -919,6 +1044,125 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             selected.add(observations.get(index));
         }
         return selected;
+    }
+
+    private List<DataDigestObservation> selectRankedPrimitiveDataDigestObservations(
+        List<DataDigestObservation> observations,
+        int budget
+    ) {
+        if (budget <= 0 || observations.isEmpty()) return List.of();
+        List<DataDigestObservation> ranked = new ArrayList<>(observations);
+        ranked.sort((left, right) -> {
+            int leftScore = cyclicDataDigestObservationScore(left);
+            int rightScore = cyclicDataDigestObservationScore(right);
+            if (leftScore != rightScore) {
+                return Integer.compare(leftScore, rightScore);
+            }
+            return Integer.compare(left.ordinal(), right.ordinal());
+        });
+        if (ranked.size() > budget) {
+            ranked = new ArrayList<>(ranked.subList(0, budget));
+        }
+        return ranked;
+    }
+
+    private void addSelectedPrimitiveDataDigestObservations(
+        List<DataDigestObservation> selected,
+        Set<DataDigestObservation> seen,
+        List<DataDigestObservation> candidates
+    ) {
+        for (DataDigestObservation candidate : candidates) {
+            if (seen.add(candidate)) {
+                selected.add(candidate);
+            }
+        }
+    }
+
+    private DataDigestObservation preferredCyclicDataDigestObservation(
+        DataDigestObservation left,
+        DataDigestObservation right
+    ) {
+        int leftScore = cyclicDataDigestObservationScore(left);
+        int rightScore = cyclicDataDigestObservationScore(right);
+        if (leftScore != rightScore) {
+            return leftScore <= rightScore ? left : right;
+        }
+        return left.ordinal() <= right.ordinal() ? left : right;
+    }
+
+    private int cyclicDataDigestObservationScore(DataDigestObservation observation) {
+        AbstractInsnNode insn = observation.anchor();
+        if (insn instanceof IincInsnNode) return 0;
+        int base = switch (observation.kind()) {
+            case INT -> 2;
+            case LONG -> 8;
+            case FLOAT -> 12;
+            case DOUBLE -> 16;
+        };
+        if (insn instanceof VarInsnNode var) {
+            return base + (isPrimitiveLocalLoad(var.getOpcode()) ? 0 : 1);
+        }
+        if (isPrimitiveArrayAccess(insn.getOpcode())) {
+            return base + 4;
+        }
+        if (isPrimitiveConstant(insn)) {
+            return base + 8;
+        }
+        return base + 6;
+    }
+
+    private boolean isPrimitiveLocalLoad(int opcode) {
+        return opcode == Opcodes.ILOAD ||
+            opcode == Opcodes.LLOAD ||
+            opcode == Opcodes.FLOAD ||
+            opcode == Opcodes.DLOAD;
+    }
+
+    private boolean isPrimitiveArrayAccess(int opcode) {
+        return switch (opcode) {
+            case Opcodes.IALOAD,
+                Opcodes.LALOAD,
+                Opcodes.FALOAD,
+                Opcodes.DALOAD,
+                Opcodes.BALOAD,
+                Opcodes.CALOAD,
+                Opcodes.SALOAD,
+                Opcodes.IASTORE,
+                Opcodes.LASTORE,
+                Opcodes.FASTORE,
+                Opcodes.DASTORE,
+                Opcodes.BASTORE,
+                Opcodes.CASTORE,
+                Opcodes.SASTORE -> true;
+            default -> false;
+        };
+    }
+
+    private boolean isPrimitiveConstant(AbstractInsnNode insn) {
+        int opcode = insn.getOpcode();
+        if (insn instanceof LdcInsnNode ldc) {
+            return ldc.cst instanceof Number;
+        }
+        if (insn instanceof IntInsnNode) {
+            return opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH;
+        }
+        return switch (opcode) {
+            case Opcodes.ICONST_M1,
+                Opcodes.ICONST_0,
+                Opcodes.ICONST_1,
+                Opcodes.ICONST_2,
+                Opcodes.ICONST_3,
+                Opcodes.ICONST_4,
+                Opcodes.ICONST_5,
+                Opcodes.LCONST_0,
+                Opcodes.LCONST_1,
+                Opcodes.FCONST_0,
+                Opcodes.FCONST_1,
+                Opcodes.FCONST_2,
+                Opcodes.DCONST_0,
+                Opcodes.DCONST_1 -> true;
+            default -> false;
+        };
     }
 
     private InsnList emitPrimitiveDataDigestUpdate(
@@ -1507,6 +1751,15 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         boolean after,
         PrimitiveDigestKind kind,
         int local,
-        long seed
-    ) {}
+        long seed,
+        int blockIndex,
+        int cyclicRegion,
+        int ordinal
+    ) {
+        boolean cyclic() {
+            return cyclicRegion >= 0;
+        }
+    }
+
+    private record LoopInterval(int start, int end) {}
 }

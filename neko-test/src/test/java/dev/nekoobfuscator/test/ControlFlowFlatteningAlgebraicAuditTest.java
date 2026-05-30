@@ -199,6 +199,36 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     }
 
     @Test
+    void cyclicPrimitiveDigestSelectionKeepsLiveFlowWithoutRepeatedFloatingHash()
+        throws Exception {
+        Path projectRoot = Path.of(
+            System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
+        );
+        Path work = recreateWork(projectRoot.resolve("build/tmp/neko-test-cff-loop-digest"));
+        Path source = work.resolve("CffLoopDigestShape.java");
+        Files.writeString(source, loopDigestSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("cff-loop-digest-shape.jar");
+        writeJar(inputJar, classes, "CffLoopDigestShape");
+        assertTrue(runJar(inputJar).contains("CFF LOOP DIGEST OK"));
+
+        Path outputJar = work.resolve("cff-loop-digest-shape-obf.jar");
+        runObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+        assertTrue(obfuscated.contains("CFF LOOP DIGEST OK"), obfuscated);
+
+        MethodNode value = method(outputJar, "CffLoopDigestShape", "value");
+        assertCffDataDigestUpdatedFromLivePrimitiveLocal(value);
+        assertTrue(
+            doubleHashCalls(value) <= 1,
+            "cyclic CFF primitive digest selected repeated floating stack hashes in loop-shaped method"
+        );
+    }
+
+    @Test
     void wrongClassIntegrityLoadOrderPoisonsKeyTable()
         throws Exception {
         Path projectRoot = Path.of(
@@ -768,6 +798,51 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         );
     }
 
+    private static void assertCffDataDigestUpdatedFromLivePrimitiveLocal(MethodNode value) {
+        CffEntryDigestProof proof = cffEntryDigestProof(value);
+        AbstractInsnNode[] insns = value.instructions.toArray();
+        int pcLocal = proof.digestLocal() - 5;
+        assertTrue(pcLocal > 0, "CFF data digest local did not match published pc/data local layout");
+        boolean sawPrimitiveFlowUpdate = false;
+        for (int i = proof.firstBranch() + 1; i < insns.length; i++) {
+            if (!(insns[i] instanceof VarInsnNode load)
+                || load.getOpcode() != Opcodes.ILOAD
+                || load.var >= pcLocal) {
+                continue;
+            }
+            boolean sawNonlinearMix = false;
+            for (int j = i + 1; j < insns.length && j < i + 32; j++) {
+                int opcode = insns[j].getOpcode();
+                sawNonlinearMix |= isNonlinearIntMixOpcode(opcode);
+                if (insns[j] instanceof VarInsnNode store
+                    && store.getOpcode() == Opcodes.ISTORE
+                    && store.var == proof.digestLocal()
+                    && sawNonlinearMix) {
+                    sawPrimitiveFlowUpdate = true;
+                    break;
+                }
+            }
+            if (sawPrimitiveFlowUpdate) break;
+        }
+        assertTrue(
+            sawPrimitiveFlowUpdate,
+            "CFF cyclic data digest was not updated from a live primitive local after dispatch"
+        );
+    }
+
+    private static int doubleHashCalls(MethodNode method) {
+        int calls = 0;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && "java/lang/Double".equals(call.owner)
+                && "hashCode".equals(call.name)
+                && "(D)I".equals(call.desc)) {
+                calls++;
+            }
+        }
+        return calls;
+    }
+
     private static void assertCffDispatchConsumesDataDigest(Path jar)
         throws Exception {
         MethodNode value = cffAuditValueMethod(jar);
@@ -854,6 +929,21 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         }
         assertTrue(value != null, "missing transformed CFF value method");
         return value;
+    }
+
+    private static MethodNode method(Path jar, String owner, String name)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get(owner);
+        assertTrue(clazz != null, "missing class " + owner);
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (name.equals(method.name)
+                && method.instructions != null
+                && method.instructions.size() > 0) {
+                return method;
+            }
+        }
+        throw new AssertionError("missing transformed method " + owner + "." + name);
     }
 
     private static CffEntryDigestProof cffEntryDigestProof(MethodNode value) {
@@ -1867,6 +1957,31 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                         acc |= mixed ^ TABLE_CHECK[i];
                     }
                     return acc == 0;
+                }
+            }
+            """;
+    }
+
+    private static String loopDigestSourceText() {
+        return """
+            public class CffLoopDigestShape {
+                public static int value(int x, int y) {
+                    int acc = x ^ y;
+                    double wave = x + 0.25d;
+                    for (int i = 0; i < 256; i++) {
+                        wave += (i * 0.125d) - (acc & 7);
+                        acc = (acc * 31) ^ i ^ x ^ y ^ (int) wave;
+                    }
+                    return acc ^ (int) (wave * 3.0d);
+                }
+
+                public static void main(String[] args) {
+                    int first = value(17, 23);
+                    int second = value(17, 23);
+                    if (first != second) {
+                        throw new AssertionError(first + ":" + second);
+                    }
+                    System.out.println("CFF LOOP DIGEST OK " + first);
                 }
             }
             """;

@@ -2217,6 +2217,42 @@ This plan will refresh that evidence before changing CFF performance code.
     `test21.jar` CFF/MPO-only artifact still runs correctly and improves the
     matrix hot-loop timings; full-profile generation is retried to determine
     whether JCP-7 string-size work remains separately required.
+  - Implementation evidence:
+    - `ControlFlowFlatteningPass` now computes back-edge loop regions from the
+      existing CFF block graph and label-alias map, then ranks primitive
+      data-digest observations in methods with loops. Cyclic regions keep a
+      low-cost live primitive observation, while non-cyclic filler observations
+      in loop-shaped methods are ranked and bounded so repeated floating stack
+      observations do not re-enter hot paths through the remaining budget.
+    - Added `ControlFlowFlatteningAlgebraicAuditTest.cyclicPrimitiveDigestSelectionKeepsLiveFlowWithoutRepeatedFloatingHash`,
+      which builds a loop-shaped primitive/double fixture, verifies the
+      obfuscated output still runs, verifies the CFF digest is still updated
+      from a live primitive local after dispatch, and rejects repeated
+      `Double.hashCode(D)I` instrumentation in the transformed loop method.
+    - Fresh focused validation passed:
+      `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
+    - Fresh `test21.jar` CFF/MPO-only regeneration passed:
+      `neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c build/test-jvm-full-obf-perf/full-cff-mpo-only.yml -i test-jars/test21.jar -o build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6a.jar`,
+      writing 37 classes and 1 resource.
+    - Fresh `test21-cff-mpo-only-jcp6a.jar` run completed with
+      `Seq: 479 ms`, `Parallel: 634 ms`, and `VThreads: 619 ms`, compared to
+      the JCP-5 CFF/MPO-only evidence of `Seq: 494 ms`, `Parallel: 750 ms`,
+      and `VThreads: 818 ms`. This proves the subtask improved the real
+      generic CFF hot-loop path, but the remaining gap is still far above the
+      user thresholds.
+    - Fresh full-profile `test21.jar` regeneration still failed closed in the
+      CFF output finalizer with
+      `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`;
+      the largest estimate row was `a/a.main([Ljava/lang/String;)V
+      estimatedCodeBytes=97026`. This confirms full-profile method size remains
+      an independent JCP-7 string/constant-size problem after JCP-6A.
+    - Review note: the active multi-agent tool contract forbids spawning a
+      subagent unless the user explicitly asks for sub-agents. The nearest
+      permitted review was scoped static diff audit plus fresh focused and
+      runtime validation. Review result: PASS for the JCP-6A bounded scope;
+      remaining risk is explicitly carried forward because CFF transition
+      material dispatch still dominates runtime and full-profile string-size
+      amplification still fails generation.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
