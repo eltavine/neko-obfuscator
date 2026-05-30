@@ -1578,6 +1578,13 @@ public final class JvmStringObfuscationPass implements TransformPass {
             "([BIILjava/nio/charset/Charset;)V",
             false
         ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/String",
+            "intern",
+            "()Ljava/lang/String;",
+            false
+        ));
         insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ASTORE, stringLocal));
         emitRuntimeStringCacheTableLoad(insns, keyTableLocal);

@@ -136,6 +136,32 @@ public class JvmStringObfuscationIntegrationTest {
         assertFalse(sawBytePayloadField, "interface string sites must not use per-site byte payload fields");
     }
 
+    @Test
+    void repeatedStringLiteralsPreserveJvmIdentityUnderFullStringProtection() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-string-identity"));
+        Path source = work.resolve("StringIdentityShapes.java");
+        Files.writeString(source, identitySourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("string-identity-shapes.jar");
+        writeJar(inputJar, classes, "StringIdentityShapes");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("string-identity-shapes-obf.jar");
+        runObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("STRING IDENTITY OBF OK"), obfuscated);
+        byte[] classBytes = NativeObfuscationHelper.extractEntry(outputJar, "StringIdentityShapes.class");
+        String classText = new String(classBytes, StandardCharsets.ISO_8859_1);
+        assertFalse(classText.contains("identity-anchor-101"), "identity literal remained in class bytes");
+        assertFalse(classText.contains("identity-replacement-103"), "replacement literal remained in class bytes");
+    }
+
     private void runObfuscation(Path input, Path output) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
@@ -1438,6 +1464,26 @@ public class JvmStringObfuscationIntegrationTest {
                         throw new AssertionError(out);
                     }
                     System.out.println("INTERFACE STRING OBF OK");
+                }
+            }
+            """;
+    }
+
+    private String identitySourceText() {
+        return """
+            public class StringIdentityShapes {
+                public static void main(String[] args) {
+                    String first = "identity-anchor-101";
+                    String second = "identity-anchor-101";
+                    if (first != second) {
+                        throw new AssertionError("same-method literal identity");
+                    }
+                    java.util.concurrent.atomic.AtomicStampedReference<String> ref =
+                        new java.util.concurrent.atomic.AtomicStampedReference<>("identity-anchor-101", 7);
+                    if (!ref.compareAndSet("identity-anchor-101", "identity-replacement-103", 7, 8)) {
+                        throw new AssertionError("atomic stamped reference identity");
+                    }
+                    System.out.println("STRING IDENTITY OBF OK");
                 }
             }
             """;

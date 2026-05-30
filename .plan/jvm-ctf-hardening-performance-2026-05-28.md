@@ -2527,6 +2527,95 @@ This plan will refresh that evidence before changing CFF performance code.
     same focused audit passed again with
     `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
 
+### [x] JCP-6D: Preserve JVM String Literal Identity For Identity-Sensitive Uses
+
+- Scope: repair JVM full-profile string obfuscation so repeated occurrences of
+  the same source string literal within a method preserve the Java `ldc` string
+  identity contract when the value flows into identity-sensitive APIs or
+  reference comparisons. The repair must keep string payloads encrypted,
+  flow-keyed, and bound to CFF/key-dispatch material; it must not restore plain
+  `ldc` strings, precompute plaintext intern constants, or special-case a
+  fixture, method, literal value, or JDK class.
+- Required evidence before editing:
+  - Fresh full-profile `test-jars/full.jar` artifact
+    `build/test-jvm-full-obf-perf/full-obf.jar` fails the deterministic target
+    `--only features --include features.jvm.concurrent-utilities --verbose`
+    with `AssertionError: AtomicStampedReference compareAndSet`.
+  - Original bytecode for
+    `com/java21test/features/ConcurrentUtilitiesFeatureTest.atomicPrimitives`
+    constructs `AtomicStampedReference` with `ldc "a"` and later calls
+    `compareAndSet(ldc "a", ldc "b", 1, 2)`. Because JVM `ldc` returns the
+    interned string object, the expected reference is identical to the stored
+    reference in the original program.
+  - Source-path evidence in `JvmStringObfuscationPass` shows each string site
+    is assigned independent `siteSeed`/payload/cache material. The shared tail
+    caches decoded strings per site/fingerprint, so two separate occurrences
+    of the same literal in the same method can decode to different `String`
+    objects even though JVM `ldc` identity semantics require the same object
+    for that literal.
+- Validation command or runtime target:
+  `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest`
+  plus fresh no-quick full-profile regeneration of `test-jars/full.jar` and a
+  direct run of
+  `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.jvm.concurrent-utilities --verbose`.
+- Completion criteria: focused string integration tests include an
+  identity-sensitive repeated-literal regression and pass; regenerated
+  `full-obf.jar` passes `features.jvm.concurrent-utilities`; encrypted string
+  material remains derived and no plaintext secret string `ldc` is restored;
+  no fallback, skip-on-error, or fixture-specific rewrite is introduced.
+- Review note: the active multi-agent tool contract forbids spawning a subagent
+  unless the user explicitly asks for sub-agents. The nearest permitted review
+  before implementation is scoped static plan/diff audit against this recorded
+  evidence, followed by the fresh validation commands above before committing
+  implementation.
+- Implementation evidence:
+  - Added
+    `JvmStringObfuscationIntegrationTest.repeatedStringLiteralsPreserveJvmIdentityUnderFullStringProtection`,
+    which first reproduced the failure on a protected fixture:
+    `AssertionError: same-method literal identity` when two occurrences of the
+    same literal decoded to different `String` objects.
+  - `JvmStringObfuscationPass` now interns the freshly decoded UTF-8
+    `String` inside the shared decode tail before storing it in the existing
+    encrypted site cache. This restores JVM `ldc` literal identity semantics
+    from runtime-decoded material without reintroducing plaintext `ldc`
+    constants, static plaintext string fields, helper fallback, or
+    fixture-specific checks.
+  - Fresh focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest.repeatedStringLiteralsPreserveJvmIdentityUnderFullStringProtection --no-daemon`.
+  - Fresh full string validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile `test-jars/full.jar` regeneration passed:
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-obf.jar`,
+    writing 313 classes and 9 resources.
+  - Fresh focused full.jar runtime validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.jvm.concurrent-utilities --verbose`,
+    with `PASS features.jvm.concurrent-utilities 14.114 ms`.
+  - Static diff review result: PASS for the bounded JCP-6D scope. The
+    production diff changes only the generic shared string decode tail and the
+    test diff adds a transform-level identity regression; no sample name,
+    literal value, JDK class, fallback path, or transform coverage reduction is
+    introduced.
+
+### [ ] JCP-6E: Restore Remaining `full.jar` Full-Profile Runtime Semantics
+
+- Scope: continue generic full-profile semantic repairs for the remaining
+  deterministic `full.jar` failures after JCP-6D, currently including
+  classloader-isolation transformed-byte loading, StackWalker/ClassValue
+  name-sensitive behavior, GC subprocess self-run success markers, and the
+  `perf.crypto.xor` timeout. Each failure must receive its own bounded
+  evidence-backed implementation subtask before code edits.
+- Required evidence before editing: for each selected failure, capture the
+  exact fresh command, stack trace or timeout, original bytecode/source
+  contract, transformed artifact path, and source transform path that explains
+  the broken invariant.
+- Validation command or runtime target: fresh no-quick full-profile
+  `test-jars/full.jar` regeneration plus focused direct runs of the selected
+  target and then the full unfiltered `full-obf.jar --verbose` run.
+- Completion criteria: every selected failure is either fixed by a generic
+  transform/runtime change and freshly validated, or remains open with a
+  concrete evidence-backed blocker; no task is marked complete from stale
+  generated jars or compile-only results.
+
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
 - Scope: optimize protected numeric/string decode runtime and size overhead
