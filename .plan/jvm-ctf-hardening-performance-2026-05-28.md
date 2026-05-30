@@ -2026,7 +2026,7 @@ This plan will refresh that evidence before changing CFF performance code.
   non-contract reflective application data remains protected, rewritten, or
   dynamically derived rather than emitted as plaintext fallback.
 
-### [ ] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
+### [x] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
 
 - Scope: collect fresh profiler/topology evidence for current full-obfuscated
   `test21` and `test` artifacts, then identify the exact runtime paths that
@@ -2044,19 +2044,150 @@ This plan will refresh that evidence before changing CFF performance code.
   explain the `Seq`, `Parallel`, `VThreads`, and `Calc` gaps well enough to
   justify the following implementation subtasks. No production code changes are
   made in this subtask.
+- Current full.jar evidence:
+  - Fresh full no-quick run of `build/test-jvm-full-obf-perf/full-obf.jar`
+    after JCP-4E10 progressed past the previous string-tail TLS crash and
+    printed `PERF perf.tls.concurrent-decrypt measure=188.346 ms`, but later
+    advanced only through `PERF perf.crypto.rsa-oaep measure=41.937 ms` and
+    produced no `perf.crypto.xor` result before being terminated after more
+    than seven minutes of CPU-bound runtime. The same run also recorded
+    remaining correctness failures before the performance stall:
+    `features.jvm.concurrent-utilities`, the ZGC subprocess and collector
+    matrix probes, `features.dynamic-proxy`, `features.stackwalker-classvalue`,
+    and `perf.reflection.method-invoke`.
+  - Fresh focused original run:
+    `java -jar test-jars/full.jar --only perf --include perf.crypto.xor --verbose`
+    completed with `PERF perf.crypto.xor measure=341.595 ms`.
+  - Fresh focused full-obfuscated run:
+    `timeout 180s java -jar build/test-jvm-full-obf-perf/full-obf.jar --only perf --include perf.crypto.xor --verbose`
+    exited with status 124 and produced no perf row beyond JVM startup output.
+  - Artifact mapping for the current full-obfuscated jar identifies
+    `com/java21test/perf/CryptoXorPerfTest -> a/ef`,
+    `xor([B[B[BI)V -> te`, and `lambda$run$0(I[B[B[B[B)J -> f`. Original
+    bytecode shows a tight byte-array XOR loop in `xor` and an outer measured
+    loop in `lambda$run$0`, so the next evidence step must prove which generic
+    transform path expands this hot loop rather than treating `perf.crypto.xor`
+    as a special benchmark case.
+  - Fresh ablation artifacts generated from the same source revision show the
+    CFF/MPO base path is already the blocker. `validation-only` (renamer,
+    keyDispatch, MPO, CFF, VSH), `no-indy` (full without invokeDynamic),
+    `constant-only`, and `string-only` all timed out after 60 seconds on the
+    same focused `perf.crypto.xor` run and produced no perf row. A narrower
+    `cff-mpo-only` artifact with renamer, keyDispatch, MPO, and CFF completed
+    but reported `PERF perf.crypto.xor measure=29,201.374 ms`, compared to the
+    original `341.595 ms`. An attempted MPO-only/no-CFF artifact failed closed
+    in the output finalizer with `Unreplaced carrier index decode marker`,
+    which proves this transform subset is not a valid generated artifact and
+    is not used as a runtime comparison.
+  - Static topology for the current full artifact shows `a.ef.te` has last
+    bytecode offset 11919, 7 switch dispatches, 57 branch instructions, and 36
+    CFF/helper calls; `a.ef.f` has last bytecode offset 5599, 1 switch dispatch,
+    87 branch instructions, 3 indy sites, and 59 CFF/helper calls. The fresh
+    `cff-mpo-only` artifact still has `a.ef.te` at bytecode offset 7224 with 8
+    switch dispatches and 69 branch instructions, and `a.ef.f` at offset 4431
+    with a 10-case switch, even without VSH, invokeDynamic, constant
+    obfuscation, or string obfuscation.
+  - Fresh JFR on the `cff-mpo-only` focused run wrote
+    `build/test-jvm-full-obf-perf/full-cff-mpo-only-crypto-xor.jfr` and
+    reported `a.ef.te(Object[], long)` as 5,429 samples / 95.85% of hot-method
+    samples, with the next method `a.yi.i(...)` at 231 samples / 4.08%. This
+    proves the current full.jar blocker is the generic CFF-transformed hot
+    byte-array loop itself, not startup, I/O, the runner, or a string/constant
+    decode-only path.
+- Current test.jar evidence:
+  - Fresh no-quick full JVM regeneration command:
+    `neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/test.jar -o build/test-jvm-full-obf-perf/test-obf-fresh-jcp5.jar`
+    exited 0, wrote 62 classes and 4 resources, and reported CFF
+    `appliedFull=85`, VSH 2, invokeDynamic 51, constant 34, string 26, plus
+    `Relocated large CFF helper sets: hosts=25 methods=1426`.
+  - Fresh original `test-jars/test.jar` run reported `Calc: 10ms`, reflection
+    Loader PASS, ReTrace PASS, and Sec ERROR.
+  - Fresh regenerated full-obf run exited 0 but reported `Calc: 3380ms`,
+    reflection Loader ERROR, ReTrace ERROR, and Sec ERROR. Sec is not a
+    regression because the original fixture also reports Sec ERROR; Loader and
+    ReTrace are current full-profile compatibility regressions, and Calc is a
+    current full-profile performance regression against the requested 200 ms
+    gate.
+- Current test21.jar evidence:
+  - Fresh no-quick full JVM regeneration command:
+    `neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/test21.jar -o build/test-jvm-full-obf-perf/test21-obf-fresh-jcp5.jar`
+    failed closed in the output finalizer with
+    `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`
+    and logged `estimatedCodeBytes=86844`.
+  - The same full run logged a CFF island dry-run for `a/a.main` with
+    `helpers=181`, `trivialCandidates=148`, `multiRealHelpers=33`,
+    `helperInsns=51003`, `callSiteInsns=0`, prototype
+    `dispatchCases=255`, `resultTokens=255`, `realBlocks=255`,
+    material-layout `materialRows=946`, `materialWords=8185`,
+    `callerDeltaInsns=543`, `sharedHelperInsns=27874`, compressed raw bytes
+    32740, and shared-interpreter readiness showing
+    `readyHelpers=181`, `projectedSharedHelpers=1`,
+    `projectedHelperReduction=180`, `missingFakeStepRows=0`,
+    `missingPoisonStepRows=0`, `missingBounceRows=0`, and
+    `semanticSwitchBlockedFakeRows=0`. This proves the finalizer has enough
+    topology to identify the large CFF island footprint, but the shared
+    interpreter path is only recorded as a dry-run and is not an active
+    size-reduction implementation.
+  - Fresh ablation generation showed `cff-mpo-only`, `validation-only`, and
+    `constant-only` variants fit, while `string-only` failed with
+    `a/a.main` estimated at 71547 bytes and `no-indy` failed with
+    `a/a.main` estimated at 75831 bytes. This proves the full-size blocker is
+    generic string-literal protection inserted into a large method and then
+    amplified by CFF; constant-only by itself is not sufficient to exceed the
+    JVM method limit.
+  - Fresh original run reported Platform 26 ms, Virtual 15 ms, Seq 2 ms,
+    Parallel 0 ms, and VThreads 0 ms. Fresh `cff-mpo-only` run reported
+    Platform 50 ms, Virtual 56 ms, Seq 494 ms, Parallel 750 ms, and VThreads
+    818 ms. Fresh `constant-only` run reported Platform 71 ms, Virtual 69 ms,
+    Seq 583 ms, Parallel 883 ms, and VThreads 902 ms. This proves the matrix
+    runtime gap is already present in generic CFF/MPO output before full string
+    and invokeDynamic overhead.
+  - Fresh JFR on `test21-cff-mpo-only-fresh-jcp5.jar` reported
+    `a.a.y(double[][], int, int, double[][], double[][], long)` at 43.31%,
+    `a.a.x(double[][], int, double[][], double[][], long, int)` at 39.93%,
+    and `a.a.e(Object[], long)` at 10.25%. The mapping file identifies these
+    as the parallel-stream lambda, virtual-thread lambda, and `doTinyWork`,
+    with the packed `mmulSeq` body at `a.a.fa(Object[], long)`.
+  - Disassembly of the hot `a.a.x` and `a.a.y` methods shows repeated CFF
+    transition material helper calls, lookupswitch dispatch chunks, and
+    primitive data-digest updates around matrix double operations, including
+    `java/lang/Double.hashCode(D)I`. Source inspection ties those digest
+    updates to `ControlFlowFlatteningPass.installPrimitiveDataDigestUpdates`,
+    which uniformly selects up to `max(12, min(96, blocks * 3))` primitive
+    load/store/constant/arithmetic/array observations without considering
+    whether the selected instruction is in a hot back-edge region.
+- Selected generic repair boundary:
+  - JCP-6 must first repair CFF hot-loop cost generically. The evidence-backed
+    target is loop-aware primitive data-digest placement and transition
+    material dispatch cost in methods with back edges. The repair may move or
+    rebalance digest observations to loop-entry, loop-exit, and non-cyclic live
+    dataflow points, or fold equivalent live primitive state through lower-cost
+    keyed accumulators, but it must keep CFF block coverage, block boundaries,
+    dynamic entry-key dependence, fake/poison transition semantics, and hidden
+    key transfer intact.
+  - JCP-7 must repair full-profile size/runtime overhead from string and
+    constant protection after JCP-6. The evidence-backed first size target is
+    string decode callsite footprint inside large CFF-protected methods; the
+    repair must preserve per-site seeds, dynamic CFF/key binding, cache
+    fingerprinting, encrypted payloads, and absence of direct plaintext `ldc`.
 
 ### [ ] JCP-6: Optimize CFF Hot Paths Without Reducing CFF
 
-- Scope: optimize the generic CFF relocated-helper relay path proven by fresh
-  JFR/topology evidence, and any additional generic CFF hot path found by
-  JCP-5. Candidate repairs include replacing compile-time-known selector relay
-  dispatch with direct helper binding or equivalent monomorphic dispatch, and
-  reducing repeated CFF material recomputation on hot loop paths while
-  preserving the same block coverage, fake/poison cases, dynamic key
-  propagation, and transition semantics.
+- Scope: optimize the generic CFF hot-loop path proven by fresh JFR/topology
+  evidence. The current selected repair surface is primitive data-digest
+  placement and transition material dispatch in methods with back edges.
+  Candidate repairs include loop-aware digest observation selection,
+  lower-cost keyed primitive-state accumulation, and replacing
+  compile-time-known selector relay dispatch with direct helper binding or an
+  equivalent monomorphic dispatch. Repairs must preserve the same block
+  coverage, block boundaries, fake/poison cases, dynamic key propagation, data
+  flow binding, and transition semantics.
 - Required evidence before editing: fresh delayed JFR or equivalent profiler
   output from JCP-5 showing the exact current hot CFF path, plus bytecode/source
-  proof for the selected generic repair.
+  proof for the selected generic repair. The current evidence is the
+  `full.jar` CFF/MPO-only `perf.crypto.xor` JFR, the `test21.jar`
+  CFF/MPO-only JFR, disassembly of `a.a.x` and `a.a.y`, and source proof in
+  `ControlFlowFlatteningPass.installPrimitiveDataDigestUpdates`.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
   and direct `java -XX:-UsePerfData -jar` runs of regenerated `test21-obf.jar`.
@@ -2067,12 +2198,13 @@ This plan will refresh that evidence before changing CFF performance code.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
-- Scope: optimize protected numeric/string decode runtime overhead responsible
-  for the `TEST full` versus `full-no-const-string` gap. Candidate repairs must
+- Scope: optimize protected numeric/string decode runtime and size overhead
+  responsible for the `TEST full` versus `full-no-const-string` gap and for the
+  `test21.jar` full-profile `main` method-size failure. Candidate repairs must
   preserve derived material and semantic entanglement, but may hoist repeated
   live-base material within a method, share already-derived primitive locals,
-  or replace expensive repeated decode helpers with equivalent monomorphic
-  keyed code.
+  compact string decode callsite setup, or replace expensive repeated decode
+  helpers with equivalent monomorphic keyed code.
 - Required evidence before editing: fresh profiler or bytecode/topology proof
   showing the exact full constant/string hot path in `test-obf.jar`, not just
   the ablation delta.
