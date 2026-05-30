@@ -816,6 +816,14 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         )) {
             return false;
         }
+        if (JvmMethodParameterObfuscationPass.isCffPackedVirtualEntry(
+            pctx,
+            clazz.name(),
+            method.name(),
+            method.descriptor()
+        )) {
+            return false;
+        }
         int access = method.access();
         if ((access & Opcodes.ACC_STATIC) != 0) return true;
         if ((access & Opcodes.ACC_PRIVATE) != 0) return true;

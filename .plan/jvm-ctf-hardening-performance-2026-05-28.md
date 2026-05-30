@@ -2671,7 +2671,51 @@ This plan will refresh that evidence before changing CFF performance code.
     application simple names. It does not add a global simple-name rewrite,
     sample-name special case, fallback path, original-name preservation, or
     transform coverage reduction.
-- [ ] JCP-6E2 implementation subtask: bind reflective carrier index encoding
+- [x] JCP-6E preflight dependency audit: keep staged validation on a runnable
+  full-profile baseline.
+  - Scope: before committing JCP-6E2/JCP-6E3/JCP-6E4, verify that the staged
+    checkpoint can be applied to current `HEAD` and validated without relying
+    on unrelated dirty worktree state. If current `HEAD` is missing generic
+    full-profile prerequisite fixes that the active runtime baseline already
+    depends on, include only those prerequisite JVM transform fixes in the
+    checkpoint and record the dependency evidence.
+  - Required evidence: a clean staged-only worktree containing only the
+    JCP-6E2/JCP-6E3/JCP-6E4 files failed
+    `JvmMethodParameterObfuscationIntegrationTest` in seven existing
+    full-profile regression cases, including top-level interface carrier
+    entry, lambda reflective method invoke, varargs metadata, concurrent
+    string tail decode, child-loader reflective carrier, record metadata, and
+    packed method-parameter reflection. The failures were runtime semantic
+    failures such as wrong reflective results, negative or out-of-bounds array
+    sizes, and missing record component state, not compilation or fixture
+    setup failures.
+  - Dependency isolation evidence: applying only the active worktree's generic
+    `CffKeyTransferRewriter` packed virtual-entry seed repair and
+    `JvmConstantObfuscationPass` generated-node/canonical-pc-token repair on
+    top of that same clean staged-only worktree made the full
+    `JvmMethodParameterObfuscationIntegrationTest` suite pass. No fixture name,
+    mapped owner, benchmark row, or special sample branch is involved: one
+    repair keeps CFF packed virtual entries on canonical reflective entry-key
+    handling, and the other keeps constant protection bound to canonical live
+    CFF pc material while leaving generated reflection filters out of ordinary
+    application constant rewrites.
+  - Validation command or runtime target:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp/jcp6e-staged-worktree/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest --no-daemon`
+    in the clean staged-only worktree after applying the two prerequisite
+    transform repairs.
+  - Fresh validation evidence: the exact seven-file staged patch was applied
+    to a clean detached worktree at `HEAD`, and the MPO command above was
+    rerun with `--rerun-tasks`; it passed with all 19 Gradle tasks executed.
+    The same staged-only worktree then regenerated `test-jars/full.jar` with
+    `test-jars/full-jvm-obf.yml` and no `quick` argument, writing 324 classes
+    and 9 resources, and the resulting artifact passed
+    `features.jvm.classloader-isolation` with
+    `PASS features.jvm.classloader-isolation 25.755 ms`.
+  - Completion criteria: the staged-only MPO suite passes with the prerequisite
+    repairs included; the intended checkpoint remains limited to generic JVM
+    full-profile transform semantics and does not stage native, website,
+    fixture-jar, or unrelated test-harness changes.
+- [x] JCP-6E2 implementation subtask: bind reflective carrier index encoding
   to the runtime declaring class table for custom class-loader targets.
   - Scope: update method-parameter reflective carrier construction so
     `Method.invoke`, `Constructor.newInstance`, and `Class.newInstance`
@@ -2713,7 +2757,31 @@ This plan will refresh that evidence before changing CFF performance code.
     permitted review before implementation is scoped static plan/diff audit
     against this recorded evidence, followed by the fresh validation commands
     above before committing implementation.
-- [ ] JCP-6E3 implementation subtask: partition CFF class-integrity state by
+  - Fresh implementation validation evidence after the dependent JCP-6E3 and
+    JCP-6E4 blockers were repaired: the focused child-first class-loader
+    regression command
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.childLoadedReflectiveConstructorUsesRuntimeCarrierTableUnderFullProfile --no-daemon`
+    passed. The full
+    `JvmMethodParameterObfuscationIntegrationTest` suite also passed. Fresh
+    no-quick full-profile `test-jars/full.jar` regeneration passed after the
+    dependent JCP-6E4 size and CFF carrier-field access repairs, writing 324
+    classes and 9 resources. The freshly generated artifact passed
+    `features.jvm.classloader-isolation` with
+    `PASS features.jvm.classloader-isolation 25.755 ms`. This accepts the
+    JCP-6E2 carrier-table fix only after the later class-loading-state,
+    method-size, and cross-class carrier-field access blockers no longer
+    prevent the declared runtime target from executing.
+  - Post-review ABI repair evidence: implementation review rejected the first
+    checkpoint because the generated runtime carrier table helper was emitted
+    as `private static` even when the reflective callsite owner was an
+    interface, which is not valid for Java 8 interface class files. The repair
+    makes interface-owned helpers `public static synthetic` and emits
+    `INVOKESTATIC` with the interface-owner flag for interface hosts; class
+    hosts remain `private static synthetic`. A Java 8 interface-default
+    reflective-invoke regression now passes under the full profile and the
+    final artifact is statically checked to contain no invalid runtime carrier
+    table helper ABI on interface owners.
+- [x] JCP-6E3 implementation subtask: partition CFF class-integrity state by
   live class-loading universe.
   - Dependency/order: JCP-6E2's dynamic target-table carrier fix is not
     accepted yet because its focused validation target now reaches a later
@@ -2779,11 +2847,13 @@ This plan will refresh that evidence before changing CFF performance code.
     `class a.c`, `first state=7`, `second state=7`, and equal class key-table
     words, proving duplicate child-loaded binary names no longer share the
     same mutable class-integrity state. The broader
-    `JvmMethodParameterObfuscationIntegrationTest` command also passed. The
-    full no-quick `full.jar` acceptance step is not complete because the fresh
-    regeneration now fails earlier in the CFF output finalizer with the
-    independent JCP-6E4 size blocker below.
-- [ ] JCP-6E4 baseline/repair subtask: repair the current full-profile CFF
+    `JvmMethodParameterObfuscationIntegrationTest` command also passed. After
+    the independent JCP-6E4 generation-size and CFF carrier-field access
+    blockers were repaired, fresh no-quick `full.jar` regeneration passed and
+    the freshly generated artifact passed `features.jvm.classloader-isolation`,
+    proving duplicate binary-name child-loaded classes receive correct static
+    initialization and class key material under the declared full profile.
+- [x] JCP-6E4 baseline/repair subtask: repair the current full-profile CFF
   output size blocker without weakening CFF.
   - Dependency/order: JCP-6E2 and JCP-6E3 cannot be accepted against
     `features.jvm.classloader-isolation` until `test-jars/full.jar` can be
@@ -2807,21 +2877,93 @@ This plan will refresh that evidence before changing CFF performance code.
     appliedFull=1037`, `invokeDynamic appliedFull=657`,
     `constantObfuscation appliedFull=316`, and `stringObfuscation
     appliedFull=425`. The same run reports
-    `Relocated large CFF helper sets: hosts=115 methods=6579`, then fails
+    `Relocated large CFF helper sets: hosts=117 methods=6653`, then fails
     previewing `a/p` with
     `MethodTooLargeException: Method too large: a/p.pa
     ([Ljava/lang/Object;)V`. Largest estimates are
-    `pa([Ljava/lang/Object;)V estimatedCodeBytes=86290`,
-    `e([Ljava/lang/Object;J)[B estimatedCodeBytes=16411`,
+    `pa([Ljava/lang/Object;)V estimatedCodeBytes=86282`,
+    `e([Ljava/lang/Object;J)[B estimatedCodeBytes=17168`,
     `jjb([Ljava/lang/Object;JIIIIII)Ljava/lang/String; estimatedCodeBytes=11069`,
-    `<clinit>()V estimatedCodeBytes=8479`, and smaller methods below 3000
+    `<clinit>()V estimatedCodeBytes=8507`, and smaller methods below 3000
     bytes. No `quick` or `--quick` argument was used.
-  - Diagnostic evidence requirement: before the concrete repair edit, record
-    whether the oversized method is original application code, packed ABI
-    wrapper/original body, generated validation/string/indy/CFF material, or
-    carrier/reflection scaffolding; record a bytecode/topology count that
-    explains the 86290-byte estimate; and record why the selected repair is the
-    minimal generic architecture-level fix for that surface.
+  - Diagnostic evidence before the repair edit: the oversized method maps to
+    original `com/java21test/features/ClassLoaderIsolationFeatureTest.run`;
+    after method-parameter obfuscation it is packed as
+    `a/p.pa([Ljava/lang/Object;)V`. A fresh CFF-only no-MPO diagnostic
+    obfuscation succeeded, while a fresh CFF+MPO-only diagnostic obfuscation
+    failed in the same output finalizer with
+    `a/p.pa([Ljava/lang/Object;)V estimatedCodeBytes=71577` and
+    `Relocated large CFF helper sets: hosts=75 methods=4070`. This isolates
+    the first size root cause to method-parameter reflective runtime-carrier
+    table discovery being inlined into a method that reflectively constructs
+    and invokes child-loaded classes. Full indy/string/constant protection
+    increases the same method to 86282 estimated bytes but is not the first
+    failing surface.
+  - Implementation evidence: reflective carrier construction now emits one
+    generated per-owner helper method for runtime carrier table discovery
+    instead of inlining the full `Class.getDeclaredFields()` synthetic
+    `Object[]` table scan at every reflective callsite. The helper is selected
+    by live `Class` / `Member` / receiver data, preserves the existing
+    fail-closed `SecurityException` behavior when no runtime carrier table is
+    found, and keeps the generated table-scan bytecode out of the CFF-packed
+    application method. The same implementation keeps method-call receiver
+    fallback only for live non-static method targets, so interface/abstract
+    declaring classes still resolve through the actual receiver class without
+    using a static parent table. Generated reflection member filters skip
+    generated nodes so the helper can see the generated carrier fields while
+    ordinary application reflection filtering remains active. Interface-owned
+    runtime carrier-table helpers are emitted as `public static synthetic` and
+    invoked with the interface owner flag, while class-owned helpers remain
+    `private static synthetic`, preserving Java 8 interface ABI.
+  - Dependent CFF carrier-field access evidence: after excluding the initial
+    unrecorded CFF object-table visibility hunks from a staged-only validation
+    worktree, the focused full-profile `full.jar`
+    `features.jvm.classloader-isolation` run failed with
+    `IllegalAccessError: class a.aa tried to access private field a.ba.a`. The
+    generated protected CFF code therefore contains legitimate cross-class
+    reads of synthetic static `Object[]` carrier fields, and leaving every
+    class carrier private violates JVM access checks once helpers are relocated
+    across owners.
+  - Dependent CFF carrier-field access implementation: CFF carrier fields now
+    keep the narrow default shape for their owner (`private static final
+    synthetic` on classes, `public static final synthetic` on interfaces), then
+    a post-restore scan relaxes only actually referenced cross-class synthetic
+    static `Object[]` carrier fields. Same-package references are relaxed to
+    package-private; cross-package references become public. This avoids the
+    rejected blanket-public visibility change while preserving the generated
+    protected dataflow path that caused the verifier/runtime access failure.
+  - Fresh implementation validation evidence: after rebuilding
+    `:neko-cli:installDist`, the focused child-loader regression command
+    passed, the full
+    `JvmMethodParameterObfuscationIntegrationTest` suite passed, including the
+    Java 8 interface-default reflective-invoke ABI regression. Fresh
+    no-quick full-profile `test-jars/full.jar` regeneration with
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-obf.jar`
+    passed, writing 324 classes and 9 resources. The freshly generated artifact
+    passed
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp java -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.jvm.classloader-isolation --verbose`
+    with `PASS features.jvm.classloader-isolation 25.755 ms` after the
+    interface ABI and targeted CFF carrier-field access repairs.
+  - Static artifact evidence: the fresh map records
+    `CLASS com/java21test/features/ClassLoaderIsolationFeatureTest -> a/p` and
+    a generated helper mapping
+    `METHOD a/p.__neko_mpo_rtab$0(Ljava/lang/Object;Ljava/lang/Object;I)[Ljava/lang/Object; -> a`.
+    `javap` on the fresh obfuscated artifact shows the packed
+    `pa([Ljava/lang/Object;)V` method is emitted with `stack=16, locals=440`,
+    so the JVM code-size limit is no longer exceeded.
+  - Plan-intake review: subagent `019e76d3-420c-7d02-b85a-8ce868b659bf`
+    returned PASS. The review found the JCP-6E4 subtask generic,
+    evidence-backed, bounded to the current generation-size invariant, and
+    compliant with the no-fallback and no-CFF-weakening constraints.
+  - First implementation review: subagent
+    `019e76df-96aa-7463-931e-ea2836f6e6dd` returned FAIL because the runtime
+    carrier table helper did not handle interface-host ABI generically and
+    because unrelated CFF object-table visibility hunks must not be included in
+    the checkpoint. The interface-host ABI issue was repaired and revalidated.
+    A later staged-only validation with those visibility hunks removed proved a
+    real access invariant failure, so the checkpoint now includes only the
+    evidence-backed targeted carrier-field access repair described above, not
+    the rejected blanket visibility change.
   - Validation command or runtime target: rerun the focused method-parameter
     child-loader regression, rerun the full
     `JvmMethodParameterObfuscationIntegrationTest`, regenerate
@@ -2834,6 +2976,20 @@ This plan will refresh that evidence before changing CFF performance code.
     regression remains green; generated bytecode does not introduce original
     bytecode fallback, skip behavior, static key exposure, descriptor-only key
     recomputation, reduced CFF coverage, or sample-specific checks.
+  - Post-checkpoint full-run evidence: the same staged-only no-quick
+    `full-obf.jar --verbose` run advanced past `features.jvm.classloader-
+    isolation` and most feature targets, proving this checkpoint removes the
+    selected class-loader blocker. The full run is not yet green: it failed
+    `features.jvm.gc.collector-subprocess` with
+    `AssertionError: ZGC probe output missing success marker`, failed
+    `features.jvm.gc.collector-compat-matrix` with
+    `AssertionError: ZGC output missing success marker`, and failed
+    `features.jvm.nio-network-io` with `SocketException: Unix domain path too
+    long` under the long staged worktree path. It then emitted perf rows
+    through `perf.crypto.rsa-oaep` and produced no further output for more than
+    10 minutes; the hanging validation processes were terminated after 636
+    seconds elapsed. JCP-6E remains open for these next blockers; this evidence
+    does not invalidate the scoped JCP-6E2/JCP-6E3/JCP-6E4 acceptance.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

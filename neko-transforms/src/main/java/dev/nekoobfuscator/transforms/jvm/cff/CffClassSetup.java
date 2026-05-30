@@ -696,6 +696,9 @@ abstract class CffClassSetup extends CffSharedState {
         int resourceNameLocal = 37;
         int streamLocal = 38;
         int bytesLocal = 39;
+        int rootCarrierLocal = 40;
+        int contextMapLocal = 41;
+        int contextKeyLocal = 42;
         InsnList insns = helper.instructions;
         insns.add(new FieldInsnNode(
             Opcodes.GETSTATIC,
@@ -705,9 +708,89 @@ abstract class CffClassSetup extends CffSharedState {
         ));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
         insns.add(new InsnNode(Opcodes.DUP));
-        LabelNode carrierReady = new LabelNode();
-        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, carrierReady));
+        LabelNode rootCarrierReady = new LabelNode();
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, rootCarrierReady));
         insns.add(new InsnNode(Opcodes.POP));
+        JvmPassBytecode.pushInt(insns, 2);
+        insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, rootCarrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/util/IdentityHashMap"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, capacity);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/util/IdentityHashMap",
+            "<init>",
+            "(I)V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new TypeInsnNode(Opcodes.NEW, "java/lang/Object"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/Object",
+            "<init>",
+            "()V",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
+        insns.add(new FieldInsnNode(
+            Opcodes.PUTSTATIC,
+            host.name(),
+            globalFieldName,
+            "Ljava/lang/Object;"
+        ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
+        insns.add(rootCarrierReady);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, rootCarrierLocal));
+
+        LabelNode contextBootstrap = new LabelNode();
+        LabelNode contextKeyReady = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, contextBootstrap));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, contextKeyReady));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(contextBootstrap);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(contextKeyReady);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, contextKeyLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/IdentityHashMap"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, contextMapLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, contextMapLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, contextKeyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/IdentityHashMap",
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
+        LabelNode carrierReady = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, carrierReady));
         JvmPassBytecode.pushInt(insns, 7);
         insns.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         insns.add(new InsnNode(Opcodes.DUP));
@@ -814,16 +897,18 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new InsnNode(Opcodes.AASTORE));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, contextMapLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, contextKeyLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
-        insns.add(new FieldInsnNode(
-            Opcodes.PUTSTATIC,
-            host.name(),
-            globalFieldName,
-            "Ljava/lang/Object;"
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/IdentityHashMap",
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            false
         ));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new InsnNode(Opcodes.POP));
         insns.add(carrierReady);
-        insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
         LabelNode classRootMode = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
         insns.add(new JumpInsnNode(Opcodes.IFGE, classRootMode));
@@ -1129,7 +1214,7 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LSHL));
         insns.add(new InsnNode(Opcodes.LOR));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 40;
+        helper.maxLocals = 43;
         helper.maxStack = 18;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         host.asmNode().methods.add(helper);
@@ -1996,11 +2081,7 @@ abstract class CffClassSetup extends CffSharedState {
             0L
         );
         CffSharedClassHelpers sharedHelpers = ensureSharedClassHelpers(pctx, clazz, seed);
-        int fieldAccess =
-            (clazz.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE) |
-            Opcodes.ACC_STATIC |
-            Opcodes.ACC_FINAL |
-            Opcodes.ACC_SYNTHETIC;
+        int fieldAccess = cffCarrierFieldAccess(clazz);
         clazz.asmNode().fields.add(new FieldNode(
             fieldAccess,
             objectFieldName,
@@ -2094,8 +2175,10 @@ abstract class CffClassSetup extends CffSharedState {
         relocateLargeCffHelperSets(pctx, classes, hierarchy);
         restoreClassIntegrityHelperNames(pctx, classes);
         restoreCffCarrierFieldNames(pctx, classes);
+        relaxReferencedCffCarrierFieldAccess(pctx, classes);
         int installed = finalizeClassIntegrityCodeMaterial(pctx, tables, hierarchy);
         restoreCffCarrierFieldNames(pctx, classes);
+        relaxReferencedCffCarrierFieldAccess(pctx, classes);
         pctx.putPassData(CLASS_CODE_INTEGRITY_FINALIZED, Boolean.TRUE);
         if (installed > 0) {
             log.info("Finalized class-integrity class-code key material: classes={}", installed);
@@ -2435,6 +2518,8 @@ abstract class CffClassSetup extends CffSharedState {
         }
     }
 
+    private record FieldRef(String owner, String name, String desc) {}
+
     private int finalizeClassIntegrityCodeMaterial(
         PipelineContext pctx,
         Map<String, CffClassKeyTable> tables,
@@ -2553,7 +2638,7 @@ abstract class CffClassSetup extends CffSharedState {
                 FieldNode carrier = findCffCarrierFieldCandidate(owner);
                 if (carrier == null) {
                     owner.asmNode().fields.add(new FieldNode(
-                        Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_FINAL | Opcodes.ACC_SYNTHETIC,
+                        cffCarrierFieldAccess(owner),
                         requiredName,
                         "[Ljava/lang/Object;",
                         null,
@@ -2603,6 +2688,89 @@ abstract class CffClassSetup extends CffSharedState {
             return field;
         }
         return null;
+    }
+
+    private int cffCarrierFieldAccess(L1Class owner) {
+        return (owner.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE) |
+            Opcodes.ACC_STATIC |
+            Opcodes.ACC_FINAL |
+            Opcodes.ACC_SYNTHETIC;
+    }
+
+    private void relaxReferencedCffCarrierFieldAccess(PipelineContext pctx, List<L1Class> classes) {
+        Map<String, L1Class> classesByName = new LinkedHashMap<>();
+        for (L1Class clazz : classes) {
+            classesByName.put(clazz.name(), clazz);
+        }
+        Map<String, Boolean> publicRequired = new LinkedHashMap<>();
+        for (L1Class referrer : classes) {
+            for (MethodNode method : referrer.asmNode().methods) {
+                if (method.instructions == null) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof FieldInsnNode field)) continue;
+                    if (!"[Ljava/lang/Object;".equals(field.desc)) continue;
+                    if (referrer.name().equals(field.owner)) continue;
+                    L1Class owner = classesByName.get(field.owner);
+                    if (owner == null) owner = pctx.classMap().get(field.owner);
+                    if (owner == null || owner.isInterface()) continue;
+                    FieldNode target = findAsmField(owner, field.name, field.desc);
+                    if (target == null || !isSyntheticStaticObjectCarrier(target)) continue;
+                    String key = field.owner + "." + field.name + field.desc;
+                    boolean crossPackage = !packageName(referrer.name()).equals(packageName(field.owner));
+                    publicRequired.merge(key, crossPackage, Boolean::logicalOr);
+                }
+            }
+        }
+        if (publicRequired.isEmpty()) return;
+        int relaxed = 0;
+        for (Map.Entry<String, Boolean> entry : publicRequired.entrySet()) {
+            FieldRef ref = parseFieldRef(entry.getKey());
+            if (ref == null) continue;
+            L1Class owner = classesByName.get(ref.owner());
+            if (owner == null) owner = pctx.classMap().get(ref.owner());
+            if (owner == null || owner.isInterface()) continue;
+            FieldNode field = findAsmField(owner, ref.name(), ref.desc());
+            if (field == null || !isSyntheticStaticObjectCarrier(field)) continue;
+            int oldAccess = field.access;
+            field.access &= ~(Opcodes.ACC_PRIVATE | Opcodes.ACC_PROTECTED);
+            if (entry.getValue()) {
+                field.access |= Opcodes.ACC_PUBLIC;
+            }
+            if (field.access != oldAccess) {
+                owner.markDirty();
+                relaxed++;
+            }
+        }
+        if (relaxed > 0) {
+            log.info("Relaxed cross-class CFF carrier field access: fields={}", relaxed);
+        }
+    }
+
+    private boolean isSyntheticStaticObjectCarrier(FieldNode field) {
+        return "[Ljava/lang/Object;".equals(field.desc) &&
+            (field.access & Opcodes.ACC_STATIC) != 0 &&
+            (field.access & Opcodes.ACC_SYNTHETIC) != 0;
+    }
+
+    private FieldNode findAsmField(L1Class owner, String name, String desc) {
+        for (FieldNode field : owner.asmNode().fields) {
+            if (name.equals(field.name) && desc.equals(field.desc)) {
+                return field;
+            }
+        }
+        return null;
+    }
+
+    private FieldRef parseFieldRef(String key) {
+        int descStart = key.indexOf('[');
+        if (descStart < 0) return null;
+        int nameStart = key.lastIndexOf('.', descStart);
+        if (nameStart < 0) return null;
+        return new FieldRef(
+            key.substring(0, nameStart),
+            key.substring(nameStart + 1, descStart),
+            key.substring(descStart)
+        );
     }
 
     private void installClassCodeIntegrity(PipelineContext pctx, L1Class clazz, CffClassKeyTable table, ClassHierarchy hierarchy) {

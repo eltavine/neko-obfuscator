@@ -166,6 +166,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int ordinal = 0;
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!metadata.applicationInstructions().contains(insn)) continue;
+            if (!generatedHelper && JvmKeyDispatchPass.isGeneratedNode(pctx, insn)) continue;
             ControlFlowFlatteningPass.CffInstructionState state =
                 metadata.instructionStates().get(insn);
             if (state == null) {
@@ -186,6 +187,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (arrayConsumed.contains(insn)) continue;
             if (!metadata.applicationInstructions().contains(insn)) continue;
+            if (!generatedHelper && JvmKeyDispatchPass.isGeneratedNode(pctx, insn)) continue;
             ControlFlowFlatteningPass.CffInstructionState state =
                 metadata.instructionStates().get(insn);
             if (state == null) {
@@ -1409,6 +1411,112 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         return x;
     }
 
+    private void emitCanonicalPcToken(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        long seed = canonicalPcTokenSeed(state);
+        emitCanonicalPcTokenMask(
+            insns,
+            state,
+            metadata.guardLocal(),
+            metadata.pathKeyLocal(),
+            metadata.blockKeyLocal(),
+            metadata.keyLocal(),
+            seed
+        );
+        JvmPassBytecode.pushInt(insns, state.pcToken() ^ canonicalPcTokenMask(state, seed));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitCanonicalPcTokenFromLocals(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyLocal
+    ) {
+        long seed = canonicalPcTokenSeed(state);
+        emitCanonicalPcTokenMask(insns, state, guardLocal, pathKeyLocal, blockKeyLocal, keyLocal, seed);
+        JvmPassBytecode.pushInt(insns, state.pcToken() ^ canonicalPcTokenMask(state, seed));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private int canonicalPcTokenMask(
+        ControlFlowFlatteningPass.CffInstructionState state,
+        long seed
+    ) {
+        int blockMix = state.blockKey() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E5043424C4BL));
+        blockMix ^= blockMix >>> shift(seed, 9);
+        int keyFold = (int) state.methodKey() ^ (int) (state.methodKey() >>> 32);
+        int x = (state.guardKey() ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E5043475541L))) +
+            state.pathKey();
+        x ^= blockMix;
+        x += keyFold ^ nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E50434D4B46L));
+        x ^= x >>> shift(seed, 15);
+        x *= nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E50434D554CL)) | 1;
+        x += state.guardKey() ^ state.blockKey() ^
+            nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E504346494EL));
+        x ^= x >>> shift(seed, 23);
+        return x;
+    }
+
+    private void emitCanonicalPcTokenMask(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int keyLocal,
+        long seed
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E5043475541L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E5043424C4BL)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 9));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E50434D4B46L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 15));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E50434D554CL)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x434F4E504346494EL)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 23));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private long canonicalPcTokenSeed(ControlFlowFlatteningPass.CffInstructionState state) {
+        return JvmPassBytecode.mix(state.selectorSeed() ^ state.methodSalt(), 0x434F4E5043544F4BL);
+    }
+
     private void emitLiveConstantBase(
         InsnList insns,
         ControlFlowFlatteningPass.CffMethodMetadata metadata,
@@ -1440,7 +1548,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IMUL));
         emitDerivedMethodKeyFold(insns, metadata, state);
         insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pcLocal()));
+        emitCanonicalPcToken(insns, metadata, state);
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x434F4E5354504331L, 0x43504331L)));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IADD));
@@ -2570,7 +2678,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IMUL));
         emitOutlinedDerivedMethodKeyFold(insns, state);
         insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 5));
+        emitCanonicalPcTokenFromLocals(insns, state, 2, 3, 4, 6);
         JvmPassBytecode.pushInt(insns, nonZeroInt(JvmPassBytecode.mix(0x434F4E5354504331L, 0x43504331L)));
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IADD));

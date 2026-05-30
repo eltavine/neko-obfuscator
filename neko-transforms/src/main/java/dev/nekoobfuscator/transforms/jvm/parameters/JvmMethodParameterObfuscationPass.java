@@ -87,6 +87,10 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         "methodParameterObfuscation.lambdaReflectiveCaptureCandidates";
     private static final String DYNAMIC_PROXY_HANDLER_TARGETS =
         "methodParameterObfuscation.dynamicProxyHandlerTargets";
+    private static final String RUNTIME_CARRIER_TABLE_HELPERS =
+        "methodParameterObfuscation.runtimeCarrierTableHelpers";
+    private static final String RUNTIME_CARRIER_TABLE_HELPER_DESC =
+        "(Ljava/lang/Object;Ljava/lang/Object;I)[Ljava/lang/Object;";
     private static final String CARRIER_INDEX_MARKER_OWNER = "dev/nekoobfuscator/runtime/CarrierIndex";
     private static final String CARRIER_INDEX_MARKER_NAME = "__neko_carrier_index";
     private static final String CARRIER_INDEX_MARKER_DESC = "()I";
@@ -4461,6 +4465,9 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         List<Type> stackPrefixTypes = stackPrefixTypes(mn, call, hasTarget ? 3 : 2);
         int[] stackPrefixLocals = allocateStackPrefixLocals(mn, stackPrefixTypes);
         boolean runtimeCandidate = plan == null && hasHiddenKeyCandidate(runtimeCandidates);
+        int runtimeCarrierTableLocal = plan != null || runtimeCandidate
+            ? allocateLocal(mn, OBJECT_ARRAY_TYPE)
+            : -1;
         boolean runtimeSplitCandidate = runtimeCandidate && hasSplitHiddenKeyCandidate(runtimeCandidates);
         int splitKeyLocal = (plan != null && plan.splitHiddenKey()) || runtimeSplitCandidate
             ? allocateLocal(mn, Type.getType(Object.class))
@@ -4496,6 +4503,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     call,
                     hasTarget,
                     memberLocal,
+                    targetLocal,
                     argsLocal,
                     innerLocal,
                     splitKeyLocal,
@@ -4503,10 +4511,21 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     matchedLocal,
                     runtimeSuffixLocals,
                     runtimeCandidates,
-                    callerKeyLocal
+                    callerKeyLocal,
+                    runtimeCarrierTableLocal
                 );
             }
         } else {
+            emitRuntimeCarrierTableFromMember(
+                pctx,
+                mn,
+                out,
+                callerOwner,
+                hasTarget,
+                memberLocal,
+                targetLocal,
+                runtimeCarrierTableLocal
+            );
             emitReflectiveCarrierForPlan(
                 pctx,
                 mn,
@@ -4516,7 +4535,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 innerLocal,
                 splitKeyLocal,
                 callerKeyLocal,
-                carrierAttestationSiteSeedOrZero(pctx, plan, callerOwner, mn, call, siteKind)
+                carrierAttestationSiteSeedOrZero(pctx, plan, callerOwner, mn, call, siteKind),
+                runtimeCarrierTableLocal
             );
         }
         if (runtimeCandidate) {
@@ -4597,6 +4617,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             ? allocateLocal(mn, Type.getType(Object.class))
             : -1;
         int outerLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
+        int runtimeCarrierTableLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
         List<Type> stackPrefixTypes = stackPrefixTypes(mn, call, 1);
         int[] stackPrefixLocals = allocateStackPrefixLocals(mn, stackPrefixTypes);
         InsnList out = new InsnList();
@@ -4611,6 +4632,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         for (MethodPlan candidate : candidates) {
             LabelNode next = new LabelNode();
             emitClassNameMatch(out, classLocal, candidate.owner().replace('/', '.'), next);
+            emitRuntimeCarrierTableFromClass(pctx, mn, out, callerOwner, classLocal, runtimeCarrierTableLocal);
             emitReflectiveCarrierForPlan(
                 pctx,
                 mn,
@@ -4627,7 +4649,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     mn,
                     call,
                     "Class.newInstance constructor target"
-                )
+                ),
+                runtimeCarrierTableLocal
             );
             emitReflectiveOuterArray(
                 pctx,
@@ -4844,6 +4867,314 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         out.add(done);
     }
 
+    private static void emitRuntimeCarrierTableFromMember(
+        PipelineContext pctx,
+        MethodNode mn,
+        InsnList out,
+        String callerOwner,
+        boolean methodMember,
+        int memberLocal,
+        int targetLocal,
+        int tableLocal
+    ) {
+        InsnList generated = new InsnList();
+        generated.add(new VarInsnNode(Opcodes.ALOAD, memberLocal));
+        if (targetLocal >= 0) {
+            generated.add(new VarInsnNode(Opcodes.ALOAD, targetLocal));
+        } else {
+            generated.add(new InsnNode(Opcodes.ACONST_NULL));
+        }
+        JvmPassBytecode.pushInt(generated, methodMember ? 2 : 1);
+        generated.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            callerOwner,
+            ensureRuntimeCarrierTableHelper(pctx, callerOwner),
+            RUNTIME_CARRIER_TABLE_HELPER_DESC,
+            runtimeCarrierTableHelperOwnerIsInterface(pctx, callerOwner)
+        ));
+        generated.add(new VarInsnNode(Opcodes.ASTORE, tableLocal));
+        JvmKeyDispatchPass.markGenerated(pctx, generated);
+        out.add(generated);
+    }
+
+    private static void emitRuntimeCarrierTableFromClass(
+        PipelineContext pctx,
+        MethodNode mn,
+        InsnList out,
+        String callerOwner,
+        int classLocal,
+        int tableLocal
+    ) {
+        InsnList generated = new InsnList();
+        generated.add(new VarInsnNode(Opcodes.ALOAD, classLocal));
+        generated.add(new InsnNode(Opcodes.ACONST_NULL));
+        JvmPassBytecode.pushInt(generated, 0);
+        generated.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            callerOwner,
+            ensureRuntimeCarrierTableHelper(pctx, callerOwner),
+            RUNTIME_CARRIER_TABLE_HELPER_DESC,
+            runtimeCarrierTableHelperOwnerIsInterface(pctx, callerOwner)
+        ));
+        generated.add(new VarInsnNode(Opcodes.ASTORE, tableLocal));
+        JvmKeyDispatchPass.markGenerated(pctx, generated);
+        out.add(generated);
+    }
+
+    private static String ensureRuntimeCarrierTableHelper(PipelineContext pctx, String owner) {
+        Map<String, String> helpers = runtimeCarrierTableHelpers(pctx);
+        String existing = helpers.get(owner);
+        if (existing != null) return existing;
+        L1Class clazz = pctx.classMap().get(owner);
+        if (clazz == null) {
+            throw new IllegalStateException("Missing runtime carrier table helper owner " + owner);
+        }
+        String name = uniqueRuntimeCarrierTableHelperName(clazz);
+        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC |
+            (clazz.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE);
+        MethodNode helper = new MethodNode(
+            access,
+            name,
+            RUNTIME_CARRIER_TABLE_HELPER_DESC,
+            null,
+            null
+        );
+        emitRuntimeCarrierTableHelperBody(helper);
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+        clazz.markDirty();
+        helpers.put(owner, name);
+        return name;
+    }
+
+    private static boolean runtimeCarrierTableHelperOwnerIsInterface(PipelineContext pctx, String owner) {
+        L1Class clazz = pctx.classMap().get(owner);
+        if (clazz == null) {
+            throw new IllegalStateException("Missing runtime carrier table helper owner " + owner);
+        }
+        return clazz.isInterface();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> runtimeCarrierTableHelpers(PipelineContext pctx) {
+        Map<String, String> helpers = pctx.getPassData(RUNTIME_CARRIER_TABLE_HELPERS);
+        if (helpers == null) {
+            helpers = new LinkedHashMap<>();
+            pctx.putPassData(RUNTIME_CARRIER_TABLE_HELPERS, helpers);
+        }
+        return helpers;
+    }
+
+    private static String uniqueRuntimeCarrierTableHelperName(L1Class clazz) {
+        Set<String> existing = new LinkedHashSet<>();
+        for (MethodNode method : clazz.asmNode().methods) {
+            existing.add(method.name + method.desc);
+        }
+        int index = 0;
+        String name;
+        do {
+            name = "__neko_mpo_rtab$" + Integer.toHexString(index++);
+        } while (existing.contains(name + RUNTIME_CARRIER_TABLE_HELPER_DESC));
+        return name;
+    }
+
+    private static void emitRuntimeCarrierTableHelperBody(MethodNode helper) {
+        int sourceLocal = 0;
+        int targetLocal = 1;
+        int modeLocal = 2;
+        int classLocal = 3;
+        int fieldsLocal = 4;
+        int indexLocal = 5;
+        int fieldLocal = 6;
+        int candidateLocal = 7;
+        int fallbackLocal = 8;
+        LabelNode loop = new LabelNode();
+        LabelNode next = new LabelNode();
+        LabelNode found = new LabelNode();
+        LabelNode missing = new LabelNode();
+        LabelNode scan = new LabelNode();
+        LabelNode memberSource = new LabelNode();
+        LabelNode tryReceiver = new LabelNode();
+        LabelNode throwMissing = new LabelNode();
+        InsnList out = helper.instructions;
+
+        JvmPassBytecode.pushInt(out, 0);
+        out.add(new VarInsnNode(Opcodes.ISTORE, fallbackLocal));
+        out.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        out.add(new JumpInsnNode(Opcodes.IFNE, memberSource));
+        out.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Class"));
+        out.add(new VarInsnNode(Opcodes.ASTORE, classLocal));
+        out.add(new JumpInsnNode(Opcodes.GOTO, scan));
+
+        out.add(memberSource);
+        out.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/reflect/Member"));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/lang/reflect/Member",
+            "getDeclaringClass",
+            "()Ljava/lang/Class;",
+            true
+        ));
+        out.add(new VarInsnNode(Opcodes.ASTORE, classLocal));
+
+        out.add(scan);
+        out.add(new InsnNode(Opcodes.ACONST_NULL));
+        out.add(new VarInsnNode(Opcodes.ASTORE, candidateLocal));
+        out.add(new VarInsnNode(Opcodes.ALOAD, classLocal));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getDeclaredFields",
+            "()[Ljava/lang/reflect/Field;",
+            false
+        ));
+        out.add(new VarInsnNode(Opcodes.ASTORE, fieldsLocal));
+        JvmPassBytecode.pushInt(out, 0);
+        out.add(new VarInsnNode(Opcodes.ISTORE, indexLocal));
+
+        out.add(loop);
+        out.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        out.add(new VarInsnNode(Opcodes.ALOAD, fieldsLocal));
+        out.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        out.add(new JumpInsnNode(Opcodes.IF_ICMPGE, missing));
+        out.add(new VarInsnNode(Opcodes.ALOAD, fieldsLocal));
+        out.add(new VarInsnNode(Opcodes.ILOAD, indexLocal));
+        out.add(new InsnNode(Opcodes.AALOAD));
+        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/reflect/Field"));
+        out.add(new VarInsnNode(Opcodes.ASTORE, fieldLocal));
+
+        out.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "isSynthetic",
+            "()Z",
+            false
+        ));
+        out.add(new JumpInsnNode(Opcodes.IFEQ, next));
+        out.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "getModifiers",
+            "()I",
+            false
+        ));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/reflect/Modifier",
+            "isStatic",
+            "(I)Z",
+            false
+        ));
+        out.add(new JumpInsnNode(Opcodes.IFEQ, next));
+        out.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "getType",
+            "()Ljava/lang/Class;",
+            false
+        ));
+        out.add(new LdcInsnNode(OBJECT_ARRAY_TYPE));
+        out.add(new JumpInsnNode(Opcodes.IF_ACMPNE, next));
+        out.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        out.add(new InsnNode(Opcodes.ICONST_1));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "setAccessible",
+            "(Z)V",
+            false
+        ));
+        out.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        out.add(new InsnNode(Opcodes.ACONST_NULL));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+        out.add(new VarInsnNode(Opcodes.ASTORE, candidateLocal));
+        out.add(new VarInsnNode(Opcodes.ALOAD, candidateLocal));
+        out.add(new JumpInsnNode(Opcodes.IFNULL, next));
+        out.add(new VarInsnNode(Opcodes.ALOAD, candidateLocal));
+        out.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        JvmPassBytecode.pushInt(out, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SLOT);
+        out.add(new JumpInsnNode(Opcodes.IF_ICMPLE, next));
+        out.add(new VarInsnNode(Opcodes.ALOAD, candidateLocal));
+        JvmPassBytecode.pushInt(out, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SLOT);
+        out.add(new InsnNode(Opcodes.AALOAD));
+        out.add(new TypeInsnNode(Opcodes.INSTANCEOF, "[I"));
+        out.add(new JumpInsnNode(Opcodes.IFNE, found));
+
+        out.add(next);
+        out.add(new IincInsnNode(indexLocal, 1));
+        out.add(new JumpInsnNode(Opcodes.GOTO, loop));
+
+        out.add(found);
+        out.add(new VarInsnNode(Opcodes.ALOAD, candidateLocal));
+        out.add(new InsnNode(Opcodes.ARETURN));
+
+        out.add(missing);
+        out.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(out, 2);
+        out.add(new JumpInsnNode(Opcodes.IF_ICMPNE, throwMissing));
+        out.add(new VarInsnNode(Opcodes.ILOAD, fallbackLocal));
+        out.add(new JumpInsnNode(Opcodes.IFNE, throwMissing));
+        out.add(new VarInsnNode(Opcodes.ALOAD, sourceLocal));
+        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/reflect/Member"));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/lang/reflect/Member",
+            "getModifiers",
+            "()I",
+            true
+        ));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/reflect/Modifier",
+            "isStatic",
+            "(I)Z",
+            false
+        ));
+        out.add(new JumpInsnNode(Opcodes.IFNE, throwMissing));
+        out.add(new VarInsnNode(Opcodes.ALOAD, targetLocal));
+        out.add(new JumpInsnNode(Opcodes.IFNULL, throwMissing));
+        out.add(tryReceiver);
+        JvmPassBytecode.pushInt(out, 1);
+        out.add(new VarInsnNode(Opcodes.ISTORE, fallbackLocal));
+        out.add(new VarInsnNode(Opcodes.ALOAD, targetLocal));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Object",
+            "getClass",
+            "()Ljava/lang/Class;",
+            false
+        ));
+        out.add(new VarInsnNode(Opcodes.ASTORE, classLocal));
+        out.add(new JumpInsnNode(Opcodes.GOTO, scan));
+
+        out.add(throwMissing);
+        out.add(new TypeInsnNode(Opcodes.NEW, "java/lang/SecurityException"));
+        out.add(new InsnNode(Opcodes.DUP));
+        out.add(new MethodInsnNode(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/SecurityException",
+            "<init>",
+            "()V",
+            false
+        ));
+        out.add(new InsnNode(Opcodes.ATHROW));
+
+        helper.maxLocals = 9;
+        helper.maxStack = 5;
+    }
+
     private void emitReflectiveCarrierForPlan(
         PipelineContext pctx,
         MethodNode mn,
@@ -4853,7 +5184,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int innerLocal,
         int splitKeyLocal,
         Integer callerKeyLocal,
-        long siteSeed
+        long siteSeed,
+        int runtimeCarrierTableLocal
     ) {
         CarrierCallsiteKeys carrierKeys = materializeCarrierCallsiteKeys(
             pctx,
@@ -4866,8 +5198,27 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(out, carrierArgumentCount(plan));
         out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
         out.add(new VarInsnNode(Opcodes.ASTORE, innerLocal));
-        emitCarrierIndexKeyStoreFromLocal(pctx, out, plan, callerKeyLocal, carrierKeys, innerLocal, "reflective target");
-        emitCarrierAttestationStoresFromLocal(pctx, out, plan, callerKeyLocal, carrierKeys, innerLocal, siteSeed, "reflective target");
+        emitCarrierIndexKeyStoreFromLocal(
+            pctx,
+            out,
+            plan,
+            callerKeyLocal,
+            carrierKeys,
+            innerLocal,
+            "reflective target",
+            runtimeCarrierTableLocal
+        );
+        emitCarrierAttestationStoresFromLocal(
+            pctx,
+            out,
+            plan,
+            callerKeyLocal,
+            carrierKeys,
+            innerLocal,
+            siteSeed,
+            "reflective target",
+            runtimeCarrierTableLocal
+        );
         int sourceIndex = 0;
         int carrierIndex = 0;
         Type[] args = plan.argumentTypes();
@@ -4893,7 +5244,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                         carrierIndex++,
                         carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
                         carrierKeys == null,
-                        plan.carrierIndexKeySeed()
+                        plan.carrierIndexKeySeed(),
+                        runtimeCarrierTableLocal
                     );
                     out.add(new VarInsnNode(Opcodes.LLOAD, carrierKeys.targetKeyLocal()));
                     out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf",
@@ -4910,7 +5262,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 carrierIndex++,
                 carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
                 carrierKeys == null,
-                plan.carrierIndexKeySeed()
+                plan.carrierIndexKeySeed(),
+                runtimeCarrierTableLocal
             );
             out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
             JvmPassBytecode.pushInt(out, sourceIndex++);
@@ -4927,6 +5280,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         MethodInsnNode call,
         boolean methodMember,
         int memberLocal,
+        int targetLocal,
         int argsLocal,
         int innerLocal,
         int splitKeyLocal,
@@ -4934,7 +5288,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int matchedLocal,
         int[] runtimeSuffixLocals,
         List<MethodPlan> runtimeCandidates,
-        Integer callerKeyLocal
+        Integer callerKeyLocal,
+        int runtimeCarrierTableLocal
     ) {
         if (callerKeyLocal == null) return;
         List<MethodPlan> candidates = new ArrayList<>();
@@ -4959,6 +5314,16 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 } else {
                     emitRuntimeConstructorMatch(out, memberLocal, candidate, next, true);
                 }
+                emitRuntimeCarrierTableFromMember(
+                    pctx,
+                    mn,
+                    out,
+                    callerOwner,
+                    methodMember,
+                    memberLocal,
+                    targetLocal,
+                    runtimeCarrierTableLocal
+                );
                 emitReflectiveCarrierForPlan(
                     pctx,
                     mn,
@@ -4970,19 +5335,20 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                     callerKeyLocal,
                     carrierAttestationSiteSeedOrZero(
                         pctx,
-                    candidate,
-                    callerOwner,
-                    mn,
-                    call,
-                    reflectiveAttestationSiteKind(
-                        pctx,
                         candidate,
+                        callerOwner,
+                        mn,
                         call,
-                        methodMember ? "reflective target" : "reflective constructor target",
-                        methodMember ? "reflective runtime target" : "reflective constructor runtime target"
-                    )
-                )
-            );
+                        reflectiveAttestationSiteKind(
+                            pctx,
+                            candidate,
+                            call,
+                            methodMember ? "reflective target" : "reflective constructor target",
+                            methodMember ? "reflective runtime target" : "reflective constructor runtime target"
+                        )
+                    ),
+                    runtimeCarrierTableLocal
+                );
                 if (matchedLocal >= 0) {
                     out.add(new InsnNode(Opcodes.ICONST_1));
                     out.add(new VarInsnNode(Opcodes.ISTORE, matchedLocal));
@@ -6165,6 +6531,18 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         out.add(new InsnNode(Opcodes.IADD));
     }
 
+    private static void emitDecodedCarrierIndexFromRuntimeTable(
+        InsnList out,
+        MethodPlan plan,
+        int logicalIndex,
+        int runtimeCarrierTableLocal
+    ) {
+        CarrierIndexCell cell = plan.carrierIndexPlan().cell(logicalIndex);
+        JvmPassBytecode.pushInt(out, cell.physicalSlot());
+        emitCarrierIndexRuntimeOffset(out, plan.carrierIndexPlan(), runtimeCarrierTableLocal);
+        out.add(new InsnNode(Opcodes.IADD));
+    }
+
     private static void emitCarrierIndexRuntimeOffset(
         InsnList out,
         CarrierIndexPlan plan,
@@ -6176,6 +6554,22 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             table.objectFieldName(),
             "[Ljava/lang/Object;"
         ));
+        emitCarrierIndexRuntimeOffsetFromTableOnStack(out, plan);
+    }
+
+    private static void emitCarrierIndexRuntimeOffset(
+        InsnList out,
+        CarrierIndexPlan plan,
+        int runtimeCarrierTableLocal
+    ) {
+        out.add(new VarInsnNode(Opcodes.ALOAD, runtimeCarrierTableLocal));
+        emitCarrierIndexRuntimeOffsetFromTableOnStack(out, plan);
+    }
+
+    private static void emitCarrierIndexRuntimeOffsetFromTableOnStack(
+        InsnList out,
+        CarrierIndexPlan plan
+    ) {
         JvmPassBytecode.pushInt(out, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SLOT);
         out.add(new InsnNode(Opcodes.AALOAD));
         out.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
@@ -6281,8 +6675,34 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         boolean rewriteKeyToTarget,
         long targetSeed
     ) {
+        emitBoundedCarrierIndexForArrayOnStack(
+            pctx,
+            out,
+            plan,
+            logicalIndex,
+            keyLocal,
+            rewriteKeyToTarget,
+            targetSeed,
+            -1
+        );
+    }
+
+    private static void emitBoundedCarrierIndexForArrayOnStack(
+        PipelineContext pctx,
+        InsnList out,
+        MethodPlan plan,
+        int logicalIndex,
+        int keyLocal,
+        boolean rewriteKeyToTarget,
+        long targetSeed,
+        int runtimeCarrierTableLocal
+    ) {
         out.add(new InsnNode(Opcodes.DUP));
-        emitCarrierIndexDecodeMarker(pctx, out, plan, logicalIndex, keyLocal, rewriteKeyToTarget, targetSeed);
+        if (runtimeCarrierTableLocal >= 0) {
+            emitDecodedCarrierIndexFromRuntimeTable(out, plan, logicalIndex, runtimeCarrierTableLocal);
+        } else {
+            emitCarrierIndexDecodeMarker(pctx, out, plan, logicalIndex, keyLocal, rewriteKeyToTarget, targetSeed);
+        }
         out.add(new InsnNode(Opcodes.SWAP));
         out.add(new InsnNode(Opcodes.ARRAYLENGTH));
         out.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Math", "floorMod", "(II)I", false));
@@ -6475,6 +6895,30 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         long siteSeed,
         String targetKind
     ) {
+        emitCarrierAttestationStoresFromLocal(
+            pctx,
+            out,
+            plan,
+            callerKeyLocal,
+            carrierKeys,
+            carrierLocal,
+            siteSeed,
+            targetKind,
+            -1
+        );
+    }
+
+    private static void emitCarrierAttestationStoresFromLocal(
+        PipelineContext pctx,
+        InsnList out,
+        MethodPlan plan,
+        Integer callerKeyLocal,
+        CarrierCallsiteKeys carrierKeys,
+        int carrierLocal,
+        long siteSeed,
+        String targetKind,
+        int runtimeCarrierTableLocal
+    ) {
         if (packedHiddenKeyArgumentIndex(plan) < 0) return;
         if (callerKeyLocal == null && carrierKeys == null) {
             throw new IllegalStateException(
@@ -6490,7 +6934,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             carrierAttestationTokenLogicalIndex(plan),
             carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
             carrierKeys == null,
-            plan.carrierIndexKeySeed()
+            plan.carrierIndexKeySeed(),
+            runtimeCarrierTableLocal
         );
         if (carrierKeys == null) {
             emitCarrierAttestationTokenFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
@@ -6515,7 +6960,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             carrierAttestationTagLogicalIndex(plan),
             carrierStoreKeyLocal(callerKeyLocal, carrierKeys),
             carrierKeys == null,
-            plan.carrierIndexKeySeed()
+            plan.carrierIndexKeySeed(),
+            runtimeCarrierTableLocal
         );
         if (carrierKeys == null) {
             emitCarrierAttestationTagFromCaller(pctx, out, plan, callerKeyLocal, siteSeed);
@@ -6733,6 +7179,28 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         int carrierLocal,
         String targetKind
     ) {
+        emitCarrierIndexKeyStoreFromLocal(
+            pctx,
+            out,
+            plan,
+            callerKeyLocal,
+            carrierKeys,
+            carrierLocal,
+            targetKind,
+            -1
+        );
+    }
+
+    private static void emitCarrierIndexKeyStoreFromLocal(
+        PipelineContext pctx,
+        InsnList out,
+        MethodPlan plan,
+        Integer callerKeyLocal,
+        CarrierCallsiteKeys carrierKeys,
+        int carrierLocal,
+        String targetKind,
+        int runtimeCarrierTableLocal
+    ) {
         if (packedHiddenKeyArgumentIndex(plan) < 0) return;
         if (callerKeyLocal == null && carrierKeys == null) {
             throw new IllegalStateException(
@@ -6748,7 +7216,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             carrierIndexKeyLogicalIndex(plan),
             -1,
             false,
-            plan.carrierIndexKeySeed()
+            plan.carrierIndexKeySeed(),
+            runtimeCarrierTableLocal
         );
         if (carrierKeys == null) {
             VarInsnNode keyLoad = new VarInsnNode(Opcodes.LLOAD, callerKeyLocal);

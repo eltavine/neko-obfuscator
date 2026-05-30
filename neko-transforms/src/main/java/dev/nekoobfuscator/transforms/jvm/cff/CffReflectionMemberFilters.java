@@ -34,6 +34,7 @@ final class CffReflectionMemberFilters {
             insn = insn.getNext()
         ) {
             if (!(insn instanceof MethodInsnNode call)) continue;
+            if (JvmKeyDispatchPass.isGeneratedNode(pctx, call)) continue;
             InsnList filter = null;
             if (isFieldReflectionCall(call)) {
                 filter = injectedFieldFilter(mn);

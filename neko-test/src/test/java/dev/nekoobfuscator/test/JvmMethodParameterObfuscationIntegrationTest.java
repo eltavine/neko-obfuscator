@@ -207,6 +207,54 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void childLoadedReflectiveConstructorUsesRuntimeCarrierTableUnderFullProfile() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-child-loader-reflective-carrier"));
+        Path source = work.resolve("ChildLoaderReflectiveEntry.java");
+        Files.writeString(source, childLoaderReflectiveCarrierSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("child-loader-reflective-carrier-entry.jar");
+        writeJar(inputJar, classes, "ChildLoaderReflectiveEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("child-loader-reflective-carrier-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("CHILD LOADER REFLECTIVE CARRIER OK"), obfuscated);
+    }
+
+    @Test
+    void interfaceDefaultReflectiveInvokeRuntimeCarrierHelperUsesJava8InterfaceAbi() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-interface-reflective-carrier"));
+        Path source = work.resolve("InterfaceReflectiveCarrierEntry.java");
+        Files.writeString(source, interfaceReflectiveCarrierSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(
+            List.of("javac", "-J-XX:-UsePerfData", "--release", "8", "-d", classes.toString(), source.toString()),
+            Duration.ofSeconds(30)
+        );
+
+        Path inputJar = work.resolve("interface-reflective-carrier-entry.jar");
+        writeJar(inputJar, classes, "InterfaceReflectiveCarrierEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("interface-reflective-carrier-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("INTERFACE REFLECTIVE CARRIER OK"), obfuscated);
+        assertNoInvalidRuntimeCarrierTableHelperInterfaceAbi(outputJar);
+    }
+
+    @Test
     void annotationEnumDefaultsSurviveFullProfileRenaming() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-annotation-enum-defaults"));
@@ -801,6 +849,46 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     private boolean isPackedParameterDescriptor(String desc) {
         Type[] args = Type.getArgumentTypes(desc);
         return args.length > 0 && "[Ljava/lang/Object;".equals(args[0].getDescriptor());
+    }
+
+    private void assertNoInvalidRuntimeCarrierTableHelperInterfaceAbi(Path jar) throws Exception {
+        JarInput input = new JarInput(jar);
+        for (L1Class clazz : input.classMap().values()) {
+            if (!clazz.isInterface()) continue;
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (!"(Ljava/lang/Object;Ljava/lang/Object;I)[Ljava/lang/Object;".equals(method.desc)) continue;
+                if ((method.access & Opcodes.ACC_STATIC) == 0 || (method.access & Opcodes.ACC_SYNTHETIC) == 0) {
+                    continue;
+                }
+                assertTrue(
+                    (method.access & Opcodes.ACC_PUBLIC) != 0,
+                    "runtime carrier table helper in interface is not public: " +
+                        clazz.name() + "." + method.name + method.desc
+                );
+                assertTrue(
+                    (method.access & Opcodes.ACC_PRIVATE) == 0,
+                    "runtime carrier table helper in interface is private: " +
+                        clazz.name() + "." + method.name + method.desc
+                );
+            }
+        }
+        for (L1Class clazz : input.classMap().values()) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                for (var insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof MethodInsnNode call)) continue;
+                    if (call.getOpcode() != Opcodes.INVOKESTATIC) continue;
+                    if (!"(Ljava/lang/Object;Ljava/lang/Object;I)[Ljava/lang/Object;".equals(call.desc)) continue;
+                    L1Class owner = input.classMap().get(call.owner);
+                    if (owner == null || !owner.isInterface()) continue;
+                    assertTrue(
+                        call.itf,
+                        "runtime carrier table helper interface call is not marked as interface: " +
+                            clazz.name() + "." + method.name + method.desc
+                    );
+                }
+            }
+        }
     }
 
     private void writeJar(Path jar, Path classes, String mainClass) throws Exception {
@@ -1728,6 +1816,154 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                 public static final class Target {
                     public int add(int left, int right) {
                         return left + right;
+                    }
+                }
+            }
+            """;
+    }
+
+    private String childLoaderReflectiveCarrierSourceText() {
+        return """
+            import java.io.InputStream;
+            import java.lang.reflect.Constructor;
+            import java.lang.reflect.Method;
+            import java.util.HashMap;
+            import java.util.Map;
+
+            public class ChildLoaderReflectiveEntry {
+                private static final String TARGET = "ChildLoaderReflectiveEntry$Target";
+
+                public static void main(String[] args) throws Exception {
+                    byte[] bytes = classBytes(TARGET);
+                    Map<String, byte[]> definitions = Map.of(TARGET, bytes);
+                    ChildFirstLoader first = new ChildFirstLoader(
+                        ChildLoaderReflectiveEntry.class.getClassLoader(),
+                        definitions
+                    );
+                    ChildFirstLoader second = new ChildFirstLoader(
+                        ChildLoaderReflectiveEntry.class.getClassLoader(),
+                        definitions
+                    );
+
+                    Class<?> firstClass = first.loadClass(TARGET);
+                    Class<?> secondClass = second.loadClass(TARGET);
+                    if (firstClass == Target.class || secondClass == Target.class || firstClass == secondClass) {
+                        throw new AssertionError("loader isolation broken");
+                    }
+
+                    Constructor<?> firstConstructor = firstClass.getConstructor();
+                    Constructor<?> secondConstructor = secondClass.getConstructor();
+                    Object firstA = firstConstructor.newInstance(new Object[0]);
+                    Object firstB = firstConstructor.newInstance(new Object[0]);
+                    Object secondA = secondConstructor.newInstance(new Object[0]);
+                    Method firstBump = firstClass.getMethod("bump");
+                    Method secondBump = secondClass.getMethod("bump");
+
+                    int firstValue = ((Integer) firstBump.invoke(firstA, new Object[0])).intValue();
+                    int firstShared = ((Integer) firstBump.invoke(firstB, new Object[0])).intValue();
+                    int secondValue = ((Integer) secondBump.invoke(secondA, new Object[0])).intValue();
+                    if (firstValue != 8 || firstShared != 9 || secondValue != 8) {
+                        throw new AssertionError(firstValue + ":" + firstShared + ":" + secondValue);
+                    }
+                    System.out.println("CHILD LOADER REFLECTIVE CARRIER OK");
+                }
+
+                private static byte[] classBytes(String binaryName) throws Exception {
+                    String resource = binaryName.replace('.', '/') + ".class";
+                    try (InputStream in = Thread.currentThread()
+                        .getContextClassLoader()
+                        .getResourceAsStream(resource)) {
+                        if (in == null) {
+                            throw new AssertionError(resource);
+                        }
+                        return in.readAllBytes();
+                    }
+                }
+
+                public static final class Target {
+                    private static int state = 7;
+
+                    public Target() {
+                    }
+
+                    public int bump() {
+                        state += 1;
+                        return state;
+                    }
+                }
+
+                static final class ChildFirstLoader extends ClassLoader {
+                    private final Map<String, byte[]> definitions = new HashMap<>();
+
+                    ChildFirstLoader(ClassLoader parent, Map<String, byte[]> definitions) {
+                        super(parent);
+                        this.definitions.putAll(definitions);
+                    }
+
+                    @Override
+                    protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
+                        synchronized (getClassLoadingLock(name)) {
+                            Class<?> loaded = findLoadedClass(name);
+                            if (loaded == null && definitions.containsKey(name)) {
+                                loaded = findClass(name);
+                            }
+                            if (loaded == null) {
+                                loaded = super.loadClass(name, false);
+                            }
+                            if (resolve) {
+                                resolveClass(loaded);
+                            }
+                            return loaded;
+                        }
+                    }
+
+                    @Override
+                    protected Class<?> findClass(String name) throws ClassNotFoundException {
+                        byte[] bytes = definitions.get(name);
+                        if (bytes == null) {
+                            throw new ClassNotFoundException(name);
+                        }
+                        return defineClass(name, bytes, 0, bytes.length);
+                    }
+                }
+            }
+            """;
+    }
+
+    private String interfaceReflectiveCarrierSourceText() {
+        return """
+            import java.lang.reflect.Method;
+
+            public class InterfaceReflectiveCarrierEntry {
+                public static void main(String[] args) throws Exception {
+                    ReflectiveRunner runner = new RunnerImpl();
+                    String out = runner.runReflective(new Target(5), 7, "v");
+                    if (!"v:12".equals(out)) {
+                        throw new AssertionError(out);
+                    }
+                    System.out.println("INTERFACE REFLECTIVE CARRIER OK");
+                }
+
+                interface ReflectiveRunner {
+                    default String runReflective(Target target, int extra, String prefix) throws Exception {
+                        Method method = Target.class.getDeclaredMethod("combine", int.class, String.class);
+                        Object value = method.invoke(target, Integer.valueOf(extra), prefix);
+                        return String.valueOf(value);
+                    }
+                }
+
+                static final class RunnerImpl implements ReflectiveRunner {
+                }
+
+                public static final class Target {
+                    private final int base;
+
+                    public Target(int base) {
+                        this.base = base;
+                    }
+
+                    public String combine(int extra, String prefix) {
+                        return prefix + ":" + (base + extra);
                     }
                 }
             }
