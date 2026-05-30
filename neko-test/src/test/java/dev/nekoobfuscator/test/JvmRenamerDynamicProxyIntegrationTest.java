@@ -46,6 +46,28 @@ public class JvmRenamerDynamicProxyIntegrationTest {
         assertTrue(obfuscated.contains("DYNAMIC PROXY HANDLER NAME OK"), obfuscated);
     }
 
+    @Test
+    void dynamicProxyHandlerArgumentsUseOriginalViewUnderFullProfile() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-renamer-dynamic-proxy-args"));
+        Path source = work.resolve("DynamicProxyHandlerArgumentsEntry.java");
+        Files.writeString(source, argumentSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("dynamic-proxy-handler-arguments-entry.jar");
+        writeJar(inputJar, classes, "DynamicProxyHandlerArgumentsEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("dynamic-proxy-handler-arguments-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("DYNAMIC PROXY HANDLER ARGS OK"), obfuscated);
+    }
+
     private void runFullProfileObfuscation(Path input, Path output) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
@@ -127,6 +149,45 @@ public class JvmRenamerDynamicProxyIntegrationTest {
                         throw new AssertionError("proxy-toString");
                     }
                     System.out.println("DYNAMIC PROXY HANDLER NAME OK");
+                }
+            }
+            """;
+    }
+
+    private String argumentSourceText() {
+        return """
+            import java.lang.reflect.Proxy;
+
+            public class DynamicProxyHandlerArgumentsEntry {
+                interface Calculator {
+                    int add(int left, int right);
+                }
+
+                public static void main(String[] args) {
+                    Calculator calculator = (Calculator) Proxy.newProxyInstance(
+                        Calculator.class.getClassLoader(),
+                        new Class<?>[] {Calculator.class},
+                        (proxy, method, values) -> {
+                            if ("add".equals(method.getName())) {
+                                if (values == null || values.length != 2) {
+                                    throw new AssertionError("proxy-args-shape");
+                                }
+                                return ((Integer) values[0]).intValue() + ((Integer) values[1]).intValue();
+                            }
+                            if ("toString".equals(method.getName())) {
+                                return "proxy-object";
+                            }
+                            throw new UnsupportedOperationException(method.toString());
+                        }
+                    );
+
+                    if (calculator.add(19, 23) != 42) {
+                        throw new AssertionError("proxy-add");
+                    }
+                    if (!"proxy-object".equals(calculator.toString())) {
+                        throw new AssertionError("proxy-toString");
+                    }
+                    System.out.println("DYNAMIC PROXY HANDLER ARGS OK");
                 }
             }
             """;

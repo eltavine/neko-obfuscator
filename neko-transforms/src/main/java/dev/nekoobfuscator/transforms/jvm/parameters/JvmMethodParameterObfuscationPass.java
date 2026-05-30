@@ -52,6 +52,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -84,6 +85,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         "methodParameterObfuscation.escapedReflectiveParameterCandidates";
     private static final String LAMBDA_REFLECTIVE_CAPTURE_CANDIDATES =
         "methodParameterObfuscation.lambdaReflectiveCaptureCandidates";
+    private static final String DYNAMIC_PROXY_HANDLER_TARGETS =
+        "methodParameterObfuscation.dynamicProxyHandlerTargets";
     private static final String CARRIER_INDEX_MARKER_OWNER = "dev/nekoobfuscator/runtime/CarrierIndex";
     private static final String CARRIER_INDEX_MARKER_NAME = "__neko_carrier_index";
     private static final String CARRIER_INDEX_MARKER_DESC = "()I";
@@ -155,8 +158,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
 
         MethodNode mn = method.asmNode();
         MethodPlan plan = planByFinalKey(pctx).get(JvmKeyDispatchPass.coverageKey(clazz, method));
+        boolean proxyHandlerChanged = installDynamicProxyHandlerArgumentView(
+            pctx,
+            mn,
+            dynamicProxyHandlerTargets(pctx).get(key(clazz.name(), mn.name, mn.desc))
+        );
         if (plan == null) {
-            if (rewriteCallsites(pctx, clazz, mn, callerKeyLocal(pctx, clazz, mn))) {
+            boolean callsitesChanged = rewriteCallsites(pctx, clazz, mn, callerKeyLocal(pctx, clazz, mn));
+            if (proxyHandlerChanged || callsitesChanged) {
                 mn.maxStack = Math.max(mn.maxStack, 32);
                 clazz.markDirty();
                 pctx.invalidate(method);
@@ -233,6 +242,16 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (map == null) {
             map = new LinkedHashMap<>();
             ctx.putPassData(LAMBDA_REFLECTIVE_CAPTURE_CANDIDATES, map);
+        }
+        return map;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, List<DynamicProxyHandlerTarget>> dynamicProxyHandlerTargets(TransformContext ctx) {
+        Map<String, List<DynamicProxyHandlerTarget>> map = ctx.getPassData(DYNAMIC_PROXY_HANDLER_TARGETS);
+        if (map == null) {
+            map = new LinkedHashMap<>();
+            ctx.putPassData(DYNAMIC_PROXY_HANDLER_TARGETS, map);
         }
         return map;
     }
@@ -369,6 +388,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         }
         assertVirtualCarrierFamilySeeds(pctx, plans);
         collectEscapedReflectiveParameterCandidates(pctx);
+        collectDynamicProxyHandlerTargets(pctx);
         collectCarrierAttestationSites(pctx);
         for (MethodPlan plan : plans) {
             L1Class clazz = pctx.classMap().get(plan.owner());
@@ -631,6 +651,227 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 );
             }
         }
+    }
+
+    private void collectDynamicProxyHandlerTargets(PipelineContext pctx) {
+        Map<String, List<DynamicProxyHandlerTarget>> targets = dynamicProxyHandlerTargets(pctx);
+        for (L1Class clazz : pctx.classMap().values()) {
+            for (L1Method method : clazz.methods()) {
+                if (!method.hasCode()) continue;
+                MethodNode mn = method.asmNode();
+                if (mn == null || mn.instructions == null) continue;
+                try {
+                    Frame<SourceValue>[] frames = analyzeSourceValues(clazz.name(), mn);
+                    for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                        if (!(insn instanceof MethodInsnNode call) || !isProxyNewProxyInstance(call)) continue;
+                        int index = mn.instructions.indexOf(call);
+                        if (index < 0 || index >= frames.length) continue;
+                        Frame<SourceValue> frame = frames[index];
+                        if (frame == null || frame.getStackSize() < 3) continue;
+                        int base = frame.getStackSize() - 3;
+                        Set<String> interfaces = sourceProxyInterfaceOwners(
+                            pctx,
+                            mn,
+                            frames,
+                            call,
+                            frame.getStack(base + 1)
+                        );
+                        if (interfaces.isEmpty()) {
+                            interfaces = nearbyProxyInterfaceOwners(pctx, mn, call);
+                        }
+                        if (interfaces.isEmpty()) continue;
+                        List<MethodPlan> plans = dynamicProxyInterfacePlans(pctx, interfaces);
+                        if (plans.isEmpty()) continue;
+                        InvokeDynamicInsnNode indy = sourceInvocationHandlerLambda(
+                            mn,
+                            frames,
+                            frame.getStack(base + 2),
+                            0
+                        );
+                        if (indy == null) {
+                            indy = nearbyInvocationHandlerLambda(mn, call);
+                        }
+                        if (indy == null) continue;
+                        Handle implementation = lambdaImplementationHandle(indy);
+                        if (implementation == null || implementation.getTag() != Opcodes.H_INVOKESTATIC) continue;
+                        if (!pctx.classMap().containsKey(implementation.getOwner())) continue;
+                        InvocationHandlerSamLocals locals = invocationHandlerSamLocals(indy, implementation);
+                        if (locals == null) continue;
+                        recordDynamicProxyHandlerTarget(
+                            targets,
+                            implementation,
+                            locals.methodLocal(),
+                            locals.argsLocal(),
+                            plans
+                        );
+                    }
+                } catch (AnalyzerException | RuntimeException ignored) {
+                    // Missing provenance only leaves this dynamic-proxy handler path unclaimed.
+                }
+            }
+        }
+    }
+
+    private static boolean isProxyNewProxyInstance(MethodInsnNode call) {
+        return call.getOpcode() == Opcodes.INVOKESTATIC
+            && "java/lang/reflect/Proxy".equals(call.owner)
+            && "newProxyInstance".equals(call.name)
+            && "(Ljava/lang/ClassLoader;[Ljava/lang/Class;Ljava/lang/reflect/InvocationHandler;)Ljava/lang/Object;"
+                .equals(call.desc);
+    }
+
+    private Set<String> sourceProxyInterfaceOwners(
+        PipelineContext pctx,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        MethodInsnNode call,
+        SourceValue value
+    ) {
+        Type[] interfaceTypes = sourceClassArrayParameterTypes(pctx, mn, frames, call, value);
+        if (interfaceTypes == null || interfaceTypes.length == 0) return Set.of();
+        Set<String> owners = new LinkedHashSet<>();
+        for (Type type : interfaceTypes) {
+            if (type.getSort() == Type.OBJECT) {
+                addDynamicProxyInterfaceOwner(pctx, owners, type.getInternalName());
+            }
+        }
+        return owners;
+    }
+
+    private Set<String> nearbyProxyInterfaceOwners(PipelineContext pctx, MethodNode mn, MethodInsnNode call) {
+        Set<String> owners = new LinkedHashSet<>();
+        int scanned = 0;
+        for (AbstractInsnNode scan = call.getPrevious(); scan != null && scanned++ < 64; scan = scan.getPrevious()) {
+            if (scan instanceof LdcInsnNode ldc
+                && ldc.cst instanceof Type type
+                && type.getSort() == Type.OBJECT) {
+                addDynamicProxyInterfaceOwner(pctx, owners, type.getInternalName());
+            }
+            if (scan instanceof MethodInsnNode previous
+                && "java/lang/reflect/Proxy".equals(previous.owner)
+                && "newProxyInstance".equals(previous.name)) {
+                break;
+            }
+            if (mn.instructions.indexOf(scan) == 0) break;
+        }
+        return owners;
+    }
+
+    private void addDynamicProxyInterfaceOwner(PipelineContext pctx, Set<String> owners, String owner) {
+        if (owner == null) return;
+        L1Class clazz = pctx.classMap().get(owner);
+        if (clazz == null || !clazz.isInterface()) return;
+        if (!owners.add(owner)) return;
+        for (String parent : clazz.interfaces()) {
+            addDynamicProxyInterfaceOwner(pctx, owners, parent);
+        }
+    }
+
+    private List<MethodPlan> dynamicProxyInterfacePlans(PipelineContext pctx, Set<String> owners) {
+        List<MethodPlan> plans = new ArrayList<>();
+        for (MethodPlan plan : planByFinalKey(pctx).values()) {
+            if (!owners.contains(plan.owner())) continue;
+            if ("<init>".equals(plan.oldName()) || "<clinit>".equals(plan.oldName())) continue;
+            addUniquePlan(plans, plan);
+        }
+        return plans;
+    }
+
+    private InvokeDynamicInsnNode sourceInvocationHandlerLambda(
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        int depth
+    ) {
+        if (value == null || depth > 8) return null;
+        InvokeDynamicInsnNode result = null;
+        for (AbstractInsnNode source : value.insns) {
+            InvokeDynamicInsnNode sourced = null;
+            if (source instanceof InvokeDynamicInsnNode indy && isInvocationHandlerLambda(indy)) {
+                sourced = indy;
+            } else if (source instanceof VarInsnNode var && var.getOpcode() == Opcodes.ALOAD) {
+                sourced = sourceInvocationHandlerLambda(mn, frames, storedLocalValue(mn, frames, var), depth + 1);
+            } else if (source instanceof TypeInsnNode type && type.getOpcode() == Opcodes.CHECKCAST) {
+                int index = mn.instructions.indexOf(type);
+                if (index >= 0 && index < frames.length) {
+                    Frame<SourceValue> frame = frames[index];
+                    if (frame != null && frame.getStackSize() > 0) {
+                        sourced = sourceInvocationHandlerLambda(
+                            mn,
+                            frames,
+                            frame.getStack(frame.getStackSize() - 1),
+                            depth + 1
+                        );
+                    }
+                }
+            }
+            if (sourced == null) return null;
+            if (result != null && result != sourced) return null;
+            result = sourced;
+        }
+        return result;
+    }
+
+    private InvokeDynamicInsnNode nearbyInvocationHandlerLambda(MethodNode mn, MethodInsnNode call) {
+        int scanned = 0;
+        for (AbstractInsnNode scan = call.getPrevious(); scan != null && scanned++ < 32; scan = scan.getPrevious()) {
+            if (scan instanceof InvokeDynamicInsnNode indy && isInvocationHandlerLambda(indy)) {
+                return indy;
+            }
+            if (scan instanceof MethodInsnNode) break;
+            if (mn.instructions.indexOf(scan) == 0) break;
+        }
+        return null;
+    }
+
+    private static boolean isInvocationHandlerLambda(InvokeDynamicInsnNode indy) {
+        if (!isLambdaMetafactory(indy) || indy.bsmArgs.length == 0 || !(indy.bsmArgs[0] instanceof Type samType)) {
+            return false;
+        }
+        Type returnType = Type.getReturnType(indy.desc);
+        Type[] samArgs = Type.getArgumentTypes(samType.getDescriptor());
+        return returnType.getSort() == Type.OBJECT
+            && "java/lang/reflect/InvocationHandler".equals(returnType.getInternalName())
+            && samArgs.length == 3
+            && "Ljava/lang/Object;".equals(samArgs[0].getDescriptor())
+            && "Ljava/lang/reflect/Method;".equals(samArgs[1].getDescriptor())
+            && OBJECT_ARRAY_TYPE.equals(samArgs[2]);
+    }
+
+    private InvocationHandlerSamLocals invocationHandlerSamLocals(InvokeDynamicInsnNode indy, Handle implementation) {
+        if (!(indy.bsmArgs[0] instanceof Type samType)) return null;
+        Type[] samArgs = Type.getArgumentTypes(samType.getDescriptor());
+        Type[] implementationArgs = Type.getArgumentTypes(implementation.getDesc());
+        int samStart = implementationArgs.length - samArgs.length;
+        if (samStart < 0) return null;
+        if (!"Ljava/lang/reflect/Method;".equals(implementationArgs[samStart + 1].getDescriptor())) return null;
+        if (!OBJECT_ARRAY_TYPE.equals(implementationArgs[samStart + 2])) return null;
+        int[] locals = argumentLocals(Opcodes.ACC_STATIC, implementation.getDesc());
+        return new InvocationHandlerSamLocals(locals[samStart + 1], locals[samStart + 2]);
+    }
+
+    private void recordDynamicProxyHandlerTarget(
+        Map<String, List<DynamicProxyHandlerTarget>> targets,
+        Handle implementation,
+        int methodLocal,
+        int argsLocal,
+        List<MethodPlan> plans
+    ) {
+        String implementationKey = key(implementation.getOwner(), implementation.getName(), implementation.getDesc());
+        List<DynamicProxyHandlerTarget> recorded = targets.computeIfAbsent(implementationKey, ignored -> new ArrayList<>());
+        for (DynamicProxyHandlerTarget existing : recorded) {
+            if (existing.methodLocal() == methodLocal && existing.argsLocal() == argsLocal) {
+                for (MethodPlan plan : plans) {
+                    addUniquePlan(existing.plans(), plan);
+                }
+                return;
+            }
+        }
+        List<MethodPlan> copy = new ArrayList<>();
+        for (MethodPlan plan : plans) {
+            addUniquePlan(copy, plan);
+        }
+        recorded.add(new DynamicProxyHandlerTarget(methodLocal, argsLocal, copy));
     }
 
     private List<MethodPlan> escapedReflectiveCalleePlans(PipelineContext pctx, MethodInsnNode call) {
@@ -2536,6 +2777,184 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             local += arg.getSize();
         }
         return local;
+    }
+
+    private boolean installDynamicProxyHandlerArgumentView(
+        PipelineContext pctx,
+        MethodNode mn,
+        List<DynamicProxyHandlerTarget> targets
+    ) {
+        if (targets == null || targets.isEmpty()) return false;
+        int carrierLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
+        int unpackedLocal = allocateLocal(mn, OBJECT_ARRAY_TYPE);
+        boolean needsHiddenKeyLocals = false;
+        for (DynamicProxyHandlerTarget target : targets) {
+            for (MethodPlan plan : target.plans()) {
+                if (packedHiddenKeyArgumentIndex(plan) >= 0) {
+                    needsHiddenKeyLocals = true;
+                    break;
+                }
+            }
+            if (needsHiddenKeyLocals) break;
+        }
+        int carrierIndexKeyLocal = needsHiddenKeyLocals ? allocateLocal(mn, Type.LONG_TYPE) : -1;
+        int targetKeyLocal = needsHiddenKeyLocals ? allocateLocal(mn, Type.LONG_TYPE) : -1;
+        int tokenLocal = needsHiddenKeyLocals ? allocateLocal(mn, Type.LONG_TYPE) : -1;
+        int tagLocal = needsHiddenKeyLocals ? allocateLocal(mn, Type.LONG_TYPE) : -1;
+        LabelNode done = new LabelNode();
+        InsnList out = new InsnList();
+        boolean emitted = false;
+        for (DynamicProxyHandlerTarget target : targets) {
+            for (MethodPlan plan : target.plans()) {
+                LabelNode next = new LabelNode();
+                emitRuntimeMethodMatch(out, target.methodLocal(), plan, next, false);
+                emitDynamicProxyOuterCarrierLoad(out, target.argsLocal(), plan, carrierLocal, next);
+                int hiddenKeyIndex = packedHiddenKeyArgumentIndex(plan);
+                if (hiddenKeyIndex >= 0) {
+                    emitCarrierShapeValidation(out, carrierLocal, plan);
+                    emitCarrierArrayLoadSafe(
+                        pctx,
+                        out,
+                        carrierLocal,
+                        plan,
+                        carrierIndexKeyLogicalIndex(plan),
+                        -1,
+                        false,
+                        plan.carrierIndexKeySeed()
+                    );
+                    emitUnboxOrCast(out, Type.LONG_TYPE);
+                    out.add(new VarInsnNode(Opcodes.LSTORE, carrierIndexKeyLocal));
+                    if (plan.splitHiddenKey()) {
+                        out.add(new VarInsnNode(Opcodes.ALOAD, target.argsLocal()));
+                        JvmPassBytecode.pushInt(out, 1);
+                        out.add(new InsnNode(Opcodes.AALOAD));
+                    } else {
+                        emitCarrierArrayLoad(
+                            pctx,
+                            out,
+                            carrierLocal,
+                            plan,
+                            hiddenKeyIndex,
+                            carrierIndexKeyLocal,
+                            false,
+                            plan.carrierIndexKeySeed()
+                        );
+                    }
+                    emitUnboxOrCast(out, Type.LONG_TYPE);
+                    out.add(new VarInsnNode(Opcodes.LSTORE, targetKeyLocal));
+                    emitCarrierAttestationValidation(
+                        pctx,
+                        out,
+                        plan,
+                        carrierLocal,
+                        targetKeyLocal,
+                        carrierIndexKeyLocal,
+                        tokenLocal,
+                        tagLocal
+                    );
+                }
+                emitDynamicProxyOriginalArgumentArray(
+                    pctx,
+                    out,
+                    target.argsLocal(),
+                    carrierLocal,
+                    unpackedLocal,
+                    plan,
+                    hiddenKeyIndex >= 0 ? carrierIndexKeyLocal : -1
+                );
+                out.add(new JumpInsnNode(Opcodes.GOTO, done));
+                out.add(next);
+                emitted = true;
+            }
+        }
+        if (!emitted) return false;
+        out.add(done);
+        JvmKeyDispatchPass.markGenerated(pctx, out);
+        AbstractInsnNode first = firstRealInstruction(mn);
+        if (first == null) {
+            mn.instructions.add(out);
+        } else {
+            mn.instructions.insertBefore(first, out);
+        }
+        return true;
+    }
+
+    private static void emitDynamicProxyOuterCarrierLoad(
+        InsnList out,
+        int argsLocal,
+        MethodPlan plan,
+        int carrierLocal,
+        LabelNode next
+    ) {
+        out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+        out.add(new JumpInsnNode(Opcodes.IFNULL, next));
+        out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+        out.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        JvmPassBytecode.pushInt(out, packedOuterArgumentCount(plan));
+        LabelNode lengthOk = new LabelNode();
+        out.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, lengthOk));
+        out.add(new JumpInsnNode(Opcodes.GOTO, next));
+        out.add(lengthOk);
+        out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+        JvmPassBytecode.pushInt(out, 0);
+        out.add(new InsnNode(Opcodes.AALOAD));
+        out.add(new TypeInsnNode(Opcodes.INSTANCEOF, "[Ljava/lang/Object;"));
+        LabelNode carrierOk = new LabelNode();
+        out.add(new JumpInsnNode(Opcodes.IFNE, carrierOk));
+        out.add(new JumpInsnNode(Opcodes.GOTO, next));
+        out.add(carrierOk);
+        out.add(new VarInsnNode(Opcodes.ALOAD, argsLocal));
+        JvmPassBytecode.pushInt(out, 0);
+        out.add(new InsnNode(Opcodes.AALOAD));
+        out.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+        out.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
+    }
+
+    private void emitDynamicProxyOriginalArgumentArray(
+        PipelineContext pctx,
+        InsnList out,
+        int argsLocal,
+        int carrierLocal,
+        int unpackedLocal,
+        MethodPlan plan,
+        int carrierIndexKeyLocal
+    ) {
+        Type[] visibleArgs = visibleArgumentTypes(plan);
+        if (visibleArgs.length == 0) {
+            out.add(new InsnNode(Opcodes.ACONST_NULL));
+            out.add(new VarInsnNode(Opcodes.ASTORE, argsLocal));
+            return;
+        }
+        JvmPassBytecode.pushInt(out, visibleArgs.length);
+        out.add(new TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"));
+        out.add(new VarInsnNode(Opcodes.ASTORE, unpackedLocal));
+        int carrierIndex = 0;
+        int visibleIndex = 0;
+        Type[] packedArgs = plan.argumentTypes();
+        for (int i = 0; i < packedArgs.length; i++) {
+            if (plan.splitHiddenKey() && isHiddenKeyArgument(plan, i)) {
+                continue;
+            }
+            if (isHiddenKeyArgument(plan, i)) {
+                carrierIndex++;
+                continue;
+            }
+            out.add(new VarInsnNode(Opcodes.ALOAD, unpackedLocal));
+            JvmPassBytecode.pushInt(out, visibleIndex++);
+            emitCarrierArrayLoad(
+                pctx,
+                out,
+                carrierLocal,
+                plan,
+                carrierIndex++,
+                carrierIndexKeyLocal,
+                false,
+                plan.carrierIndexKeySeed()
+            );
+            out.add(new InsnNode(Opcodes.AASTORE));
+        }
+        out.add(new VarInsnNode(Opcodes.ALOAD, unpackedLocal));
+        out.add(new VarInsnNode(Opcodes.ASTORE, argsLocal));
     }
 
     private void installUnpackPrologue(PipelineContext pctx, MethodNode mn, MethodPlan plan) {
@@ -6623,6 +7042,10 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     ) {}
 
     private record CarrierCallsiteKeys(int targetKeyLocal, int carrierIndexKeyLocal) {}
+
+    private record DynamicProxyHandlerTarget(int methodLocal, int argsLocal, List<MethodPlan> plans) {}
+
+    private record InvocationHandlerSamLocals(int methodLocal, int argsLocal) {}
 
     public record CarrierIndexDecodeSite(
         CarrierIndexPlan plan,

@@ -2143,7 +2143,7 @@ This plan will refresh that evidence before changing CFF performance code.
   proves the remaining dynamic-proxy failure belongs to packed argument-array
   view adaptation, not the method-name remap.
 
-### [ ] JCP-4E13: Adapt Proven Dynamic-Proxy Handler Argument Arrays To Packed Application ABI
+### [x] JCP-4E13: Adapt Proven Dynamic-Proxy Handler Argument Arrays To Packed Application ABI
 
 - Scope: repair `java.lang.reflect.Proxy` invocation-handler argument-array
   views for proven application interface calls after method-parameter
@@ -2179,6 +2179,25 @@ This plan will refresh that evidence before changing CFF performance code.
   spawning a subagent unless the user explicitly requests sub-agents. The
   nearest permitted review before implementation is this scoped static evidence
   audit plus the fresh runtime validation above.
+- Completion evidence: `JvmMethodParameterObfuscationPass` now records proven
+  dynamic-proxy handler targets during prepare from the live
+  `Proxy.newProxyInstance` callsite dataflow: proxied interface `Class[]`,
+  LambdaMetafactory invocation-handler implementation method, and the concrete
+  SAM `Method` / `Object[] args` implementation locals. Handler entry bytecode
+  matches the runtime `Method` against the final packed application interface
+  ABI, then rewrites only that invocation's `args` local to the source-level
+  proxy argument view by unpacking the inner carrier. Zero-argument source
+  methods restore the JDK proxy `null` args convention; unproven and external
+  proxy calls keep the true JDK argument array.
+- Validation evidence: focused full-profile regression
+  `JvmRenamerDynamicProxyIntegrationTest.dynamicProxyHandlerArgumentsUseOriginalViewUnderFullProfile`
+  passed together with the method-name proxy regression and adjacent
+  method-parameter reflection ABI regressions:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.lambdaCapturedReflectiveMethodInvokeUsesPackedApplicationAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmRenamerDynamicProxyIntegrationTest --no-daemon`.
+  Fresh no-quick full.jar regeneration with `test-jars/full-jvm-obf.yml`
+  completed, and
+  `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.dynamic-proxy --verbose`
+  passed with `PASS features.dynamic-proxy 5.003 ms`.
 
 ### [x] JCP-5: Refresh Performance Evidence And Select Generic Repair Path
 
