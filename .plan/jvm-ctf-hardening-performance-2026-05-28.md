@@ -2311,15 +2311,16 @@ This plan will refresh that evidence before changing CFF performance code.
     plan/diff audit against this recorded evidence, followed by the fresh
     validation commands above before committing implementation.
 - JCP-6C implementation subtask: replace dispatcher odd-inverse decode with
-  raw-pc plus data-bound attestation.
-  - Scope: change generic CFF dispatch state so the live raw dispatch pc token
-    remains available for selector masking, while a separate persistent
-    data-bound attestation word proves that the raw pc was derived from the
-    current CFF data digest at the previous transition. Dispatchers must check
-    the attestation before routing and poison on mismatch. This removes the
-    repeated hot odd-inverse decode from dispatcher entries without exposing
-    static block indexes, changing block construction, reducing fake/poison
-    cases, or removing live data/key binding.
+  static-affine live-data pc binding.
+  - Scope: keep the existing encoded dispatch pc local and generic dispatcher
+    shape, but change the pc/data binding formula so transitions encode the raw
+    pc token with two live data-derived nonlinear words and a per-site static
+    odd affine multiplier. Dispatchers decode with the matching static inverse
+    and the current live data words, then apply the existing guard/path/block
+    token mask. This removes the repeated hot odd-inverse decode from
+    dispatcher entries without adding helper ABI state, exposing static block
+    indexes, changing block construction, reducing fake/poison cases, or
+    removing live data/key binding.
   - Required evidence: JCP-6A/JCP-6B runtime evidence still leaves
     `test21.jar` CFF/MPO-only around `Seq: 479 ms` and hundreds of milliseconds
     in the parallel rows. Fresh disassembly of hot `a.a.x(...)` and
@@ -2340,8 +2341,8 @@ This plan will refresh that evidence before changing CFF performance code.
     matrix and focused XOR timings improve over JCP-6A; full-profile size
     evidence is refreshed for JCP-7 if generation still fails. No raw
     block-index selector, original-bytecode fallback, CFF block-boundary
-    change, static key recomputation, or unbound control-flow state is
-    introduced.
+    change, descriptor-only/static key recomputation, or unbound control-flow
+    state is introduced.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
