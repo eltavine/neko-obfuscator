@@ -2298,11 +2298,50 @@ This plan will refresh that evidence before changing CFF performance code.
     selector removes the previous repeated-decode cost while preserving the
     same live data multiplier, token mask, fake/poison routing, and block
     coverage.
+  - Final iteration result: raising the JIT-budget small-token width to four
+    also passed the focused CFF algebraic audit and regenerated successfully,
+    but three fresh runs regressed the parallel rows to about
+    `Parallel: 706-720 ms` and `VThreads: 794-800 ms`. The attempted
+    JCP-6B source edits were therefore reverted and not committed. This proves
+    the remaining blocker is not primarily lookup-switch shape or repeated
+    small-dispatch selector derivation.
   - Plan-intake review note: the active multi-agent tool contract forbids
     spawning a subagent unless the user explicitly asks for sub-agents. The
     nearest permitted review before implementation is a scoped static
     plan/diff audit against this recorded evidence, followed by the fresh
     validation commands above before committing implementation.
+- JCP-6C implementation subtask: replace dispatcher odd-inverse decode with
+  raw-pc plus data-bound attestation.
+  - Scope: change generic CFF dispatch state so the live raw dispatch pc token
+    remains available for selector masking, while a separate persistent
+    data-bound attestation word proves that the raw pc was derived from the
+    current CFF data digest at the previous transition. Dispatchers must check
+    the attestation before routing and poison on mismatch. This removes the
+    repeated hot odd-inverse decode from dispatcher entries without exposing
+    static block indexes, changing block construction, reducing fake/poison
+    cases, or removing live data/key binding.
+  - Required evidence: JCP-6A/JCP-6B runtime evidence still leaves
+    `test21.jar` CFF/MPO-only around `Seq: 479 ms` and hundreds of milliseconds
+    in the parallel rows. Fresh disassembly of hot `a.a.x(...)` and
+    `a.a.y(...)` shows repeated dispatcher decode blocks containing
+    `emitOddIntInverse`'s five Newton iterations immediately before dispatch
+    routing. Source inspection ties those blocks to
+    `emitDispatchSelectorFromEncodedPc` and `emitDispatchTokenMask`, both of
+    which decode `pcLocal` by recomputing a data-derived multiplier and its
+    odd inverse on every dispatch entry.
+  - Validation command or runtime target:
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+    plus fresh direct regeneration/run of `test21.jar` CFF/MPO-only,
+    focused `full.jar` CFF/MPO-only `perf.crypto.xor`, and a full-profile
+    `test21.jar` regeneration retry.
+  - Completion criteria: focused CFF algebraic audit passes; regenerated
+    CFF/MPO-only artifacts run correctly; hot dispatcher bytecode no longer
+    contains repeated odd-inverse Newton blocks on the normal dispatch path;
+    matrix and focused XOR timings improve over JCP-6A; full-profile size
+    evidence is refreshed for JCP-7 if generation still fails. No raw
+    block-index selector, original-bytecode fallback, CFF block-boundary
+    change, static key recomputation, or unbound control-flow state is
+    introduced.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
