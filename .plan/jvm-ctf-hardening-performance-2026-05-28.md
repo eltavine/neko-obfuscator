@@ -2671,6 +2671,106 @@ This plan will refresh that evidence before changing CFF performance code.
     application simple names. It does not add a global simple-name rewrite,
     sample-name special case, fallback path, original-name preservation, or
     transform coverage reduction.
+- [ ] JCP-6E2 implementation subtask: bind reflective carrier index encoding
+  to the runtime declaring class table for custom class-loader targets.
+  - Scope: update method-parameter reflective carrier construction so
+    `Method.invoke`, `Constructor.newInstance`, and `Class.newInstance`
+    carriers whose target member/class is only known at runtime derive carrier
+    slot indexes from the live target declaring class's CFF object table,
+    instead of from the statically resolved application owner. The change must
+    remain generic for alternate class loaders and must not preserve original
+    descriptors, introduce a fallback, skip hidden keys, or disable carrier
+    attestation.
+  - Required evidence before editing: a fresh no-quick full-profile
+    `test-jars/full.jar` artifact fails
+    `--only features --include features.jvm.classloader-isolation --verbose`
+    with `InvocationTargetException`, caused by `NullPointerException: Cannot
+    throw exception because "null" is null` in child-loaded `a.ke.<init>`.
+    Original bytecode loads `LoaderTarget` bytes through
+    `ClassLoader.getResourceAsStream`, defines the same binary name in two
+    child-first class loaders, then constructs and invokes it reflectively.
+    A fresh `renamer+keyDispatch+MPO+CFF` diagnostic artifact reproduces the
+    same constructor attestation failure. Static bytecode inspection of
+    obfuscated `a.p.pa` shows reflective carrier construction for the child
+    `Constructor` uses `getstatic a/ke.b`, i.e. the parent-loaded class table.
+    A local diagnostic loader proves parent and child `a.ke` are distinct
+    classes with the same constructor descriptor but different live carrier
+    tables: both static object tables have length 79, while table slots such as
+    `[I` slot 65 differ (`left0=-1187380011`, `right0=-651618629`).
+  - Validation command or runtime target:
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`
+    plus fresh no-quick `test-jars/full.jar` regeneration and direct run of
+    `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.jvm.classloader-isolation --verbose`.
+  - Completion criteria: a focused regression with a custom child-first class
+    loader, reflected constructor, and reflected method passes under the full
+    method-parameter/CFF profile; fresh full-profile `full-obf.jar` passes
+    `features.jvm.classloader-isolation`; the generated carrier still contains
+    attestation token/tag stores and hidden-key transfer; no original-bytecode
+    fallback, static parent-table assumption, fixture-specific class name, or
+    descriptor preservation is introduced.
+  - Review note: the active multi-agent tool contract forbids spawning a
+    subagent unless the user explicitly asks for sub-agents. The nearest
+    permitted review before implementation is scoped static plan/diff audit
+    against this recorded evidence, followed by the fresh validation commands
+    above before committing implementation.
+- [ ] JCP-6E3 implementation subtask: partition CFF class-integrity state by
+  live class-loading universe.
+  - Dependency/order: JCP-6E2's dynamic target-table carrier fix is not
+    accepted yet because its focused validation target now reaches a later
+    independent failure. The first post-E2 focused run no longer failed with
+    the child constructor carrier attestation NPE; it failed with
+    `AssertionError: 8:9:-860286587`. That means the reflected constructor and
+    first child method path progressed, but the second child-loaded definition
+    had already received wrong class initialization/key material. JCP-6E3 must
+    repair this class-loading-state invariant before JCP-6E2 can be freshly
+    validated and committed.
+  - Scope: update CFF class-integrity global state initialization so its
+    mutable global/node/order state is keyed by the live runtime class-loading
+    universe of the `lookupClass()` argument, not by the selected helper host's
+    static field alone and not by only the transformed binary owner hash. The
+    helper may still live in a shared host class, but duplicate transformed
+    application classes with the same binary name loaded by different
+    class-loaders must not mutate the same class-integrity state instance. The
+    runtime state key must use live JVM class loading state such as the actual
+    lookup class or class loader identity, while preserving CFF class-order
+    binding, class-code hash binding, ticket issue/consume behavior, dynamic
+    method-entry key propagation, and fail-closed behavior.
+  - Required evidence before editing:
+    after the current JCP-6E2 edits, the focused child-loader regression command
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.childLoadedReflectiveConstructorUsesRuntimeCarrierTableUnderFullProfile --no-daemon`
+    compiles and runs but fails as `AssertionError: 8:9:-860286587`. A runtime
+    probe against the freshly generated focused obfuscated jar prints
+    `helper=class a.a loader=jdk.internal.loader.ClassLoaders$AppClassLoader`,
+    `same helper carrier=true`, two distinct child loaders for `class a.c`,
+    `first state=7`, `second state=0`, and different class key-table words
+    (`first table=-57484075`, `second table=-174373262`). Static bytecode for
+    child-loaded `a.c.<clinit>` calls
+    `MethodHandles.lookup().lookupClass()` and then shared helper
+    `a/a.i:(IJJLjava/lang/Class;JJ)J`; `javap -p a.a` shows the helper host
+    owns public static `Object b`, the single class-integrity carrier. The
+    original focused source has `private static int state = 7`, so `state=0`
+    before any second-loader `bump()` call proves class initialization/key
+    material is wrong before reflective method dispatch.
+  - Validation command or runtime target:
+    rerun the focused child-loader regression above; rerun
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest`;
+    regenerate `test-jars/full.jar` with
+    `env JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp neko-cli/build/install/neko-cli/bin/neko-cli obfuscate -c test-jars/full-jvm-obf.yml -i test-jars/full.jar -o build/test-jvm-full-obf-perf/full-obf.jar`
+    without `quick`; and run
+    `java -jar build/test-jvm-full-obf-perf/full-obf.jar --only features --include features.jvm.classloader-isolation --verbose`.
+  - Completion criteria: duplicate binary-name classes loaded by independent
+    child-first class loaders each receive correct static initialization and
+    class key material; focused reflected constructor/method regression passes;
+    fresh full-profile `full.jar` passes `features.jvm.classloader-isolation`;
+    the generated class-integrity helper still binds root computation to live
+    `lookupClass`, class code hash, required order bloom, and live mutable
+    state; no owner/name special case, static reset, original-bytecode fallback,
+    skip behavior, descriptor preservation, or CFF coverage reduction is
+    introduced.
+  - Plan-intake review: subagent `019e76be-90a8-7ff3-be79-c5531a1bc2e7`
+    returned PASS. The review found the task generic, evidence-backed,
+    dependency-ordered, validation-targeted, and scoped away from fallback or
+    CFF-coverage reduction.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
