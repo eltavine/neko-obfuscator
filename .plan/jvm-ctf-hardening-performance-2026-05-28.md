@@ -2171,7 +2171,7 @@ This plan will refresh that evidence before changing CFF performance code.
     repair must preserve per-site seeds, dynamic CFF/key binding, cache
     fingerprinting, encrypted payloads, and absence of direct plaintext `ldc`.
 
-### [ ] JCP-6: Optimize CFF Hot Paths Without Reducing CFF
+### [-] JCP-6: Optimize CFF Hot Paths Without Reducing CFF
 
 - Scope: optimize the generic CFF hot-loop path proven by fresh JFR/topology
   evidence. The current selected repair surface is primitive data-digest
@@ -2195,6 +2195,28 @@ This plan will refresh that evidence before changing CFF performance code.
   `VThreads` line <= 15 ms on a fresh full-obf artifact; CFF block metrics and
   coverage are preserved; no CFF coverage or block-granularity reduction is
   introduced.
+- JCP-6A implementation subtask: loop-aware primitive data-digest placement.
+  - Scope: change CFF primitive data-digest observation selection so methods
+    with backward block edges keep live primitive-flow binding without selecting
+    repeated expensive stack/floating observations from the same cyclic block.
+    This subtask may add loop-region analysis, per-cyclic-block observation
+    ranking, and a focused regression proving cyclic primitive flow remains
+    live while repeated `Double.hashCode(D)I` loop instrumentation is bounded.
+    It must not change CFF block construction, block boundaries, transition
+    semantics, hidden-key propagation, or string/constant transforms.
+  - Required evidence: JCP-5 JFR/topology evidence for `test21` and `full.jar`,
+    source proof that current uniform primitive observation selection ignores
+    back edges, and a new regression that fails if cyclic primitive dataflow is
+    no longer bound or if floating stack observations are repeatedly selected
+    in a loop-shaped CFF method.
+  - Validation command or runtime target:
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+    plus fresh direct regeneration/run of `test21.jar` CFF/MPO-only and
+    full-profile artifacts under repository-local build directories.
+  - Completion criteria: focused CFF algebraic audit passes; the fresh
+    `test21.jar` CFF/MPO-only artifact still runs correctly and improves the
+    matrix hot-loop timings; full-profile generation is retried to determine
+    whether JCP-7 string-size work remains separately required.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
