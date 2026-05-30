@@ -2026,7 +2026,7 @@ This plan will refresh that evidence before changing CFF performance code.
   non-contract reflective application data remains protected, rewritten, or
   dynamically derived rather than emitted as plaintext fallback.
 
-### [ ] JCP-4E11: Propagate Lambda-Captured Reflective Method Targets
+### [x] JCP-4E11: Propagate Lambda-Captured Reflective Method Targets
 
 - Scope: repair escaped reflective `Method` provenance through
   LambdaMetafactory capture sites. When a proven application `Method` object is
@@ -2058,6 +2058,27 @@ This plan will refresh that evidence before changing CFF performance code.
   count; external/unproven reflection keeps its true ABI; packed carriers,
   hidden keys, CFF, string/constant protection, and invokeDynamic protection
   remain enabled.
+- Completion evidence: implemented a two-stage provenance collector in
+  `JvmMethodParameterObfuscationPass`: normal escaped reflective parameters are
+  collected first, then LambdaMetafactory captured locals are resolved from
+  direct reflective lookup sources or from the already-recorded escaped
+  parameter map and recorded by implementation-method local. Runtime
+  `Method.invoke` and `Constructor.newInstance` candidate selection now checks
+  that lambda-captured local map before the existing escaped-parameter fallback.
+- Validation evidence: added
+  `lambdaCapturedReflectiveMethodInvokeUsesPackedApplicationAbiUnderFullProfile`
+  covering an application `Method` that escapes through a normal call into a
+  lambda capture, while retaining an external `String.substring` lambda-captured
+  `Method` as an ABI guard. Fresh focused runs passed:
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.lambdaCapturedReflectiveMethodInvokeUsesPackedApplicationAbiUnderFullProfile`
+  and
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp bash ./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.exactExternalReflectionLookupsKeepExternalAbiUnderFullProfile --tests dev.nekoobfuscator.test.JvmMethodParameterObfuscationIntegrationTest.lambdaCapturedReflectiveMethodInvokeUsesPackedApplicationAbiUnderFullProfile`.
+- Full.jar evidence: regenerated
+  `build/test-jvm-full-obf-perf/full-obf.jar` from `test-jars/full.jar` with
+  `test-jars/full-jvm-obf.yml` and no `quick` argument. Fresh focused runtime
+  `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/tmp -XX:-UsePerfData -XX:+ShowCodeDetailsInExceptionMessages' java -jar build/test-jvm-full-obf-perf/full-obf.jar --only perf --include perf.reflection.method-invoke --verbose`
+  passed with `Perf summary: passed=1 failed=0 skipped=30`; no wrong argument
+  count exception occurred.
 - Plan-intake review note: the active multi-agent tool contract forbids
   spawning a subagent unless the user explicitly requests sub-agents. The
   nearest permitted review before implementation is this scoped static evidence

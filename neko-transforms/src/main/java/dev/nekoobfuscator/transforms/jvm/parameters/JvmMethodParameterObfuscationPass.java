@@ -82,6 +82,8 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
     private static final String CARRIER_ATTESTATION_SITE_SEEDS = "methodParameterObfuscation.carrierAttestationSiteSeeds";
     private static final String ESCAPED_REFLECTIVE_PARAMETER_CANDIDATES =
         "methodParameterObfuscation.escapedReflectiveParameterCandidates";
+    private static final String LAMBDA_REFLECTIVE_CAPTURE_CANDIDATES =
+        "methodParameterObfuscation.lambdaReflectiveCaptureCandidates";
     private static final String CARRIER_INDEX_MARKER_OWNER = "dev/nekoobfuscator/runtime/CarrierIndex";
     private static final String CARRIER_INDEX_MARKER_NAME = "__neko_carrier_index";
     private static final String CARRIER_INDEX_MARKER_DESC = "()I";
@@ -221,6 +223,16 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (map == null) {
             map = new LinkedHashMap<>();
             ctx.putPassData(ESCAPED_REFLECTIVE_PARAMETER_CANDIDATES, map);
+        }
+        return map;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, List<MethodPlan>> lambdaReflectiveCaptureCandidates(TransformContext ctx) {
+        Map<String, List<MethodPlan>> map = ctx.getPassData(LAMBDA_REFLECTIVE_CAPTURE_CANDIDATES);
+        if (map == null) {
+            map = new LinkedHashMap<>();
+            ctx.putPassData(LAMBDA_REFLECTIVE_CAPTURE_CANDIDATES, map);
         }
         return map;
     }
@@ -472,6 +484,7 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
 
     private void collectEscapedReflectiveParameterCandidates(PipelineContext pctx) {
         Map<String, List<MethodPlan>> escaped = escapedReflectiveParameterCandidates(pctx);
+        Map<String, List<MethodPlan>> lambdaCaptured = lambdaReflectiveCaptureCandidates(pctx);
         for (L1Class clazz : pctx.classMap().values()) {
             for (L1Method method : clazz.methods()) {
                 if (!method.hasCode()) continue;
@@ -535,6 +548,89 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
                 }
             }
         }
+        for (L1Class clazz : pctx.classMap().values()) {
+            for (L1Method method : clazz.methods()) {
+                if (!method.hasCode()) continue;
+                MethodNode mn = method.asmNode();
+                if (mn == null || mn.instructions == null) continue;
+                try {
+                    Frame<SourceValue>[] frames = analyzeSourceValues(clazz.name(), mn);
+                    for (AbstractInsnNode insn = mn.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                        if (insn instanceof InvokeDynamicInsnNode indy) {
+                            collectLambdaCapturedReflectiveParameterCandidates(
+                                pctx,
+                                lambdaCaptured,
+                                clazz.name(),
+                                mn,
+                                frames,
+                                indy
+                            );
+                        }
+                    }
+                } catch (AnalyzerException | RuntimeException ignored) {
+                    // Missing provenance only leaves this lambda capture path unclaimed.
+                }
+            }
+        }
+    }
+
+    private void collectLambdaCapturedReflectiveParameterCandidates(
+        PipelineContext pctx,
+        Map<String, List<MethodPlan>> lambdaCaptured,
+        String currentOwner,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        InvokeDynamicInsnNode indy
+    ) {
+        Handle implementation = lambdaImplementationHandle(indy);
+        if (implementation == null || implementation.getTag() != Opcodes.H_INVOKESTATIC) return;
+        if (!pctx.classMap().containsKey(implementation.getOwner())) return;
+        Type[] capturedTypes = Type.getArgumentTypes(indy.desc);
+        Type[] implementationTypes = Type.getArgumentTypes(implementation.getDesc());
+        int capturedCount = Math.min(capturedTypes.length, implementationTypes.length);
+        if (capturedCount == 0) return;
+        int index = mn.instructions.indexOf(indy);
+        if (index < 0 || index >= frames.length) return;
+        Frame<SourceValue> frame = frames[index];
+        if (frame == null || frame.getStackSize() < capturedTypes.length) return;
+        int firstArg = frame.getStackSize() - capturedTypes.length;
+        int[] implementationLocals = argumentLocals(Opcodes.ACC_STATIC, implementation.getDesc());
+        String implementationKey = key(implementation.getOwner(), implementation.getName(), implementation.getDesc());
+        for (int i = 0; i < capturedCount; i++) {
+            if (isReflectiveMethodType(capturedTypes[i]) && isReflectiveMethodType(implementationTypes[i])) {
+                List<MethodPlan> candidates = reflectiveCaptureSourceCandidates(
+                    pctx,
+                    currentOwner,
+                    mn,
+                    frames,
+                    frame.getStack(firstArg + i),
+                    true
+                );
+                recordLambdaReflectiveCaptureCandidates(
+                    lambdaCaptured,
+                    true,
+                    implementationKey,
+                    implementationLocals[i],
+                    candidates
+                );
+            } else if (isReflectiveConstructorType(capturedTypes[i]) && isReflectiveConstructorType(implementationTypes[i])) {
+                List<MethodPlan> candidates = reflectiveCaptureSourceCandidates(
+                    pctx,
+                    currentOwner,
+                    mn,
+                    frames,
+                    frame.getStack(firstArg + i),
+                    false
+                );
+                recordLambdaReflectiveCaptureCandidates(
+                    lambdaCaptured,
+                    false,
+                    implementationKey,
+                    implementationLocals[i],
+                    candidates
+                );
+            }
+        }
     }
 
     private List<MethodPlan> escapedReflectiveCalleePlans(PipelineContext pctx, MethodInsnNode call) {
@@ -564,6 +660,54 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         if (candidates.isEmpty()) return;
         List<MethodPlan> plans = escaped.computeIfAbsent(
             escapedReflectiveParameterKey(methodMember, calleeKey, argumentIndex),
+            ignored -> new ArrayList<>()
+        );
+        for (MethodPlan candidate : candidates) {
+            addUniquePlan(plans, candidate);
+        }
+    }
+
+    private List<MethodPlan> reflectiveCaptureSourceCandidates(
+        PipelineContext pctx,
+        String currentOwner,
+        MethodNode mn,
+        Frame<SourceValue>[] frames,
+        SourceValue value,
+        boolean methodMember
+    ) {
+        List<MethodPlan> direct = reflectiveMemberSourceCandidates(pctx, mn, frames, value, methodMember, 0);
+        if (!direct.isEmpty()) return direct;
+        MethodPlan currentPlan = planByOldKey(pctx).get(key(currentOwner, mn.name, mn.desc));
+        if (currentPlan == null) return List.of();
+        String methodKey = key(currentPlan.owner(), currentPlan.oldName(), currentPlan.oldDesc());
+        List<Integer> locals = new ArrayList<>();
+        collectSourceLoadLocals(mn, frames, value, locals, 0);
+        if (locals.isEmpty()) return List.of();
+        List<MethodPlan> candidates = new ArrayList<>();
+        for (int local : locals) {
+            int argumentIndex = argumentIndexForLocal(currentPlan, local);
+            if (argumentIndex < 0) continue;
+            List<MethodPlan> recorded = escapedReflectiveParameterCandidates(pctx).get(
+                escapedReflectiveParameterKey(methodMember, methodKey, argumentIndex)
+            );
+            if (recorded == null) continue;
+            for (MethodPlan candidate : recorded) {
+                addUniquePlan(candidates, candidate);
+            }
+        }
+        return candidates;
+    }
+
+    private void recordLambdaReflectiveCaptureCandidates(
+        Map<String, List<MethodPlan>> lambdaCaptured,
+        boolean methodMember,
+        String methodKey,
+        int local,
+        List<MethodPlan> candidates
+    ) {
+        if (candidates.isEmpty()) return;
+        List<MethodPlan> plans = lambdaCaptured.computeIfAbsent(
+            lambdaReflectiveCaptureKey(methodMember, methodKey, local),
             ignored -> new ArrayList<>()
         );
         for (MethodPlan candidate : candidates) {
@@ -670,6 +814,10 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
 
     private static String escapedReflectiveParameterKey(boolean methodMember, String methodKey, int argumentIndex) {
         return (methodMember ? "M:" : "C:") + methodKey + "#" + argumentIndex;
+    }
+
+    private static String lambdaReflectiveCaptureKey(boolean methodMember, String methodKey, int local) {
+        return (methodMember ? "M:" : "C:") + methodKey + "#L" + local;
     }
 
     private static Frame<SourceValue>[] analyzeSourceValues(String owner, MethodNode mn) throws AnalyzerException {
@@ -2323,6 +2471,13 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return indy.bsm != null
             && "java/lang/invoke/LambdaMetafactory".equals(indy.bsm.getOwner())
             && ("metafactory".equals(indy.bsm.getName()) || "altMetafactory".equals(indy.bsm.getName()));
+    }
+
+    private static Handle lambdaImplementationHandle(InvokeDynamicInsnNode indy) {
+        if (!isLambdaMetafactory(indy) || indy.bsmArgs.length < 2 || !(indy.bsmArgs[1] instanceof Handle handle)) {
+            return null;
+        }
+        return handle;
     }
 
     private static MethodNode findMethodNode(L1Class clazz, String name, String desc) {
@@ -4527,6 +4682,28 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
         return candidates;
     }
 
+    private List<MethodPlan> lambdaCapturedReflectiveParameterCandidates(
+        PipelineContext pctx,
+        String currentOwner,
+        MethodNode mn,
+        MethodInsnNode invokeCall,
+        boolean methodMember
+    ) {
+        int operandValues = methodMember ? 3 : 2;
+        String methodKey = key(currentOwner, mn.name, mn.desc);
+        List<MethodPlan> candidates = new ArrayList<>();
+        for (int local : reflectiveMemberSourceLocals(mn, invokeCall, operandValues)) {
+            List<MethodPlan> recorded = lambdaReflectiveCaptureCandidates(pctx).get(
+                lambdaReflectiveCaptureKey(methodMember, methodKey, local)
+            );
+            if (recorded == null) continue;
+            for (MethodPlan candidate : recorded) {
+                addUniquePlan(candidates, candidate);
+            }
+        }
+        return candidates;
+    }
+
     private List<MethodPlan> reflectiveInvokeSourceCandidates(
         PipelineContext pctx,
         MethodNode mn,
@@ -4622,6 +4799,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             if (!plans.isEmpty()) return plans;
             if (arrayName != null) return plansMatchingReflectionTarget(pctx, null, arrayName);
         }
+        List<MethodPlan> lambdaCaptured = lambdaCapturedReflectiveParameterCandidates(
+            pctx,
+            currentOwner,
+            mn,
+            invokeCall,
+            true
+        );
+        if (!lambdaCaptured.isEmpty()) return lambdaCaptured;
         return escapedReflectiveParameterCandidates(pctx, currentOwner, mn, invokeCall, true);
     }
 
@@ -4638,6 +4823,14 @@ public final class JvmMethodParameterObfuscationPass implements TransformPass {
             List<MethodPlan> plans = constructorPlansMatchingReflectionTarget(pctx, arrayOwner, null);
             if (!plans.isEmpty()) return plans;
         }
+        List<MethodPlan> lambdaCaptured = lambdaCapturedReflectiveParameterCandidates(
+            pctx,
+            currentOwner,
+            mn,
+            invokeCall,
+            false
+        );
+        if (!lambdaCaptured.isEmpty()) return lambdaCaptured;
         return escapedReflectiveParameterCandidates(pctx, currentOwner, mn, invokeCall, false);
     }
 

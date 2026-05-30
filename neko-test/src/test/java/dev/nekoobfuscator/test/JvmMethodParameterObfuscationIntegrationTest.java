@@ -185,6 +185,28 @@ public class JvmMethodParameterObfuscationIntegrationTest {
     }
 
     @Test
+    void lambdaCapturedReflectiveMethodInvokeUsesPackedApplicationAbiUnderFullProfile() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-lambda-reflective-method"));
+        Path source = work.resolve("LambdaReflectiveMethodEntry.java");
+        Files.writeString(source, lambdaReflectiveMethodSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("lambda-reflective-method-entry.jar");
+        writeJar(inputJar, classes, "LambdaReflectiveMethodEntry");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("lambda-reflective-method-entry-obf.jar");
+        runFullProfileObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("LAMBDA REFLECTIVE METHOD OK"), obfuscated);
+    }
+
+    @Test
     void annotationEnumDefaultsSurviveFullProfileRenaming() throws Exception {
         Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
         Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-annotation-enum-defaults"));
@@ -1660,6 +1682,53 @@ public class JvmMethodParameterObfuscationIntegrationTest {
                 static Method runtimeExternalMethod(Object target, String name, Class<?>[] parameterTypes)
                     throws Exception {
                     return target.getClass().getMethod(name, parameterTypes);
+                }
+            }
+            """;
+    }
+
+    private String lambdaReflectiveMethodSourceText() {
+        return """
+            import java.lang.reflect.Method;
+
+            public class LambdaReflectiveMethodEntry {
+                interface LongOperation {
+                    long run() throws Exception;
+                }
+
+                public static void main(String[] args) throws Exception {
+                    Target target = new Target();
+                    Method method = Target.class.getMethod("add", int.class, int.class);
+                    LongOperation operation = capture(8, method, target);
+                    long result = operation.run();
+                    if (result != 196L) {
+                        throw new AssertionError("lambda-reflective-result:" + result);
+                    }
+
+                    Method external = String.class.getMethod("substring", int.class, int.class);
+                    LongOperation externalOperation = () -> ((String) external.invoke("abcdef", 1, 4)).length();
+                    long externalResult = externalOperation.run();
+                    if (externalResult != 3L) {
+                        throw new AssertionError("lambda-external-result:" + externalResult);
+                    }
+
+                    System.out.println("LAMBDA REFLECTIVE METHOD OK");
+                }
+
+                static LongOperation capture(int size, Method method, Target target) {
+                    return () -> {
+                        long checksum = 0L;
+                        for (int i = 0; i < size; i++) {
+                            checksum += ((Integer) method.invoke(target, new Object[] {i, 21})).intValue();
+                        }
+                        return checksum;
+                    };
+                }
+
+                public static final class Target {
+                    public int add(int left, int right) {
+                        return left + right;
+                    }
                 }
             }
             """;
