@@ -2253,6 +2253,40 @@ This plan will refresh that evidence before changing CFF performance code.
       remaining risk is explicitly carried forward because CFF transition
       material dispatch still dominates runtime and full-profile string-size
       amplification still fails generation.
+- JCP-6B implementation subtask: single-decode small-token dispatch selector.
+  - Scope: change the generic small-token CFF dispatcher emission so one
+    dispatcher entry derives the data-bound raw pc and masked selector once,
+    stores them in existing scratch locals, and compares the cached selector
+    against the small case set. This subtask must preserve encoded pc storage
+    at transitions, raw pc restoration before real block entry, data-digest
+    multiplier binding, guard/path/block token masking, fake/poison case
+    routing, and all CFF block construction boundaries.
+  - Required evidence: after JCP-6A, fresh JFR on the regenerated
+    `test21.jar` CFF/MPO-only artifact still reports the hot matrix lambdas
+    `a.a.x(...)` and `a.a.y(...)` as 44.23% and 39.94% of samples, with
+    transition material helper `a.ia.ua(...)` still present in the same hot
+    bytecode. Source inspection of `CffDispatchEmitter.emitSmallTokenDispatch`
+    shows `emitDispatchSelectorFromEncodedPc(...)` is called once per
+    candidate case even though `encodedPcLocal`, `dataLocal`, guard/path/block
+    locals, and `seed` do not change between those comparisons. That means the
+    same data-bound odd multiplier and inverse are recomputed multiple times
+    within a single dispatch entry.
+  - Validation command or runtime target:
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+    plus fresh direct regeneration/run of `test21.jar` CFF/MPO-only and a
+    full-profile regeneration retry under repository-local build directories.
+  - Completion criteria: focused CFF algebraic audit passes; fresh
+    `test21.jar` CFF/MPO-only output remains semantically correct and shows
+    lower matrix runtime than JCP-6A; full-profile generation is retried so
+    remaining `MethodTooLargeException` evidence, if still present, remains
+    assigned to JCP-7 rather than hidden by a stale artifact. No small-dispatch
+    case is converted to static dispatch, no token mask is removed, and no CFF
+    block granularity or coverage is changed.
+  - Plan-intake review note: the active multi-agent tool contract forbids
+    spawning a subagent unless the user explicitly asks for sub-agents. The
+    nearest permitted review before implementation is a scoped static
+    plan/diff audit against this recorded evidence, followed by the fresh
+    validation commands above before committing implementation.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
