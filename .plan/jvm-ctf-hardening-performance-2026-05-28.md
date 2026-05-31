@@ -3348,6 +3348,7 @@ This plan will refresh that evidence before changing CFF performance code.
     focused audit/assertion proving the inline path applies only to eligible
     real `DIRECT_ISLAND` transitions and handler/non-direct/fake/poison routing
     stays on the existing outlined path.
+
   - Implementation validation:
     - Implemented projected-budget direct-island inlining in the existing
       live-keyed `emitTransitionCore` path. The budget is computed only from
@@ -3389,6 +3390,67 @@ This plan will refresh that evidence before changing CFF performance code.
       `a.ja::wa (698 bytes)` and several relocated `a.ia::*` helpers are still
       reported as `hot method too big` / `too big`. This residual is assigned
       to JCP-7/JCP-8; JCP-6G does not claim final threshold acceptance.
+
+- [ ] JCP-6H implementation subtask: cache small-token selector and reload
+  dense-result route pc.
+  - Dependency/order: this follows the completed JCP-6G validation block and
+    the adaptive direct-inline reserve because those subtasks left a fresh
+    runnable full-profile `test21.jar` artifact with C2/OSR compiled
+    row-compute loops, but `PrintInlining` still reports rejected CFF helper
+    call surfaces. This subtask is also required to checkpoint the current CFF
+    source state before any later runtime/performance repair so that
+    subsequent evidence is not tied to uncommitted transform behavior. It
+    precedes JCP-8 final threshold enforcement and precedes independent JCP-9
+    class-load-state key-table work.
+  - Plan-only checkpoint handling: the plan checkpoint commit for this subtask
+    must stage only `.plan/jvm-ctf-hardening-performance-2026-05-28.md` and
+    must explicitly exclude the already-dirty CFF source hunks. After fresh
+    implementation validation, the implementation checkpoint commit must stage
+    only `CffDispatchEmitter.java`, `CffTransitionOutliner.java`, and the
+    matching plan/todo update for JCP-6H.
+  - Scope: make one bounded generic CFF dispatch/routing repair. For
+    multi-case small-token dispatch, derive the existing data-bound dispatch
+    selector once into a scratch local and compare that cached selector across
+    the candidate cases. For outlined dispatch loads, reload the transition
+    output pc whenever dense-result routing will consume route-mask state, not
+    only when fake routes or hub-result routes are present. The selector
+    formula, encoded-pc storage, raw-pc restore before real block entry,
+    guard/path/block token masks, data-digest multiplier binding, dense/sparse
+    result semantics, fake/poison routing, and hidden-key propagation must stay
+    unchanged.
+  - Required evidence before editing: source inspection of
+    `CffDispatchEmitter.emitSmallTokenDispatch` shows the multi-case path
+    recomputes `emitDispatchSelectorFromEncodedPc(...)` once per comparison
+    even though `pcLocal`, `dataLocal`, guard/path/block locals, seed,
+    multiplier scratch, and inverse scratch are unchanged within that dispatch
+    entry. Source inspection of `CffTransitionOutliner.emitDispatchCall` and
+    `emitIslandDispatchCall` shows dense-result routers can request route-mask
+    emission while the caller reload flag is still controlled only by
+    hub-result or fake-route conditions. Source inspection of
+    `emitResultRouteMask` shows dense routing consumes `pcLocal`, so a dense
+    result caller must reload the transition-output pc before routing. Fresh
+    current-source full-profile runs after JCP-6G/adaptive reserve complete
+    successfully but remain above the requested thresholds:
+    `test21.jar` reports `Seq 518 ms`, `Parallel 25 ms`, `VThreads 26 ms`,
+    and `test.jar` reports `Calc: 709ms`.
+  - Validation command or runtime target:
+    `./gradlew :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`,
+    fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, fresh no-quick full-profile regeneration and
+    direct runtime of `test-jars/test.jar`, static bytecode/source review
+    proving the small-token selector is still derived from live pc/data/key
+    material before it is cached, and a focused policy or bytecode assertion
+    proving dense-result routing reloads the transition-output `pcLocal` before
+    route-mask consumption.
+  - Completion criteria: focused CFF tests pass, including the dense-result
+    reload assertion; fresh full-profile `test21.jar` and `test.jar` artifacts
+    run successfully and expose the timing rows needed by JCP-8; no selector is
+    replaced with static block indexes, no token mask or live data binding is
+    removed, no CFF block boundary/count/coverage changes, no
+    fallback/original-bytecode path, and no benchmark/sample-specific condition
+    is introduced. If fresh validation shows a correctness failure or a
+    material performance regression, revise or revert this subtask before
+    commit and record the failing evidence here.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
