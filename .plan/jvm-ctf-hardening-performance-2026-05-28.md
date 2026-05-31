@@ -3543,6 +3543,29 @@ This plan will refresh that evidence before changing CFF performance code.
   - Keep one base-state init per CFF block and keep all per-site helper bodies
     seeded independently; do not merge sites, weaken CFF granularity, expose
     raw constants, or replace live CFF state with descriptor/static material.
+- Fifth repair third iteration evidence:
+  - The outlined state-array implementation compiles and reduces fresh no-quick
+    `test21.jar` constant-only `a/a.main([Ljava/lang/String;)V` from
+    `estimatedCodeBytes=70613` to `estimatedCodeBytes=68778`, but the method is
+    still over the JVM limit. This proves per-site outlined argument loads were
+    real caller bloat but not the last constant-layer size source.
+  - Source evidence in `JvmConstantObfuscationPass.transformMethod` shows
+    `needsScalarBase = !outlineNumericSites || !arraySites.isEmpty()`, then the
+    scalar base init is inserted for every `firstSiteByBlock` entry. When a
+    method has any primitive-array constant and normal numeric sites are already
+    outlined, this inserts scalar base material into every numeric block even
+    though only primitive-array rewrite sites consume `baseLocal`,
+    `baseMultiplierLocal`, `baseInverseLocal`, `baseDataLocal`, and
+    `baseRawLocal`. The scalar base is not needed by outlined numeric int/long
+    helpers, which use the separate base-state array.
+- Fifth repair fourth revised implementation:
+  - Split scalar-base insertion from outlined numeric base-state insertion.
+  - When outlined numeric sites are active, insert scalar base only for CFF
+    blocks that contain primitive-array constant sites; when outlined numeric
+    sites are inactive, keep the existing all-site scalar base behavior.
+  - Preserve primitive-array constant decoding, per-element seeds, live CFF
+    state binding, and all numeric coverage; do not special-case a jar or
+    disable array/constant transforms.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
