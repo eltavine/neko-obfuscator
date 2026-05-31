@@ -3295,6 +3295,60 @@ This plan will refresh that evidence before changing CFF performance code.
     JCP-6F checkpoint. Non-blocking residual risk remains assigned to JCP-8:
     `Seq` is still above threshold and helper inlining blockers remain.
 
+- [ ] JCP-6G implementation subtask: budgeted inline direct-island transitions
+  for cyclic outlined CFF methods.
+  - Dependency/order: this follows JCP-6F because JCP-6F proved full outlining
+    fixes the huge-method compilation blocker but leaves a measured helper-call
+    hot path. It precedes JCP-8 because the final `test21.jar` thresholds are
+    not yet attainable, and precedes JCP-9 because the class-load-state table
+    task is independent of this already-measured CFF hot path.
+  - Scope: refine outlined-transition emission for cyclic methods under a
+    bounded generic JIT budget. For eligible methods, keep a limited number of
+    `DIRECT_ISLAND` real transitions on the existing inline
+    `emitTransitionCore` path instead of routing every transition through the
+    shared transition-material helper. The inline path must remain the current
+    live-keyed delta transition logic; it must not change CFF block
+    construction, block boundaries, block count, dispatch coverage, fake/poison
+    routing, hidden-key propagation, or data-bound pc storage. Non-direct
+    edges, handler edges, and methods outside the budget remain on the existing
+    outlined helper path.
+  - Required evidence before editing: fresh current-source CFF+MPO-only
+    `test21.jar` regeneration and run completed with full CFF coverage and
+    reported `Seq 480 ms`, `Parallel 28 ms`, and `VThreads 32 ms`; a JFR run of
+    the same artifact reported hot samples in `a.a.y(...)` at 18.47%,
+    `a.a.x(...)` at 17.87%, shared transition helper `a.ja.wa(...)` at 11.65%,
+    and shared int/material helper `a.ja.ua(...)` at 4.42%. Fresh
+    `PrintCompilation`/`PrintInlining` reported repeated `a.ja::wa
+    (698 bytes) hot method too big` / `callee is too large` at the hot
+    row-compute callsites, while `javap` shows each row-compute lambda has only
+    one real multiply-add but 14 shared transition-material helper calls.
+    Original `test-jars/test21.jar` row lambdas are 66-67 byte nested loops.
+    Source inspection shows `CffDispatchEmitter.transition` currently sends
+    every edge to `TransitionOutliner.emitCall` whenever outlining is enabled,
+    even though the non-outlined `DIRECT_ISLAND` path already uses
+    `emitTransitionCore` with live-keyed delta transitions.
+  - Validation command or runtime target:
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`,
+    fresh current-source CFF+MPO-only regeneration/run of `test-jars/test21.jar`,
+    fresh no-quick full-profile regeneration/run of `test-jars/test21.jar`, and
+    `javap`/`PrintCompilation` inspection of the row-compute lambdas. The fresh
+    runs must report `Seq`, `Parallel`, and `VThreads` timing rows.
+  - Completion criteria: focused CFF algebraic/key-flow audit passes; the
+    transformed row-compute lambdas still stay below the 8000-byte JIT budget
+    and receive C2/OSR compilation; CFF+MPO-only and full-profile `test21.jar`
+    artifacts exit 0 and improve matrix timings over JCP-6F; no CFF coverage
+    reduction, block-boundary change, static selector/key exposure,
+    descriptor-only key recomputation, original-bytecode fallback, or
+    transform skip is introduced. If the bounded inline policy regresses
+    runtime or size, revert that implementation before commit and record the
+    negative result.
+  - Plan-intake review result: PASS. The review confirmed the subtask is
+    generic, evidence-backed, bounded, and correctly ordered before JCP-8 and
+    before independent JCP-9. Non-blocking implementation note: add or update a
+    focused audit/assertion proving the inline path applies only to eligible
+    real `DIRECT_ISLAND` transitions and handler/non-direct/fake/poison routing
+    stays on the existing outlined path.
+
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
 - Scope: optimize protected numeric/string decode runtime and size overhead
