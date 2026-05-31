@@ -3216,7 +3216,7 @@ This plan will refresh that evidence before changing CFF performance code.
 - Required evidence before editing: fresh profiler or bytecode/topology proof
   showing the exact full constant/string hot path in `test-obf.jar`, not just
   the ablation delta.
-- Fresh evidence before the first JCP-7 repair:
+  - Fresh evidence before the first JCP-7 repair:
   - The JCP-6E6 full-profile focused `perf.crypto.xor` run and the
     `full-no-indy` ablation both time out, while `renamer+keyDispatch+MPO+CFF`
     completes at `20,048.082 ms` and `full-no-const-string` completes at
@@ -3236,6 +3236,32 @@ This plan will refresh that evidence before changing CFF performance code.
     base binding, class-key-table material, and full coverage while reducing
     hot-loop bytecode expansion. It will not skip constants, preserve
     plaintext values, special-case arrays, or reduce CFF block coverage.
+- First repair validation:
+  - Implemented the generic loop-region compact-selection rule in
+    `JvmConstantObfuscationPass` by consuming the existing
+    `loopRegionInstructions(mn)` result for numeric and primitive-array
+    constant material. The change does not inspect benchmark names, class
+    names, method names, owners, descriptors, array element types, or constants
+    values.
+  - Focused Gradle validation passed:
+    `JvmConstantObfuscationIntegrationTest`,
+    `JvmStringObfuscationIntegrationTest`, and
+    `ControlFlowFlatteningAlgebraicAuditTest`.
+  - Fresh `full-no-indy` ablation regenerated from current sources wrote 316
+    classes. The hot `a.ef.te` bytecode maximum offset dropped from 11,854 to
+    7,400 and the selected hot-path instruction-pattern count dropped from
+    1,242 to 774. The focused XOR run no longer timed out and reported
+    `PERF perf.crypto.xor measure=42,243.871 ms`.
+  - Fresh full-profile regeneration with `test-jars/full-jvm-obf.yml` wrote
+    324 classes with `invokeDynamic appliedFull=657`,
+    `constantObfuscation appliedFull=316`, and `stringObfuscation
+    appliedFull=425`. The focused full-profile XOR run no longer timed out and
+    reported `PERF perf.crypto.xor measure=42,231.689 ms`.
+  - JCP-7 remains open: this repair restores completion and reduces bytecode
+    expansion, but it does not meet the requested final performance thresholds.
+    The next repair must target the remaining hot-loop decode/runtime cost
+    without reducing constant, string, invokedynamic, CFF, or key-dispatch
+    coverage.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a

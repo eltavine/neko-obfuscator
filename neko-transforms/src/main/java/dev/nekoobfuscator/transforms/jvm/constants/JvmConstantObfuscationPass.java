@@ -221,7 +221,8 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 firstSiteByBlock.putIfAbsent(site.state().blockIndex(), site);
             }
         }
-        boolean compact = useCompactNumericDecode(mn, sites);
+        boolean hasLoopNumericMaterial = hasLoopNumericMaterial(sites, arraySites, loopInstructions);
+        boolean compact = useCompactNumericDecode(mn, sites, hasLoopNumericMaterial);
         String compactHelper = compact ? ensureIntDecodeHelper(pctx, clazz) : null;
         String compactProtectedHelper = compact && (hasProtectedIntMaterialSites(sites) || !arraySites.isEmpty())
             ? ensureProtectedIntDecodeHelper(pctx, clazz)
@@ -399,7 +400,25 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         }
     }
 
-    private boolean useCompactNumericDecode(MethodNode mn, List<NumericSite> sites) {
+    private boolean hasLoopNumericMaterial(
+        List<NumericSite> sites,
+        List<ArrayConstantSite> arraySites,
+        Set<AbstractInsnNode> loopInstructions
+    ) {
+        if (loopInstructions.isEmpty()) return false;
+        for (NumericSite site : sites) {
+            if (loopInstructions.contains(site.insn())) return true;
+        }
+        for (ArrayConstantSite site : arraySites) {
+            for (AbstractInsnNode consumed : site.consumed()) {
+                if (loopInstructions.contains(consumed)) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean useCompactNumericDecode(MethodNode mn, List<NumericSite> sites, boolean hasLoopNumericMaterial) {
+        if (hasLoopNumericMaterial) return true;
         if (sites.size() >= COMPACT_SITE_THRESHOLD) return true;
         int estimatedGrowth = 0;
         int protectedIntSites = 0;
