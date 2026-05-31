@@ -2990,6 +2990,110 @@ This plan will refresh that evidence before changing CFF performance code.
     10 minutes; the hanging validation processes were terminated after 636
     seconds elapsed. JCP-6E remains open for these next blockers; this evidence
     does not invalidate the scoped JCP-6E2/JCP-6E3/JCP-6E4 acceptance.
+- [ ] JCP-6E5 baseline/repair subtask: restore ZGC internal probe success
+  markers under full JVM obfuscation.
+  - Dependency/order: JCP-6E2/JCP-6E3/JCP-6E4 are complete and committed, and
+    the fresh full-profile artifact now reaches the GC subprocess feature
+    tests. This blocker is independent from classloader-isolation and must be
+    repaired before a full unfiltered `full.jar` run can be accepted.
+  - Scope: diagnose and repair the generic transform/runtime invariant that
+    makes internal GC probe subprocesses running under ZGC exit successfully
+    without printing the required `GC_PROBE_OK` / `GC_COMPAT_OK` markers. The
+    repair must preserve full JVM obfuscation, internal argument parsing,
+    stdout marker emission, string/constant/CFF/key protection, and GC
+    compatibility. It must not skip ZGC, skip subprocess probes, preserve
+    plaintext marker strings as a fallback, special-case probe class names, or
+    reduce transform coverage for GC-related classes.
+  - Required evidence before editing production code:
+    - Fresh no-quick full-profile artifact
+      `build/tmp/jcp6e-staged-worktree/build/test-jvm-full-obf-perf/full-obf.jar`
+      fails `--only features --include features.jvm.gc.collector-subprocess
+      --verbose` with `AssertionError: ZGC probe output missing success marker`.
+    - The same artifact fails `--only features --include
+      features.jvm.gc.collector-compat-matrix --verbose` with
+      `AssertionError: ZGC output missing success marker`.
+    - Direct internal probe commands return exit code 0 but emit no marker:
+      `java -XX:+UseZGC -jar .../full-obf.jar --internal-gc-probe ZGC` prints
+      no `GC_PROBE_OK`, and
+      `java -XX:+UseZGC -jar .../full-obf.jar --internal-gc-compat-probe ZGC`
+      prints no `GC_COMPAT_OK`. With `-Xlog:gc`, the same obfuscated probe only
+      prints the VM line `Using The Z Garbage Collector`.
+    - Direct G1 internal probe on the same obfuscated artifact prints
+      `GC_PROBE_OK collector=G1 ...`, proving the internal probe route and jar
+      path are not globally broken.
+    - Original `test-jars/full.jar` passes both GC focused targets with
+      `PASS features.jvm.gc.collector-subprocess 169.783 ms` and
+      `PASS features.jvm.gc.collector-compat-matrix 753.883 ms`; original
+      direct ZGC internal probe prints `GC_PROBE_OK collector=ZGC ...`.
+    - Original bytecode contract:
+      `Main.main` checks `--internal-gc-probe` and
+      `--internal-gc-compat-probe` before normal runner parsing, then exits
+      with the return value of `GcProbe.run` or `GcCompatibilityProbe.run`.
+      `GcProbe.run` catches `Throwable`, prints failures to `System.out`, and
+      otherwise emits `GC_PROBE_OK ...`; `GcCompatibilityProbe.run` similarly
+      emits `GC_COMPAT_OK ...`.
+  - Validation command or runtime target: regenerate `test-jars/full.jar` with
+    `test-jars/full-jvm-obf.yml` without `quick`; run direct obfuscated
+    internal probes under G1 and ZGC; run focused
+    `features.jvm.gc.collector-subprocess` and
+    `features.jvm.gc.collector-compat-matrix`; then rerun the full unfiltered
+    `full-obf.jar --verbose` until it advances past these two targets.
+  - Completion criteria: fresh obfuscated ZGC internal probes emit the expected
+    success markers; both focused GC targets pass; unsupported collector
+    handling still fail-closes or skips only when the JVM reports an unsupported
+    collector; no ZGC skip, subprocess skip, marker fallback, plaintext marker
+    exposure, original-bytecode fallback, or transform coverage reduction is
+    introduced.
+- [ ] JCP-6E6 baseline/repair subtask: restore full-profile
+  `perf.crypto.xor` completion.
+  - Dependency/order: JCP-6E5 must run before this subtask when validating a
+    full unfiltered `full.jar` run, because the full runner reaches the GC
+    subprocess failures before the perf suite. The focused perf command may be
+    used independently for diagnosis, but final acceptance must use a freshly
+    regenerated full-profile artifact after the GC blocker is fixed.
+  - Scope: diagnose and repair the generic transform/runtime invariant that
+    makes the obfuscated `perf.crypto.xor` hot byte-array loop fail to finish
+    within 240 seconds under full JVM obfuscation. The repair must preserve CFF
+    block coverage, method-parameter packing, invokedynamic, string/constant
+    protection, dynamic key propagation, and array/loop semantics. It must not
+    special-case the XOR benchmark, byte-array loops, mapped class/method
+    names, benchmark ids, or reduce CFF granularity.
+  - Required evidence before editing production code:
+    - The post-JCP-6E no-quick full unfiltered `full-obf.jar --verbose` run
+      emits perf rows through `perf.crypto.rsa-oaep`, then produces no further
+      output for more than 10 minutes and must be terminated.
+    - Fresh focused obfuscated run
+      `timeout 240s java -jar .../full-obf.jar --only perf --include
+      perf.crypto.xor --verbose` exits 124 with no `PERF perf.crypto.xor`
+      output.
+    - Original `test-jars/full.jar --only perf --include perf.crypto.xor
+      --verbose` passes with `PERF perf.crypto.xor measure=339.404 ms`.
+    - Original bytecode for `CryptoXorPerfTest` uses a pure byte-array XOR
+      loop over `byte[]` inputs and `PerfSupport.measure`; no I/O, subprocess,
+      or external dependency participates in the measured path.
+  - Validation command or runtime target: after the concrete repair is chosen,
+    run the focused transformed perf target with a hard timeout, rerun
+    relevant CFF/MPO/string/constant regression tests for the touched path,
+    regenerate `test-jars/full.jar` without `quick`, and rerun the full
+    unfiltered `full-obf.jar --verbose`.
+  - Completion criteria: fresh full-profile `perf.crypto.xor` emits a PERF row
+    and completes within the runner's normal perf envelope; the full unfiltered
+    run advances past `perf.crypto.xor`; no static key recomputation,
+    descriptor-only keying, fallback, original-bytecode rescue, benchmark
+    special-case, CFF thinning, or transform coverage reduction is introduced.
+- [x] JCP-6E full-run environment classification: classify the staged-worktree
+  Unix-domain socket failure.
+  - Scope: determine whether `features.jvm.nio-network-io` is a transform
+    semantic failure or a validation-path artifact before creating a repair
+    task.
+  - Evidence: the full unfiltered run in the long staged worktree failed
+    `features.jvm.nio-network-io` with `SocketException: Unix domain path too
+    long`. Re-running the same obfuscated artifact with a shorter
+    repository-local `java.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t`
+    passed the focused target with
+    `PASS features.jvm.nio-network-io 18.065 ms`.
+  - Completion criteria: do not create a production repair for this failure
+    unless it reproduces under a non-pathological repository-local runtime path.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
