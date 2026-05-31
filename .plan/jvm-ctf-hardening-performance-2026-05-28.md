@@ -3455,6 +3455,68 @@ This plan will refresh that evidence before changing CFF performance code.
     per-site key-slot material to the shared string tail/helper.
   - Existing string/CFF/constant regression tests pass, no plaintext strings are
     restored, and no CFF block selection or transform coverage is weakened.
+- Fifth repair iteration evidence:
+  - The first live-`pcLocal` implementation compiled and the focused
+    string/CFF/constant regression tests passed, but fresh no-quick full-profile
+    `test21.jar` regeneration still failed with
+    `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`.
+    The largest-method estimate improved from `97206` to `90647`, proving the
+    callsite pc-token compaction is valid but insufficient.
+  - Actual bytecode-offset inspection of already written fresh artifacts shows
+    `test21-cff-mpo-only` `main` ending at offset `60657`,
+    `test21-validation-only` at `61307`, and `test21-constant-only` at
+    `64646`. This proves the caller is already near the JVM method-size ceiling
+    before string obfuscation, so the next generic repair must move string
+    callsite growth out of large caller methods rather than further tuning CFF
+    dispatch or disabling transforms.
+  - Source-path evidence in `rewriteStringConcat` shows concat literal strings
+    are always externalized: the caller decodes every concat recipe string and
+    then passes decoded `String` arguments to a generated concat helper. The
+    helper already supports internal decoded strings using `decodedStrings`
+    entries with `-1`, receives live method key/guard/path/block/pc state from
+    the caller, and calls the same protected shared string tail. Therefore, for
+    callers under generic JVM size pressure, concat string constants can be
+    decoded inside the existing helper without exposing plaintext strings,
+    without changing the original CFF block graph, and without falling back to
+    original bytecode.
+- Fifth repair revised implementation:
+  - Add a generic string-concat caller-size pressure threshold.
+  - When a caller is over that threshold, keep concat literals internal to the
+    generated concat helper instead of emitting their decode calls in the
+    caller. The helper remains keyed by the caller's live CFF state and each
+    internal string keeps its independent site seed/material.
+  - Keep the live-`pcLocal` callsite compaction from the first iteration.
+- Fifth repair fresh diagnosis after revised implementation:
+  - Fresh no-quick `test21.jar` string-only generation with the revised string
+    path succeeds and writes `test21-string-only-current.jar`; `javap` reports
+    `a/a.main([Ljava/lang/String;)V` ending at bytecode offset `60065`. This
+    proves the string-side repair moved the string layer below the JVM method
+    limit without weakening string coverage.
+  - Fresh no-quick `test21.jar` constant-only generation now fails in the CFF
+    output finalizer with `a/a.main([Ljava/lang/String;)V
+    estimatedCodeBytes=75009`, and fresh no-quick no-indy generation fails at
+    `estimatedCodeBytes=77877`. The remaining overflow is therefore not just
+    string concat growth; numeric constant base/material emission is now the
+    first failing layer on the large CFF/MPO method.
+  - Source evidence in `JvmConstantObfuscationPass.emitLiveConstantBase` shows
+    each live constant base currently calls `emitCanonicalPcToken(...)`, which
+    re-synthesizes a CFF pc token from live guard/path/block/key locals plus
+    static per-state material. The outlined base-state path already passes
+    `metadata.pcLocal()` into `OUTLINED_BASE_INIT_DESC`, but
+    `emitOutlinedLiveConstantBase` ignores that argument and recomputes the same
+    canonical token from locals. This is the same caller-size pattern repaired
+    for string callsites: the live CFF `pcLocal` is already available and is the
+    correct data-flow binding; the duplicated canonical-token synthesis adds
+    per-block/per-helper code size without adding required semantic coverage.
+- Fifth repair second revised implementation:
+  - Replace constant-obfuscation canonical pc-token recomputation in live
+    constant base derivation with direct consumption of the live CFF pc local.
+  - In outlined constant-base helpers, consume the already passed pc argument
+    instead of rebuilding the canonical token from guard/path/block/key locals.
+  - Preserve all numeric site coverage, independent site seeds, live
+    method-key/guard/path/block/data inputs, class-key table binding, and
+    runtime-derived material; do not change CFF block construction, method
+    parameter obfuscation, fallback behavior, or plaintext constant exposure.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
