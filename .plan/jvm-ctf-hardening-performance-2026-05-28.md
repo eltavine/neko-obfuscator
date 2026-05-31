@@ -3116,6 +3116,70 @@ This plan will refresh that evidence before changing CFF performance code.
     - Original bytecode for `CryptoXorPerfTest` uses a pure byte-array XOR
       loop over `byte[]` inputs and `PerfSupport.measure`; no I/O, subprocess,
       or external dependency participates in the measured path.
+    - Fresh JCP-6E6 focused runs on 2026-05-31 refreshed the baseline with
+      repository-local tmp dirs: original `test-jars/full.jar --only perf
+      --include perf.crypto.xor --verbose` passed with
+      `PERF perf.crypto.xor measure=355.655 ms`, while the freshly regenerated
+      full-profile `build/test-jvm-full-obf-perf/full-obf.jar` exited 124 after
+      240 seconds and printed only the JVM startup line.
+    - Fresh JCP-6E6 ablations regenerated from current sources isolate the
+      bad path before invokeDynamic/string/constant-specific runtime:
+      `renamer+keyDispatch+MPO+CFF` completed but reported
+      `PERF perf.crypto.xor measure=20,048.082 ms`; `full-no-const-string`
+      completed with `23,619.108 ms`; `full-no-indy` exited 124 after 240
+      seconds with no PERF row. `full-no-cff` failed closed during generation
+      with `constantObfuscation requires CFF class key table`, so it is not a
+      valid runtime comparison.
+    - Fresh JFR on the `renamer+keyDispatch+MPO+CFF` ablation reported
+      `a.ef.te(Object[], long)` at 3,663 samples / 91.35% and the shared CFF
+      int helper `a.zi.i(...)` at 339 samples / 8.45%. This proves the focused
+      blocker is the transformed XOR loop body itself, not the runner,
+      reporting, I/O, or a string/constant decode-only path.
+    - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the same ablation
+      shows `a.ef.te` reaches C2, but its dispatcher bytecode still contains
+      repeated `emitOddIntInverse` selector decode inside the same small-token
+      dispatch entry and the outer lambda reports `a.ef::te (6828 bytes) hot
+      method too big` for inlining. The first falsifiable repair candidate was
+      therefore the generic small-token dispatcher path: derive the data-bound
+      raw pc and selector once per dispatch entry, then compare the cached
+      selector across cases. This preserved the same encoded pc storage, live
+      data multiplier, guard/path/block token mask, fake/poison routing, block
+      coverage, and key propagation; it did not change block construction or
+      introduce a static selector.
+    - Iteration result: the single-decode small-token selector edit passed the
+      full `ControlFlowFlatteningAlgebraicAuditTest`, then a freshly
+      regenerated `renamer+keyDispatch+MPO+CFF` full.jar ablation reported
+      `PERF perf.crypto.xor measure=21,456.037 ms`, worse than the immediate
+      pre-edit `20,048.082 ms` baseline. The edit was reverted before commit;
+      JCP-6E6 must select a different generic CFF hot-path repair.
+    - Iteration result: forcing compact transition wrappers for every outlined
+      transition also passed the CFF algebraic audit, but the fresh
+      `renamer+keyDispatch+MPO+CFF` full.jar ablation reported
+      `PERF perf.crypto.xor measure=22,142.672 ms`, again worse than the
+      20,048.082 ms baseline. That edit was reverted before commit; moving
+      transition material behind per-edge wrappers is not the current repair.
+    - Iteration result: reducing JIT-budget small-token dispatch width from 2
+      to 1 passed the CFF audit and improved the same ablation only slightly to
+      `19,832.013 ms`; reducing it to 0 regressed to `21,192.169 ms`. Reducing
+      the odd-inverse Newton decode from five iterations to four also passed
+      the CFF audit but regressed to `21,140.450 ms`. These edits were reverted
+      before commit; dispatch-shape and inverse micro-tuning are insufficient
+      for the JCP-6E6 blocker.
+    - Fresh JCP-6E6 `full-no-indy` JFR on the focused XOR run exited 124 after
+      120 seconds and reported `a.ef.te(Object[], long)` at 11,554 samples /
+      99.63%. This proves the full-profile timeout still executes the
+      transformed hot loop body rather than hanging in class initialization,
+      string table setup, runner output, or invokedynamic bootstrap.
+    - Fresh bytecode topology comparison of `a.ef.te` shows
+      `full-cff-mpo-only.jar` has a final instruction offset of 6,827 bytes,
+      while `full-no-indy.jar` grows the same method to 11,854 bytes. The
+      selected `te` instruction-pattern count rises from 714 to 1,242, and the
+      simple byte-array XOR mask sequence around `bastore` expands from
+      `arraylength; iconst_1; isub; iand; baload; ixor` into hundreds of
+      runtime-derived integer fragments before the same `baload; ixor;
+      bastore`. This identifies the next repair surface as generic
+      constant/string numeric-material expansion in loop-carried code, not a
+      CFF dispatcher-only invariant.
   - Validation command or runtime target: after the concrete repair is chosen,
     run the focused transformed perf target with a hard timeout, rerun
     relevant CFF/MPO/string/constant regression tests for the touched path,
@@ -3152,6 +3216,26 @@ This plan will refresh that evidence before changing CFF performance code.
 - Required evidence before editing: fresh profiler or bytecode/topology proof
   showing the exact full constant/string hot path in `test-obf.jar`, not just
   the ablation delta.
+- Fresh evidence before the first JCP-7 repair:
+  - The JCP-6E6 full-profile focused `perf.crypto.xor` run and the
+    `full-no-indy` ablation both time out, while `renamer+keyDispatch+MPO+CFF`
+    completes at `20,048.082 ms` and `full-no-const-string` completes at
+    `23,619.108 ms`. This isolates a base CFF cost plus a larger
+    constant/string numeric-material multiplier.
+  - The `full-no-indy` JFR reports `a.ef.te(Object[], long)` at 99.63% of
+    samples, and bytecode topology proves the hot `te` body grows from 6,827
+    bytes to 11,854 bytes when constant/string protection is enabled. The hot
+    XOR store retains the same byte-array operation but inserts large
+    runtime-derived numeric fragments for loop-local constants such as the
+    array index mask.
+  - Source inspection shows `JvmConstantObfuscationPass` already computes
+    `loopRegionInstructions(mn)` but does not consume that set when choosing
+    compact numeric decode. The first JCP-7 repair will use that existing
+    generic loop topology signal to route loop-region numeric sites through the
+    compact keyed numeric decode path, preserving per-site seeds, live CFF/data
+    base binding, class-key-table material, and full coverage while reducing
+    hot-loop bytecode expansion. It will not skip constants, preserve
+    plaintext values, special-case arrays, or reduce CFF block coverage.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
