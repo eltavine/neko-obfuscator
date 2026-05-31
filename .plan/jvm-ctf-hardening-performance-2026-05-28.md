@@ -3566,6 +3566,46 @@ This plan will refresh that evidence before changing CFF performance code.
   - Preserve primitive-array constant decoding, per-element seeds, live CFF
     state binding, and all numeric coverage; do not special-case a jar or
     disable array/constant transforms.
+- Fifth repair fourth iteration evidence:
+  - The scalar-base narrowing implementation compiles. Fresh no-quick
+    `test21.jar` constant-only generation now succeeds and writes
+    `build/test-jvm-full-obf-perf/test21-constant-only-scalar-narrow.jar`.
+  - Fresh no-quick `test21.jar` full-no-indy generation also succeeds and
+    writes `build/test-jvm-full-obf-perf/test21-no-indy-scalar-narrow.jar`.
+    This proves the constant/string caller-size repairs are now below the JVM
+    method-size limit when the invokeDynamic reference layer is absent.
+  - Fresh no-quick `test21.jar` full-profile generation from the same current
+    sources fails during CFF finalization with
+    `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`.
+    The failed run reports `invokeDynamic appliedFull=63`,
+    `constantObfuscation appliedFull=33`, `stringObfuscation appliedFull=16`,
+    and `a/a.main([Ljava/lang/String;)V estimatedCodeBytes=74859`.
+    This isolates the remaining full-profile size overflow to invokeDynamic
+    callsite material layered on top of the now-passing no-indy artifact.
+  - Source-path evidence in `JvmInvokeDynamicObfuscationPass` shows size-pressure
+    methods already route reference sites through `__neko_indysite$*` outlined
+    helpers, but the large caller still computes both the bound site key and
+    the live indy flow word at every reference site. The caller first invokes
+    the existing `KEY_DESC ([Ljava/lang/Object;I)J` helper, stores the site key,
+    reloads it, emits five live CFF locals plus the material carrier and salt
+    slot, invokes the existing `FLOW_DESC (IIIII[Ljava/lang/Object;IJ)J` helper,
+    then calls the outlined site helper with the original operands, site key,
+    and flow word.
+- Fifth repair fifth revised implementation:
+  - For outlined invokeDynamic sites in size-pressure callers, keep the bound
+    site key as a real hidden entry argument to the outlined site helper so CFF
+    generated-helper key metadata remains tied to the actual site key.
+  - Move only the live indy flow-word computation from the caller into the
+    existing per-site outlined helper. The caller will pass the site key, live
+    guard/path/block/pc/data locals, and the material carrier to the helper;
+    the helper will use its site-specific flow-salt slot, call the existing
+    flow helper, and then invoke the protected indy with the original operands,
+    site key, and freshly computed flow.
+  - Preserve independent per-site seeds, resolver material, static-array
+    material, live CFF state binding, helper CFF key publication, and full
+    invokeDynamic coverage. Do not remove the site key, skip indy rewriting,
+    special-case `test21.jar` or `a/a.main`, expose plaintext bootstrap data,
+    or add fallback/original-bytecode behavior.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
