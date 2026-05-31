@@ -34,7 +34,12 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Handle;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.InvokeDynamicInsnNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
@@ -97,6 +102,60 @@ final class CffTransitionOutlinerPolicyTest {
                 ALIAS_HUB,
                 FALLTHROUGH,
                 128
+            )
+        );
+    }
+
+    @Test
+    void adaptiveReserveTracksFuturePostCffSitePressure() {
+        MethodNode lowPressure = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "lowPressure",
+            "()V",
+            null,
+            null
+        );
+        lowPressure.instructions.add(new InsnNode(Opcodes.ICONST_0));
+        lowPressure.instructions.add(new InsnNode(Opcodes.POP));
+        lowPressure.instructions.add(new InsnNode(Opcodes.RETURN));
+
+        MethodNode highPressure = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "highPressure",
+            "()V",
+            null,
+            null
+        );
+        for (int i = 0; i < 5; i++) {
+            highPressure.instructions.add(stringConcatIndy());
+            highPressure.instructions.add(new InsnNode(Opcodes.POP));
+            highPressure.instructions.add(new LdcInsnNode("protected literal " + i));
+            highPressure.instructions.add(new InsnNode(Opcodes.POP));
+        }
+        highPressure.instructions.add(new InsnNode(Opcodes.RETURN));
+
+        int lowReserve = CffBlockBuilder.adaptivePostCffReserveBytes(lowPressure);
+        int highReserve = CffBlockBuilder.adaptivePostCffReserveBytes(highPressure);
+        assertTrue(lowReserve < highReserve, "low-pressure methods should spend more inline budget");
+        assertEquals(1_500, highReserve, "high-pressure methods should keep the fixed reserve cap");
+    }
+
+    @Test
+    void adaptiveReserveStillRejectsAlreadyOversizedProjectedMethods() {
+        MethodNode lowPressure = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+            "lowPressure",
+            "()V",
+            null,
+            null
+        );
+        lowPressure.instructions.add(new InsnNode(Opcodes.RETURN));
+
+        assertEquals(
+            0,
+            CffBlockBuilder.inlineDirectTransitionBudgetBytesForProjectedSize(
+                lowPressure,
+                8_000
             )
         );
     }
@@ -200,6 +259,23 @@ final class CffTransitionOutlinerPolicyTest {
             }
         }
         return calls;
+    }
+
+    private static InvokeDynamicInsnNode stringConcatIndy() {
+        return new InvokeDynamicInsnNode(
+            "makeConcatWithConstants",
+            "()Ljava/lang/String;",
+            new Handle(
+                Opcodes.H_INVOKESTATIC,
+                "java/lang/invoke/StringConcatFactory",
+                "makeConcatWithConstants",
+                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;" +
+                    "Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)" +
+                    "Ljava/lang/invoke/CallSite;",
+                false
+            ),
+            "prefix\u0001suffix"
+        );
     }
 
     private static Path recreateWork(Path work)

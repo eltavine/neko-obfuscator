@@ -603,12 +603,97 @@ abstract class CffBlockBuilder extends CffIslandMaterial {
             blocks,
             handlerBridges
         );
+        return inlineDirectTransitionBudgetBytesForProjectedSize(
+            mn,
+            projectedOutlinedBytes
+        );
+    }
+
+    static int inlineDirectTransitionBudgetBytesForProjectedSize(
+        MethodNode mn,
+        int projectedOutlinedBytes
+    ) {
         return Math.max(
             0,
             HOTSPOT_HUGE_METHOD_LIMIT_BYTES -
-                JIT_BUDGET_POST_CFF_RESERVE_BYTES -
+                adaptivePostCffReserveBytes(mn) -
                 projectedOutlinedBytes
         );
+    }
+
+    static int adaptivePostCffReserveBytes(MethodNode mn) {
+        if (mn == null || mn.instructions == null) {
+            return JIT_BUDGET_POST_CFF_RESERVE_BYTES;
+        }
+        int pressure = 0;
+        for (
+            AbstractInsnNode insn = mn.instructions.getFirst();
+            insn != null;
+            insn = insn.getNext()
+        ) {
+            pressure += postCffSiteReservePressure(insn);
+            if (
+                pressure >=
+                    JIT_BUDGET_POST_CFF_RESERVE_BYTES -
+                        JIT_BUDGET_MIN_POST_CFF_RESERVE_BYTES
+            ) {
+                return JIT_BUDGET_POST_CFF_RESERVE_BYTES;
+            }
+        }
+        return Math.min(
+            JIT_BUDGET_POST_CFF_RESERVE_BYTES,
+            JIT_BUDGET_MIN_POST_CFF_RESERVE_BYTES + Math.max(0, pressure)
+        );
+    }
+
+    private static int postCffSiteReservePressure(AbstractInsnNode insn) {
+        if (insn instanceof InvokeDynamicInsnNode indy) {
+            return isStringConcatWithConstants(indy) ? 220 : 160;
+        }
+        if (insn instanceof LdcInsnNode ldc) {
+            Object cst = ldc.cst;
+            if (cst instanceof String value) {
+                return 96 + Math.min(96, value.length() / 8);
+            }
+            if (cst instanceof Number) {
+                return 32;
+            }
+            if (cst instanceof Type || cst instanceof Handle) {
+                return 48;
+            }
+            return 16;
+        }
+        if (insn instanceof IntInsnNode intInsn) {
+            if (intInsn.getOpcode() == Opcodes.NEWARRAY) {
+                return 160;
+            }
+            if (
+                intInsn.getOpcode() == Opcodes.BIPUSH ||
+                    intInsn.getOpcode() == Opcodes.SIPUSH
+            ) {
+                return 24;
+            }
+        }
+        int opcode = insn.getOpcode();
+        if (
+            opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5 ||
+                opcode == Opcodes.LCONST_0 ||
+                opcode == Opcodes.LCONST_1 ||
+                opcode == Opcodes.FCONST_0 ||
+                opcode == Opcodes.FCONST_1 ||
+                opcode == Opcodes.FCONST_2 ||
+                opcode == Opcodes.DCONST_0 ||
+                opcode == Opcodes.DCONST_1
+        ) {
+            return 4;
+        }
+        return 0;
+    }
+
+    private static boolean isStringConcatWithConstants(InvokeDynamicInsnNode indy) {
+        return indy.bsm != null &&
+            "java/lang/invoke/StringConcatFactory".equals(indy.bsm.getOwner()) &&
+            "makeConcatWithConstants".equals(indy.bsm.getName());
     }
 
     protected int estimatedOutlinedJitMethodBytes(

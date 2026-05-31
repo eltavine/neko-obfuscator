@@ -4273,6 +4273,49 @@ This plan will refresh that evidence before changing CFF performance code.
   - The changed budget policy is generic, depends only on method topology and
     future transform site density, and preserves live-keyed direct-island
     transition semantics.
+- Tenth repair validation evidence:
+  - Implemented adaptive post-CFF reserve selection in
+    `CffBlockBuilder.inlineDirectTransitionBudgetBytes`. The reserve now starts
+    at a low generic floor and rises toward the previous 1500-byte cap based on
+    future invokeDynamic, string, numeric constant, and primitive-array
+    material sites visible in the current method. The budget still uses the
+    projected outlined CFF method size and `HOTSPOT_HUGE_METHOD_LIMIT_BYTES`;
+    it still returns zero when the projected outlined method is already beyond
+    budget.
+  - Added focused policy tests proving low future site pressure receives a
+    lower reserve than string/indy-heavy pressure and proving already oversized
+    projected methods still receive zero direct-inline budget.
+  - Focused validation passed:
+    `./gradlew :neko-transforms:compileJava :neko-test:test --tests
+    dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest
+    --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test21-obf-adaptive-reserve.jar` with full
+    coverage for all enabled transforms (`renamer appliedFull=96`,
+    `keyDispatch appliedFull=96`, `methodParameterObfuscation appliedFull=35
+    appliedSafe=7`, `controlFlowFlattening appliedFull=96`,
+    `invokeDynamic appliedFull=63`, `constantObfuscation appliedFull=33`,
+    `stringObfuscation appliedFull=16`). The fresh artifact ran successfully
+    with `Seq 518 ms`, `Parallel 25 ms`, and `VThreads 26 ms`, improving over
+    the ninth-repair row of `Seq 553 ms`, `Parallel 24 ms`, `VThreads 27 ms`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test-obf-adaptive-reserve.jar` with full
+    coverage for all enabled transforms (`renamer appliedFull=84`,
+    `keyDispatch appliedFull=84`, `methodParameterObfuscation appliedFull=74
+    appliedSafe=2`, `controlFlowFlattening appliedFull=85`,
+    `invokeDynamic appliedFull=51`, `constantObfuscation appliedFull=34`,
+    `stringObfuscation appliedFull=26`). The fresh artifact exited 0 and
+    reported `Calc: 709ms`, improving over the ninth-repair row of
+    `Calc: 777ms`.
+  - Fresh `test21` `-XX:+PrintCompilation -XX:+PrintInlining` evidence shows
+    `a.a::y` still compiles with C2/OSR at 6326 bytes and the generated
+    artifact remains below the huge-method limit. Static `javap` inspection of
+    `a/a` shows `__neko_cff_xmat` callsites decreased from 169 in the
+    ninth-repair artifact to 162 in the adaptive-reserve artifact. Remaining
+    JIT blockers still include relocated CFF helpers in the 566-920 byte range
+    rejected as `hot method too big`, so final threshold work remains open.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
