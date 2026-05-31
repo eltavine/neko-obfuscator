@@ -3517,6 +3517,32 @@ This plan will refresh that evidence before changing CFF performance code.
     method-key/guard/path/block/data inputs, class-key table binding, and
     runtime-derived material; do not change CFF block construction, method
     parameter obfuscation, fallback behavior, or plaintext constant exposure.
+- Fifth repair second iteration evidence:
+  - The constant live-`pcLocal` implementation compiles and reduces fresh
+    no-quick `test21.jar` constant-only `a/a.main([Ljava/lang/String;)V` from
+    `estimatedCodeBytes=75009` to `estimatedCodeBytes=70613`, but the method is
+    still over the JVM code-size limit. This proves canonical pc-token
+    recomputation was real caller-side bloat, while a second generic constant
+    repair is still required before full generation can pass.
+  - `ControlFlowFlatteningPass` allocates CFF locals after the application
+    method locals (`pcLocal = mn.maxLocals`, followed by guard/path/block/data),
+    and CFF data digest stores happen in CFF dispatch/init code, not through
+    application locals. `JvmConstantObfuscationPass` already initializes one
+    `int[]` base state at the first protected constant site in each CFF block,
+    but every outlined numeric site still reloads `data`, `guard`, and
+    `block` from the caller and passes them to a per-site helper. Because those
+    values are the same live CFF block state captured by the block's base-state
+    init helper, storing them in the existing base-state array preserves the
+    live data-flow binding while removing repeated caller-side parameter loads.
+- Fifth repair third revised implementation:
+  - Expand the outlined numeric base-state array from two words to include the
+    captured live `data`, `guard`, and `block` values.
+  - Change outlined numeric int/long helper descriptors to consume only the
+    base-state array, and refresh from the captured state words inside the
+    helper.
+  - Keep one base-state init per CFF block and keep all per-site helper bodies
+    seeded independently; do not merge sites, weaken CFF granularity, expose
+    raw constants, or replace live CFF state with descriptor/static material.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
