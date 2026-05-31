@@ -162,6 +162,29 @@ public class JvmStringObfuscationIntegrationTest {
         assertFalse(classText.contains("identity-replacement-103"), "replacement literal remained in class bytes");
     }
 
+    @Test
+    void sizePressureStringConcatUsesCompactLiveStateAbi() throws Exception {
+        Path projectRoot = Path.of(System.getProperty("neko.test.projectRoot", System.getProperty("user.dir")));
+        Path work = Files.createDirectories(projectRoot.resolve("build/tmp/neko-test-string-concat-pressure"));
+        Path source = work.resolve("StringConcatPressureShapes.java");
+        Files.writeString(source, concatPressureSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("string-concat-pressure.jar");
+        writeJar(inputJar, classes, "StringConcatPressureShapes");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("string-concat-pressure-obf.jar");
+        runObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+
+        assertEquals(original, obfuscated);
+        assertCompactConcatAbi(outputJar, "StringConcatPressureShapes");
+        assertCompactStringTailAbi(outputJar, "StringConcatPressureShapes");
+    }
+
     private void runObfuscation(Path input, Path output) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
@@ -624,6 +647,125 @@ public class JvmStringObfuscationIntegrationTest {
         assertTrue(materialCells >= 2, "string fixture should emit multiple derived string material cells");
         assertTrue(fragmentedWrites >= materialCells * 2, "string material cells should use fragmented numeric writes");
         assertTrue(sawTail, "string fixture should emit a shared string decode tail");
+    }
+
+    private void assertCompactConcatAbi(Path jar, String owner) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get(owner);
+        int compactCalls = 0;
+        int legacyStateCalls = 0;
+        int compactHelpers = 0;
+        boolean sawClassKeySelector = false;
+        boolean sawLiveMethodKey = false;
+        boolean sawLivePc = false;
+        boolean sawRecoveredStateStores = false;
+        for (var method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            boolean compactHelper = method.name.startsWith("__neko_strcat$")
+                && method.desc.endsWith("JI)Ljava/lang/String;");
+            if (compactHelper) {
+                compactHelpers++;
+                int intStores = 0;
+                for (AbstractInsnNode insn : insns) {
+                    if (pushesInt(insn, CLASS_KEY_WORDS_SELECTOR_SLOT)) {
+                        sawClassKeySelector = true;
+                    }
+                    if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.LLOAD) {
+                        sawLiveMethodKey = true;
+                    }
+                    if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ILOAD) {
+                        sawLivePc = true;
+                    }
+                    if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.ISTORE && var.var > 0) {
+                        intStores++;
+                    }
+                }
+                sawRecoveredStateStores |= intStores >= 4;
+            }
+            for (AbstractInsnNode insn : insns) {
+                if (!(insn instanceof MethodInsnNode call)
+                    || !owner.equals(call.owner)
+                    || !call.name.startsWith("__neko_strcat$")) {
+                    continue;
+                }
+                if (call.desc.endsWith("JI)Ljava/lang/String;")) {
+                    compactCalls++;
+                }
+                if (call.desc.endsWith("JIIII)Ljava/lang/String;")) {
+                    legacyStateCalls++;
+                }
+            }
+        }
+        assertTrue(compactCalls > 0, "size-pressure string concat fixture did not use compact concat ABI");
+        assertEquals(0, legacyStateCalls, "size-pressure string concat callsites still pass guard/path/block locals");
+        assertTrue(compactHelpers > 0, "compact concat helper was not emitted");
+        assertTrue(sawClassKeySelector, "compact concat helper should select class-key words through the selector slot");
+        assertTrue(sawLiveMethodKey, "compact concat helper should consume the live hidden method key");
+        assertTrue(sawLivePc, "compact concat helper should consume the live pc token");
+        assertTrue(sawRecoveredStateStores, "compact concat helper should recover state words into helper locals");
+    }
+
+    private void assertCompactStringTailAbi(Path jar, String owner) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get(owner);
+        int compactCalls = 0;
+        int legacyCallsInCompactMethods = 0;
+        int compactTailHelpers = 0;
+        boolean sawSelectorSlot = false;
+        boolean sawRecoveredStateStores = false;
+        boolean sawLiveMethodKey = false;
+        for (var method : clazz.asmNode().methods) {
+            if (method.instructions == null) continue;
+            AbstractInsnNode[] insns = method.instructions.toArray();
+            boolean compactTail = method.name.startsWith("__neko_strtail$")
+                && "([Ljava/lang/Object;JIII)Ljava/lang/String;".equals(method.desc);
+            if (compactTail) {
+                compactTailHelpers++;
+                int recoveredStores = 0;
+                for (AbstractInsnNode insn : insns) {
+                    if (pushesInt(insn, STRING_MATERIAL_SELECTOR_SLOT)) {
+                        sawSelectorSlot = true;
+                    }
+                    if (insn instanceof VarInsnNode var && var.getOpcode() == Opcodes.LLOAD && var.var == 1) {
+                        sawLiveMethodKey = true;
+                    }
+                    if (insn instanceof VarInsnNode var
+                        && var.getOpcode() == Opcodes.ISTORE
+                        && (var.var == 6 || var.var == 7 || var.var == 8)) {
+                        recoveredStores++;
+                    }
+                }
+                sawRecoveredStateStores |= recoveredStores >= 3;
+            }
+            boolean generatedStringHelper = method.name.startsWith("__neko_strcat$")
+                || method.name.startsWith("__neko_strtail$");
+            boolean methodUsesCompactTail = false;
+            int methodLegacyApplicationCalls = 0;
+            for (AbstractInsnNode insn : insns) {
+                if (!(insn instanceof MethodInsnNode call)
+                    || !owner.equals(call.owner)
+                    || !call.name.startsWith("__neko_strtail$")) {
+                    continue;
+                }
+                if ("([Ljava/lang/Object;JIII)Ljava/lang/String;".equals(call.desc)) {
+                    compactCalls++;
+                    methodUsesCompactTail = true;
+                }
+                if (!generatedStringHelper && "([Ljava/lang/Object;JIIIIII)Ljava/lang/String;".equals(call.desc)) {
+                    methodLegacyApplicationCalls++;
+                }
+            }
+            if (methodUsesCompactTail) {
+                legacyCallsInCompactMethods += methodLegacyApplicationCalls;
+            }
+        }
+        assertTrue(compactCalls > 0, "size-pressure string fixture did not use compact string tail ABI");
+        assertEquals(0, legacyCallsInCompactMethods, "compact string methods still pass guard/path/block locals");
+        assertTrue(compactTailHelpers > 0, "compact string tail helper was not emitted");
+        assertTrue(sawSelectorSlot, "compact string tail should still select string material through the selector slot");
+        assertTrue(sawLiveMethodKey, "compact string tail should consume the live hidden method key");
+        assertTrue(sawRecoveredStateStores, "compact string tail should recover guard/path/block locals from keyed metadata");
     }
 
     private List<int[]> literalIntArrays(AbstractInsnNode[] insns) {
@@ -1409,6 +1551,58 @@ public class JvmStringObfuscationIntegrationTest {
         assertTrue(exited, "command timed out: " + command);
         assertEquals(0, process.exitValue(), "command failed: " + command + "\n" + output);
         return output;
+    }
+
+    private String concatPressureSourceText() {
+        StringBuilder source = new StringBuilder();
+        source.append("""
+            public class StringConcatPressureShapes {
+                public static void main(String[] args) {
+                    String out = pressure(17);
+                    System.out.println(out);
+                    if (!out.startsWith("pressure:")) {
+                        throw new AssertionError(out);
+                    }
+                }
+
+                static String pressure(int seed) {
+                    String s = "pressure-root";
+                    int v = seed;
+            """);
+        for (int i = 0; i < 112; i++) {
+            source.append("        v = (v * 1664525 + 1013904223) ^ ")
+                .append(i)
+                .append(";\n");
+            source.append("        if ((v & ")
+                .append((i % 7) + 1)
+                .append(") == ")
+                .append(i & 3)
+                .append(") {\n");
+            source.append("            v ^= s.length() + ")
+                .append(i)
+                .append(";\n");
+            source.append("        } else {\n");
+            source.append("            v += seed ^ ")
+                .append(i)
+                .append(";\n");
+            source.append("        }\n");
+            if (i % 5 == 0) {
+                source.append("        s = s + \"|concat-pressure-")
+                    .append(i)
+                    .append("-\" + v;\n");
+                source.append("        if (s.length() > 512) s = s.substring(s.length() - 256);\n");
+            } else {
+                source.append("        v ^= v >>> ")
+                    .append((i % 11) + 1)
+                    .append(";\n");
+            }
+        }
+        source.append("""
+                    return "pressure:" + s.length() + ":" + v + ":" + s.charAt(s.length() - 1);
+                }
+            }
+            """);
+        return source.toString();
     }
 
     private String sourceText() {

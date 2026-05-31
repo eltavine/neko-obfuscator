@@ -91,6 +91,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/invoke/MutableCallSite;Ljava/lang/invoke/MethodType;" +
         "Ljava/lang/String;I[Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;";
     private static final String FLOW_DESC = "(IIIII[Ljava/lang/Object;IJ)J";
+    private static final String COMPACT_FLOW_DESC = "(II[Ljava/lang/Object;IJ)J";
     private static final String KEY_DESC = "([Ljava/lang/Object;I)J";
     private static final String HELPERS_KEY = "invokeDynamic.classHelpers";
     private static final String SHARED_HELPERS_KEY = "invokeDynamic.sharedHelpers";
@@ -122,6 +123,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private static final int INDY_ARRAY_MATERIAL_TABLE_LOGICAL = 3;
     private static final int FLOW_HELPER_DATA_WORD_LOCAL = 4;
     private static final int FLOW_HELPER_METHOD_KEY_LOCAL = 7;
+    private static final int COMPACT_FLOW_HELPER_METHOD_KEY_LOCAL = 4;
 
     @Override
     public String id() {
@@ -212,7 +214,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             long token = indyTokenFromFlow(siteSeed, salt, flow);
             IndyFlowTable flowTable = ensureIndyFlowTable(pctx, clazz, metadata);
             activeFlowTable = flowTable;
-            if (indyMaterialLocal < 0) {
+            if (!outlineSites && indyMaterialLocal < 0) {
                 indyMaterialLocal = mn.maxLocals++;
                 indyMaterialInit.add(new FieldInsnNode(Opcodes.GETSTATIC, clazz.name(), flowTable.fieldName(), OBJECT_ARRAY_DESC));
                 indyMaterialInit.add(new VarInsnNode(Opcodes.ASTORE, indyMaterialLocal));
@@ -278,41 +280,37 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             );
 
             InsnList replacement = new InsnList();
-            if (indySiteKeyLocal < 0) {
-                indySiteKeyLocal = mn.maxLocals;
-                mn.maxLocals = indySiteKeyLocal + 2;
-            }
-            emitBoundIndySiteKeyCall(
-                replacement,
-                helpers,
-                indyMaterialLocal,
-                flowSaltSlot,
-                indySiteKeyLocal
-            );
             if (outlineSites) {
                 String helperName = addOutlinedIndySiteHelper(
                     pctx,
                     clazz,
                     spec,
                     indy,
-                    siteSeed
+                    siteSeed,
+                    helpers,
+                    flowSaltSlot,
+                    flowTable.fieldName()
                 );
-                replacement.add(new VarInsnNode(Opcodes.LLOAD, indySiteKeyLocal));
                 emitOutlinedIndySiteCall(
                     replacement,
                     clazz,
                     spec.indyDesc(),
                     helperName,
+                    metadata
+                );
+                outlined++;
+            } else if (loopInstructions.contains(insn)) {
+                if (indySiteKeyLocal < 0) {
+                    indySiteKeyLocal = mn.maxLocals;
+                    mn.maxLocals = indySiteKeyLocal + 2;
+                }
+                emitBoundIndySiteKeyCall(
+                    replacement,
                     helpers,
-                    metadata,
-                    state,
-                    interfaceOwner,
                     indyMaterialLocal,
                     flowSaltSlot,
                     indySiteKeyLocal
                 );
-                outlined++;
-            } else if (loopInstructions.contains(insn)) {
                 int flowCacheLocal = mn.maxLocals;
                 mn.maxLocals += 2;
                 flowCacheInit.add(new InsnNode(Opcodes.LCONST_0));
@@ -333,6 +331,17 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                 );
                 replacement.add(indy);
             } else {
+                if (indySiteKeyLocal < 0) {
+                    indySiteKeyLocal = mn.maxLocals;
+                    mn.maxLocals = indySiteKeyLocal + 2;
+                }
+                emitBoundIndySiteKeyCall(
+                    replacement,
+                    helpers,
+                    indyMaterialLocal,
+                    flowSaltSlot,
+                    indySiteKeyLocal
+                );
                 replacement.add(new VarInsnNode(Opcodes.LLOAD, indySiteKeyLocal));
                 emitLiveIndyWord(
                     replacement,
@@ -358,11 +367,13 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                 JvmKeyDispatchPass.markGenerated(pctx, flowCacheInit);
                 mn.instructions.insert(flowCacheInit);
             }
-            JvmKeyDispatchPass.markGenerated(pctx, indyMaterialInit);
-            if ("<clinit>".equals(method.name()) && "()V".equals(method.descriptor()) && activeFlowTable != null) {
-                mn.instructions.insert(activeFlowTable.initEnd(), indyMaterialInit);
-            } else {
-                mn.instructions.insert(indyMaterialInit);
+            if (indyMaterialInit.size() > 0) {
+                JvmKeyDispatchPass.markGenerated(pctx, indyMaterialInit);
+                if ("<clinit>".equals(method.name()) && "()V".equals(method.descriptor()) && activeFlowTable != null) {
+                    mn.instructions.insert(activeFlowTable.initEnd(), indyMaterialInit);
+                } else {
+                    mn.instructions.insert(indyMaterialInit);
+                }
             }
             mn.maxStack = Math.max(mn.maxStack, 32);
             clazz.markDirty();
@@ -386,7 +397,10 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         L1Class clazz,
         SiteSpec spec,
         InvokeDynamicInsnNode indy,
-        long siteSeed
+        long siteSeed,
+        HelperNames helpers,
+        int flowSaltSlot,
+        String carrierFieldName
     ) {
         String desc = outlinedIndySiteDescriptor(spec.indyDesc());
         String name = uniqueMethodName(
@@ -397,17 +411,42 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         access |= clazz.isInterface() ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
         MethodNode helper = new MethodNode(access, name, desc, null, null);
         Type[] originalArgs = Type.getArgumentTypes(spec.indyDesc());
+        int originalArgSlots = 0;
+        for (Type arg : originalArgs) {
+            originalArgSlots += arg.getSize();
+        }
+        int pcLocal = originalArgSlots;
+        int dataLocal = pcLocal + 1;
+        int indyMaterialLocal = dataLocal + 1;
+        int keyLocal = indyMaterialLocal + 1;
+        helper.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, clazz.name(), carrierFieldName, OBJECT_ARRAY_DESC));
+        helper.instructions.add(new VarInsnNode(Opcodes.ASTORE, indyMaterialLocal));
+        helper.instructions.add(new VarInsnNode(Opcodes.ALOAD, indyMaterialLocal));
+        JvmPassBytecode.pushInt(helper.instructions, flowSaltSlot);
+        helper.instructions.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            helpers.keyOwner(),
+            helpers.key(),
+            KEY_DESC,
+            helpers.keyInterfaceOwner()
+        ));
+        helper.instructions.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
         int local = 0;
         for (Type arg : originalArgs) {
             helper.instructions.add(new VarInsnNode(arg.getOpcode(Opcodes.ILOAD), local));
             local += arg.getSize();
         }
-        int keyLocal = local;
-        local += 2;
+        local = keyLocal + 2;
         helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
-        int flowLocal = local;
-        local += 2;
-        helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, flowLocal));
+        emitCompactLiveIndyWordFromLocals(
+            helper.instructions,
+            helpers,
+            pcLocal,
+            dataLocal,
+            indyMaterialLocal,
+            flowSaltSlot,
+            keyLocal
+        );
         helper.instructions.add(indy);
         Type returnType = Type.getReturnType(spec.indyDesc());
         helper.instructions.add(new InsnNode(returnType.getOpcode(Opcodes.IRETURN)));
@@ -425,25 +464,10 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         L1Class clazz,
         String indyDesc,
         String helperName,
-        HelperNames helpers,
-        ControlFlowFlatteningPass.CffMethodMetadata metadata,
-        ControlFlowFlatteningPass.CffInstructionState state,
-        boolean interfaceOwner,
-        int indyMaterialLocal,
-        int flowSaltSlot,
-        int keyLocal
+        ControlFlowFlatteningPass.CffMethodMetadata metadata
     ) {
-        emitLiveIndyWord(
-            replacement,
-            clazz.name(),
-            helpers,
-            metadata,
-            state,
-            interfaceOwner,
-            indyMaterialLocal,
-            flowSaltSlot,
-            keyLocal
-        );
+        replacement.add(new VarInsnNode(Opcodes.ILOAD, metadata.pcLocal()));
+        replacement.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
         replacement.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             clazz.name(),
@@ -459,8 +483,8 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         Type[] args = new Type[originalArgs.length + 2];
         System.arraycopy(originalArgs, 0, args, 0, originalArgs.length);
         int offset = originalArgs.length;
-        args[offset] = Type.LONG_TYPE;
-        args[offset + 1] = Type.LONG_TYPE;
+        args[offset] = Type.INT_TYPE;
+        args[offset + 1] = Type.INT_TYPE;
         return Type.getMethodDescriptor(method.getReturnType(), args);
     }
 
@@ -809,6 +833,9 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             shared.flowOwner(),
             shared.flow(),
             shared.flowInterfaceOwner(),
+            shared.compactFlowOwner(),
+            shared.compactFlow(),
+            shared.compactFlowInterfaceOwner(),
             shared.keyOwner(),
             shared.key(),
             shared.keyInterfaceOwner(),
@@ -839,6 +866,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             return existing;
         }
         String flow = uniqueMethodName(clazz, "__neko_indy_flow");
+        String compactFlow = uniqueMethodName(clazz, "__neko_indy_flowc");
         String helperKey = uniqueMethodName(clazz, "__neko_indy_sitekey");
         String guard = uniqueMethodName(clazz, "__neko_indy_guard");
         String resolver = uniqueMethodName(clazz, "__neko_indy_resolve");
@@ -896,8 +924,16 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         clazz.asmNode().methods.add(emitGuard(guard, access));
         clazz.asmNode().methods.add(emitKey(helperKey, access));
         clazz.asmNode().methods.add(emitFlow(flow, classKeyMask, access));
+        clazz.asmNode().methods.add(emitCompactFlow(compactFlow, classKeyMask, access));
         publishGeneratedIndyHelperFlowKey(pctx, clazz.name(), resolver, RESOLVER_DESC, RESOLVER_FLOW_LOCAL);
         publishGeneratedIndyHelperFlowKey(pctx, clazz.name(), flow, FLOW_DESC, FLOW_HELPER_METHOD_KEY_LOCAL);
+        publishGeneratedIndyHelperFlowKey(
+            pctx,
+            clazz.name(),
+            compactFlow,
+            COMPACT_FLOW_DESC,
+            COMPACT_FLOW_HELPER_METHOD_KEY_LOCAL
+        );
         installInjectedStackTraceFilter(
             pctx,
             clazz.name(),
@@ -906,6 +942,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                 bootstrapCore,
                 resolver,
                 flow,
+                compactFlow,
                 helperKey,
                 guard,
                 arrayHelpers.booleanHelper(),
@@ -930,6 +967,9 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             interfaceOwner,
             clazz.name(),
             flow,
+            interfaceOwner,
+            clazz.name(),
+            compactFlow,
             interfaceOwner,
             clazz.name(),
             helperKey,
@@ -4145,6 +4185,29 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         ));
     }
 
+    private void emitCompactLiveIndyWordFromLocals(
+        InsnList insns,
+        HelperNames helpers,
+        int pcLocal,
+        int dataLocal,
+        int indyMaterialLocal,
+        int flowSaltSlot,
+        int keyLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, indyMaterialLocal));
+        JvmPassBytecode.pushInt(insns, flowSaltSlot);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            helpers.compactFlowOwner(),
+            helpers.compactFlow(),
+            COMPACT_FLOW_DESC,
+            helpers.compactFlowInterfaceOwner()
+        ));
+    }
+
     private void emitCachedLiveIndyWord(
         InsnList insns,
         String owner,
@@ -4385,7 +4448,11 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
             epochLocal,
             FLOW_HELPER_METHOD_KEY_LOCAL,
             stateLocal,
-            sourceLocal
+            sourceLocal,
+            0,
+            1,
+            2,
+            3
         );
         insns.add(new VarInsnNode(Opcodes.LSTORE, nextEpochLocal));
         emitIndyFlowSaltCellStore(
@@ -4497,6 +4564,345 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         mn.maxStack = 12;
         mn.maxLocals = 35;
         return mn;
+    }
+
+    private MethodNode emitCompactFlow(
+        String name,
+        int classKeyMask,
+        int access
+    ) {
+        MethodNode mn = new MethodNode(
+            access,
+            name,
+            COMPACT_FLOW_DESC,
+            null,
+            null
+        );
+        InsnList insns = mn.instructions;
+        int pcArgLocal = 0;
+        int dataArgLocal = 1;
+        int carrierLocal = 2;
+        int flowSlotLocal = 3;
+        int methodKeyLocal = 4;
+        int stateLocal = 6;
+        int xLocal = 7;
+        int idxLocal = 8;
+        int saltCellLocal = 9;
+        int methodSaltLocal = 10;
+        int siteSeedLocal = 12;
+        int epochLocal = 14;
+        int nextEpochLocal = 16;
+        int flowTableLocal = 18;
+        int selectorFoldLocal = 19;
+        int saltLockLocal = 20;
+        int sourceLocal = 21;
+        int threadLocal = 22;
+        int stackLocal = 23;
+        int stackLenLocal = 24;
+        int descriptorLocal = 25;
+        int staticGuardLocal = 27;
+        int staticPathLocal = 28;
+        int staticBlockLocal = 29;
+        int staticClassWordLocal = 30;
+        int selectedClassKeySlotLocal = 31;
+        int pcTokenLocal = 32;
+
+        emitCompactFlowSelectorFold(
+            insns,
+            flowSlotLocal,
+            methodKeyLocal,
+            pcArgLocal,
+            dataArgLocal,
+            selectorFoldLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.INDY_MATERIAL_SELECTOR_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        emitCompactFlowSelectorFold(
+            insns,
+            flowSlotLocal,
+            methodKeyLocal,
+            pcArgLocal,
+            dataArgLocal,
+            -1
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorFoldLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, OBJECT_ARRAY_DESC));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, flowTableLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, flowTableLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, OBJECT_ARRAY_DESC));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, flowSlotLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[J"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, saltCellLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, flowTableLocal));
+        JvmPassBytecode.pushInt(insns, 2);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, OBJECT_ARRAY_DESC));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, flowSlotLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, saltLockLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, saltLockLocal));
+        insns.add(new InsnNode(Opcodes.MONITORENTER));
+        emitIndyMaterialDescriptorLoad(insns, saltCellLocal, descriptorLocal);
+        emitIndyMaterialCellValueLoad(insns, saltCellLocal, descriptorLocal, INDY_FLOW_EPOCH_LOGICAL);
+        insns.add(new VarInsnNode(Opcodes.LSTORE, epochLocal));
+        emitIndyMaterialCellValueLoad(insns, saltCellLocal, descriptorLocal, INDY_FLOW_METHOD_SALT_LOGICAL);
+        emitIndyFlowSaltMask(insns, flowSlotLocal, descriptorLocal, epochLocal, 0x494E4459464D534CL);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, methodSaltLocal));
+        emitIndyMaterialCellValueLoad(insns, saltCellLocal, descriptorLocal, INDY_FLOW_SITE_SEED_LOGICAL);
+        emitIndyFlowSaltMask(insns, flowSlotLocal, descriptorLocal, epochLocal, 0x494E445946535445L);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LSTORE, siteSeedLocal));
+        emitIndyMaterialCellValueLoad(insns, saltCellLocal, descriptorLocal, INDY_FLOW_STATE_LOGICAL);
+        emitIndyFlowStateMask(insns, flowSlotLocal, descriptorLocal, methodSaltLocal, siteSeedLocal);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, stateLocal));
+        emitIndyMaterialCellValueLoad(insns, saltCellLocal, descriptorLocal, INDY_FLOW_PC_TOKEN_LOGICAL);
+        emitIndyFlowPcTokenMask(insns, flowSlotLocal, descriptorLocal, methodSaltLocal, siteSeedLocal);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pcTokenLocal));
+        emitIndyFlowStaticIntLoad(
+            insns,
+            saltCellLocal,
+            descriptorLocal,
+            flowSlotLocal,
+            methodSaltLocal,
+            siteSeedLocal,
+            INDY_FLOW_GUARD_LOGICAL,
+            0x494E445946475541L,
+            staticGuardLocal
+        );
+        emitIndyFlowStaticIntLoad(
+            insns,
+            saltCellLocal,
+            descriptorLocal,
+            flowSlotLocal,
+            methodSaltLocal,
+            siteSeedLocal,
+            INDY_FLOW_PATH_LOGICAL,
+            0x494E445946504154L,
+            staticPathLocal
+        );
+        emitIndyFlowStaticIntLoad(
+            insns,
+            saltCellLocal,
+            descriptorLocal,
+            flowSlotLocal,
+            methodSaltLocal,
+            siteSeedLocal,
+            INDY_FLOW_BLOCK_LOGICAL,
+            0x494E445946424C4BL,
+            staticBlockLocal
+        );
+        emitIndyFlowStaticIntLoad(
+            insns,
+            saltCellLocal,
+            descriptorLocal,
+            flowSlotLocal,
+            methodSaltLocal,
+            siteSeedLocal,
+            INDY_FLOW_CLASS_WORD_LOGICAL,
+            0x494E445946434C53L,
+            staticClassWordLocal
+        );
+        emitRuntimeThreadStackSource(
+            insns,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLenLocal,
+            methodKeyLocal,
+            stateLocal
+        );
+        emitCompactFlowSelectorFold(
+            insns,
+            flowSlotLocal,
+            methodKeyLocal,
+            pcArgLocal,
+            dataArgLocal,
+            selectorFoldLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorFoldLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, stateLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, sourceLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, selectorFoldLocal));
+        emitIndyFlowSaltNextEpoch(
+            insns,
+            flowSlotLocal,
+            descriptorLocal,
+            epochLocal,
+            methodKeyLocal,
+            stateLocal,
+            sourceLocal,
+            staticGuardLocal,
+            staticPathLocal,
+            staticBlockLocal,
+            pcArgLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.LSTORE, nextEpochLocal));
+        emitIndyFlowSaltCellStore(
+            insns,
+            saltCellLocal,
+            descriptorLocal,
+            INDY_FLOW_METHOD_SALT_LOGICAL,
+            flowSlotLocal,
+            nextEpochLocal,
+            methodSaltLocal,
+            0x494E4459464D534CL
+        );
+        emitIndyFlowSaltCellStore(
+            insns,
+            saltCellLocal,
+            descriptorLocal,
+            INDY_FLOW_SITE_SEED_LOGICAL,
+            flowSlotLocal,
+            nextEpochLocal,
+            siteSeedLocal,
+            0x494E445946535445L
+        );
+        emitIndyMaterialCellValueStore(
+            insns,
+            saltCellLocal,
+            descriptorLocal,
+            INDY_FLOW_EPOCH_LOGICAL,
+            nextEpochLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.ALOAD, saltLockLocal));
+        insns.add(new InsnNode(Opcodes.MONITOREXIT));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, staticGuardLocal));
+        emitSeededInt(insns, siteSeedLocal, 0x494E44474731L);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, staticPathLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
+        emitShift(insns, siteSeedLocal, 9);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, staticBlockLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitSeededInt(insns, siteSeedLocal, 0x494E444D554CL);
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcTokenLocal));
+        emitSeededInt(insns, siteSeedLocal, 0x494E44504331L);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, stateLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        emitSeededInt(insns, siteSeedLocal, 0x494E445441424CL);
+        insns.add(new InsnNode(Opcodes.IADD));
+        JvmPassBytecode.pushInt(insns, classKeyMask);
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, idxLocal));
+
+        emitCompactIndyClassKeyWordsSlotSelectionFromCarrier(
+            insns,
+            carrierLocal,
+            pcArgLocal,
+            dataArgLocal,
+            flowSlotLocal,
+            selectorFoldLocal,
+            selectedClassKeySlotLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectedClassKeySlotLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, idxLocal));
+        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorFoldLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, selectorFoldLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, staticClassWordLocal));
+        emitSeededInt(insns, siteSeedLocal, 0x494E445456414CL);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, xLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, xLocal));
+        emitShift(insns, siteSeedLocal, 21);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.I2L));
+        JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
+        insns.add(new InsnNode(Opcodes.LAND));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushLong(insns, 0x494E44594D4B31L);
+        emitInlineMix(insns);
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, siteSeedLocal));
+        insns.add(new InsnNode(Opcodes.LXOR));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        mn.maxStack = 12;
+        mn.maxLocals = 33;
+        return mn;
+    }
+
+    private void emitCompactFlowSelectorFold(
+        InsnList insns,
+        int flowSlotLocal,
+        int methodKeyLocal,
+        int pcLocal,
+        int dataLocal,
+        int storeLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, flowSlotLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        if (storeLocal >= 0) {
+            insns.add(new VarInsnNode(Opcodes.ISTORE, storeLocal));
+        }
     }
 
     private void emitRuntimeThreadStackSource(
@@ -4670,6 +5076,32 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IALOAD));
     }
 
+    private void emitCompactIndyClassKeyWordsSlotSelectionFromCarrier(
+        InsnList insns,
+        int carrierLocal,
+        int pcLocal,
+        int dataLocal,
+        int flowSlotLocal,
+        int selectorFoldLocal,
+        int selectedSlotLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SELECTOR_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, flowSlotLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorFoldLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, selectedSlotLocal));
+    }
+
     private void emitIndyFlowSaltMask(
         InsnList insns,
         int slotLocal,
@@ -4826,7 +5258,11 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         int epochLocal,
         int methodKeyLocal,
         int stateLocal,
-        int sourceLocal
+        int sourceLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int pcLocal
     ) {
         insns.add(new VarInsnNode(Opcodes.LLOAD, epochLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
@@ -4838,18 +5274,18 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LLOAD, descriptorLocal));
         insns.add(new InsnNode(Opcodes.LXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LADD));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 2));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 17);
         insns.add(new InsnNode(Opcodes.LSHL));
         insns.add(new InsnNode(Opcodes.LADD));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 3));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, stateLocal));
@@ -5006,6 +5442,9 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         String flowOwner,
         String flow,
         boolean flowInterfaceOwner,
+        String compactFlowOwner,
+        String compactFlow,
+        boolean compactFlowInterfaceOwner,
         String keyOwner,
         String key,
         boolean keyInterfaceOwner,
@@ -5027,6 +5466,9 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         String flowOwner,
         String flow,
         boolean flowInterfaceOwner,
+        String compactFlowOwner,
+        String compactFlow,
+        boolean compactFlowInterfaceOwner,
         String keyOwner,
         String key,
         boolean keyInterfaceOwner,

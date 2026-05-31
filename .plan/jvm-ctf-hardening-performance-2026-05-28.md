@@ -4165,6 +4165,48 @@ This plan will refresh that evidence before changing CFF performance code.
   - The fresh artifact runs successfully and preserves the required timing rows.
   - No transform coverage, CFF granularity, key propagation, per-site seed
     independence, or data/control-flow binding is weakened.
+- Fifth repair ninth validation evidence:
+  - `:neko-transforms:compileJava :neko-cli:installDist` passed with
+    repository-local `GRADLE_USER_HOME` and `java.io.tmpdir`.
+  - The focused regression command covering
+    `JvmConstantObfuscationIntegrationTest`,
+    `JvmStringObfuscationIntegrationTest`, and
+    `ControlFlowFlatteningAlgebraicAuditTest` passed.
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`
+    succeeded and wrote `build/test-jvm-full-obf-perf/test21-obf-current.jar`
+    with full coverage for the relevant transforms:
+    `invokeDynamic appliedFull=63`, `constantObfuscation appliedFull=33`, and
+    `stringObfuscation appliedFull=16`.
+  - Fresh `javap` inspection of the generated `a/a.main` bytecode found 26
+    compact size-pressure string concat helper calls with descriptors ending in
+    `JI)Ljava/lang/String;` and 0 full concat helper calls ending in
+    `JIIII)Ljava/lang/String;`. This proves the large caller no longer passes
+    separate guard/path/block locals for those concat sites.
+  - Executing the same fresh full-profile `test21` artifact exited 0 and
+    printed `=== All tests completed ===`. The measured rows were
+    `Seq 553 ms`, `Parallel 24 ms`, and `VThreads 27 ms`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test.jar` succeeded
+    and wrote `build/test-jvm-full-obf-perf/test-obf-current.jar` with full
+    coverage for the enabled JVM transforms
+    (`renamer appliedFull=84`, `keyDispatch appliedFull=84`,
+    `methodParameterObfuscation appliedFull=74 appliedSafe=2`,
+    `controlFlowFlattening appliedFull=85`, `invokeDynamic appliedFull=51`,
+    `constantObfuscation appliedFull=34`, `stringObfuscation
+    appliedFull=26`). The default runner exited 0 and reported
+    `Calc: 777ms`; it also printed the existing `ReTrace ERROR` and
+    `Sec ERROR` rows. This is below final acceptance because the requested
+    `Calc <= 200 ms` threshold is not met.
+  - Fresh no-quick full-profile regeneration of `test-jars/full.jar` succeeded
+    and wrote `build/test-jvm-full-obf-perf/full-obf-current.jar` with 325
+    classes and 9 resources. The default full runner exited 0 with
+    `Feature summary: passed=61 failed=0 skipped=0 nameSensitiveFailed=0` and
+    `Perf summary: passed=31 failed=0 skipped=0`. The slowest observed current
+    row is still `perf.crypto.xor measure=57,200.071 ms`, so this proves
+    runtime correctness for `full.jar` but not final performance acceptance.
+  - JCP-7 remains open: the ninth repair converts the previous full-profile
+    `test21.jar` size failure into a runnable full-obfuscation artifact, but
+    it does not meet the requested final performance thresholds. The remaining
+    runtime cost is assigned to the next JCP-7/JCP-8 performance repair.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 

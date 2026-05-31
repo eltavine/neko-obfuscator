@@ -573,6 +573,7 @@ abstract class CffClassSetup extends CffSharedState {
         String u4Name = uniqueMethodName(host, "__neko_class_integrity_u4$" + codeSuffix, "([BI)I");
         String codeName = uniqueMethodName(host, "__neko_class_integrity_code$" + codeSuffix, "([BII)Z");
         String clinitName = uniqueMethodName(host, "__neko_class_integrity_clinit$" + codeSuffix, "([BII)Z");
+        String generatedName = uniqueMethodName(host, "__neko_class_integrity_generated$" + codeSuffix, "([BI)Z");
         String mixName = uniqueMethodName(host, "__neko_class_integrity_mix$" + codeSuffix, "([BIIJ)J");
         String scanName = uniqueMethodName(host, "__neko_class_integrity_scan$" + codeSuffix, "([BJ)J");
         int helperAccess = Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
@@ -581,8 +582,21 @@ abstract class CffClassSetup extends CffSharedState {
         installU4Helper(pctx, host, helperAccess, u1Name, u4Name);
         installUtf8EqualsHelper(pctx, host, helperAccess, u1Name, codeName, "Code");
         installUtf8EqualsHelper(pctx, host, helperAccess, u1Name, clinitName, "<clinit>");
+        installGeneratedNameHelper(pctx, host, helperAccess, u1Name, u2Name, generatedName);
         installCodeMixHelper(pctx, host, helperAccess, u1Name, mixName);
-        installCodeScanHelper(pctx, host, helperAccess, u1Name, u2Name, u4Name, codeName, clinitName, mixName, scanName);
+        installCodeScanHelper(
+            pctx,
+            host,
+            helperAccess,
+            u1Name,
+            u2Name,
+            u4Name,
+            codeName,
+            clinitName,
+            generatedName,
+            mixName,
+            scanName
+        );
         int capacity = Math.max(1, pctx.classMap().size() + 16);
         long rootMask = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x473138524F4F544DL));
         long globalInitial = nonZeroLong(JvmPassBytecode.mix(hostSeed, 0x47313847494E4954L));
@@ -2795,6 +2809,7 @@ abstract class CffClassSetup extends CffSharedState {
         String u4Name = finalizerHelperName(clazz, suffix, 0x5534434646553448L, "([BI)I");
         String codeName = finalizerHelperName(clazz, suffix, 0x43434646434F4445L, "([BII)Z");
         String clinitName = finalizerHelperName(clazz, suffix, 0x43434646434C494EL, "([BII)Z");
+        String generatedName = finalizerHelperName(clazz, suffix, 0x4343464647454E31L, "([BI)Z");
         String mixName = finalizerHelperName(clazz, suffix, 0x434346464D495831L, "([BIIJ)J");
         String scanName = finalizerHelperName(clazz, suffix, 0x434346465343414EL, "([BJ)J");
         String verifyName = finalizerHelperName(clazz, suffix, 0x4343464656455249L, "(Ljava/lang/Class;JJ)J");
@@ -2807,8 +2822,21 @@ abstract class CffClassSetup extends CffSharedState {
         installU4Helper(pctx, clazz, access, u1Name, u4Name);
         installUtf8EqualsHelper(pctx, clazz, access, u1Name, codeName, "Code");
         installUtf8EqualsHelper(pctx, clazz, access, u1Name, clinitName, "<clinit>");
+        installGeneratedNameHelper(pctx, clazz, access, u1Name, u2Name, generatedName);
         installCodeMixHelper(pctx, clazz, access, u1Name, mixName);
-        installCodeScanHelper(pctx, clazz, access, u1Name, u2Name, u4Name, codeName, clinitName, mixName, scanName);
+        installCodeScanHelper(
+            pctx,
+            clazz,
+            access,
+            u1Name,
+            u2Name,
+            u4Name,
+            codeName,
+            clinitName,
+            generatedName,
+            mixName,
+            scanName
+        );
         installCodeVerifyHelper(pctx, clazz, access, scanName, verifyName);
 
         MethodNode clinit = findOrCreateClassInit(clazz);
@@ -3067,12 +3095,16 @@ abstract class CffClassSetup extends CffSharedState {
         p += 2;
         int codeNameIndex = -1;
         int clinitNameIndex = -1;
+        int[] utf8Offsets = new int[cpCount];
+        int[] utf8Lengths = new int[cpCount];
         for (int i = 1; i < cpCount; i++) {
             int tag = u1(data, p++);
             switch (tag) {
                 case 1 -> {
                     int len = u2(data, p);
                     p += 2;
+                    utf8Offsets[i] = p;
+                    utf8Lengths[i] = len;
                     if (utf8Equals(data, p, len, "Code")) codeNameIndex = i;
                     if (utf8Equals(data, p, len, "<clinit>")) clinitNameIndex = i;
                     p += len;
@@ -3105,6 +3137,7 @@ abstract class CffClassSetup extends CffSharedState {
         int methods = u2(data, p);
         p += 2;
         long h = seed ^ 0x4E4B434F44454831L;
+        long includedCodeLength = 0L;
         for (int i = 0; i < methods; i++) {
             p += 2;
             int methodNameIndex = u2(data, p);
@@ -3114,14 +3147,27 @@ abstract class CffClassSetup extends CffSharedState {
             for (int a = 0; a < attrs; a++) {
                 int nameIndex = u2(data, p);
                 int len = u4(data, p + 2);
-                if (nameIndex == codeNameIndex && methodNameIndex != clinitNameIndex) {
+                if (
+                    nameIndex == codeNameIndex &&
+                    methodNameIndex != clinitNameIndex &&
+                    !utf8StartsWith(data, utf8Offsets[methodNameIndex], utf8Lengths[methodNameIndex], "__neko_")
+                ) {
                     int codeLen = u4(data, p + 10);
+                    includedCodeLength += codeLen;
                     h = mixCodeBytes(data, p + 14, codeLen, h);
                 }
                 p += 6 + len;
             }
         }
-        return h ^ data.length;
+        return h ^ includedCodeLength;
+    }
+
+    private static boolean utf8StartsWith(byte[] data, int offset, int len, String value) {
+        if (offset <= 0 || len < value.length()) return false;
+        for (int i = 0; i < value.length(); i++) {
+            if ((data[offset + i] & 0xFF) != value.charAt(i)) return false;
+        }
+        return true;
     }
 
     private static int u1(byte[] data, int index) {
@@ -3255,6 +3301,128 @@ abstract class CffClassSetup extends CffSharedState {
         clazz.asmNode().methods.add(helper);
     }
 
+    private void installGeneratedNameHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        int access,
+        String u1Name,
+        String u2Name,
+        String name
+    ) {
+        MethodNode helper = new MethodNode(access, name, "([BI)Z", null, null);
+        InsnList insns = helper.instructions;
+        int dataLocal = 0;
+        int targetLocal = 1;
+        int pLocal = 2;
+        int countLocal = 3;
+        int iLocal = 4;
+        int tagLocal = 5;
+        int lenLocal = 6;
+        LabelNode loop = new LabelNode();
+        LabelNode doneFalse = new LabelNode();
+        LabelNode next = new LabelNode();
+        LabelNode utf8 = new LabelNode();
+        LabelNode cp4 = new LabelNode();
+        LabelNode cp8 = new LabelNode();
+        LabelNode cp2 = new LabelNode();
+        LabelNode cp3 = new LabelNode();
+        LabelNode checkTarget = new LabelNode();
+
+        JvmPassBytecode.pushInt(insns, 8);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pLocal));
+        emitReadU2(insns, clazz, u2Name, dataLocal, pLocal);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, countLocal));
+        emitIincWide(insns, pLocal, 2);
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, iLocal));
+        insns.add(loop);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, iLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, countLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPGE, doneFalse));
+        emitReadU1(insns, clazz, u1Name, dataLocal, pLocal);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, tagLocal));
+        emitIincWide(insns, pLocal, 1);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, iLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, targetLocal));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, checkTarget));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, tagLocal));
+        insns.add(new LookupSwitchInsnNode(
+            doneFalse,
+            new int[] {1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 20},
+            new LabelNode[] {
+                utf8, cp4, cp4, cp8, cp8, cp2, cp2, cp4, cp4, cp4, cp4, cp3, cp2, cp4, cp4, cp2, cp2
+            }
+        ));
+        insns.add(utf8);
+        emitReadU2(insns, clazz, u2Name, dataLocal, pLocal);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lenLocal));
+        emitIincWide(insns, pLocal, 2);
+        emitAddLocal(insns, pLocal, lenLocal);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, next));
+        insns.add(cp4);
+        emitIincWide(insns, pLocal, 4);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, next));
+        insns.add(cp8);
+        emitIincWide(insns, pLocal, 8);
+        insns.add(new IincInsnNode(iLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, next));
+        insns.add(cp2);
+        emitIincWide(insns, pLocal, 2);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, next));
+        insns.add(cp3);
+        emitIincWide(insns, pLocal, 3);
+        insns.add(new JumpInsnNode(Opcodes.GOTO, next));
+
+        insns.add(checkTarget);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, tagLocal));
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, doneFalse));
+        emitReadU2(insns, clazz, u2Name, dataLocal, pLocal);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lenLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lenLocal));
+        JvmPassBytecode.pushInt(insns, 7);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPLT, doneFalse));
+        emitGeneratedNameByteEquals(insns, dataLocal, pLocal, 2, '_', doneFalse);
+        emitGeneratedNameByteEquals(insns, dataLocal, pLocal, 3, '_', doneFalse);
+        emitGeneratedNameByteEquals(insns, dataLocal, pLocal, 4, 'n', doneFalse);
+        emitGeneratedNameByteEquals(insns, dataLocal, pLocal, 5, 'e', doneFalse);
+        emitGeneratedNameByteEquals(insns, dataLocal, pLocal, 6, 'k', doneFalse);
+        emitGeneratedNameByteEquals(insns, dataLocal, pLocal, 7, 'o', doneFalse);
+        emitGeneratedNameByteEquals(insns, dataLocal, pLocal, 8, '_', doneFalse);
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+
+        insns.add(next);
+        insns.add(new IincInsnNode(iLocal, 1));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, loop));
+        insns.add(doneFalse);
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 7;
+        helper.maxStack = 8;
+        JvmKeyDispatchPass.markGenerated(pctx, insns);
+        clazz.asmNode().methods.add(helper);
+    }
+
+    private void emitGeneratedNameByteEquals(
+        InsnList insns,
+        int dataLocal,
+        int pLocal,
+        int offset,
+        int expected,
+        LabelNode mismatch
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, dataLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pLocal));
+        JvmPassBytecode.pushInt(insns, offset);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.BALOAD));
+        JvmPassBytecode.pushInt(insns, 0xFF);
+        insns.add(new InsnNode(Opcodes.IAND));
+        JvmPassBytecode.pushInt(insns, expected);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, mismatch));
+    }
+
     private void installCodeMixHelper(PipelineContext pctx, L1Class clazz, int access, String u1Name, String name) {
         MethodNode helper = new MethodNode(access, name, "([BIIJ)J", null, null);
         int hLocal = 3;
@@ -3318,6 +3486,7 @@ abstract class CffClassSetup extends CffSharedState {
         String u4Name,
         String codeName,
         String clinitName,
+        String generatedName,
         String mixName,
         String name
     ) {
@@ -3336,6 +3505,8 @@ abstract class CffClassSetup extends CffSharedState {
         int nameIndexLocal = 11;
         int hLocal = 12;
         int attrIndexLocal = 14;
+        int includedLengthLocal = 15;
+        int codeLenLocal = 16;
 
         JvmPassBytecode.pushInt(insns, 8);
         insns.add(new VarInsnNode(Opcodes.ISTORE, pLocal));
@@ -3423,6 +3594,8 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new VarInsnNode(Opcodes.LSTORE, hLocal));
         JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, includedLengthLocal));
+        JvmPassBytecode.pushInt(insns, 0);
         insns.add(new VarInsnNode(Opcodes.ISTORE, iLocal));
 
         LabelNode methodLoop = new LabelNode();
@@ -3458,10 +3631,26 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ILOAD, clinitNameLocal));
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, skipMix));
         insns.add(new VarInsnNode(Opcodes.ALOAD, dataLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, methodNameLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            clazz.name(),
+            generatedName,
+            "([BI)Z",
+            clazz.isInterface()
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, skipMix));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, dataLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, pLocal));
         JvmPassBytecode.pushInt(insns, 14);
         insns.add(new InsnNode(Opcodes.IADD));
         emitReadU4AtOffset(insns, clazz, u4Name, dataLocal, pLocal, 10);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, codeLenLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, includedLengthLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, codeLenLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, includedLengthLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, codeLenLocal));
         insns.add(new VarInsnNode(Opcodes.LLOAD, hLocal));
         insns.add(new MethodInsnNode(Opcodes.INVOKESTATIC, clazz.name(), mixName, "([BIIJ)J", clazz.isInterface()));
         insns.add(new VarInsnNode(Opcodes.LSTORE, hLocal));
@@ -3475,12 +3664,11 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new JumpInsnNode(Opcodes.GOTO, methodLoop));
         insns.add(methodsDone);
         insns.add(new VarInsnNode(Opcodes.LLOAD, hLocal));
-        insns.add(new VarInsnNode(Opcodes.ALOAD, dataLocal));
-        insns.add(new InsnNode(Opcodes.ARRAYLENGTH));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, includedLengthLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         insns.add(new InsnNode(Opcodes.LXOR));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 15;
+        helper.maxLocals = 17;
         helper.maxStack = 12;
         JvmKeyDispatchPass.markGenerated(pctx, insns);
         clazz.asmNode().methods.add(helper);

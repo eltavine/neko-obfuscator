@@ -57,8 +57,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private static final String STRING_DECODE_TAILS = "stringObfuscation.stringDecodeTails";
     private static final String STRING_CONCAT_HELPERS = "stringObfuscation.stringConcatHelpers";
     private static final String STRING_TAIL_DESC = "([Ljava/lang/Object;JIIIIII)Ljava/lang/String;";
+    private static final String STRING_TAIL_COMPACT_DESC = "([Ljava/lang/Object;JIII)Ljava/lang/String;";
     private static final int STRING_CLASS_KEY_TABLE_MASK = 63;
     private static final int GENERATED_HELPER_HARDENING_SIZE_PRESSURE = 12_000;
+    private static final int STRING_CALLER_SIZE_PRESSURE = 48_000;
     private static final int STRING_PAYLOAD_TABLE_SLOT = 0;
     private static final int STRING_CACHE_TABLE_SLOT = 1;
     private static final int STRING_AES_CIPHER_SLOT = 2;
@@ -67,6 +69,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private static final int STRING_KEY_CELL_PAYLOAD_SLOT = 8;
     private static final int STRING_KEY_CELL_CACHE_SLOT = 9;
     private static final int STRING_KEY_CELL_LENGTH = 10;
+    private static final int STRING_KEY_CELL_RAW_PC = 11;
+    private static final int STRING_KEY_CELL_GUARD = 12;
+    private static final int STRING_KEY_CELL_PATH = 13;
+    private static final int STRING_KEY_CELL_BLOCK = 14;
     private static final int STRING_KEY_CELL_DESCRIPTOR_SLOT = 0;
     private static final int STRING_KEY_CELL_PHYSICAL_MASK = 31;
     private static final int STRING_KEY_CELL_PHYSICAL_LENGTH = STRING_KEY_CELL_PHYSICAL_MASK + 2;
@@ -78,6 +84,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
     private static final long STRING_KEY_CELL_PAYLOAD_MASK = 0x5354525041594C44L;
     private static final long STRING_KEY_CELL_CACHE_MASK = 0x5354524341434845L;
     private static final long STRING_KEY_CELL_LENGTH_MASK = 0x5354524C454E3031L;
+    private static final long STRING_KEY_CELL_RAW_PC_MASK = 0x5354525043544F4BL;
+    private static final long STRING_KEY_CELL_GUARD_MASK = 0x5354524755415244L;
+    private static final long STRING_KEY_CELL_PATH_MASK = 0x5354525041544831L;
+    private static final long STRING_KEY_CELL_BLOCK_MASK = 0x535452424C4F434BL;
     private static final long STATIC_CHAR_STRIDE = 0x9E3779B97F4A7C15L;
 
     @Override
@@ -146,6 +156,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         InsnList loopStringCacheInit = new InsnList();
         Set<Integer> defaultedStringResultLocals = new LinkedHashSet<>();
         InsnList stringResultLocalInit = new InsnList();
+        boolean compactDecodeState = stringDecodeCallerUnderSizePressure(mn);
         for (AbstractInsnNode insn : mn.instructions.toArray()) {
             if (!metadata.applicationInstructions().contains(insn)) continue;
             ControlFlowFlatteningPass.CffInstructionState state =
@@ -158,11 +169,20 @@ public final class JvmStringObfuscationPass implements TransformPass {
 
             if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof String value) {
                 long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal);
-                StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed);
+                StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed, state);
                 Algorithm algorithm = algorithmFor(ordinal, siteSeed, metadata, state, keyMaterial);
                 ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
                 byte[] encrypted = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
-                StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, metadata, siteSeed, encrypted, keyMaterial, algorithm, byteLayer);
+                StringSiteCache siteCache = ensureStringSiteCache(
+                    pctx,
+                    clazz,
+                    metadata,
+                    siteSeed,
+                    encrypted,
+                    keyMaterial,
+                    algorithm,
+                    byteLayer
+                );
                 if (canUseCallerCarrierLocal && callerCarrierLocal < 0) {
                     callerCarrierLocal = mn.maxLocals++;
                     callerCarrierInit.add(new FieldInsnNode(
@@ -192,7 +212,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
                         algorithm,
                         byteLayer,
                         siteCache,
-                        activeCarrierLocal
+                        activeCarrierLocal,
+                        compactDecodeState
                     ));
                 } else {
                     emitDecodedStringCall(
@@ -207,7 +228,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
                         algorithm,
                         byteLayer,
                         siteCache,
-                        callerCarrierLocal
+                        callerCarrierLocal,
+                        compactDecodeState
                     );
                 }
                 maybeAddStringResultLocalDefault(
@@ -269,17 +291,19 @@ public final class JvmStringObfuscationPass implements TransformPass {
         }
 
         if (transformed > 0) {
-            if (callerCarrierLocal >= 0) {
-                JvmKeyDispatchPass.markGenerated(pctx, callerCarrierInit);
-                mn.instructions.insert(callerCarrierInit);
+            InsnList entryInit = new InsnList();
+            if (stringResultLocalInit.size() > 0) {
+                entryInit.add(stringResultLocalInit);
             }
             if (hasLoopStringCacheInit) {
-                JvmKeyDispatchPass.markGenerated(pctx, loopStringCacheInit);
-                mn.instructions.insert(loopStringCacheInit);
+                entryInit.add(loopStringCacheInit);
             }
-            if (stringResultLocalInit.size() > 0) {
-                JvmKeyDispatchPass.markGenerated(pctx, stringResultLocalInit);
-                mn.instructions.insert(stringResultLocalInit);
+            if (callerCarrierLocal >= 0) {
+                entryInit.add(callerCarrierInit);
+            }
+            if (entryInit.size() > 0) {
+                JvmKeyDispatchPass.markGenerated(pctx, entryInit);
+                insertStringEntryInit(mn, metadata.keyLocal(), metadata.guardLocal(), entryInit);
             }
             mn.maxStack = Math.max(mn.maxStack, 32);
             clazz.markDirty();
@@ -292,6 +316,65 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 "cff-keyed-string-sites-" + transformed
             );
         }
+    }
+
+    private void insertStringEntryInit(MethodNode mn, int keyLocal, int guardLocal, InsnList init) {
+        AbstractInsnNode anchor = hiddenKeyInitializationAnchor(mn, keyLocal, guardLocal);
+        if (anchor == null) {
+            mn.instructions.insert(init);
+        } else {
+            mn.instructions.insert(anchor, init);
+        }
+    }
+
+    private AbstractInsnNode hiddenKeyInitializationAnchor(MethodNode mn, int keyLocal, int guardLocal) {
+        AbstractInsnNode firstGuardStore = null;
+        for (
+            AbstractInsnNode insn = mn.instructions.getFirst();
+            insn != null;
+            insn = insn.getNext()
+        ) {
+            if (
+                insn instanceof VarInsnNode var &&
+                    var.getOpcode() == Opcodes.ISTORE &&
+                    var.var == guardLocal
+            ) {
+                firstGuardStore = insn;
+                break;
+            }
+        }
+        AbstractInsnNode anchor = null;
+        for (
+            AbstractInsnNode insn = mn.instructions.getFirst();
+            insn != null && insn != firstGuardStore;
+            insn = insn.getNext()
+        ) {
+            if (
+                insn instanceof VarInsnNode var &&
+                    var.getOpcode() == Opcodes.LSTORE &&
+                    var.var == keyLocal
+            ) {
+                anchor = insn;
+            }
+        }
+        return anchor == null ? firstHiddenKeyStore(mn, keyLocal) : anchor;
+    }
+
+    private AbstractInsnNode firstHiddenKeyStore(MethodNode mn, int keyLocal) {
+        for (
+            AbstractInsnNode insn = mn.instructions.getFirst();
+            insn != null;
+            insn = insn.getNext()
+        ) {
+            if (
+                insn instanceof VarInsnNode var &&
+                    var.getOpcode() == Opcodes.LSTORE &&
+                    var.var == keyLocal
+            ) {
+                return insn;
+            }
+        }
+        return null;
     }
 
     private void maybeAddStringResultLocalDefault(
@@ -353,7 +436,10 @@ public final class JvmStringObfuscationPass implements TransformPass {
     ) {
         Type[] args = Type.getArgumentTypes(indy.desc);
         long helperSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal) ^ 0x5354524341543131L;
-        List<String> externalStrings = concatStringConstants(concat);
+        boolean compactState = stringConcatCallerUnderSizePressure(mn);
+        List<String> externalStrings = compactState
+            ? List.of()
+            : concatStringConstants(concat);
         ConcatRewriteResult helper = installConcatHelper(
             pctx,
             clazz,
@@ -365,18 +451,28 @@ public final class JvmStringObfuscationPass implements TransformPass {
             ordinal,
             args,
             helperSeed,
-            externalStrings
+            externalStrings,
+            compactState
         );
         InsnList out = new InsnList();
         int externalized = 0;
         boolean usesLoopCache = false;
         for (String value : externalStrings) {
             long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + externalized);
-            StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed);
+            StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed, state);
             Algorithm algorithm = algorithmFor(ordinal + externalized, siteSeed, metadata, state, keyMaterial);
             ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
             byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
-            StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, metadata, siteSeed, payload, keyMaterial, algorithm, byteLayer);
+            StringSiteCache siteCache = ensureStringSiteCache(
+                pctx,
+                clazz,
+                metadata,
+                siteSeed,
+                payload,
+                keyMaterial,
+                algorithm,
+                byteLayer
+            );
             if (loopSite) {
                 int cacheLocal = mn.maxLocals++;
                 loopStringCacheInit.add(new InsnNode(Opcodes.ACONST_NULL));
@@ -415,15 +511,19 @@ public final class JvmStringObfuscationPass implements TransformPass {
             externalized++;
         }
         out.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
-        out.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
-        out.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
-        out.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
-        emitCanonicalPcToken(out, metadata, state, helperSeed);
+        if (compactState) {
+            out.add(new VarInsnNode(Opcodes.ILOAD, metadata.pcLocal()));
+        } else {
+            out.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
+            out.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
+            out.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
+            emitCanonicalPcToken(out, metadata, state, helperSeed);
+        }
         out.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             clazz.name(),
             helper.helperName(),
-            concatHelperDescriptor(args, externalStrings.size()),
+            concatHelperDescriptor(args, externalStrings.size(), compactState),
             (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0
         ));
         return new ConcatRewriteResult(out, helper.encryptedStrings() + externalized, null, usesLoopCache);
@@ -440,7 +540,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int ordinal,
         Type[] args,
         long helperSeed,
-        List<String> externalStrings
+        List<String> externalStrings,
+        boolean compactState
     ) {
         int[] argLocals = new int[args.length];
         int nextLocal = 0;
@@ -462,7 +563,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             }
         }
         boolean hasInternalDecodedStrings = decodedStrings.containsValue(-1);
-        String helperDesc = concatHelperDescriptor(args, externalStrings.size());
+        String helperDesc = concatHelperDescriptor(args, externalStrings.size(), compactState);
         ConcatHelperCacheKey cacheKey = null;
         if (!hasInternalDecodedStrings) {
             cacheKey = new ConcatHelperCacheKey(
@@ -478,10 +579,23 @@ public final class JvmStringObfuscationPass implements TransformPass {
         }
         int methodKeyLocal = nextLocal;
         nextLocal += 2;
-        int guardLocal = nextLocal++;
-        int pathKeyLocal = nextLocal++;
-        int blockKeyLocal = nextLocal++;
         int pcLocal = nextLocal++;
+        int guardLocal;
+        int pathKeyLocal;
+        int blockKeyLocal;
+        int rawPcLocal;
+        if (compactState) {
+            guardLocal = nextLocal++;
+            pathKeyLocal = nextLocal++;
+            blockKeyLocal = nextLocal++;
+            rawPcLocal = nextLocal++;
+        } else {
+            guardLocal = pcLocal;
+            pathKeyLocal = nextLocal++;
+            blockKeyLocal = nextLocal++;
+            pcLocal = nextLocal++;
+            rawPcLocal = pcLocal;
+        }
         int dataLocal = nextLocal++;
         String name = uniqueMethodName(
             clazz,
@@ -523,6 +637,28 @@ public final class JvmStringObfuscationPass implements TransformPass {
             "[Ljava/lang/Object;"
         ));
         helperCarrierInit.add(new VarInsnNode(Opcodes.ASTORE, helperCarrierLocal));
+        if (compactState) {
+            emitCompactConcatRawPcInit(
+                helperCarrierInit,
+                helperSeed,
+                state,
+                methodKeyLocal,
+                rawPcLocal
+            );
+            emitCompactConcatStateInit(
+                helperCarrierInit,
+                metadata,
+                state,
+                helperSeed,
+                helperCarrierLocal,
+                methodKeyLocal,
+                rawPcLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                concatPredicateLocal
+            );
+        }
         emitStringHelperDataDigestInit(
             helperCarrierInit,
             methodKeyLocal,
@@ -540,11 +676,20 @@ public final class JvmStringObfuscationPass implements TransformPass {
             int local = nextLocal++;
             helper.maxLocals = nextLocal;
             long siteSeed = siteSeed(pctx.masterSeed(), clazz, method, state, ordinal + encrypted);
-            StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed);
+            StringSiteMaterial keyMaterial = stringSiteMaterial(pctx, clazz, siteSeed, state);
             Algorithm algorithm = algorithmFor(ordinal + encrypted, siteSeed, metadata, state, keyMaterial);
             ByteLayer byteLayer = byteLayerFor(siteSeed, metadata, state, keyMaterial);
             byte[] payload = encryptPayload(value, siteSeed, metadata, state, algorithm, byteLayer, keyMaterial);
-            StringSiteCache siteCache = ensureStringSiteCache(pctx, clazz, helperMetadata, siteSeed, payload, keyMaterial, algorithm, byteLayer);
+            StringSiteCache siteCache = ensureStringSiteCache(
+                pctx,
+                clazz,
+                helperMetadata,
+                siteSeed,
+                payload,
+                keyMaterial,
+                algorithm,
+                byteLayer
+            );
             emitDecodedStringCall(
                 pctx,
                 clazz,
@@ -735,6 +880,274 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
+    private void emitCompactConcatRawPcInit(
+        InsnList insns,
+        long helperSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int methodKeyLocal,
+        int outLocal
+    ) {
+        emitStaticIntFragmented(insns, state.pcToken() ^ compactConcatRawPcMask(helperSeed, state));
+        emitCompactConcatRawPcMask(insns, helperSeed, methodKeyLocal);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, outLocal));
+    }
+
+    private void emitCompactConcatRawPcMask(
+        InsnList insns,
+        long helperSeed,
+        int methodKeyLocal
+    ) {
+        long seed = JvmPassBytecode.mix(helperSeed, 0x5354435043524157L);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x53544350434D4B31L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 7));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x53544350434D554CL)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(seed, 0x535443504346494EL)));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(seed, 19));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private int compactConcatRawPcMask(
+        long helperSeed,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        long seed = JvmPassBytecode.mix(helperSeed, 0x5354435043524157L);
+        int x = (int) state.methodKey() ^ (int) (state.methodKey() >>> 32);
+        x ^= nonZeroInt(JvmPassBytecode.mix(seed, 0x53544350434D4B31L));
+        x ^= x >>> shift(seed, 7);
+        x *= nonZeroInt(JvmPassBytecode.mix(seed, 0x53544350434D554CL)) | 1;
+        x += nonZeroInt(JvmPassBytecode.mix(seed, 0x535443504346494EL));
+        return x ^ (x >>> shift(seed, 19));
+    }
+
+    private void emitCompactConcatStateInit(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        long helperSeed,
+        int carrierLocal,
+        int methodKeyLocal,
+        int pcLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal,
+        int classWordLocal
+    ) {
+        int classWordIndex = compactConcatClassWordIndex(metadata, state, helperSeed);
+        int classWord = metadata.classKeyTable().values()[classWordIndex];
+        emitCompactConcatClassWord(insns, metadata, state, helperSeed, carrierLocal, methodKeyLocal, pcLocal, classWordLocal);
+        emitCompactConcatStateWord(insns, helperSeed, state, classWord, 0, methodKeyLocal, pcLocal, classWordLocal, guardLocal);
+        emitCompactConcatStateWord(insns, helperSeed, state, classWord, 1, methodKeyLocal, pcLocal, classWordLocal, pathKeyLocal);
+        emitCompactConcatStateWord(insns, helperSeed, state, classWord, 2, methodKeyLocal, pcLocal, classWordLocal, blockKeyLocal);
+    }
+
+    private void emitCompactConcatClassWord(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        long helperSeed,
+        int carrierLocal,
+        int methodKeyLocal,
+        int pcLocal,
+        int outLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.CLASS_KEY_WORDS_SELECTOR_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        emitCompactConcatClassWordsSlotSelector(insns, helperSeed, methodKeyLocal, pcLocal);
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, outLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, outLocal));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        emitCompactConcatClassWordIndex(insns, metadata, state, helperSeed, methodKeyLocal, pcLocal);
+        ControlFlowFlatteningPass.emitDecodedSealedClassKeyWord(
+            insns,
+            ControlFlowFlatteningPass.CLASS_KEY_WORD_SEAL
+        );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, outLocal));
+    }
+
+    private void emitCompactConcatClassWordsSlotSelector(
+        InsnList insns,
+        long helperSeed,
+        int methodKeyLocal,
+        int pcLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(helperSeed, 0x5354434154534C31L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private void emitCompactConcatClassWordIndex(
+        InsnList insns,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        long helperSeed,
+        int methodKeyLocal,
+        int pcLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(helperSeed, 0x5354434149445831L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        emitStaticIntFragmented(insns, (int) state.selectorSeed());
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(helperSeed, 5));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(helperSeed, 0x5354434149445832L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        JvmPassBytecode.pushInt(insns, metadata.classKeyTable().values().length - 1);
+        insns.add(new InsnNode(Opcodes.IAND));
+    }
+
+    private int compactConcatClassWordIndex(
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        long helperSeed
+    ) {
+        int x = (int) state.methodKey() ^ (int) (state.methodKey() >>> 32);
+        x += state.pcToken() ^ nonZeroInt(JvmPassBytecode.mix(helperSeed, 0x5354434149445831L));
+        x ^= (int) state.selectorSeed();
+        x ^= x >>> shift(helperSeed, 5);
+        x *= nonZeroInt(JvmPassBytecode.mix(helperSeed, 0x5354434149445832L)) | 1;
+        return x & (metadata.classKeyTable().values().length - 1);
+    }
+
+    private void emitCompactConcatStateWord(
+        InsnList insns,
+        long helperSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int classWord,
+        int lane,
+        int methodKeyLocal,
+        int pcLocal,
+        int classWordLocal,
+        int outLocal
+    ) {
+        int value = switch (lane) {
+            case 0 -> state.guardKey();
+            case 1 -> state.pathKey();
+            case 2 -> state.blockKey();
+            default -> throw new IllegalArgumentException("invalid compact concat lane " + lane);
+        };
+        int mask = compactConcatStateMask(helperSeed, state, classWord, lane);
+        emitStaticIntFragmented(insns, value ^ mask);
+        emitCompactConcatStateMask(insns, helperSeed, state, lane, methodKeyLocal, pcLocal, classWordLocal);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, outLocal));
+    }
+
+    private void emitCompactConcatStateMask(
+        InsnList insns,
+        long helperSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int lane,
+        int methodKeyLocal,
+        int pcLocal,
+        int classWordLocal
+    ) {
+        long laneSeed = compactConcatStateLaneSeed(helperSeed, state, lane);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B31L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, classWordLocal));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B32L)));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitStaticIntFragmented(insns, state.state() ^ nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B33L)));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(laneSeed, 11));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B34L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, shift(laneSeed, 19));
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B35L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private int compactConcatStateMask(
+        long helperSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int classWord,
+        int lane
+    ) {
+        long laneSeed = compactConcatStateLaneSeed(helperSeed, state, lane);
+        int x = (int) state.methodKey() ^ (int) (state.methodKey() >>> 32);
+        x += state.pcToken() ^ nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B31L));
+        x ^= classWord + nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B32L));
+        x += state.state() ^ nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B33L));
+        x ^= x >>> shift(laneSeed, 11);
+        x *= nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B34L)) | 1;
+        x += x >>> shift(laneSeed, 19);
+        return x ^ nonZeroInt(JvmPassBytecode.mix(laneSeed, 0x5354434D41534B35L));
+    }
+
+    private long compactConcatStateLaneSeed(
+        long helperSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int lane
+    ) {
+        return JvmPassBytecode.mix(
+            helperSeed ^ state.selectorSeed() ^ (((long) lane) << 48),
+            0x5354435354415445L
+        );
+    }
+
     private List<ConcatCachePiece> concatHelperCachePieces(
         ConcatPlan concat,
         List<String> externalStrings
@@ -780,7 +1193,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
     }
 
     private String concatHelperDescriptor(Type[] args) {
-        return concatHelperDescriptor(args, 0);
+        return concatHelperDescriptor(args, 0, false);
     }
 
     @SuppressWarnings("unchecked")
@@ -810,17 +1223,20 @@ public final class JvmStringObfuscationPass implements TransformPass {
     }
 
     private String concatHelperDescriptor(Type[] args, int externalStrings) {
-        Type[] helperArgs = new Type[args.length + externalStrings + 5];
+        return concatHelperDescriptor(args, externalStrings, false);
+    }
+
+    private String concatHelperDescriptor(Type[] args, int externalStrings, boolean compactState) {
+        Type[] helperArgs = new Type[args.length + externalStrings + (compactState ? 2 : 5)];
         System.arraycopy(args, 0, helperArgs, 0, args.length);
         for (int i = 0; i < externalStrings; i++) {
             helperArgs[args.length + i] = Type.getType(String.class);
         }
         int keyOffset = args.length + externalStrings;
         helperArgs[keyOffset] = Type.LONG_TYPE;
-        helperArgs[keyOffset + 1] = Type.INT_TYPE;
-        helperArgs[keyOffset + 2] = Type.INT_TYPE;
-        helperArgs[keyOffset + 3] = Type.INT_TYPE;
-        helperArgs[keyOffset + 4] = Type.INT_TYPE;
+        for (int i = 1; i < (compactState ? 2 : 5); i++) {
+            helperArgs[keyOffset + i] = Type.INT_TYPE;
+        }
         return Type.getMethodDescriptor(Type.getType(String.class), helperArgs);
     }
 
@@ -856,6 +1272,14 @@ public final class JvmStringObfuscationPass implements TransformPass {
 
     private boolean generatedHelperUnderSizePressure(MethodNode mn) {
         return JvmCodeSizeEstimator.estimateMethodBytes(mn) >= GENERATED_HELPER_HARDENING_SIZE_PRESSURE;
+    }
+
+    private boolean stringConcatCallerUnderSizePressure(MethodNode mn) {
+        return JvmCodeSizeEstimator.estimateMethodBytes(mn) >= STRING_CALLER_SIZE_PRESSURE;
+    }
+
+    private boolean stringDecodeCallerUnderSizePressure(MethodNode mn) {
+        return JvmCodeSizeEstimator.estimateMethodBytes(mn) >= STRING_CALLER_SIZE_PRESSURE;
     }
 
     private Set<AbstractInsnNode> loopRegionInstructions(MethodNode mn) {
@@ -1144,7 +1568,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
         StringSiteCache siteCache,
         StringDecodeTail tail,
         int keyTableLocal,
-        MethodNode mn
+        MethodNode mn,
+        boolean compactState
     ) {
         if (!siteCache.hasKeyMaterial()) {
             throw new IllegalStateException("shared string decode tail requires key material table");
@@ -1160,17 +1585,21 @@ public final class JvmStringObfuscationPass implements TransformPass {
             ));
         }
         insns.add(new VarInsnNode(Opcodes.LLOAD, metadata.keyLocal()));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
-        emitCanonicalPcToken(insns, metadata, state, siteSeed);
+        if (compactState) {
+            emitStaticIntFragmented(insns, state.pcToken() ^ compactStringPcMask(state, siteCache.keySlot()));
+        } else {
+            insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.guardLocal()));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.pathKeyLocal()));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.blockKeyLocal()));
+            emitCanonicalPcToken(insns, metadata, state, siteSeed);
+        }
         insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
         JvmPassBytecode.pushInt(insns, siteCache.keySlot());
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             tail.owner(),
             tail.name(),
-            STRING_TAIL_DESC,
+            tail.desc(),
             tail.interfaceOwner()
         ));
     }
@@ -1218,6 +1647,38 @@ public final class JvmStringObfuscationPass implements TransformPass {
         StringSiteCache siteCache,
         int carrierLocal
     ) {
+        emitDecodedStringCall(
+            pctx,
+            clazz,
+            caller,
+            mn,
+            encryptedLength,
+            siteSeed,
+            metadata,
+            state,
+            algorithm,
+            byteLayer,
+            siteCache,
+            carrierLocal,
+            false
+        );
+    }
+
+    private void emitDecodedStringCall(
+        PipelineContext pctx,
+        L1Class clazz,
+        InsnList caller,
+        MethodNode mn,
+        int encryptedLength,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffMethodMetadata metadata,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        Algorithm algorithm,
+        ByteLayer byteLayer,
+        StringSiteCache siteCache,
+        int carrierLocal,
+        boolean compactState
+    ) {
         if (!siteCache.hasKeyMaterial()) {
             throw new IllegalStateException(
                 "stringObfuscation requires dynamic key material table for decode helper in " + clazz.name()
@@ -1225,7 +1686,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
         }
         StringDecodeTail tail = ensureStringDecodeTail(
             pctx,
-            clazz
+            clazz,
+            compactState
         );
         emitDecodedString(
             caller,
@@ -1238,25 +1700,30 @@ public final class JvmStringObfuscationPass implements TransformPass {
             siteCache,
             tail,
             carrierLocal,
-            mn
+            mn,
+            compactState
         );
     }
 
     @SuppressWarnings("unchecked")
     private StringDecodeTail ensureStringDecodeTail(
         PipelineContext pctx,
-        L1Class clazz
+        L1Class clazz,
+        boolean compactState
     ) {
         Map<String, StringDecodeTail> tails = pctx.getPassData(STRING_DECODE_TAILS);
         if (tails == null) {
             tails = new LinkedHashMap<>();
             pctx.putPassData(STRING_DECODE_TAILS, tails);
         }
-        String key = clazz.name();
+        String key = clazz.name() + ":" + compactState;
         StringDecodeTail existing = tails.get(key);
-        if (existing != null) return existing;
+        if (existing != null) {
+            return existing;
+        }
 
         boolean interfaceOwner = (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0;
+        String desc = compactState ? STRING_TAIL_COMPACT_DESC : STRING_TAIL_DESC;
         String name = uniqueMethodName(
             clazz,
             "__neko_strtail$"
@@ -1265,39 +1732,56 @@ public final class JvmStringObfuscationPass implements TransformPass {
         MethodNode helper = new MethodNode(
             access,
             name,
-            STRING_TAIL_DESC,
+            desc,
             null,
             null
         );
-        helper.maxLocals = 12;
-        helper.maxStack = 32;
-        emitDecodedStringTail(
-            helper.instructions,
-            helper
-        );
-        helper.instructions.add(new InsnNode(Opcodes.ARETURN));
-        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        rebuildStringDecodeTail(pctx, clazz.name(), helper, compactState);
         clazz.asmNode().methods.add(helper);
         clazz.markDirty();
-        publishGeneratedStringHelperFlowKey(pctx, clazz.name(), name, STRING_TAIL_DESC, 1);
+        publishGeneratedStringHelperFlowKey(pctx, clazz.name(), name, desc, 1);
 
-        StringDecodeTail tail = new StringDecodeTail(clazz.name(), name, interfaceOwner);
+        StringDecodeTail tail = new StringDecodeTail(clazz.name(), name, desc, interfaceOwner);
         tails.put(key, tail);
         return tail;
     }
 
+    private void rebuildStringDecodeTail(
+        PipelineContext pctx,
+        String owner,
+        MethodNode helper,
+        boolean compactState
+    ) {
+        helper.instructions.clear();
+        helper.maxLocals = 12;
+        helper.maxStack = 32;
+        emitDecodedStringTail(
+            pctx,
+            owner,
+            helper.instructions,
+            helper,
+            compactState
+        );
+        helper.instructions.add(new InsnNode(Opcodes.ARETURN));
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+    }
+
     private void emitDecodedStringTail(
+        PipelineContext pctx,
+        String owner,
         InsnList insns,
-        MethodNode mn
+        MethodNode mn,
+        boolean compactState
     ) {
         int carrierLocal = 0;
         int methodKeyLocal = 1;
-        int guardLocal = 3;
-        int pathKeyLocal = 4;
-        int blockKeyLocal = 5;
-        int pcLocal = 6;
-        int inputDataLocal = 7;
-        int keySlotLocal = 8;
+        int guardLocal = compactState ? 6 : 3;
+        int pathKeyLocal = compactState ? 7 : 4;
+        int blockKeyLocal = compactState ? 8 : 5;
+        int pcLocal = compactState ? 3 : 6;
+        int inputDataLocal = compactState ? 4 : 7;
+        int keySlotLocal = compactState ? 5 : 8;
+        int rawPcLocal = 9;
         int methodFoldLocal = 10;
         int rootLocal = 11;
         int dataWordLocal = 12;
@@ -1333,18 +1817,30 @@ public final class JvmStringObfuscationPass implements TransformPass {
         LabelNode monitorHandler = new LabelNode();
         LabelNode afterMonitor = new LabelNode();
 
-        emitRuntimeMethodKeyFold(insns, guardLocal, pathKeyLocal, blockKeyLocal, methodKeyLocal, methodFoldLocal);
-        emitRuntimeStringInitialMaterialSlotSelection(
-            insns,
-            carrierLocal,
-            methodKeyLocal,
-            guardLocal,
-            pathKeyLocal,
-            blockKeyLocal,
-            pcLocal,
-            inputDataLocal,
-            keySlotLocal
-        );
+        if (compactState) {
+            emitRuntimeCompactStringPcDecode(insns, methodKeyLocal, pcLocal, keySlotLocal);
+            emitRuntimeCompactStringInitialMaterialSlotSelection(
+                insns,
+                carrierLocal,
+                methodKeyLocal,
+                pcLocal,
+                inputDataLocal,
+                keySlotLocal
+            );
+        } else {
+            emitRuntimeMethodKeyFold(insns, guardLocal, pathKeyLocal, blockKeyLocal, methodKeyLocal, methodFoldLocal);
+            emitRuntimeStringInitialMaterialSlotSelection(
+                insns,
+                carrierLocal,
+                methodKeyLocal,
+                guardLocal,
+                pathKeyLocal,
+                blockKeyLocal,
+                pcLocal,
+                inputDataLocal,
+                keySlotLocal
+            );
+        }
         insns.add(new VarInsnNode(Opcodes.ISTORE, slotSelectorLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, slotSelectorLocal));
@@ -1372,6 +1868,72 @@ public final class JvmStringObfuscationPass implements TransformPass {
             oldEpochLocal,
             siteSeedLocal
         );
+        emitRuntimeStringSiteMetadataLoad(
+            insns,
+            keyCellLocal,
+            keyCellDescriptorLocal,
+            oldEpochLocal,
+            siteSeedLocal,
+            STRING_KEY_CELL_RAW_PC,
+            STRING_KEY_CELL_RAW_PC_MASK,
+            rawPcLocal
+        );
+        if (compactState) {
+            emitRuntimeCompactStringStateLoad(
+                insns,
+                keyCellLocal,
+                keyCellDescriptorLocal,
+                oldEpochLocal,
+                siteSeedLocal,
+                methodKeyLocal,
+                pcLocal,
+                keySlotLocal,
+                STRING_KEY_CELL_GUARD,
+                STRING_KEY_CELL_GUARD_MASK,
+                0,
+                guardLocal
+            );
+            emitRuntimeCompactStringStateLoad(
+                insns,
+                keyCellLocal,
+                keyCellDescriptorLocal,
+                oldEpochLocal,
+                siteSeedLocal,
+                methodKeyLocal,
+                pcLocal,
+                keySlotLocal,
+                STRING_KEY_CELL_PATH,
+                STRING_KEY_CELL_PATH_MASK,
+                1,
+                pathKeyLocal
+            );
+            emitRuntimeCompactStringStateLoad(
+                insns,
+                keyCellLocal,
+                keyCellDescriptorLocal,
+                oldEpochLocal,
+                siteSeedLocal,
+                methodKeyLocal,
+                pcLocal,
+                keySlotLocal,
+                STRING_KEY_CELL_BLOCK,
+                STRING_KEY_CELL_BLOCK_MASK,
+                2,
+                blockKeyLocal
+            );
+            emitRuntimeMethodKeyFold(insns, guardLocal, pathKeyLocal, blockKeyLocal, methodKeyLocal, methodFoldLocal);
+        }
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rawPcLocal));
+        emitRuntimeStringRawPcArgumentMask(
+            insns,
+            siteSeedLocal,
+            methodKeyLocal,
+            guardLocal,
+            pathKeyLocal,
+            blockKeyLocal
+        );
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, rawPcLocal));
         emitRuntimeRootSeed(insns, siteSeedLocal, keySeedLocal);
         emitRuntimeStringDataWord(
             insns,
@@ -1388,7 +1950,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             guardLocal,
             pathKeyLocal,
             blockKeyLocal,
-            pcLocal,
+            rawPcLocal,
             methodFoldLocal,
             keySeedLocal,
             rootLocal
@@ -1456,7 +2018,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
             insns,
             carrierLocal,
             rootLocal,
-            pcLocal,
+            rawPcLocal,
             blockKeyLocal,
             classWordsSelectorLocal,
             dataWordLocal,
@@ -1668,6 +2230,168 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.ICONST_1));
         insns.add(new InsnNode(Opcodes.IAND));
         insns.add(new InsnNode(Opcodes.IALOAD));
+    }
+
+    private void emitRuntimeCompactStringPcDecode(
+        InsnList insns,
+        int methodKeyLocal,
+        int pcLocal,
+        int keySlotLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        emitRuntimeCompactStringPcMask(insns, methodKeyLocal, keySlotLocal);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
+    }
+
+    private void emitRuntimeCompactStringPcMask(
+        InsnList insns,
+        int methodKeyLocal,
+        int keySlotLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, keySlotLocal));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(0x5354524350434D31L, 0x4B4559534C4F5431L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 11);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(0x5354524350434D32L, 0x4B4559534C4F5432L)) | 1);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitStaticIntFragmented(insns, nonZeroInt(JvmPassBytecode.mix(0x5354524350434D33L, 0x4B4559534C4F5433L)));
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private int compactStringPcMask(
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int keySlot
+    ) {
+        int x = (int) state.methodKey() ^ (int) (state.methodKey() >>> 32);
+        x += keySlot ^ nonZeroInt(JvmPassBytecode.mix(0x5354524350434D31L, 0x4B4559534C4F5431L));
+        x ^= x >>> 11;
+        x *= nonZeroInt(JvmPassBytecode.mix(0x5354524350434D32L, 0x4B4559534C4F5432L)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(0x5354524350434D33L, 0x4B4559534C4F5433L));
+    }
+
+    private void emitRuntimeCompactStringInitialMaterialSlotSelection(
+        InsnList insns,
+        int carrierLocal,
+        int methodKeyLocal,
+        int pcLocal,
+        int dataLocal,
+        int keySlotLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, ControlFlowFlatteningPass.STRING_MATERIAL_SELECTOR_SLOT);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[I"));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, keySlotLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 16);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+    }
+
+    private void emitRuntimeCompactStringStateLoad(
+        InsnList insns,
+        int keyCellLocal,
+        int descriptorLocal,
+        int epochLocal,
+        int siteSeedLocal,
+        int methodKeyLocal,
+        int pcLocal,
+        int keySlotLocal,
+        int logicalIndex,
+        long metadataMask,
+        int lane,
+        int outLocal
+    ) {
+        emitRuntimeStringSiteMetadataLoad(
+            insns,
+            keyCellLocal,
+            descriptorLocal,
+            epochLocal,
+            siteSeedLocal,
+            logicalIndex,
+            metadataMask,
+            outLocal
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, outLocal));
+        emitRuntimeCompactStringStateMask(insns, siteSeedLocal, methodKeyLocal, pcLocal, keySlotLocal, lane);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, outLocal));
+    }
+
+    private void emitRuntimeCompactStringStateMask(
+        InsnList insns,
+        int siteSeedLocal,
+        int methodKeyLocal,
+        int pcLocal,
+        int keySlotLocal,
+        int lane
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354435354413131L + lane);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, keySlotLocal));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354435354413231L + lane);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.DUP));
+        JvmPassBytecode.pushInt(insns, 13 + lane);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354435354413331L + lane);
+        JvmPassBytecode.pushInt(insns, 1);
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354435354413431L + lane);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
+    private int compactStringStateMask(
+        long siteSeed,
+        ControlFlowFlatteningPass.CffInstructionState state,
+        int keySlot,
+        int lane
+    ) {
+        int x = (int) state.methodKey() ^ (int) (state.methodKey() >>> 32);
+        x += state.pcToken() ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354435354413131L + lane));
+        x ^= keySlot + nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354435354413231L + lane));
+        x ^= x >>> (13 + lane);
+        x *= nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354435354413331L + lane)) | 1;
+        return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354435354413431L + lane));
     }
 
     private void emitRuntimeStringMaterialSlotSelection(
@@ -2535,6 +3259,49 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
+    private void emitRuntimeStringRawPcArgumentMask(
+        InsnList insns,
+        int siteSeedLocal,
+        int methodKeyLocal,
+        int guardLocal,
+        int pathKeyLocal,
+        int blockKeyLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, methodKeyLocal));
+        JvmPassBytecode.pushInt(insns, 32);
+        insns.add(new InsnNode(Opcodes.LUSHR));
+        insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354504347554131L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354504350415431L);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x53545043424C4B31L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, siteSeedLocal, 13);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x535450434D554C31L);
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.IOR));
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitRuntimeShift(insns, siteSeedLocal, 21);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IADD));
+        emitRuntimeMixToNonZeroInt(insns, siteSeedLocal, 0x5354504346494E31L);
+        insns.add(new InsnNode(Opcodes.IXOR));
+    }
+
     private void emitRuntimeStringKeyCellUpdate(
         InsnList insns,
         int keyCellLocal,
@@ -2625,6 +3392,50 @@ public final class JvmStringObfuscationPass implements TransformPass {
             nextEpochLocal,
             STRING_KEY_CELL_LENGTH,
             STRING_KEY_CELL_LENGTH_MASK,
+            valueLocal
+        );
+        emitRuntimeStringSiteMetadataCellUpdate(
+            insns,
+            keyCellLocal,
+            descriptorLocal,
+            siteSeedLocal,
+            oldEpochLocal,
+            nextEpochLocal,
+            STRING_KEY_CELL_RAW_PC,
+            STRING_KEY_CELL_RAW_PC_MASK,
+            valueLocal
+        );
+        emitRuntimeStringSiteMetadataCellUpdate(
+            insns,
+            keyCellLocal,
+            descriptorLocal,
+            siteSeedLocal,
+            oldEpochLocal,
+            nextEpochLocal,
+            STRING_KEY_CELL_GUARD,
+            STRING_KEY_CELL_GUARD_MASK,
+            valueLocal
+        );
+        emitRuntimeStringSiteMetadataCellUpdate(
+            insns,
+            keyCellLocal,
+            descriptorLocal,
+            siteSeedLocal,
+            oldEpochLocal,
+            nextEpochLocal,
+            STRING_KEY_CELL_PATH,
+            STRING_KEY_CELL_PATH_MASK,
+            valueLocal
+        );
+        emitRuntimeStringSiteMetadataCellUpdate(
+            insns,
+            keyCellLocal,
+            descriptorLocal,
+            siteSeedLocal,
+            oldEpochLocal,
+            nextEpochLocal,
+            STRING_KEY_CELL_BLOCK,
+            STRING_KEY_CELL_BLOCK_MASK,
             valueLocal
         );
     }
@@ -3022,7 +3833,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.LOR));
     }
 
-    private StringSiteMaterial stringSiteMaterial(PipelineContext pctx, L1Class clazz, long siteSeed) {
+    private StringSiteMaterial stringSiteMaterial(
+        PipelineContext pctx,
+        L1Class clazz,
+        long siteSeed,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
         long seed = JvmPassBytecode.mix(pctx.masterSeed() ^ 0x5354524B4D415431L, clazz.name().hashCode());
         int layoutId = 1 + (int) Long.remainderUnsigned(
             JvmPassBytecode.mix(seed ^ siteSeed, 0x5354524C41594F55L),
@@ -3050,6 +3866,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
             fingerprint,
             words,
             wordIndexes,
+            state.pcToken(),
+            state.methodKey(),
+            state.pcToken() ^ stringRawPcArgumentMask(siteSeed, state),
+            state.guardKey(),
+            state.pathKey(),
+            state.blockKey(),
             StringPayloadMetadata.unbound(fingerprint)
         );
     }
@@ -3060,7 +3882,8 @@ public final class JvmStringObfuscationPass implements TransformPass {
         ByteLayer byteLayer,
         int payloadSlot,
         int cacheSlot,
-        int encryptedLength
+        int encryptedLength,
+        int keySlot
     ) {
         keyMaterial = keyMaterial.withPayloadMetadata(payloadSlot, cacheSlot, encryptedLength);
         int descriptor = stringKeyCellDescriptor(keyMaterial);
@@ -3128,6 +3951,46 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 STRING_KEY_CELL_LENGTH_MASK
             )
         );
+        putStringKeyCellValue(
+            cell,
+            descriptor,
+            STRING_KEY_CELL_RAW_PC,
+            keyMaterial.encodedRawPc() ^ stringSiteMetadataCellMask(
+                keyMaterial.siteSeed(),
+                keyMaterial.epoch(),
+                STRING_KEY_CELL_RAW_PC_MASK
+            )
+        );
+        putStringKeyCellValue(
+            cell,
+            descriptor,
+            STRING_KEY_CELL_GUARD,
+            keyMaterial.encodedGuardKey(keySlot) ^ stringSiteMetadataCellMask(
+                keyMaterial.siteSeed(),
+                keyMaterial.epoch(),
+                STRING_KEY_CELL_GUARD_MASK
+            )
+        );
+        putStringKeyCellValue(
+            cell,
+            descriptor,
+            STRING_KEY_CELL_PATH,
+            keyMaterial.encodedPathKey(keySlot) ^ stringSiteMetadataCellMask(
+                keyMaterial.siteSeed(),
+                keyMaterial.epoch(),
+                STRING_KEY_CELL_PATH_MASK
+            )
+        );
+        putStringKeyCellValue(
+            cell,
+            descriptor,
+            STRING_KEY_CELL_BLOCK,
+            keyMaterial.encodedBlockKey(keySlot) ^ stringSiteMetadataCellMask(
+                keyMaterial.siteSeed(),
+                keyMaterial.epoch(),
+                STRING_KEY_CELL_BLOCK_MASK
+            )
+        );
         return cell;
     }
 
@@ -3175,6 +4038,20 @@ public final class JvmStringObfuscationPass implements TransformPass {
         x += (liveWord >>> shift(siteSeed, 29)) ^ keyMaterial.word(3);
         x ^= x >>> shift(siteSeed, 5);
         return x;
+    }
+
+    private int stringRawPcArgumentMask(
+        long siteSeed,
+        ControlFlowFlatteningPass.CffInstructionState state
+    ) {
+        int x = (int) state.methodKey() ^ (int) (state.methodKey() >>> 32);
+        x += state.guardKey() ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354504347554131L));
+        x ^= state.pathKey() + nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354504350415431L));
+        x += state.blockKey() ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x53545043424C4B31L));
+        x ^= x >>> shift(siteSeed, 13);
+        x *= nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x535450434D554C31L)) | 1;
+        x += x >>> shift(siteSeed, 21);
+        return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354504346494E31L));
     }
 
     private List<Integer> shuffledStringWordIndexes(long seed, long siteSeed, int layoutId, int wordCount) {
@@ -3421,7 +4298,6 @@ public final class JvmStringObfuscationPass implements TransformPass {
             cacheSlot,
             encrypted.length
         );
-
         StringSiteCache cache = new StringSiteCache(
             clazz.name(),
             keyTable.fieldName(),
@@ -3507,7 +4383,15 @@ public final class JvmStringObfuscationPass implements TransformPass {
             throw new IllegalStateException("string key material table requires encoded key material");
         }
         int slot = table.cells().size() + STRING_KEY_CELL_BASE_SLOT;
-        table.cells().add(encodedStringKeyCell(keyMaterial, algorithm, byteLayer, payloadSlot, cacheSlot, encryptedLength));
+        table.cells().add(encodedStringKeyCell(
+            keyMaterial,
+            algorithm,
+            byteLayer,
+            payloadSlot,
+            cacheSlot,
+            encryptedLength,
+            slot
+        ));
         rebuildStringKeyInit(pctx, table);
         return slot;
     }
@@ -4629,6 +5513,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
         int fingerprint,
         List<Integer> words,
         List<Integer> wordIndexes,
+        int pcToken,
+        long methodKey,
+        int encodedRawPc,
+        int guardKey,
+        int pathKey,
+        int blockKey,
         StringPayloadMetadata payloadMetadata
     ) {
         private StringSiteMaterial {
@@ -4665,6 +5555,12 @@ public final class JvmStringObfuscationPass implements TransformPass {
                 fingerprint,
                 words,
                 wordIndexes,
+                pcToken,
+                methodKey,
+                encodedRawPc,
+                guardKey,
+                pathKey,
+                blockKey,
                 new StringPayloadMetadata(
                     payloadSlot,
                     cacheSlot,
@@ -4675,6 +5571,27 @@ public final class JvmStringObfuscationPass implements TransformPass {
                     ))
                 )
             );
+        }
+
+        int encodedGuardKey(int keySlot) {
+            return guardKey ^ compactStringStateMask(siteSeed, keySlot, 0);
+        }
+
+        int encodedPathKey(int keySlot) {
+            return pathKey ^ compactStringStateMask(siteSeed, keySlot, 1);
+        }
+
+        int encodedBlockKey(int keySlot) {
+            return blockKey ^ compactStringStateMask(siteSeed, keySlot, 2);
+        }
+
+        private int compactStringStateMask(long siteSeed, int keySlot, int lane) {
+            int x = (int) methodKey ^ (int) (methodKey >>> 32);
+            x += pcToken ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354435354413131L + lane));
+            x ^= keySlot + nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354435354413231L + lane));
+            x ^= x >>> (13 + lane);
+            x *= nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354435354413331L + lane)) | 1;
+            return x ^ nonZeroInt(JvmPassBytecode.mix(siteSeed, 0x5354435354413431L + lane));
         }
     }
 
@@ -4701,7 +5618,7 @@ public final class JvmStringObfuscationPass implements TransformPass {
         LabelNode initEnd
     ) {}
 
-    private record StringDecodeTail(String owner, String name, boolean interfaceOwner) {}
+    private record StringDecodeTail(String owner, String name, String desc, boolean interfaceOwner) {}
 
     private enum ByteLayer {
         ADD,
