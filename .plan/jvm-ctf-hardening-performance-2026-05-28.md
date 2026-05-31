@@ -4207,6 +4207,72 @@ This plan will refresh that evidence before changing CFF performance code.
     `test21.jar` size failure into a runnable full-obfuscation artifact, but
     it does not meet the requested final performance thresholds. The remaining
     runtime cost is assigned to the next JCP-7/JCP-8 performance repair.
+- Tenth repair evidence before editing:
+  - Fresh current-source `-XX:+PrintCompilation -XX:+PrintInlining` on the
+    no-quick full-profile `test21` artifact reports `a.a::x` and `a.a::y`
+    compiled by C2/OSR at 6326 bytecode bytes, so the hot matrix methods are
+    below HotSpot's 8000 byte huge-method limit but still carry enough outlined
+    transition calls to keep the requested timings out of range.
+  - The same fresh inlining log shows repeated rejection of the shared CFF
+    transition material helper: `a.ja::wa (698 bytes)` is reported as
+    `callee is too large`, `hot method too big`, or `size >
+    DesiredMethodLimit` at many callsites in the hot methods. The mapping file
+    identifies this method as `__neko_cff_xmat$...`, the shared transition
+    material helper used by outlined CFF transitions.
+  - The same log also shows relocated CFF island helpers such as `a.ia::kja`
+    through `a.ia::wja` in the 570-1012 byte range rejected as `hot method too
+    big`; the remaining cost is therefore the helper-call surface left by
+    conservative direct-island inlining, not a failure to compile the matrix
+    loops themselves.
+  - Source evidence in `CffBlockBuilder.inlineDirectTransitionBudgetBytes`
+    shows the direct-island inline budget subtracts a fixed
+    `JIT_BUDGET_POST_CFF_RESERVE_BYTES = 1500` from the HotSpot huge-method
+    budget for every method. Source evidence in the later invokeDynamic,
+    constant, and string passes shows post-CFF caller growth is driven by the
+    number and shape of future protected invokeDynamic, string, and constant
+    sites. The hot matrix methods have little of that future site pressure, so
+    the fixed reserve leaves unused JIT bytecode budget while preserving helper
+    calls that the JIT refuses to inline.
+- Tenth repair plan-intake scope:
+  - Replace the fixed direct-island post-CFF reserve with a generic adaptive
+    reserve derived from the current method's future post-CFF protection site
+    density. Methods with many string, concat/invokedynamic, numeric constant,
+    or primitive-array material sites keep a large reserve; low-pressure cyclic
+    methods can spend more of their remaining HotSpot method-size budget on
+    live-keyed direct-island transition inlining.
+  - Keep the same projected outlined method-size calculation and the same
+    hard cap against `HOTSPOT_HUGE_METHOD_LIMIT_BYTES`; do not use original
+    method size as a fallback budget and do not inline when the projected
+    method is already over budget.
+  - Preserve CFF block boundaries, block count, transition semantics,
+    independent per-edge material, live hidden-method key flow, and the
+    existing `emitTransitionCore` keyed transition body. This repair may only
+    change how much already-eligible `DIRECT_ISLAND` transition code is allowed
+    to stay inline under a method-size budget; it must not special-case
+    `test21.jar`, matrix methods, class names, descriptors, benchmark strings,
+    or timing rows.
+  - Add focused test coverage for reserve selection: a method with low future
+    post-CFF site pressure receives a smaller reserve than a string/indy-heavy
+    method, and the resulting inline budget is still zero when projected
+    outlined size is already beyond the HotSpot budget.
+- Tenth repair validation target:
+  - `./gradlew :neko-transforms:compileJava`
+  - `./gradlew :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`; record `Seq`, `Parallel`, and `VThreads`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`; record `Calc`.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` for `test21` proving hot
+    matrix methods remain below the huge-method limit and showing whether the
+    shared transition helper rejection count drops.
+- Tenth repair completion criteria:
+  - Focused CFF regression tests pass; generated artifacts avoid verifier
+    errors, VM fatal errors, fallback/original-bytecode behavior, and transform
+    coverage weakening.
+  - `test21.jar` and `test.jar` fresh full-profile artifacts run successfully.
+  - The changed budget policy is generic, depends only on method topology and
+    future transform site density, and preserves live-keyed direct-island
+    transition semantics.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
