@@ -228,6 +228,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             ? ensureProtectedIntDecodeHelper(pctx, clazz)
             : null;
         String baseRefreshHelper = compact ? ensureBaseRefreshHelper(pctx, clazz) : null;
+        int baseRawLocal = compact ? mn.maxLocals++ : -1;
         boolean outlineNumericSites = compactProtectedHelper != null && useOutlinedNumericDecode(mn, sites);
         boolean needsScalarBase = !outlineNumericSites || !arraySites.isEmpty();
         int baseStateLocal = -1;
@@ -245,6 +246,8 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 InsnList base = new InsnList();
                 emitLiveConstantBase(base, metadata, site.state(), !compact);
                 if (compact) {
+                    base.add(new InsnNode(Opcodes.DUP));
+                    base.add(new VarInsnNode(Opcodes.ISTORE, baseRawLocal));
                     emitCompactBaseTransport(base, metadata, baseRefreshHelper, false, clazz);
                     base.add(new InsnNode(Opcodes.L2I));
                 }
@@ -293,6 +296,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 compactHelper,
                 compactProtectedHelper,
                 baseRefreshHelper,
@@ -333,6 +337,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                         baseMultiplierLocal,
                         baseInverseLocal,
                         baseDataLocal,
+                        baseRawLocal,
                         compactProtectedHelper,
                         baseRefreshHelper,
                         clazz
@@ -372,6 +377,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
+                    baseRawLocal,
                     compactHelper,
                     compactProtectedHelper,
                     baseRefreshHelper,
@@ -725,6 +731,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactHelper,
         String compactProtectedHelper,
         String baseRefreshHelper,
@@ -741,6 +748,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 compactProtectedHelper,
                 baseRefreshHelper,
                 clazz
@@ -755,6 +763,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 compactProtectedHelper,
                 baseRefreshHelper,
                 clazz
@@ -770,6 +779,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
+                    baseRawLocal,
                     compactProtectedHelper,
                     baseRefreshHelper,
                     clazz
@@ -793,6 +803,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
+                    baseRawLocal,
                     compactProtectedHelper,
                     baseRefreshHelper,
                     clazz
@@ -819,6 +830,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactProtectedHelper,
         String baseRefreshHelper,
         L1Class clazz
@@ -833,6 +845,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             baseMultiplierLocal,
             baseInverseLocal,
             baseDataLocal,
+            baseRawLocal,
             compactProtectedHelper,
             baseRefreshHelper,
             clazz
@@ -849,6 +862,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactProtectedHelper,
         String baseRefreshHelper,
         L1Class clazz
@@ -865,6 +879,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 baseRefreshHelper,
                 clazz
             );
@@ -889,6 +904,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 baseRefreshHelper,
                 clazz
             );
@@ -925,6 +941,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactHelper,
         String baseRefreshHelper,
         L1Class clazz
@@ -939,6 +956,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             baseMultiplierLocal,
             baseInverseLocal,
             baseDataLocal,
+            baseRawLocal,
             compactHelper,
             baseRefreshHelper,
             clazz
@@ -955,6 +973,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactHelper,
         String baseRefreshHelper,
         L1Class clazz
@@ -970,6 +989,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 baseRefreshHelper,
                 clazz
             );
@@ -1003,6 +1023,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 baseRefreshHelper,
                 clazz
             );
@@ -1031,6 +1052,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactProtectedHelper,
         String baseRefreshHelper,
         L1Class clazz
@@ -1044,6 +1066,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 baseRefreshHelper,
                 clazz
             );
@@ -1087,6 +1110,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             baseMultiplierLocal,
             baseInverseLocal,
             baseDataLocal,
+            baseRawLocal,
             compactProtectedHelper,
             baseRefreshHelper,
             clazz
@@ -1104,6 +1128,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             baseMultiplierLocal,
             baseInverseLocal,
             baseDataLocal,
+            baseRawLocal,
             compactProtectedHelper,
             baseRefreshHelper,
             clazz
@@ -1189,6 +1214,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactHelper,
         String baseRefreshHelper,
         L1Class clazz
@@ -1202,6 +1228,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 baseRefreshHelper,
                 clazz
             );
@@ -1247,6 +1274,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             baseMultiplierLocal,
             baseInverseLocal,
             baseDataLocal,
+            baseRawLocal,
             compactHelper,
             baseRefreshHelper,
             clazz
@@ -1340,6 +1368,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactHelper,
         String baseRefreshHelper,
         L1Class clazz
@@ -1354,6 +1383,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             baseMultiplierLocal,
             baseInverseLocal,
             baseDataLocal,
+            baseRawLocal,
             compactHelper,
             baseRefreshHelper,
             clazz
@@ -1371,6 +1401,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
             baseMultiplierLocal,
             baseInverseLocal,
             baseDataLocal,
+            baseRawLocal,
             compactHelper,
             baseRefreshHelper,
             clazz
@@ -1674,6 +1705,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String baseRefreshHelper,
         L1Class clazz
     ) {
@@ -1684,6 +1716,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 state,
                 baseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 baseRefreshHelper,
                 clazz
             );
@@ -1708,9 +1741,18 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         ControlFlowFlatteningPass.CffInstructionState state,
         int baseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String baseRefreshHelper,
         L1Class clazz
     ) {
+        LabelNode refresh = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseDataLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, refresh));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseRawLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+        insns.add(refresh);
         insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, baseDataLocal));
         emitCompactBaseTransport(insns, metadata, baseRefreshHelper, true, clazz);
@@ -1720,8 +1762,11 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LUSHR));
         insns.add(new InsnNode(Opcodes.L2I));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, baseRawLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
         insns.add(new VarInsnNode(Opcodes.ISTORE, baseDataLocal));
+        insns.add(done);
     }
 
     private void emitCompactBaseTransport(
@@ -3137,6 +3182,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactHelper,
         String compactProtectedHelper,
         String baseRefreshHelper,
@@ -3154,6 +3200,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 compactProtectedHelper,
                 baseRefreshHelper,
                 clazz
@@ -3169,6 +3216,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 compactHelper,
                 baseRefreshHelper,
                 clazz
@@ -3191,6 +3239,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
+                    baseRawLocal,
                     baseRefreshHelper,
                     clazz
                 );
@@ -3227,6 +3276,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
+                    baseRawLocal,
                     compactHelper,
                     baseRefreshHelper,
                     clazz
@@ -3242,6 +3292,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
+                    baseRawLocal,
                     compactHelper,
                     baseRefreshHelper,
                     clazz
@@ -3413,6 +3464,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         int baseMultiplierLocal,
         int baseInverseLocal,
         int baseDataLocal,
+        int baseRawLocal,
         String compactHelper,
         String baseRefreshHelper,
         L1Class clazz
@@ -3428,6 +3480,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 compactHelper,
                 baseRefreshHelper,
                 clazz
@@ -3442,6 +3495,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 baseMultiplierLocal,
                 baseInverseLocal,
                 baseDataLocal,
+                baseRawLocal,
                 compactHelper,
                 baseRefreshHelper,
                 clazz
@@ -3457,6 +3511,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
+                    baseRawLocal,
                     compactHelper,
                     baseRefreshHelper,
                     clazz
@@ -3480,6 +3535,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                     baseMultiplierLocal,
                     baseInverseLocal,
                     baseDataLocal,
+                    baseRawLocal,
                     compactHelper,
                     baseRefreshHelper,
                     clazz

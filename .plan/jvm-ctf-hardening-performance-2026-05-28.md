@@ -3286,6 +3286,28 @@ This plan will refresh that evidence before changing CFF performance code.
     update both cached forms when the data changes. This preserves data-flow
     binding while removing redundant same-state base refresh helper calls in
     hot loops.
+- Second repair validation:
+  - `:neko-transforms:compileJava` passed after the raw-base cache edit.
+  - Focused Gradle validation passed:
+    `JvmConstantObfuscationIntegrationTest`,
+    `JvmStringObfuscationIntegrationTest`, and
+    `ControlFlowFlatteningAlgebraicAuditTest`.
+  - Fresh full-profile `test-jars/full.jar` regeneration without quick mode
+    wrote 324 classes and 9 resources to
+    `build/test-jvm-full-obf-perf/full-obf-rawcache.jar`.
+  - Fresh focused full-profile XOR validation passed and improved from
+    `PERF perf.crypto.xor measure=42,231.689 ms` to
+    `PERF perf.crypto.xor measure=33,878.232 ms`.
+  - Static bytecode inspection of the fresh raw-cache `a.ef.te` shows the
+    compact base helper calls are now guarded by a `baseDataLocal` versus live
+    CFF data comparison and the cached raw base local is used on the unchanged
+    path. The method remains fully obfuscated and still contains protected
+    numeric helper calls; no constants, strings, invokedynamic sites, CFF
+    blocks, or key-dispatch coverage were disabled.
+  - JCP-7 remains open: the raw-base cache is a measured generic improvement,
+    but full-profile XOR still takes `33,878.232 ms`, so additional generic
+    hot-loop numeric/string decode reduction is required before JCP-8 can
+    enforce the requested final thresholds.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
