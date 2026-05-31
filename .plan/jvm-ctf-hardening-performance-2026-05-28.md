@@ -3766,7 +3766,7 @@ This plan will refresh that evidence before changing CFF performance code.
     threshold gate. This runtime target is required because the repair changes
     the outlined constant-base formula; generation success alone proves size,
     not decode correctness.
-- Fifth repair eighth completion criteria:
+- Fifth repair eighth superseded completion criteria:
   - Fresh no-quick full-profile `test21.jar` generation writes an artifact
     successfully with the same full transform coverage.
   - The same fresh full-profile artifact runs successfully and prints the
@@ -3778,6 +3778,82 @@ This plan will refresh that evidence before changing CFF performance code.
   - Focused constant/string/CFF regression tests pass; generated constants
     remain protected and runtime-derived; no transform coverage, CFF
     granularity, key propagation, or data-flow binding is weakened.
+  - Superseded by the failed-implementation evidence below: direct `pcLocal`
+    was proven invalid for constant-base derivation because CFF may data-bind
+    that local at application sites. The active acceptance criteria are the
+    revised criteria after the failed-implementation evidence.
+- Fifth repair eighth failed-implementation evidence:
+  - The first implementation of the eighth repair compiled, but the required
+    focused regression command failed before full-profile artifact generation.
+    `JvmConstantObfuscationIntegrationTest.constantObfuscationCoversJvmNumericShapesWithCff`
+    wrote and executed a fresh obfuscated `constant-shapes-obf.jar`, which
+    failed at runtime with `ArrayIndexOutOfBoundsException` while constructing
+    primitive arrays. Fresh `javap` on that artifact shows the scalar constant
+    base consuming `pcLocal` after CFF has bound the dispatch pc to the live
+    data digest. This proves direct `pcLocal` is not equivalent to the
+    canonical constant pc token at application constant sites.
+  - The same focused regression command also failed several invokeDynamic
+    static-array fixtures during ASM verification with
+    `AnalyzerException: Expected I, but found [Ljava/lang/Object;` in
+    `__neko_indy_flowc(II[Ljava/lang/Object;IJ)J`. This proves the compact flow
+    helper's stack-carried carrier/selected-slot sequence needs a verifier
+    stable local handoff before `AALOAD`; it is not a semantic reason to
+    disable compact outlined indy sites or weaken coverage.
+- Fifth repair eighth revised scope after failed implementation:
+  - Restore canonical pc-token reconstruction for constant base derivation.
+    Scalar, array, and outlined numeric constant material must not consume the
+    CFF dispatch `pcLocal` directly because that local can be data-bound by CFF
+    dispatch mechanics at application sites.
+  - Compact the outlined numeric base-state initializer by dropping the
+    explicit `pcLocal` argument instead of dropping `pathKeyLocal`. The helper
+    will keep the existing canonical pc-token reconstruction from live
+    `guardLocal`, `pathKeyLocal`, `blockKeyLocal`, and hidden method key, and
+    will continue to capture live `dataLocal` for data-change refresh. This
+    removes one caller-side wide int load per outlined base-state init while
+    preserving the proven canonical constant key formula.
+  - Stabilize the compact invokeDynamic flow helper verifier shape by storing
+    the runtime-selected material-carrier slot into a helper local before
+    indexing the carrier. This does not move key computation back into the
+    large caller and does not expose site keys or plaintext bootstrap material.
+  - Preserve all constant/string/invokeDynamic/CFF coverage, independent
+    per-site seeds, hidden method-key propagation, class-key table binding,
+    primitive-array handling, data-change base refresh semantics, and compact
+    outlined indy caller-size reduction. Do not use direct data-bound pc as a
+    constant decrypt key, disable transforms, change CFF block boundaries, add
+    fallback/original-bytecode paths, or special-case a fixture/class/method.
+- Fifth repair eighth revised validation target:
+  - `./gradlew :neko-transforms:compileJava`
+  - `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`,
+    followed by `javap` inspection proving outlined numeric base-state init
+    calls no longer pass `pcLocal` and outlined indy calls still use the
+    compact caller ABI.
+  - `javap` or ASM inspection of the generated compact flow helper proving the
+    selected class-key carrier slot is stored into an `Object[]` local before
+    the final carrier `AALOAD`, and focused invokeDynamic/static-array
+    regression tests no longer fail verifier analysis for `__neko_indy_flowc`.
+  - Execute that same freshly generated no-quick full `test21.jar` artifact
+    with repository-local `java.io.tmpdir`; it must exit 0, print
+    `=== All tests completed ===`, avoid verifier errors and VM fatal errors,
+    and expose `Seq`, `Parallel`, and `VThreads` timing rows for JCP-8.
+- Fifth repair eighth revised completion criteria:
+  - Focused constant/string/CFF regression tests pass, including the
+    constant-shapes runtime path and invokeDynamic static-array verifier cases
+    that failed the first implementation.
+  - Fresh no-quick full-profile `test21.jar` generation writes an artifact
+    successfully with the same full transform coverage.
+  - The same fresh full-profile artifact runs successfully and prints the
+    completion marker, proving the restored canonical constant-base formula and
+    compact outlined indy helper are semantically valid on the large-method
+    pressure path.
+  - The large caller's outlined numeric base-state init callsites pass one
+    fewer wide CFF local by omitting direct `pcLocal` while still passing live
+    data, guard, path, block, and method key material for canonical pc-token
+    reconstruction.
+  - The compact flow helper uses verifier-stable `Object[]` local material for
+    the final carrier lookup; generated constants remain protected and
+    runtime-derived; no transform coverage, CFF granularity, key propagation,
+    or data-flow binding is weakened.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
