@@ -3854,6 +3854,94 @@ This plan will refresh that evidence before changing CFF performance code.
     the final carrier lookup; generated constants remain protected and
     runtime-derived; no transform coverage, CFF granularity, key propagation,
     or data-flow binding is weakened.
+- Fifth repair eighth revised validation evidence:
+  - `:neko-transforms:compileJava :neko-cli:installDist` passed with
+    repository-local `GRADLE_USER_HOME` and `java.io.tmpdir`.
+  - The focused regression command covering
+    `JvmConstantObfuscationIntegrationTest`,
+    `JvmStringObfuscationIntegrationTest`, and
+    `ControlFlowFlatteningAlgebraicAuditTest` passed. This proves the restored
+    canonical constant pc-token path fixed the prior constant-shapes runtime
+    failure, and the compact invokeDynamic flow helper no longer fails ASM
+    verifier analysis for `__neko_indy_flowc`.
+  - Fresh no-quick full-profile `test-jars/test21.jar` regeneration still
+    fails in the CFF output finalizer with
+    `MethodTooLargeException: Method too large: a/a.main
+    ([Ljava/lang/String;)V`. Coverage remains full for the relevant transforms:
+    `invokeDynamic appliedFull=63`, `constantObfuscation appliedFull=33`, and
+    `stringObfuscation appliedFull=16`. The largest-method estimate improved
+    from `estimatedCodeBytes=65440` to `estimatedCodeBytes=65237`, proving the
+    compact flow/helper verifier repair is correct but the combined full
+    profile still needs another generic caller-size reduction.
+  - Fresh `javap` of the unmodified `test-jars/test21.jar` proves
+    `org.example.Main.main([Ljava/lang/String;)V` has 30 invokedynamic sites,
+    including 26 `StringConcatFactory.makeConcatWithConstants` sites. Source
+    inspection of the current `JvmStringObfuscationPass.rewriteStringConcat`
+    shows every concat helper call still pushes the live hidden method key plus
+    three separate CFF state locals (`guardLocal`, `pathKeyLocal`,
+    `blockKeyLocal`) and the live `pcLocal` before the helper call. In the
+    large full-profile method those CFF locals are high-index locals, so each
+    removed int transfer saves wide caller bytecode across many concat
+    callsites. This is the next generic remaining caller-side ABI pressure
+    after the invokeDynamic outlined ABI and outlined numeric ABI repairs.
+- Fifth repair ninth plan-intake scope:
+  - Add a compact string-concat helper ABI used only for callers under generic
+    JVM size pressure. The current full descriptor shape is
+    `<concat-args><external-string-args>JIIII -> String`, where the final
+    arguments are `methodKey`, `guard`, `path`, `block`, and `pc`. The compact
+    size-pressure descriptor will be
+    `<concat-args><external-string-args>JI -> String`, keeping only the live
+    hidden `methodKey` and live CFF `pc` token in the caller ABI.
+  - Keep the helper per concat callsite/state. Inside that helper, dynamically
+    recover the required guard/path/block runtime words into the same helper
+    locals currently consumed by `emitStringHelperDataDigestInit`,
+    `emitDecodedStringCall`, and `emitConcatCarrierDependency`. Each recovered
+    word will be decoded from fragmented encoded material using a runtime mask
+    derived from the live method key, live pc token, per-state selector seed,
+    and a decoded CFF class-key-table word. The helper may embed encoded
+    masked material, but must not emit raw guard/path/block state keys as direct
+    constants.
+  - Keep the existing full concat helper ABI for non-size-pressure callers and
+    for cached helpers where the current ABI is already compact enough.
+  - Preserve full string coverage, internal string decode helpers,
+    method-key propagation, live CFF pc binding, per-callsite seeds,
+    class-key-table binding, and generated-helper hardening. Do not disable
+    string constants, skip concat sites, change CFF block boundaries, expose
+    raw state keys, introduce static descriptor-only recomputation, or
+    special-case `test21.jar`/`a/a.main`.
+- Fifth repair ninth validation target:
+  - `./gradlew :neko-transforms:compileJava :neko-cli:installDist`
+  - `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  - Add and run a focused `JvmStringObfuscationIntegrationTest` fixture with a
+    generated size-pressure method containing multiple
+    `makeConcatWithConstants` sites. The fixture must exceed
+    `STRING_CONCAT_CALLER_SIZE_PRESSURE`, execute successfully after
+    obfuscation, and assert the compact concat helper ABI is exercised without
+    relying on `test21.jar` or any sample-specific owner/name.
+  - `javap` or ASM inspection of the focused fixture and the fresh
+    `test21.jar` artifact proving size-pressure concat callsites invoke helper
+    descriptors ending in `JI)Ljava/lang/String;` rather than
+    `JIIII)Ljava/lang/String;`, and proving the compact helper reconstructs
+    guard/path/block through live key/pc/class-key-table material without raw
+    state-key constants.
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`; the
+    output must write successfully with the same full coverage rows and without
+    `MethodTooLargeException`.
+  - Execute that same fresh no-quick full `test21.jar`; it must exit 0, print
+    `=== All tests completed ===`, avoid verifier errors and VM fatal errors,
+    and expose `Seq`, `Parallel`, and `VThreads` timing rows for the JCP-8
+    threshold gate.
+- Fifth repair ninth completion criteria:
+  - Size-pressure concat helper callsites no longer pass separate
+    guard/path/block locals, while the helper bytecode shows runtime
+    reconstruction of those words from live key/pc-derived material rather
+    than raw static constants.
+  - The new focused compact-concat fixture, existing focused
+    constant/string/CFF regression tests, and fresh full-profile `test21.jar`
+    generation all pass.
+  - The fresh artifact runs successfully and preserves the required timing rows.
+  - No transform coverage, CFF granularity, key propagation, per-site seed
+    independence, or data/control-flow binding is weakened.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
