@@ -31,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
@@ -69,6 +70,20 @@ import org.slf4j.LoggerFactory;
  * flattening starts immediately after that prefix.</p>
  */
 public final class ControlFlowFlatteningPass extends CffTransitionOutliner implements TransformPass {
+    private static final String RECORD_BUDGETED_DIRECT_INLINE_STATS_PROPERTY =
+        "neko.cff.recordBudgetedDirectInlineStats";
+    private static final Map<String, BudgetedDirectInlineStats> BUDGETED_DIRECT_INLINE_STATS =
+        new ConcurrentHashMap<>();
+
+    record BudgetedDirectInlineStats(int candidates, int accepted, int rejected) {}
+
+    static void clearBudgetedDirectInlineStatsForTesting() {
+        BUDGETED_DIRECT_INLINE_STATS.clear();
+    }
+
+    static Map<String, BudgetedDirectInlineStats> budgetedDirectInlineStatsForTesting() {
+        return Map.copyOf(BUDGETED_DIRECT_INLINE_STATS);
+    }
 
     public static void emitDecodedSealedClassKeyWord(InsnList insns, int seal) {
         insns.add(new InsnNode(Opcodes.IALOAD));
@@ -270,6 +285,12 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
         int compactTransitionStateLocal = outlineDispatchers && compactTransitionWrappers
             ? mn.maxLocals++
             : -1;
+        int inlineDirectTransitionBudgetBytes = inlineDirectTransitionBudgetBytes(
+            mn,
+            blocks,
+            handlerBridges,
+            outlineTransitions
+        );
         CffTransitionOutliner.TransitionOutliner dispatcherOutliner = outlineDispatchers
             ? new TransitionOutliner(
                 pctx,
@@ -278,6 +299,7 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
                 compactTransitionStateLocal,
                 smallTokenDispatchCases,
                 compactTransitionWrappers,
+                inlineDirectTransitionBudgetBytes,
                 syntheticNoiseBudget
             )
             : null;
@@ -482,9 +504,29 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             method.descriptor(),
             "direct-keyed-island-dispatchers-" + dispatchPlan.groups().size()
         );
+        recordBudgetedDirectInlineStats(
+            clazz.name() + "." + method.name() + method.descriptor(),
+            transitionOutliner
+        );
         logIslandDryRunMethodStats(
             pctx,
             clazz.name() + "." + method.name() + method.descriptor()
+        );
+    }
+
+    private static void recordBudgetedDirectInlineStats(
+        String methodKey,
+        CffTransitionOutliner.TransitionOutliner transitionOutliner
+    ) {
+        if (transitionOutliner == null) return;
+        if (!Boolean.getBoolean(RECORD_BUDGETED_DIRECT_INLINE_STATS_PROPERTY)) return;
+        BUDGETED_DIRECT_INLINE_STATS.put(
+            methodKey,
+            new BudgetedDirectInlineStats(
+                transitionOutliner.inlineDirectTransitionCandidates(),
+                transitionOutliner.inlineDirectTransitionAccepted(),
+                transitionOutliner.inlineDirectTransitionRejected()
+            )
         );
     }
 

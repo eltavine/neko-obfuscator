@@ -3295,7 +3295,7 @@ This plan will refresh that evidence before changing CFF performance code.
     JCP-6F checkpoint. Non-blocking residual risk remains assigned to JCP-8:
     `Seq` is still above threshold and helper inlining blockers remain.
 
-- [ ] JCP-6G implementation subtask: budgeted inline direct-island transitions
+- [x] JCP-6G implementation subtask: budgeted inline direct-island transitions
   for cyclic outlined CFF methods.
   - Dependency/order: this follows JCP-6F because JCP-6F proved full outlining
     fixes the huge-method compilation blocker but leaves a measured helper-call
@@ -3348,6 +3348,47 @@ This plan will refresh that evidence before changing CFF performance code.
     focused audit/assertion proving the inline path applies only to eligible
     real `DIRECT_ISLAND` transitions and handler/non-direct/fake/poison routing
     stays on the existing outlined path.
+  - Implementation validation:
+    - Implemented projected-budget direct-island inlining in the existing
+      live-keyed `emitTransitionCore` path. The budget is computed only from
+      estimated outlined post-CFF method size and the HotSpot huge-method
+      limit; it no longer falls back to original method size when the projected
+      outlined shape is already over budget. Inlined direct jumps register the
+      matching direct island entry before jumping to the island label, fixing
+      the verifier failure observed during the first iteration.
+    - Focused policy/integration validation passed:
+      `./gradlew :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest`.
+      The integration row records eligible candidates and accepted budgeted
+      direct-inline transitions for a cyclic JIT-budget method, verifies the
+      transformed method stays below 8000 estimated bytes, and verifies
+      outlined helper routes remain present.
+    - Full CFF validation passed:
+      `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest`.
+    - Fresh current-source CFF+MPO-only no-quick `test-jars/test21.jar`
+      regeneration wrote 38 classes and 1 resource with full CFF coverage
+      (`renamer appliedFull=96`, `keyDispatch appliedFull=96`,
+      `methodParameterObfuscation appliedFull=35 appliedSafe=7`,
+      `controlFlowFlattening appliedFull=96`). Direct runtime passed with
+      `Seq 478 ms`, `Parallel 19 ms`, and `VThreads 19 ms`, improving over the
+      JCP-6F CFF+MPO-only row of `Seq 480 ms`, `Parallel 28 ms`,
+      `VThreads 32 ms`.
+    - Fresh current-source full-profile no-quick `test-jars/test21.jar`
+      regeneration wrote 43 classes and 1 resource with full coverage for all
+      enabled JVM transforms (`renamer appliedFull=96`, `keyDispatch
+      appliedFull=96`, `methodParameterObfuscation appliedFull=35
+      appliedSafe=7`, `controlFlowFlattening appliedFull=96`,
+      `validationSinkHardening appliedFull=1`, `invokeDynamic appliedFull=63`,
+      `constantObfuscation appliedFull=33`, `stringObfuscation
+      appliedFull=16`). Direct runtime passed with `Seq 519 ms`,
+      `Parallel 24 ms`, and `VThreads 25 ms`, improving over the JCP-6F full
+      row of `Seq 552 ms`, `Parallel 30 ms`, `VThreads 32 ms`.
+    - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` evidence for the full
+      artifact shows the transformed row lambdas receive C2/OSR compilation:
+      `a.a::x` at 6318 bytes and `a.a::y` at 6314 bytes. It also shows the
+      remaining measured blocker is now the helper inlining surface:
+      `a.ja::wa (698 bytes)` and several relocated `a.ia::*` helpers are still
+      reported as `hot method too big` / `too big`. This residual is assigned
+      to JCP-7/JCP-8; JCP-6G does not claim final threshold acceptance.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

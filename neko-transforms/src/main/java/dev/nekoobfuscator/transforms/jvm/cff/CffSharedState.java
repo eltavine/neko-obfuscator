@@ -201,6 +201,11 @@ abstract class CffSharedState {
     protected static final int JIT_BUDGET_BLOCK_BYTES = 360;
     protected static final int JIT_BUDGET_EDGE_BYTES = 300;
     protected static final int JIT_BUDGET_HANDLER_BYTES = 540;
+    protected static final int JIT_BUDGET_OUTLINED_BLOCK_BYTES = 180;
+    protected static final int JIT_BUDGET_OUTLINED_EDGE_BYTES = 24;
+    protected static final int JIT_BUDGET_OUTLINED_HANDLER_BYTES = 240;
+    protected static final int JIT_BUDGET_POST_CFF_RESERVE_BYTES = 1_500;
+    protected static final int OUTLINED_TRANSITION_CALLSITE_ESTIMATED_BYTES = 28;
     protected static final long METHOD_KEY_PC_MIX = 0x9E3779B97F4A7C15L;
     protected static final int CFF_ISLAND_REAL_DISPATCH_ROW_WORDS = 12;
     protected static final int CFF_ISLAND_FAKE_DISPATCH_ROW_WORDS = 14;

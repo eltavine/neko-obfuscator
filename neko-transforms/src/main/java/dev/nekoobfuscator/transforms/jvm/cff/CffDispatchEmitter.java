@@ -1086,6 +1086,35 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
         EdgeKind edgeKind = chooseEdgeKind(edgeSeed, role, target);
         LabelNode jumpTarget = transitionJumpTarget(target, edgeKind, edgeSeed);
         if (transitionOutliner != null) {
+            if (transitionOutliner.canInlineBudgetedDirectTransition(edgeKind, role)) {
+                InsnList inline = new InsnList();
+                emitTransitionCore(
+                    inline,
+                    state,
+                    target,
+                    edgeKind,
+                    keyLocal,
+                    guardLocal,
+                    pathKeyLocal,
+                    blockKeyLocal,
+                    pcLocal,
+                    domainLocal,
+                    dataLocal,
+                    keyTmpLocal,
+                    targetDispatchSeed,
+                    sourceKeys,
+                    targetKeys,
+                    methodSeed,
+                    stepSeed,
+                    role,
+                    updateGuard
+                );
+                inline.add(new JumpInsnNode(Opcodes.GOTO, jumpTarget));
+                if (transitionOutliner.consumeBudgetedDirectTransition(inline)) {
+                    transitionOutliner.recordDirectIslandEntry(target);
+                    return inline;
+                }
+            }
             return transitionOutliner.emitCall(
                 state,
                 target,

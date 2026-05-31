@@ -590,6 +590,55 @@ abstract class CffBlockBuilder extends CffIslandMaterial {
         return Math.min(estimated, HOTSPOT_HUGE_METHOD_LIMIT_BYTES);
     }
 
+    protected int inlineDirectTransitionBudgetBytes(
+        MethodNode mn,
+        List<Block> blocks,
+        List<HandlerBridge> handlerBridges,
+        boolean outlineTransitions
+    ) {
+        if (!outlineTransitions) return 0;
+        if (!useJitBudgetTokenDispatchEncoding(mn, blocks, handlerBridges)) return 0;
+        int projectedOutlinedBytes = estimatedOutlinedJitMethodBytes(
+            mn,
+            blocks,
+            handlerBridges
+        );
+        return Math.max(
+            0,
+            HOTSPOT_HUGE_METHOD_LIMIT_BYTES -
+                JIT_BUDGET_POST_CFF_RESERVE_BYTES -
+                projectedOutlinedBytes
+        );
+    }
+
+    protected int estimatedOutlinedJitMethodBytes(
+        MethodNode mn,
+        List<Block> blocks,
+        List<HandlerBridge> handlerBridges
+    ) {
+        int estimatedEdges = 0;
+        int nonHandlerBlocks = 0;
+        for (int i = 0; i < blocks.size(); i++) {
+            Block block = blocks.get(i);
+            if (block.handler()) continue;
+            nonHandlerBlocks++;
+            AbstractInsnNode last = lastRealBefore(mn, block.endExclusive());
+            if (last instanceof LookupSwitchInsnNode ls) {
+                estimatedEdges += 1 + ls.labels.size();
+            } else if (last instanceof TableSwitchInsnNode ts) {
+                estimatedEdges += 1 + ts.labels.size();
+            } else if (last instanceof JumpInsnNode jump) {
+                estimatedEdges += jump.getOpcode() == Opcodes.GOTO ? 1 : 2;
+            } else if (last != null && !terminates(last.getOpcode()) && i + 1 < blocks.size()) {
+                estimatedEdges++;
+            }
+        }
+        return JvmCodeSizeEstimator.estimateMethodBytes(mn) +
+            nonHandlerBlocks * JIT_BUDGET_OUTLINED_BLOCK_BYTES +
+            estimatedEdges * JIT_BUDGET_OUTLINED_EDGE_BYTES +
+            handlerBridges.size() * JIT_BUDGET_OUTLINED_HANDLER_BYTES;
+    }
+
     protected boolean hasBackwardBlockEdge(MethodNode mn, List<Block> blocks) {
         Map<LabelNode, Integer> blockIndex = new IdentityHashMap<>();
         for (int i = 0; i < blocks.size(); i++) {

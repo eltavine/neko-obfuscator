@@ -56,6 +56,18 @@ import org.slf4j.LoggerFactory;
 
 abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
 
+    static boolean isBudgetedDirectTransitionEligible(
+        EdgeKind edgeKind,
+        EdgeRole role,
+        int budgetBytes
+    ) {
+        return edgeKind == EdgeKind.DIRECT_ISLAND &&
+            role != EdgeRole.HANDLER &&
+            role != EdgeRole.FAKE &&
+            role != EdgeRole.POISON &&
+            budgetBytes > 0;
+    }
+
     protected final class TransitionOutliner {
         private static final String DESC = "(JIIIIII[J)J";
         private static final String COMPACT_TRANSITION_DESC = "(JIIII[J)J";
@@ -68,6 +80,10 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
         private final int compactStateOutLocal;
         private final int smallTokenDispatchCases;
         private final boolean compactTransitionWrappers;
+        private int inlineDirectTransitionBudgetBytes;
+        private int inlineDirectTransitionCandidates;
+        private int inlineDirectTransitionAccepted;
+        private int inlineDirectTransitionRejected;
         private final SyntheticNoiseBudget syntheticNoiseBudget;
         private final Map<IslandGroup, RouterState> routers = new IdentityHashMap<>();
         private final Map<IslandGroup, String> groupDispatchHelpers = new IdentityHashMap<>();
@@ -81,6 +97,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             int compactStateOutLocal,
             int smallTokenDispatchCases,
             boolean compactTransitionWrappers,
+            int inlineDirectTransitionBudgetBytes,
             SyntheticNoiseBudget syntheticNoiseBudget
         ) {
             this.pctx = pctx;
@@ -91,11 +108,57 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             this.compactStateOutLocal = compactStateOutLocal;
             this.smallTokenDispatchCases = smallTokenDispatchCases;
             this.compactTransitionWrappers = compactTransitionWrappers;
+            this.inlineDirectTransitionBudgetBytes = Math.max(0, inlineDirectTransitionBudgetBytes);
             this.syntheticNoiseBudget = syntheticNoiseBudget;
         }
 
         int outLocal() {
             return outLocal;
+        }
+
+        boolean canInlineBudgetedDirectTransition(EdgeKind edgeKind, EdgeRole role) {
+            boolean eligible = isBudgetedDirectTransitionEligible(
+                edgeKind,
+                role,
+                inlineDirectTransitionBudgetBytes
+            );
+            if (eligible) {
+                inlineDirectTransitionCandidates++;
+            }
+            return eligible;
+        }
+
+        boolean consumeBudgetedDirectTransition(InsnList inlineTransition) {
+            int estimatedExtraBytes = Math.max(
+                1,
+                JvmCodeSizeEstimator.estimateInsnListBytes(inlineTransition) -
+                    OUTLINED_TRANSITION_CALLSITE_ESTIMATED_BYTES
+            );
+            if (estimatedExtraBytes > inlineDirectTransitionBudgetBytes) {
+                inlineDirectTransitionRejected++;
+                return false;
+            }
+            inlineDirectTransitionBudgetBytes -= estimatedExtraBytes;
+            inlineDirectTransitionAccepted++;
+            return true;
+        }
+
+        int inlineDirectTransitionCandidates() {
+            return inlineDirectTransitionCandidates;
+        }
+
+        int inlineDirectTransitionAccepted() {
+            return inlineDirectTransitionAccepted;
+        }
+
+        int inlineDirectTransitionRejected() {
+            return inlineDirectTransitionRejected;
+        }
+
+        void recordDirectIslandEntry(DispatchTarget target) {
+            directIslandEntries
+                .computeIfAbsent(target.hub(), ignored -> new BitSet())
+                .set(target.island());
         }
 
         void emitInitOutLocals(InsnList insns) {
@@ -1775,9 +1838,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             EdgeRole role
         ) {
             if (edgeKind == EdgeKind.DIRECT_ISLAND) {
-                directIslandEntries
-                    .computeIfAbsent(target.hub(), ignored -> new BitSet())
-                    .set(target.island());
+                recordDirectIslandEntry(target);
             }
             boolean materialTransition = !compactTransitionWrappers;
             CffClassKeyTable table = null;

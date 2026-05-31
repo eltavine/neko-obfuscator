@@ -4,6 +4,7 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.IincInsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
 import org.objectweb.asm.tree.LabelNode;
@@ -22,8 +23,13 @@ public final class JvmCodeSizeEstimator {
 
     public static int estimateMethodBytes(MethodNode method) {
         if (method == null || method.instructions == null) return 0;
+        return estimateInsnListBytes(method.instructions);
+    }
+
+    public static int estimateInsnListBytes(InsnList instructions) {
+        if (instructions == null) return 0;
         int offset = 0;
-        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+        for (AbstractInsnNode insn = instructions.getFirst(); insn != null; insn = insn.getNext()) {
             offset += estimateInstructionBytes(insn, offset);
         }
         return offset;
