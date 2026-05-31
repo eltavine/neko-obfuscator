@@ -3408,6 +3408,53 @@ This plan will refresh that evidence before changing CFF performance code.
     accepted as a JCP-7 repair. The negative result proves this repeated
     reference-load cleanup is not the next performance bottleneck on the
     focused full-profile hot path.
+- Fifth repair evidence before editing:
+  - Fresh no-quick full-profile `test21.jar` regeneration after the accepted
+    lazy-base repair fails during CFF finalization with
+    `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`.
+    The finalizer reports `a/a.main([Ljava/lang/String;)V` at
+    `estimatedCodeBytes=97206`.
+  - Existing fresh ablation artifacts isolate the first size failure to string
+    obfuscation layered onto the CFF/MPO output: `test21-cff-mpo-only` and
+    `test21-validation-only` both write runnable jars, `test21-constant-only`
+    writes a jar, while `test21-string-only` fails with
+    `a/a.main([Ljava/lang/String;)V estimatedCodeBytes=71547`. The same dry-run
+    row for `a/a.main` reports 181 island helpers and 255 live dispatch-token
+    rows before string insertion, proving the failing method is already a large
+    fully CFF-protected method and the next failing layer is per-string callsite
+    growth.
+  - Source-path evidence in `JvmStringObfuscationPass.emitDecodedString` and
+    `rewriteStringConcat` shows every protected string site and every concat
+    helper call currently inlines `emitCanonicalPcToken(...)`. That sequence
+    recomputes a site pc-token mask from live method key, guard, path, and
+    block state, then xors a static site token before calling the shared string
+    decode tail/helper. The shared decode tail already receives the pc-token
+    argument as a dynamic local and derives the site seed, data word, live
+    string word, key-cell update, and cache fingerprint inside the helper from
+    the passed live state and the per-site key material.
+  - The fifth JCP-7 repair will replace the per-site canonical pc-token
+    synthesis at string and concat callsites with a direct load of the live CFF
+    `pcLocal`. This keeps the string decode bound to live CFF dataflow, removes
+    duplicated static token/mask material from large caller methods, and leaves
+    per-site seeds/material in the existing protected string key cells. It must
+    not disable string coverage, expose plaintext strings, change CFF block
+    coverage or block boundaries, remove the shared decode tail, or introduce
+    fallback/original-bytecode behavior.
+- Fifth repair validation target:
+  - `./gradlew :neko-transforms:compileJava`
+  - `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest`
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar` and
+    `test-jars/full.jar`, followed by direct runtime smoke/perf for the
+    regenerated `test21` artifact and focused `full.jar --only perf --include
+    perf.crypto.xor`.
+- Fifth repair completion criteria:
+  - `test21.jar` no-quick full-profile generation no longer fails with
+    `MethodTooLargeException` for `a/a.main`.
+  - Generated string callsites no longer inline the canonical pc-token mask
+    sequence, and still pass live method key, guard, path, block, pc, data, and
+    per-site key-slot material to the shared string tail/helper.
+  - Existing string/CFF/constant regression tests pass, no plaintext strings are
+    restored, and no CFF block selection or transform coverage is weakened.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
