@@ -3631,6 +3631,77 @@ This plan will refresh that evidence before changing CFF performance code.
       This residual is assigned to the next performance repair; JCP-6I does
       not claim final threshold acceptance.
 
+### [ ] JCP-6J: Split Class-Integrity Ticket Hot Path
+
+- Dependency/order: this follows the committed JCP-6I cold island miss split
+  because fresh CFF/MPO-only and full-profile artifacts now run correctly, but
+  the remaining JIT evidence points at class-integrity ticket consumption at
+  hot method entries. It precedes JCP-7 constant/string runtime work and JCP-8
+  threshold enforcement because the class-integrity helper is present in the
+  base CFF/MPO profile and blocks matrix/thread timings before full
+  constant/string costs are isolated. It also precedes JCP-9 load-order key
+  table work, which is independent and explicitly deferred by the user until
+  the current performance task is complete.
+- Plan-only checkpoint handling: the plan checkpoint commit for this subtask
+  must stage only `.plan/jvm-ctf-hardening-performance-2026-05-28.md` and
+  exclude source edits. After implementation validation, the implementation
+  checkpoint commit must stage only the touched CFF class-integrity
+  production/test files plus the matching plan update for JCP-6J.
+- Scope: split the generated class-integrity ticket path away from the
+  generated class-root/code-integrity helper. Ticket issue, defer, observe, and
+  consume call sites must use a dedicated generated ticket helper keyed by the
+  same live ticket seed/material and owner context. Class-root initialization
+  must continue to use the existing root/code-integrity helper. If carrier
+  bootstrap is separated, the cold bootstrap path must initialize the exact
+  carrier shape required by both ticket and root modes, including the
+  ThreadLocal/global ticket map and class-root cells, without exposing static
+  key material or weakening class-load/order/code-integrity state.
+- Required evidence before editing:
+  - Fresh JCP-6I CFF/MPO-only run log
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6i.run.log` completes
+    with `Seq 477 ms`, `Parallel 19 ms`, and `VThreads 21 ms`; the fresh
+    full-profile `test21` and `test` logs complete with `Seq 515 ms`,
+    `Parallel 27 ms`, `VThreads 23 ms`, and `Calc: 695ms`, still above the
+    requested gates.
+  - Fresh JCP-6I `PrintInlining` log
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6i-printcomp.log`
+    repeatedly reports `a.a::ta (1733 bytes)` as `callee is too large` or
+    `hot method too big` at hot method entries. The mapping file identifies it
+    as `a/a.__neko_class_integrity$16m39ju(IJJLjava/lang/Class;JJ)J -> ta`,
+    and static `javap` shows it is a `public static synchronized` helper.
+  - Source inspection of `CffClassSetup.installClassIntegrityHelper` shows a
+    single generated `CLASS_INTEGRITY_HELPER_DESC` helper contains carrier
+    lookup/bootstrap, negative ticket mode dispatch, and positive class-root /
+    class-code-integrity logic. Source inspection of
+    `CffKeyTransferRewriter.installClassIntegrityEntryTicketConsume` and the
+    key-transfer material helpers shows hot ticket observe/consume/issue paths
+    call that same helper with negative mode values, so the hot path inherits
+    the root/code-integrity helper's bytecode size and synchronization surface.
+- Validation command or runtime target:
+  - `./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest`
+  - Focused generated-bytecode regression proving ticket issue/defer and
+    entry consume/observe call sites target the dedicated ticket helper, while
+    class-root table initialization still targets the root/code-integrity
+    helper.
+  - Fresh no-quick CFF/MPO-only regeneration and direct runtime of
+    `test-jars/test21.jar`, with persisted obfuscation/runtime logs.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar` and `test-jars/test.jar`, with persisted
+    obfuscation/runtime logs.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` for the CFF/MPO-only
+    artifact proving hot entry call sites no longer invoke the 1733-byte
+    class-root helper, or recording a negative result with the next exact
+    blocker.
+- Completion criteria: focused tests pass; fresh regenerated artifacts run
+  without verifier errors, VM crashes, fallback/original-bytecode behavior, or
+  coverage weakening; ticket issue/defer/observe/consume semantics remain
+  live-keyed and support thread-local/global asynchronous paths; class-root,
+  class-code, class-load-order, and carrier state remain semantically intact;
+  no sample/class/method/benchmark-specific condition, static key replacement,
+  descriptor-only recomputation, CFF block boundary/count change, or reduced
+  transform coverage is introduced. JCP-6J does not by itself claim final
+  threshold acceptance unless fresh runtime logs meet the requested gates.
+
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
 - Scope: optimize protected numeric/string decode runtime and size overhead
