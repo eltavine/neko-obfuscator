@@ -3497,7 +3497,7 @@ This plan will refresh that evidence before changing CFF performance code.
       still exceed the requested `Seq <= 400 ms`, `Parallel/VThreads <= 15 ms`,
       and `Calc <= 200 ms` gates, so JCP-7/JCP-8 remain open.
 
-- [ ] JCP-6I implementation subtask: split CFF island fake/poison miss paths
+- [x] JCP-6I implementation subtask: split CFF island fake/poison miss paths
   into cold helpers.
   - Dependency/order: this follows JCP-6H because fresh current-source
     CFF/MPO-only `test21.jar` still runs correctly but remains above the
@@ -3557,6 +3557,79 @@ This plan will refresh that evidence before changing CFF performance code.
     benchmark/sample-specific condition is introduced. If runtime regresses or
     helper inlining does not improve, revert or revise this subtask before
     commit and record the failing evidence here.
+  - Implementation validation:
+    - `CffTransitionOutliner.createIslandDispatchHelper` now emits hot island
+      helpers that keep live-token dispatch and real result returns in the hot
+      method, but route dispatch misses through a generated cold helper with
+      the same `(JIIIIII[J)J` live-keyed ABI. The cold helper contains the
+      dynamic fake-source router, fake bounce cases, poison materialization,
+      and poison return. The real-result material decode, result-token
+      masking, transition output stores, fake/poison key material, CFF block
+      boundaries, block count, and dispatch selector equations are unchanged.
+    - Added
+      `CffTransitionOutlinerPolicyTest.assertIslandDispatchMissUsesColdHelper`,
+      which inspects a generated CFF-only artifact and proves a shared island
+      dispatch helper decodes real result material and returns before its
+      dispatch-miss call to a separate same-ABI helper.
+    - Added `generatedStaticHelperAccess` and
+      `generatedCffStaticHelpersUseInterfaceCompatibleAccess` so hot and cold
+      CFF static helpers share the existing interface-compatible access policy:
+      public static synthetic for interface owners and private static
+      synthetic for ordinary class owners.
+    - Focused validation passed:
+      `./gradlew :neko-transforms:compileJava :neko-test:test --tests
+      dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest
+      --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+      with repository-local `GRADLE_USER_HOME` and `java.io.tmpdir`.
+    - Fresh no-quick CFF/MPO-only `test-jars/test21.jar` regeneration wrote
+      `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6i.jar` with full
+      CFF coverage (`renamer appliedFull=96`, `keyDispatch appliedFull=96`,
+      `methodParameterObfuscation appliedFull=35 appliedSafe=7`,
+      `controlFlowFlattening appliedFull=96`) and persisted its obfuscation
+      log at
+      `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6i.obf.log`. The
+      direct runtime log at
+      `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6i.run.log`
+      completed successfully with `Seq 477 ms`, `Parallel 19 ms`, and
+      `VThreads 21 ms`, improving the JCP-6H CFF/MPO-only row of
+      `Seq 483 ms`, `Parallel 39 ms`, and `VThreads 19 ms` without claiming
+      final threshold acceptance.
+    - Fresh no-quick full-profile `test-jars/test21.jar` regeneration wrote
+      `build/test-jvm-full-obf-perf/test21-obf-jcp6i.jar` with full coverage
+      for all enabled JVM transforms (`renamer appliedFull=96`,
+      `keyDispatch appliedFull=96`, `methodParameterObfuscation appliedFull=35
+      appliedSafe=7`, `controlFlowFlattening appliedFull=96`,
+      `validationSinkHardening appliedFull=1`, `invokeDynamic appliedFull=63`,
+      `constantObfuscation appliedFull=33`, `stringObfuscation appliedFull=16`).
+      The obfuscation log is
+      `build/test-jvm-full-obf-perf/test21-obf-jcp6i.obf.log`; the direct
+      runtime log is
+      `build/test-jvm-full-obf-perf/test21-obf-jcp6i.run.log` and completed
+      successfully with `Seq 515 ms`, `Parallel 27 ms`, and `VThreads 23 ms`.
+    - Fresh no-quick full-profile `test-jars/test.jar` regeneration wrote
+      `build/test-jvm-full-obf-perf/test-obf-jcp6i.jar` with full coverage
+      for all enabled JVM transforms (`renamer appliedFull=84`,
+      `keyDispatch appliedFull=84`, `methodParameterObfuscation appliedFull=74
+      appliedSafe=2`, `controlFlowFlattening appliedFull=85`,
+      `validationSinkHardening appliedFull=2`, `invokeDynamic appliedFull=51`,
+      `constantObfuscation appliedFull=34`, `stringObfuscation appliedFull=26`).
+      The obfuscation log is
+      `build/test-jvm-full-obf-perf/test-obf-jcp6i.obf.log`; the direct
+      runtime log is `build/test-jvm-full-obf-perf/test-obf-jcp6i.run.log`,
+      exited 0, retained the existing fixture `ReTrace ERROR` and `Sec ERROR`
+      rows, and reported `Calc: 695ms`.
+    - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the CFF/MPO-only
+      artifact wrote
+      `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6i-printcomp.log`.
+      The remaining dominant blocker is no longer the fake/poison body inside
+      the hot island helper: the log repeatedly reports the class-integrity
+      helper `a.a::ta (1733 bytes)` as `callee is too large` or
+      `hot method too big` from hot method entries, and the mapping file
+      identifies it as
+      `a/a.__neko_class_integrity$11qc1j0(IJJLjava/lang/Class;JJ)J -> ta`.
+      Static `javap` confirms `ta` is a `public static synchronized` helper.
+      This residual is assigned to the next performance repair; JCP-6I does
+      not claim final threshold acceptance.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

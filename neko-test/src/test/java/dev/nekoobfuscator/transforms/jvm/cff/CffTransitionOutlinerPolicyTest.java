@@ -26,9 +26,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -44,6 +46,9 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
 final class CffTransitionOutlinerPolicyTest {
+    private static final String CFF_SHARED_GROUP_DISPATCH_DESC = "(JIIIIII[J)J";
+    private static final String CFF_ISLAND_MATERIAL_DESC =
+        "(JIII[Ljava/lang/Object;III)I";
 
     @Test
     void budgetedInlineOnlyAcceptsRealDirectIslandEdges() {
@@ -137,6 +142,21 @@ final class CffTransitionOutlinerPolicyTest {
             CffTransitionOutliner.shouldReloadPcForIslandResultRoute(false, 0),
             "sparse island result routing without fake routes does not consume the pc route mask"
         );
+    }
+
+    @Test
+    void generatedCffStaticHelpersUseInterfaceCompatibleAccess() {
+        int interfaceAccess = CffTransitionOutliner.generatedStaticHelperAccess(true);
+        assertTrue((interfaceAccess & Opcodes.ACC_PUBLIC) != 0);
+        assertFalse((interfaceAccess & Opcodes.ACC_PRIVATE) != 0);
+        assertTrue((interfaceAccess & Opcodes.ACC_STATIC) != 0);
+        assertTrue((interfaceAccess & Opcodes.ACC_SYNTHETIC) != 0);
+
+        int classAccess = CffTransitionOutliner.generatedStaticHelperAccess(false);
+        assertTrue((classAccess & Opcodes.ACC_PRIVATE) != 0);
+        assertFalse((classAccess & Opcodes.ACC_PUBLIC) != 0);
+        assertTrue((classAccess & Opcodes.ACC_STATIC) != 0);
+        assertTrue((classAccess & Opcodes.ACC_SYNTHETIC) != 0);
     }
 
     @Test
@@ -245,6 +265,7 @@ final class CffTransitionOutlinerPolicyTest {
             cffOutlinerHelperCallCount(hot) > 0,
             "budgeted direct inline removed all outlined helper routes"
         );
+        assertIslandDispatchMissUsesColdHelper(outputJar, "CffBudgetedDirectInlineShape");
     }
 
     private static void runCffOnlyObfuscation(Path input, Path output)
@@ -281,7 +302,7 @@ final class CffTransitionOutlinerPolicyTest {
         int calls = 0;
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (!(insn instanceof MethodInsnNode call)) continue;
-            if ("(JIIIIII[J)J".equals(call.desc)) {
+            if (CFF_SHARED_GROUP_DISPATCH_DESC.equals(call.desc)) {
                 calls++;
             } else if ("(JIII[Ljava/lang/Object;II[J)J".equals(call.desc)) {
                 calls++;
@@ -292,6 +313,69 @@ final class CffTransitionOutlinerPolicyTest {
             }
         }
         return calls;
+    }
+
+    private static void assertIslandDispatchMissUsesColdHelper(Path jar, String owner)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get(owner);
+        assertTrue(clazz != null, "missing class " + owner);
+        Set<String> sharedHelpers = new HashSet<>();
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (CFF_SHARED_GROUP_DISPATCH_DESC.equals(method.desc)) {
+                sharedHelpers.add(method.name);
+            }
+        }
+
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!CFF_SHARED_GROUP_DISPATCH_DESC.equals(method.desc)
+                || method.instructions == null
+                || method.instructions.size() == 0) {
+                continue;
+            }
+            boolean decodesRealResult = false;
+            boolean returnedRealResultBeforeColdMiss = false;
+            boolean callsColdMissHelper = false;
+            for (
+                AbstractInsnNode insn = method.instructions.getFirst();
+                insn != null;
+                insn = insn.getNext()
+            ) {
+                if (insn.getOpcode() == Opcodes.LRETURN && !callsColdMissHelper) {
+                    returnedRealResultBeforeColdMiss = true;
+                }
+                if (!(insn instanceof MethodInsnNode call)) {
+                    continue;
+                }
+                if (CFF_ISLAND_MATERIAL_DESC.equals(call.desc)) {
+                    decodesRealResult = true;
+                    continue;
+                }
+                if (!CFF_SHARED_GROUP_DISPATCH_DESC.equals(call.desc)
+                    || !owner.equals(call.owner)
+                    || !sharedHelpers.contains(call.name)
+                    || call.name.equals(method.name)) {
+                    continue;
+                }
+                AbstractInsnNode next = nextOpcodeInsn(call.getNext());
+                if (next != null && next.getOpcode() == Opcodes.LRETURN) {
+                    callsColdMissHelper = true;
+                }
+            }
+            if (decodesRealResult && returnedRealResultBeforeColdMiss && callsColdMissHelper) {
+                return;
+            }
+        }
+        throw new AssertionError(
+            "missing island dispatch helper with hot real-result returns and cold miss helper call"
+        );
+    }
+
+    private static AbstractInsnNode nextOpcodeInsn(AbstractInsnNode insn) {
+        while (insn != null && insn.getOpcode() < 0) {
+            insn = insn.getNext();
+        }
+        return insn;
     }
 
     private static InvokeDynamicInsnNode stringConcatIndy() {

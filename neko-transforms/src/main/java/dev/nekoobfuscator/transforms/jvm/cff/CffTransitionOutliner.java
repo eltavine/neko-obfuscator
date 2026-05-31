@@ -83,6 +83,11 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
         return denseResultRouter || fakeCount > 0;
     }
 
+    static int generatedStaticHelperAccess(boolean interfaceOwner) {
+        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+        return access | (interfaceOwner ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE);
+    }
+
     protected final class TransitionOutliner {
         private static final String DESC = "(JIIIIII[J)J";
         private static final String COMPACT_TRANSITION_DESC = "(JIIII[J)J";
@@ -856,10 +861,8 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             boolean denseResultRouter
         ) {
             String helperName = nextHelperName();
-            int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
-            access |= interfaceOwner ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
             MethodNode helper = new MethodNode(
-                access,
+                generatedStaticHelperAccess(interfaceOwner),
                 helperName,
                 DESC,
                 null,
@@ -896,12 +899,9 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 realDispatchTokens.add(realDispatchToken);
                 cases.put(realDispatchToken, caseLabel);
             }
-            List<LabelNode> fakeLabels = new ArrayList<>();
             List<Integer> fakeTokens = new ArrayList<>();
             List<Integer> fakeStates = new ArrayList<>();
             for (int fakeIndex = 0; fakeIndex < fakeCount; fakeIndex++) {
-                LabelNode fake = new LabelNode();
-                fakeLabels.add(fake);
                 int fakeState = fakeState(
                     salt,
                     firstState ^ island ^ (fakeIndex * 0x45D9F3B)
@@ -943,10 +943,21 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 ),
                 salt ^ dispatchSeed ^ methodSeed ^ resultMaskSeed ^ 0x494D415449534C31L
             );
-            LabelNode poisonLabel = new LabelNode();
-            LabelNode dispatchMissLabel = fakeLabels.isEmpty()
-                ? poisonLabel
-                : new LabelNode();
+            LabelNode dispatchMissLabel = new LabelNode();
+            String coldMissHelperName = createIslandDispatchColdMissHelper(
+                group,
+                island,
+                firstState,
+                fakeCount,
+                keyStateByLabel,
+                methodSeed,
+                salt,
+                dispatchSeed,
+                bounceToken,
+                poisonToken,
+                resultMaskSeed,
+                denseResultRouter
+            );
             emitCffIslandCallsiteRuntimeSource(
                 helper.instructions,
                 helperKeyLocal,
@@ -1002,8 +1013,70 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                     denseResultRouter
                 );
             }
+            helper.instructions.add(dispatchMissLabel);
+            emitIslandDispatchColdMissCall(
+                helper.instructions,
+                coldMissHelperName,
+                helperKeyLocal,
+                helperGuardLocal,
+                helperPathLocal,
+                helperBlockLocal,
+                helperPcLocal,
+                helperDomainLocal,
+                helperDataLocal,
+                helperOutLocal
+            );
+            helper.maxLocals = 15;
+            helper.maxStack = 32;
+            JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+            clazz.asmNode().methods.add(helper);
+            clazz.markDirty();
+            publishGeneratedHelperFlowKey(pctx, owner, helperName, DESC, helperKeyLocal);
+            return new IslandDispatchHelperPlan(
+                helperName,
+                cases.size(),
+                helper.instructions.size()
+            );
+        }
+
+        private String createIslandDispatchColdMissHelper(
+            IslandGroup group,
+            int island,
+            int firstState,
+            int fakeCount,
+            Map<LabelNode, CffBlockKeyState> keyStateByLabel,
+            long methodSeed,
+            long salt,
+            long dispatchSeed,
+            int bounceToken,
+            int poisonToken,
+            long resultMaskSeed,
+            boolean denseResultRouter
+        ) {
+            String helperName = nextHelperName();
+            MethodNode helper = new MethodNode(
+                generatedStaticHelperAccess(interfaceOwner),
+                helperName,
+                DESC,
+                null,
+                null
+            );
+            int helperKeyLocal = 0;
+            int helperGuardLocal = 2;
+            int helperPathLocal = 3;
+            int helperBlockLocal = 4;
+            int helperPcLocal = 5;
+            int helperDomainLocal = 6;
+            int helperDataLocal = 7;
+            int helperOutLocal = 8;
+            int helperKeyTmpLocal = 9;
+            CffClassKeyTable stepTable = ensureClassKeyTable(pctx, clazz);
+            LabelNode poisonLabel = new LabelNode();
+            List<LabelNode> fakeLabels = new ArrayList<>();
+            for (int fakeIndex = 0; fakeIndex < fakeCount; fakeIndex++) {
+                fakeLabels.add(new LabelNode());
+            }
             if (!fakeLabels.isEmpty()) {
-                helper.instructions.add(dispatchMissLabel);
                 emitDynamicFakeSourceRouter(
                     helper.instructions,
                     fakeLabels,
@@ -1077,8 +1150,8 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 poisonSeed,
                 EdgeRole.POISON
             );
-                finishOutlinedDispatchReturn(
-                    helper.instructions,
+            finishOutlinedDispatchReturn(
+                helper.instructions,
                 helperKeyLocal,
                 helperGuardLocal,
                 helperPathLocal,
@@ -1096,11 +1169,37 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             clazz.asmNode().methods.add(helper);
             clazz.markDirty();
             publishGeneratedHelperFlowKey(pctx, owner, helperName, DESC, helperKeyLocal);
-            return new IslandDispatchHelperPlan(
+            return helperName;
+        }
+
+        private void emitIslandDispatchColdMissCall(
+            InsnList insns,
+            String helperName,
+            int keyLocal,
+            int guardLocal,
+            int pathKeyLocal,
+            int blockKeyLocal,
+            int pcLocal,
+            int domainLocal,
+            int dataLocal,
+            int outLocal
+        ) {
+            insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pathKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, blockKeyLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+            insns.add(new VarInsnNode(Opcodes.ALOAD, outLocal));
+            insns.add(new MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                owner,
                 helperName,
-                cases.size(),
-                helper.instructions.size()
-            );
+                DESC,
+                interfaceOwner
+            ));
+            insns.add(new InsnNode(Opcodes.LRETURN));
         }
 
         private void emitDynamicFakeSourceRouter(
