@@ -3204,7 +3204,7 @@ This plan will refresh that evidence before changing CFF performance code.
   - Completion criteria: do not create a production repair for this failure
     unless it reproduces under a non-pathological repository-local runtime path.
 
-- [ ] JCP-6F implementation subtask: loop-aware CFF JIT-budget transition
+- [x] JCP-6F implementation subtask: loop-aware CFF JIT-budget transition
   outlining.
   - Dependency/order: this subtask is independent of the still-open
     full-profile `full.jar` XOR loop-material work and independent of the final
@@ -3256,6 +3256,44 @@ This plan will refresh that evidence before changing CFF performance code.
     for JCP-8 threshold enforcement; no fallback, original bytecode rescue,
     transform skip, CFF thinning, static key exposure, or descriptor-only key
     recomputation is introduced.
+  - Implementation/validation result before review: updated
+    `CffBlockBuilder.useTransitionOutliner` so cyclic methods also choose the
+    existing live-keyed transition/dispatcher outliner when the estimated
+    transformed method size crosses the JIT method budget. Added a focused
+    cyclic-loop regression and extended the algebraic audit so it validates
+    data-digest-bound dispatch selectors both in original transformed methods
+    and in generated relocated CFF helpers. Fresh focused validation passed:
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest.cyclicLoopNearJitBudgetUsesOutlinedTransitions`
+    under repository-local `GRADLE_USER_HOME` and `java.io.tmpdir`. Fresh full
+    CFF algebraic audit also passed with
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`.
+    Fresh no-quick full-profile `test21.jar` regeneration completed with
+    `renamer appliedFull=96`, `keyDispatch appliedFull=96`,
+    `methodParameterObfuscation appliedFull=35 appliedSafe=7`,
+    `controlFlowFlattening appliedFull=96`, `invokeDynamic appliedFull=63`,
+    `constantObfuscation appliedFull=33`, and
+    `stringObfuscation appliedFull=16`; the regenerated artifact exited 0 and
+    printed `=== All tests completed ===`.
+  - Runtime evidence before review: fresh `test21-obf-jitbudget.jar` reported
+    `Seq 552 ms`, `Parallel 30 ms`, and `VThreads 32 ms`, compared with the
+    pre-JCP-6F fresh full-profile selector artifact at `Seq 548 ms`,
+    `Parallel 678 ms`, and `VThreads 688 ms`. `javap` bytecode-size inspection
+    shows the row-compute lambdas now end at `a.a.x` offset `3533` and
+    `a.a.y` offset `3546`, while `a.a.fa` remains at offset `6441` for JCP-8
+    follow-up. Fresh `-XX:+PrintCompilation -XX:+PrintInlining` output shows
+    `a.a::x @ 1978 (3534 bytes)` and `a.a::y @ 2290 (3547 bytes)` receiving
+    tier-4 OSR compilation, and normal compilations for `a.a::x (3534 bytes)`
+    and `a.a::y (3547 bytes)`. The same output shows remaining helper inlining
+    blockers such as `a.ja::wa (698 bytes) hot method too big` and
+    `a.ia::*` helper methods in the 566-973 byte range, so JCP-6F improves the
+    row-loop huge-method blocker but does not claim final JCP-8 performance
+    acceptance.
+  - Subagent review result: PASS. The review confirmed the production change is
+    limited to selecting the existing live-keyed CFF outliner earlier for
+    cyclic JIT-budget methods, the audit rejects constant-only/static dispatch
+    selectors across relocated helpers, and the evidence is sufficient for the
+    JCP-6F checkpoint. Non-blocking residual risk remains assigned to JCP-8:
+    `Seq` is still above threshold and helper inlining blockers remain.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

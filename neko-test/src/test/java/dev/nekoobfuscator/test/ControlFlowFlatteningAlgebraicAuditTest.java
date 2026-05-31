@@ -7,6 +7,7 @@ import dev.nekoobfuscator.core.jar.JarInput;
 import dev.nekoobfuscator.core.pipeline.ObfuscationPipeline;
 import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
+import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -225,6 +226,41 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertTrue(
             doubleHashCalls(value) <= 1,
             "cyclic CFF primitive digest selected repeated floating stack hashes in loop-shaped method"
+        );
+    }
+
+    @Test
+    void cyclicLoopNearJitBudgetUsesOutlinedTransitions()
+        throws Exception {
+        Path projectRoot = Path.of(
+            System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
+        );
+        Path work = recreateWork(projectRoot.resolve("build/tmp/neko-test-cff-cyclic-jit-budget"));
+        Path source = work.resolve("CffCyclicJitBudgetShape.java");
+        Files.writeString(source, cyclicJitBudgetSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("cff-cyclic-jit-budget.jar");
+        writeJar(inputJar, classes, "CffCyclicJitBudgetShape");
+        String original = runJar(inputJar);
+
+        Path outputJar = work.resolve("cff-cyclic-jit-budget-obf.jar");
+        runCffOnlyObfuscation(inputJar, outputJar);
+        String obfuscated = runJar(outputJar);
+        assertEquals(original, obfuscated);
+        assertTrue(obfuscated.contains("CFF CYCLIC JIT OK"), obfuscated);
+
+        MethodNode hot = method(outputJar, "CffCyclicJitBudgetShape", "hot");
+        int transformedBytes = JvmCodeSizeEstimator.estimateMethodBytes(hot);
+        assertTrue(
+            transformedBytes < 8_000,
+            "cyclic CFF hot method exceeds HotSpot huge-method budget: " + transformedBytes
+        );
+        assertTrue(
+            callsCffOutlinerHelper(hot),
+            "cyclic CFF hot method did not use the outlined live-keyed helper path"
         );
     }
 
@@ -878,44 +914,90 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
 
     private static void assertCffDispatchConsumesDataDigest(Path jar)
         throws Exception {
-        MethodNode value = cffAuditValueMethod(jar);
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get("CffAuditShapes");
+        assertTrue(clazz != null, "missing CFF audit fixture class");
+        MethodNode value = cffAuditValueMethod(clazz);
         CffEntryDigestProof proof = cffEntryDigestProof(value);
-        AbstractInsnNode[] insns = value.instructions.toArray();
         int pcLocal = proof.digestLocal() - 5;
         assertTrue(pcLocal >= 0, "CFF data digest local did not match published pc/data local layout");
 
-        int checkedDispatchBranches = 0;
-        for (int i = proof.firstBranch(); i < insns.length; i++) {
-            if (!isDispatchSelectorBranch(insns[i])) {
-                continue;
-            }
-            int sliceStart = previousBranchIndex(insns, i) + 1;
-            int pcLoad = firstVarLoadIndex(insns, Opcodes.ILOAD, pcLocal, sliceStart, i);
-            if (pcLoad < 0) {
-                continue;
-            }
-            boolean sawDataDigest = false;
-            boolean sawNonlinearAfterDigest = false;
-            for (int j = pcLoad + 1; j < i; j++) {
-                if (insns[j] instanceof VarInsnNode load
-                    && load.getOpcode() == Opcodes.ILOAD
-                    && load.var == proof.digestLocal()) {
-                    sawDataDigest = true;
-                }
-                if (sawDataDigest && isNonlinearIntMixOpcode(insns[j].getOpcode())) {
-                    sawNonlinearAfterDigest = true;
-                }
-            }
-            assertTrue(
-                sawDataDigest && sawNonlinearAfterDigest,
-                "CFF dispatch selector loaded pc local without consuming nonlinear data digest before branch"
-            );
-            checkedDispatchBranches++;
+        int checkedDispatchBranches = countDispatchSelectorBranches(
+            value,
+            proof.firstBranch(),
+            pcLocal,
+            proof.digestLocal()
+        );
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!method.name.startsWith("__neko_cff$")) continue;
+            if (!"(JIIIIII[J)J".equals(method.desc)) continue;
+            checkedDispatchBranches += countDispatchSelectorBranches(method, 0, 5, 7);
         }
         assertTrue(
             checkedDispatchBranches > 0,
             "CFF audit fixture did not expose a pc-token dispatch selector"
         );
+    }
+
+    private static int countDispatchSelectorBranches(
+        MethodNode method,
+        int firstIndex,
+        int pcLocal,
+        int dataLocal
+    ) {
+        AbstractInsnNode[] insns = method.instructions.toArray();
+        int checked = 0;
+        for (int i = Math.max(0, firstIndex); i < insns.length; i++) {
+            if (!isDispatchSelectorBranch(insns[i])) {
+                continue;
+            }
+            if (dispatchSelectorConsumesDataDigest(insns, i, pcLocal, dataLocal)) {
+                checked++;
+            }
+        }
+        return checked;
+    }
+
+    private static boolean dispatchSelectorConsumesDataDigest(
+        AbstractInsnNode[] insns,
+        int branchIndex,
+        int pcLocal,
+        int dataLocal
+    ) {
+        int sliceStart = previousBranchIndex(insns, branchIndex) + 1;
+        int pcLoad = firstVarLoadIndex(insns, Opcodes.ILOAD, pcLocal, sliceStart, branchIndex);
+        if (pcLoad >= 0) {
+            return hasDataDigestMix(insns, pcLoad + 1, branchIndex, dataLocal);
+        }
+        int selectorLoad = lastVarLoadIndex(insns, sliceStart, branchIndex);
+        if (selectorLoad < 0) return false;
+        int selectorLocal = ((VarInsnNode) insns[selectorLoad]).var;
+        int selectorStore = previousVarStoreIndex(insns, selectorLocal, selectorLoad);
+        if (selectorStore < 0) return false;
+        int storeSliceStart = previousBranchIndex(insns, selectorStore) + 1;
+        pcLoad = firstVarLoadIndex(insns, Opcodes.ILOAD, pcLocal, storeSliceStart, selectorStore);
+        return pcLoad >= 0 && hasDataDigestMix(insns, pcLoad + 1, selectorStore, dataLocal);
+    }
+
+    private static boolean hasDataDigestMix(
+        AbstractInsnNode[] insns,
+        int start,
+        int end,
+        int dataLocal
+    ) {
+        boolean sawDataDigest = false;
+        boolean sawNonlinearAfterDigest = false;
+        for (int i = start; i < end; i++) {
+            if (insns[i] instanceof VarInsnNode load
+                && load.getOpcode() == Opcodes.ILOAD
+                && load.var == dataLocal) {
+                sawDataDigest = true;
+            }
+            if (sawDataDigest && isNonlinearIntMixOpcode(insns[i].getOpcode())) {
+                sawNonlinearAfterDigest = true;
+            }
+        }
+        return sawDataDigest && sawNonlinearAfterDigest;
     }
 
     private static boolean isDispatchSelectorBranch(AbstractInsnNode insn) {
@@ -951,6 +1033,10 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         JarInput input = new JarInput(jar);
         L1Class clazz = input.classMap().get("CffAuditShapes");
         assertTrue(clazz != null, "missing CFF audit fixture class");
+        return cffAuditValueMethod(clazz);
+    }
+
+    private static MethodNode cffAuditValueMethod(L1Class clazz) {
         MethodNode value = null;
         for (MethodNode method : clazz.asmNode().methods) {
             if ("value".equals(method.name)
@@ -977,6 +1063,18 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
             }
         }
         throw new AssertionError("missing transformed method " + owner + "." + name);
+    }
+
+    private static boolean callsCffOutlinerHelper(MethodNode method) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (!(insn instanceof MethodInsnNode call)) continue;
+            if (!call.name.startsWith("__neko_cff")) continue;
+            if ("(JIIIIII[J)J".equals(call.desc)) return true;
+            if ("(JIII[Ljava/lang/Object;II[J)J".equals(call.desc)) return true;
+            if ("(JIIII[J)J".equals(call.desc)) return true;
+            if ("(JIIII[J[I)J".equals(call.desc)) return true;
+        }
+        return false;
     }
 
     private static CffEntryDigestProof cffEntryDigestProof(MethodNode value) {
@@ -1068,6 +1166,35 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
             if (insns[i] instanceof VarInsnNode var
                 && var.getOpcode() == opcode
+                && var.var == local) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int lastVarLoadIndex(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = Math.min(limitExclusive, insns.length) - 1; i >= startInclusive; i--) {
+            if (insns[i] instanceof VarInsnNode var
+                && var.getOpcode() == Opcodes.ILOAD) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static int previousVarStoreIndex(
+        AbstractInsnNode[] insns,
+        int local,
+        int beforeExclusive
+    ) {
+        for (int i = Math.min(beforeExclusive, insns.length) - 1; i >= 0; i--) {
+            if (insns[i] instanceof VarInsnNode var
+                && var.getOpcode() == Opcodes.ISTORE
                 && var.var == local) {
                 return i;
             }
@@ -2051,6 +2178,53 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                         throw new AssertionError(first + ":" + second);
                     }
                     System.out.println("CFF LOOP DIGEST OK " + first);
+                }
+            }
+            """;
+    }
+
+    private static String cyclicJitBudgetSourceText() {
+        return """
+            public class CffCyclicJitBudgetShape {
+                public static void main(String[] args) {
+                    int out = hot(41);
+                    System.out.println("CFF CYCLIC JIT OK " + out);
+                    if (out == 0x12345678) {
+                        throw new AssertionError(out);
+                    }
+                }
+
+                static int hot(int seed) {
+                    int v = seed;
+                    int a = 3;
+                    int b = 5;
+                    int c = 7;
+                    int d = 11;
+                    for (int i = 0; i < 96; i++) {
+                        v = (v * 1103515245 + 12345) ^ i;
+                        if ((v & 1) == 0) {
+                            a += v ^ i;
+                        } else {
+                            b ^= v + i;
+                        }
+                        if ((v & 2) == 0) {
+                            c += a ^ b;
+                        } else {
+                            d ^= c + i;
+                        }
+                        if ((v & 4) == 0) {
+                            b += d ^ (v >>> 3);
+                        } else {
+                            c ^= b + (v << 1);
+                        }
+                        if ((v & 8) == 0) {
+                            d += a ^ (c >>> 1);
+                        } else {
+                            a ^= d + (b << 2);
+                        }
+                        v ^= a + b + c + d;
+                    }
+                    return v ^ a ^ b ^ c ^ d;
                 }
             }
             """;

@@ -445,11 +445,21 @@ abstract class CffBlockBuilder extends CffIslandMaterial {
         List<Block> blocks,
         List<HandlerBridge> handlerBridges
     ) {
-        if (
-            hasBackwardBlockEdge(mn, blocks) &&
-            estimatedOutlinerCodePressure(mn, blocks, handlerBridges) >= DISPATCH_OUTLINER_ESTIMATED_CODE_PRESSURE
-        ) {
-            return true;
+        if (hasBackwardBlockEdge(mn, blocks)) {
+            int outlinerPressure = estimatedOutlinerCodePressure(
+                mn,
+                blocks,
+                handlerBridges
+            );
+            if (outlinerPressure >= DISPATCH_OUTLINER_ESTIMATED_CODE_PRESSURE) {
+                return true;
+            }
+            if (
+                estimatedJitMethodBytes(mn, blocks, handlerBridges) >=
+                    JIT_BUDGET_METHOD_BYTES
+            ) {
+                return true;
+            }
         }
         return useOutliner(
             mn,
