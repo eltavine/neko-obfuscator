@@ -248,8 +248,6 @@ public final class JvmConstantObfuscationPass implements TransformPass {
                 if (compact) {
                     base.add(new InsnNode(Opcodes.DUP));
                     base.add(new VarInsnNode(Opcodes.ISTORE, baseRawLocal));
-                    emitCompactBaseTransport(base, metadata, baseRefreshHelper, false, clazz);
-                    base.add(new InsnNode(Opcodes.L2I));
                 }
                 base.add(new VarInsnNode(Opcodes.ISTORE, baseLocal));
                 base.add(new VarInsnNode(Opcodes.ILOAD, metadata.dataLocal()));
@@ -1753,9 +1751,8 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new VarInsnNode(Opcodes.ILOAD, baseRawLocal));
         insns.add(new JumpInsnNode(Opcodes.GOTO, done));
         insns.add(refresh);
-        insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, baseDataLocal));
-        emitCompactBaseTransport(insns, metadata, baseRefreshHelper, true, clazz);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseRawLocal));
+        emitCompactBaseTransport(insns, metadata, baseRefreshHelper, false, clazz);
         insns.add(new InsnNode(Opcodes.DUP2));
         insns.add(new InsnNode(Opcodes.L2I));
         insns.add(new VarInsnNode(Opcodes.ISTORE, baseLocal));

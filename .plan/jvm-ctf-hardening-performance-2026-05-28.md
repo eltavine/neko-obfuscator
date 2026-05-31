@@ -3330,13 +3330,40 @@ This plan will refresh that evidence before changing CFF performance code.
   - The third JCP-7 repair will keep the same per-site protected numeric
     helpers, live CFF data binding, and data-change refresh semantics, but will
     make compact base encoding lazy. Block-entry initialization will store the
-    live raw base, cached live data, and an invalid encoded-base marker without
-    calling the compact base helper. The existing helper will only run when
-    live CFF data changes and an encoded old base is required for refresh; on
+    live raw base and cached live data without calling the compact base helper.
+    The existing helper will only run when live CFF data changes, using the
+    cached raw base to derive the encoded base for the current data; on
     unchanged data the decode path continues to consume the cached raw base.
     This removes the measured unconditional helper calls without exposing
     plaintext constants, disabling string/constant coverage, or changing CFF
     block coverage.
+- Third repair validation:
+  - `:neko-transforms:compileJava` passed after the lazy compact-base edit.
+  - Focused Gradle validation passed:
+    `JvmConstantObfuscationIntegrationTest`,
+    `JvmStringObfuscationIntegrationTest`, and
+    `ControlFlowFlatteningAlgebraicAuditTest`.
+  - Fresh full-profile `test-jars/full.jar` regeneration without quick mode
+    wrote 324 classes and 9 resources to
+    `build/test-jvm-full-obf-perf/full-obf-lazybase.jar`.
+  - Fresh focused full-profile XOR validation passed and improved from
+    `PERF perf.crypto.xor measure=33,878.232 ms` to
+    `PERF perf.crypto.xor measure=31,782.153 ms`; a JFR run of the same
+    artifact reported `PERF perf.crypto.xor measure=31,817.478 ms`.
+  - Static bytecode inspection of the fresh lazy-base `a.ef.te` shows the hot
+    method is 7,472 bytes and contains 3 compact base helper calls plus 3
+    protected numeric helper calls; the previous raw-cache artifact contained
+    6 compact base helper calls and 3 protected numeric helper calls. The
+    remaining compact base calls are only in the data-change branch guarded by
+    the cached-data comparison.
+  - Fresh post-lazybase JFR reports no compact base helper samples. The
+    remaining samples are `a.ef.te(Object[], long)` with 5,206 samples /
+    95.59% and `a.ak.i(int[], int, int, int, int, int, int)` with 228 samples /
+    4.19%.
+  - JCP-7 remains open: lazy compact-base initialization is a measured generic
+    improvement, but full-profile XOR still takes `31,782.153 ms`, so the next
+    repair must target the remaining in-method protected numeric/live-base cost
+    or the measured CFF selector helper cost without reducing coverage.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
