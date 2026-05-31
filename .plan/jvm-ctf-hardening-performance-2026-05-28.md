@@ -3497,6 +3497,67 @@ This plan will refresh that evidence before changing CFF performance code.
       still exceed the requested `Seq <= 400 ms`, `Parallel/VThreads <= 15 ms`,
       and `Calc <= 200 ms` gates, so JCP-7/JCP-8 remain open.
 
+- [ ] JCP-6I implementation subtask: split CFF island fake/poison miss paths
+  into cold helpers.
+  - Dependency/order: this follows JCP-6H because fresh current-source
+    CFF/MPO-only `test21.jar` still runs correctly but remains above the
+    requested matrix thresholds. It precedes JCP-7/JCP-8 threshold enforcement
+    because the current evidence isolates a generic CFF helper inlining blocker
+    before constant/string-specific runtime.
+  - Plan-only checkpoint handling: the plan checkpoint commit for this subtask
+    must stage only `.plan/jvm-ctf-hardening-performance-2026-05-28.md` and
+    must exclude source edits. After fresh implementation validation, the
+    implementation checkpoint commit must stage only the touched CFF
+    production/test files plus the matching plan/todo update for JCP-6I.
+  - Scope: keep the hot island dispatch helper responsible for live-token
+    dispatch and real result return, but move the fake-source router, fake
+    bounce cases, and poison miss return for each island into a generated cold
+    helper with the same live keyed dispatch ABI. The hot helper must call the
+    cold helper only from the dispatch-miss path. Real block result decoding,
+    result-token masking, transition-output stores, fake case generation,
+    poison generation, class-key-table material, CFF block construction,
+    block boundaries, block count, and hidden-key propagation must stay
+    unchanged.
+  - Required evidence before editing:
+    - Fresh current-source CFF/MPO-only no-quick regeneration of
+      `test-jars/test21.jar` wrote
+      `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6h.jar` with full
+      CFF coverage. A direct sequential run exited 0 and reported
+      `Seq 483 ms`, `Parallel 39 ms`, and `VThreads 19 ms`, so the base CFF
+      path alone still misses the requested thresholds.
+    - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on that artifact wrote
+      `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6h-printcomp.log`.
+      The log shows `a.a::y` compiled at 5202 bytes, but hot row-compute
+      callsites inline 90-98 byte wrapper helpers and then reject relocated
+      CFF island helpers such as `a.ia::gja (595 bytes)`,
+      `a.ia::cja (770 bytes)`, `a.ia::mja (808 bytes)`, and
+      `a.ia::rja (984 bytes)` as `hot method too big` or `too big`.
+    - Static bytecode inspection of a relocated island helper such as
+      `a.ia.aia` shows the same method contains the real dispatch-token path,
+      compressed real result decode, dynamic fake-source router, multiple fake
+      bounce cases, and poison return. The measured hot matrix path takes the
+      real result route; fake and poison paths are still mandatory protection
+      semantics, but they do not need to be in the same inlining unit as the
+      real route.
+  - Validation command or runtime target:
+    `./gradlew :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`,
+    plus a focused policy/bytecode regression proving a generated island helper
+    with fake cases routes dispatch misses through a separate helper while real
+    result labels remain in the hot helper; fresh no-quick CFF/MPO-only
+    regeneration and direct runtime of `test-jars/test21.jar`; fresh no-quick
+    full-profile regeneration and direct runtime of `test-jars/test21.jar` and
+    `test-jars/test.jar`; and fresh `PrintInlining` proving the hot row helper
+    inlining blocker has been reduced or recording a negative result.
+  - Completion criteria: focused CFF tests pass; fresh CFF/MPO-only and
+    full-profile artifacts run successfully without verifier errors or VM
+    crashes; fake/poison paths still exist and are keyed by live dispatch
+    material; hot helpers no longer carry fake/poison body size in the real
+    route; no CFF block boundary/count/coverage reduction, static selector,
+    static key replacement, fallback/original-bytecode path, or
+    benchmark/sample-specific condition is introduced. If runtime regresses or
+    helper inlining does not improve, revert or revise this subtask before
+    commit and record the failing evidence here.
+
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
 - Scope: optimize protected numeric/string decode runtime and size overhead
