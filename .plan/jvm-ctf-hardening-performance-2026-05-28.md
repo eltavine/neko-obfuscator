@@ -3393,6 +3393,21 @@ This plan will refresh that evidence before changing CFF performance code.
     class-key table initialization label so the cached reference cannot observe
     a null carrier. The repair must not cache decoded words, static keys, table
     indexes, class-loading state, or constant values.
+- Fourth repair validation result:
+  - The implementation compiled and the focused Gradle validation passed:
+    `JvmConstantObfuscationIntegrationTest`,
+    `JvmStringObfuscationIntegrationTest`, and
+    `ControlFlowFlatteningAlgebraicAuditTest`.
+  - Fresh full-profile `test-jars/full.jar` regeneration without quick mode
+    wrote 324 classes and 9 resources to
+    `build/test-jvm-full-obf-perf/full-obf-classwords.jar`.
+  - The focused full-profile XOR runtime regressed from the lazy-base artifact
+    at `PERF perf.crypto.xor measure=31,782.153 ms` to
+    `PERF perf.crypto.xor measure=32,771.199 ms`.
+  - The class-key words local-cache implementation was reverted and is not
+    accepted as a JCP-7 repair. The negative result proves this repeated
+    reference-load cleanup is not the next performance bottleneck on the
+    focused full-profile hot path.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
