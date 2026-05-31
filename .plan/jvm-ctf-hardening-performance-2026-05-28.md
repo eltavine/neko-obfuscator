@@ -3204,6 +3204,59 @@ This plan will refresh that evidence before changing CFF performance code.
   - Completion criteria: do not create a production repair for this failure
     unless it reproduces under a non-pathological repository-local runtime path.
 
+- [ ] JCP-6F implementation subtask: loop-aware CFF JIT-budget transition
+  outlining.
+  - Dependency/order: this subtask is independent of the still-open
+    full-profile `full.jar` XOR loop-material work and independent of the final
+    JCP-8 threshold-enforcement task. It is ordered here because the current
+    worktree already produces a fresh no-quick full-profile `test21.jar`
+    artifact that runs to completion, exposing a concrete CFF hot-loop JIT
+    shape blocker. JCP-6F does not claim final performance acceptance by
+    itself; final `test.jar`, `test21.jar`, and `full.jar` threshold acceptance
+    remains in JCP-8 after all repairs.
+  - Scope: update the generic CFF outliner decision so small cyclic methods
+    whose transformed bytecode is projected to exceed HotSpot's practical JIT
+    method budget use the existing transition/dispatcher outliner surface. This
+    must not change CFF block construction, block boundaries, block count,
+    coverage, hidden-key propagation, or dispatch semantics; it only chooses the
+    already existing live-keyed helper path earlier for loop-shaped methods.
+  - Required evidence before editing: fresh full-profile
+    `test21-obf-selector.jar` runs but reports `Seq 548 ms`, `Parallel 678 ms`,
+    and `VThreads 688 ms`. JFR reports hot time in the row-compute lambdas
+    `a.a.x(...)` and `a.a.y(...)`; `PrintCompilation` has no C2 compile lines
+    for those methods, while `javap` shows final bytecode offsets around 9662
+    and 9416 bytes and no CFF transition outliner helper calls. Original
+    `test-jars/test21.jar` bytecode shows the corresponding nested-loop lambda
+    methods are only 66-67 bytes with real backward branches, proving the
+    existing pre-CFF outliner estimate underweights small cyclic loop
+    amplification. Source inspection shows `useTransitionOutliner` uses the
+    lower `estimatedOutlinerCodePressure` path for cyclic methods, and the
+    existing JIT-budget path only reduces small-token dispatch width instead of
+    forcing the transition/dispatcher outliner.
+  - Validation command or runtime target:
+    `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+    plus a focused cyclic-loop bytecode-size regression, then fresh no-quick
+    full-profile regeneration and execution of `test-jars/test21.jar`.
+    The fresh runtime target must include:
+    `javap` bytecode-size evidence for the row-compute lambdas,
+    `-XX:+PrintCompilation -XX:+PrintInlining` evidence that the hot cyclic
+    methods now receive C2/OSR compilation or that the prior huge-method
+    non-compilation evidence is absent with no `hot method too big` blocker for
+    those methods, and timing evidence for `Seq`, `Parallel`, and `VThreads`.
+    The changed CFF path must also keep the algebraic/key-flow audit green,
+    including unchanged full CFF block coverage and no self-canceling or
+    static-selector key shapes.
+  - Completion criteria: the focused cyclic-loop fixture runs correctly and
+    its transformed hot loop method remains below the 8000-byte JIT budget while
+    calling the existing CFF outliner helper path; fresh no-quick full
+    `test21.jar` still exits 0 and prints the matrix timing rows; fresh
+    `PrintCompilation`/`PrintInlining` output proves the row-compute hot loop
+    methods are no longer blocked by huge-method non-compilation; matrix
+    timings improve over the pre-JCP-6F full-profile artifact and are reported
+    for JCP-8 threshold enforcement; no fallback, original bytecode rescue,
+    transform skip, CFF thinning, static key exposure, or descriptor-only key
+    recomputation is introduced.
+
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
 - Scope: optimize protected numeric/string decode runtime and size overhead
@@ -3884,6 +3937,31 @@ This plan will refresh that evidence before changing CFF performance code.
     removed int transfer saves wide caller bytecode across many concat
     callsites. This is the next generic remaining caller-side ABI pressure
     after the invokeDynamic outlined ABI and outlined numeric ABI repairs.
+  - During the compact-concat implementation, the focused size-pressure
+    string fixture proved a separate string-tail invariant: application
+    instructions observe a CFF `pcLocal` already rebound through the dispatch
+    data digest, while `CffInstructionState.pcToken()` is the raw per-site pc
+    token used to derive the static string encryption root. Instrumented
+    bytecode on the failing fixture captured the same LDC site with runtime
+    `pcLocal=1738749614` and raw planned `state.pcToken=107191622`; source
+    inspection of `CffDispatchEmitter.emitBindDispatchPcToDataDigest` confirms
+    the dispatcher multiplies and stores the raw pc with dispatch data before
+    transformed application instructions execute. Feeding the data-bound
+    `pcLocal` directly into `__neko_strtail$` caused a bad decrypted length;
+    embedding the raw pc as a new original-method constant avoided that length
+    bug but triggered the existing CFF entry hard-fail path and returned null.
+    The repair for this subtask must therefore keep the live caller pc argument
+    as data-flow input while recovering the raw pc token from protected
+    per-site string material inside the shared tail.
+  - The same focused fixture also exposed a transform-ordering invariant in
+    the generated artifact: string pass method-entry initialization for cached
+    string locals and the shared carrier was inserted at absolute method head,
+    before the CFF class-integrity ticket consume and hidden-key initialization
+    prologue. The first shared CFF island call in `pressure(IJ)String` then
+    reached its hard-fail default before any application instruction. The
+    repair must keep those generated initializations dominating all string
+    uses, but anchor them after the first hidden-key store instead of before
+    the CFF/key prologue.
 - Fifth repair ninth plan-intake scope:
   - Add a compact string-concat helper ABI used only for callers under generic
     JVM size pressure. The current full descriptor shape is
@@ -3909,6 +3987,18 @@ This plan will refresh that evidence before changing CFF performance code.
     string constants, skip concat sites, change CFF block boundaries, expose
     raw state keys, introduce static descriptor-only recomputation, or
     special-case `test21.jar`/`a/a.main`.
+  - Store each string site's raw CFF pc token in the existing protected string
+    key cell, masked with the per-site seed and mutable epoch. Decode that raw
+    pc in `__neko_strtail$` before computing `emitRuntimeLiveStringWordPrefix`
+    and `emitRuntimeLiveStringWordTail`, and rotate its mask whenever the key
+    cell epoch changes. This avoids raw pc constants in original application
+    bytecode while preserving live caller data flow through the existing pc
+    argument.
+  - Move string pass method-entry initialization blocks from absolute method
+    head to immediately after the first hidden-key local store when a CFF
+    hidden-key local is present. This preserves verifier/local initialization
+    behavior and carrier reuse while keeping generated string setup out of the
+    CFF class-integrity ticket consume and key-initialization prefix.
 - Fifth repair ninth validation target:
   - `./gradlew :neko-transforms:compileJava :neko-cli:installDist`
   - `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
