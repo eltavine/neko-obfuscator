@@ -1647,7 +1647,6 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.LSTORE, hashLocal));
         emitClassIntegrityUnsafeIntSignal(insns, unsafeLocal, "addressSize", "()I", hashLocal, 0x5531384144445231L);
         emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[Ljava/lang/Object;"), true, hashLocal);
-        emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[Ljava/lang/Object;"), false, hashLocal);
         emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[B"), true, hashLocal);
         emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[B"), false, hashLocal);
         emitClassIntegrityUnsafeArraySignal(insns, unsafeLocal, Type.getType("[I"), true, hashLocal);
@@ -1698,6 +1697,24 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         insns.add(new JumpInsnNode(Opcodes.IFNE, next));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "getType",
+            "()Ljava/lang/Class;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "isPrimitive",
+            "()Z",
+            false
+        ));
+        LabelNode skipOffset = new LabelNode();
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, skipOffset));
         insns.add(new VarInsnNode(Opcodes.ALOAD, unsafeLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
         insns.add(new MethodInsnNode(
@@ -1708,6 +1725,7 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         emitClassIntegrityMixLongSignal(insns, hashLocal, 0x553138464F464631L);
+        insns.add(skipOffset);
         insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,
@@ -1724,14 +1742,6 @@ abstract class CffClassSetup extends CffSharedState {
             false
         ));
         emitClassIntegrityMixIntSignal(insns, hashLocal, 0x553138464E414D31L);
-        insns.add(new VarInsnNode(Opcodes.ALOAD, fieldLocal));
-        insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/lang/reflect/Field",
-            "getType",
-            "()Ljava/lang/Class;",
-            false
-        ));
         insns.add(new MethodInsnNode(
             Opcodes.INVOKEVIRTUAL,
             "java/lang/Class",
@@ -1887,7 +1897,6 @@ abstract class CffClassSetup extends CffSharedState {
                 0x5531384144445231L
             );
             hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, Object[].class, true, hash);
-            hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, Object[].class, false, hash);
             hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, byte[].class, true, hash);
             hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, byte[].class, false, hash);
             hash = classIntegrityMixUnsafeArraySignal(unsafeClass, unsafe, int[].class, true, hash);
@@ -1899,8 +1908,10 @@ abstract class CffClassSetup extends CffSharedState {
                 unsafeClass.getMethod("objectFieldOffset", java.lang.reflect.Field.class);
             for (java.lang.reflect.Field field : Class.class.getDeclaredFields()) {
                 if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
-                long offset = ((Number) objectFieldOffset.invoke(unsafe, field)).longValue();
-                hash = classIntegrityMixLongSignal(hash, offset, 0x553138464F464631L);
+                if (field.getType().isPrimitive()) {
+                    long offset = ((Number) objectFieldOffset.invoke(unsafe, field)).longValue();
+                    hash = classIntegrityMixLongSignal(hash, offset, 0x553138464F464631L);
+                }
                 hash = classIntegrityMixIntSignal(hash, field.getName().hashCode(), 0x553138464E414D31L);
                 hash = classIntegrityMixIntSignal(hash, field.getType().getName().hashCode(), 0x5531384654595031L);
             }

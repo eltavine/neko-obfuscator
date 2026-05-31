@@ -253,6 +253,39 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     }
 
     @Test
+    void cffClassIntegrityRootSurvivesZgcReferenceLayout()
+        throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+            jvmAccepts(List.of("-XX:+UseZGC")),
+            "ZGC is not available on this JVM"
+        );
+        Path projectRoot = Path.of(
+            System.getProperty("neko.test.projectRoot", System.getProperty("user.dir"))
+        );
+        Path work = recreateWork(projectRoot.resolve("build/tmp/neko-test-cff-zgc-layout"));
+        Path source = work.resolve("ZgcCffProbe.java");
+        Files.writeString(source, zgcCffProbeSourceText(), StandardCharsets.UTF_8);
+
+        Path classes = Files.createDirectories(work.resolve("classes"));
+        run(List.of("javac", "-d", classes.toString(), source.toString()), Duration.ofSeconds(30));
+
+        Path inputJar = work.resolve("zgc-cff-probe.jar");
+        writeJar(inputJar, classes, "ZgcCffProbe");
+
+        Path outputJar = work.resolve("zgc-cff-probe-obf.jar");
+        runCffOnlyObfuscation(inputJar, outputJar);
+        List<String> args = List.of("--probe", "ZGC");
+        assertTrue(
+            runJar(outputJar, List.of("-XX:+UseG1GC"), args).contains("ZGC CFF OK ZGC"),
+            "G1 reference layout did not reach the protected probe"
+        );
+        assertTrue(
+            runJar(outputJar, List.of("-XX:+UseZGC"), args).contains("ZGC CFF OK ZGC"),
+            "ZGC reference layout did not reach the protected probe"
+        );
+    }
+
+    @Test
     void validationSinkHardeningRemovesPlainStringEqualsTarget()
         throws Exception {
         Path projectRoot = Path.of(
@@ -1271,6 +1304,20 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         new ObfuscationPipeline(config, registry).execute(input, output);
     }
 
+    private void runCffOnlyObfuscation(Path input, Path output) throws Exception {
+        ObfuscationConfig config = new ObfuscationConfig();
+        config.setInputJar(input);
+        config.setOutputJar(output);
+        Map<String, TransformConfig> transforms = new LinkedHashMap<>();
+        transforms.put("controlFlowFlattening", new TransformConfig(true, 1.0));
+        config.setTransforms(transforms);
+        config.keyConfig().setMasterSeed(0x5A6C0FFEE11L);
+
+        PassRegistry registry = new PassRegistry();
+        StandardJvmPasses.register(registry);
+        new ObfuscationPipeline(config, registry).execute(input, output);
+    }
+
     private void runObfuscation(Path input, Path output, boolean packedParameters) throws Exception {
         ObfuscationConfig config = new ObfuscationConfig();
         config.setInputJar(input);
@@ -1866,6 +1913,28 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         );
     }
 
+    private static String runJar(Path jar, List<String> jvmArgs, List<String> appArgs) throws Exception {
+        List<String> command = new ArrayList<>();
+        command.add("java");
+        command.add("-XX:-UsePerfData");
+        command.addAll(jvmArgs);
+        command.add("-jar");
+        command.add(jar.toString());
+        command.addAll(appArgs);
+        return run(command, Duration.ofSeconds(30));
+    }
+
+    private static boolean jvmAccepts(List<String> jvmArgs) throws Exception {
+        List<String> command = new ArrayList<>();
+        command.add("java");
+        command.add("-XX:-UsePerfData");
+        command.addAll(jvmArgs);
+        command.add("-version");
+        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
+        boolean exited = process.waitFor(30, TimeUnit.SECONDS);
+        return exited && process.exitValue() == 0;
+    }
+
     private static String run(List<String> command, Duration timeout)
         throws Exception {
         Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
@@ -1982,6 +2051,31 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                         throw new AssertionError(first + ":" + second);
                     }
                     System.out.println("CFF LOOP DIGEST OK " + first);
+                }
+            }
+            """;
+    }
+
+    private static String zgcCffProbeSourceText() {
+        return """
+            public class ZgcCffProbe {
+                public static void main(String[] args) {
+                    if (args.length == 2 && "--probe".equals(args[0])) {
+                        System.out.println(Probe.run(args[1]));
+                        return;
+                    }
+                    throw new AssertionError("probe arguments not routed");
+                }
+
+                static final class Probe {
+                    static String run(String collector) {
+                        System.gc();
+                        long checksum = 0;
+                        for (int i = 0; i < 64; i++) {
+                            checksum += (i * 31L) ^ collector.length();
+                        }
+                        return "ZGC CFF OK " + collector + " " + checksum;
+                    }
                 }
             }
             """;

@@ -2990,7 +2990,7 @@ This plan will refresh that evidence before changing CFF performance code.
     10 minutes; the hanging validation processes were terminated after 636
     seconds elapsed. JCP-6E remains open for these next blockers; this evidence
     does not invalidate the scoped JCP-6E2/JCP-6E3/JCP-6E4 acceptance.
-- [ ] JCP-6E5 baseline/repair subtask: restore ZGC internal probe success
+- [x] JCP-6E5 baseline/repair subtask: restore ZGC internal probe success
   markers under full JVM obfuscation.
   - Dependency/order: JCP-6E2/JCP-6E3/JCP-6E4 are complete and committed, and
     the fresh full-profile artifact now reaches the GC subprocess feature
@@ -3044,6 +3044,51 @@ This plan will refresh that evidence before changing CFF performance code.
     collector; no ZGC skip, subprocess skip, marker fallback, plaintext marker
     exposure, original-bytecode fallback, or transform coverage reduction is
     introduced.
+  - Diagnostic isolation evidence: fresh ablation artifacts showed the failure
+    is already present with renamer+CFF only. `cff-no-key-no-mpo.jar` printed
+    `GC_PROBE_OK ...` and `GC_COMPAT_OK ...` under G1, but under actual
+    `-XX:+UseZGC` it exited 0 with no marker. Class-load logging for the same
+    jar showed G1 loaded `a.a` and `a.sa`, while ZGC loaded only `a.a`, proving
+    the internal probe target was never reached and the failing surface was
+    CFF dispatch/root state in `Main`, not the probe class, collector-name
+    string, indy, constant, string, MPO, or keyDispatch.
+  - Root-cause evidence: a repo-local `Unsafe` layout probe showed G1/Serial
+    report `Object[]` scale 4 and compact `java.lang.Class` reference-field
+    offsets, while ZGC reports `Object[]` scale 8 and widened reference-field
+    offsets. CFF class-integrity expected roots had included this build-time
+    reference layout fingerprint, so ZGC computed a different live root and
+    selected a legal poisoned route before the internal probe call. Primitive
+    array base/scale, primitive value probes, address size, field names, field
+    types, and primitive field offsets remained stable across the measured
+    collectors.
+  - Implementation evidence: class-integrity layout fingerprinting now keeps
+    portable live JVM material only: address size, `Object[]` base offset,
+    primitive array base/scale, primitive array value probes, `Class` field
+    names/types, and primitive field offsets. It no longer binds expected CFF
+    roots to GC/reference-compression-dependent `Object[]` reference scale or
+    reference-field object offsets. The class root still binds to live
+    `lookupClass`, class loader context, class code hash, class order bloom,
+    mutable node/global state, and portable live VM metadata; no ZGC skip,
+    marker fallback, original-bytecode fallback, or CFF coverage reduction was
+    introduced.
+  - Fresh validation evidence: the focused regression
+    `ControlFlowFlatteningAlgebraicAuditTest.cffClassIntegrityRootSurvivesZgcReferenceLayout`
+    passed, then the full `ControlFlowFlatteningAlgebraicAuditTest` and
+    `JvmMethodParameterObfuscationIntegrationTest` suites passed. A fresh
+    CFF-only `full.jar` ablation regenerated after the repair printed
+    `GC_PROBE_OK ...` under `-XX:+UseZGC -Xlog:gc` and also printed
+    `GC_COMPAT_OK ...` under ZGC. Fresh no-quick full-profile
+    `test-jars/full.jar` regeneration with `test-jars/full-jvm-obf.yml`
+    succeeded, writing 324 classes and 9 resources. Direct full-profile
+    internal probes printed `GC_PROBE_OK ...` under G1, `GC_PROBE_OK ...` under
+    ZGC with a visible `System.gc()` log line, and `GC_COMPAT_OK ...` under
+    ZGC. Focused full-profile runtime targets passed with
+    `PASS features.jvm.gc.collector-subprocess 412.511 ms` and
+    `PASS features.jvm.gc.collector-compat-matrix 1,229.877 ms`. A no-quick
+    unfiltered `full-obf.jar --verbose` run then advanced past both GC targets
+    with `PASS features.jvm.gc.collector-subprocess 364.078 ms` and
+    `PASS features.jvm.gc.collector-compat-matrix 1,202.313 ms` before timing
+    out at the already recorded later `perf.crypto.xor` blocker.
 - [ ] JCP-6E6 baseline/repair subtask: restore full-profile
   `perf.crypto.xor` completion.
   - Dependency/order: JCP-6E5 must run before this subtask when validating a
