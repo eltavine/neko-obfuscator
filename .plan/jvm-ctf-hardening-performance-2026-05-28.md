@@ -3639,9 +3639,76 @@ This plan will refresh that evidence before changing CFF performance code.
   - Preserve per-site seeds, live CFF data binding, indy resolver/static-array
     material, and full invokeDynamic coverage. Do not cache or expose raw site
     keys in bytecode, skip sites, weaken CFF, or add fallback behavior.
+- Fifth repair sixth iteration evidence:
+  - The outlined site-key relocation implementation compiles and keeps
+    `invokeDynamic appliedFull=63`, but fresh no-quick `test21.jar`
+    full-profile generation still fails with
+    `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`.
+  - The finalizer estimate improves from `a/a.main estimatedCodeBytes=72705`
+    to `estimatedCodeBytes=68868`, proving caller-side site-key decode was
+    real size pressure but still not enough for the combined full profile.
+  - Fresh no-quick `test21.jar` with full invokeDynamic and no
+    constant/string obfuscation succeeds; `javap` reports `a/a.main` ending at
+    bytecode offset `63615`. Fresh no-quick `test21.jar` full-no-indy with
+    constant/string obfuscation succeeds at offset `64060`. The same source
+    fails with string disabled but constant+indy enabled at
+    `estimatedCodeBytes=66706`, and fails with constant disabled but
+    string+indy enabled at `estimatedCodeBytes=65419`. This proves the
+    remaining overflow is not one transform alone; it is the caller-side live
+    CFF-state argument cost shared by invokeDynamic with the later protected
+    material layers.
+  - `javap` of the passing invokeDynamic-only artifact shows the large caller
+    stores the indy material carrier in `astore_w 314`, and each outlined indy
+    call loads five wide CFF locals (`iload_w 290`, `291`, `292`, `289`, `294`)
+    before the material carrier. The map for the same class lists 218
+    `a/a.__neko_indysite$*` helpers, so replacing those five wide loads plus
+    the carrier load with only the live `pcLocal` and `dataLocal` arguments
+    removes a generic per-site caller cost large enough to cover the remaining
+    full-profile gap.
+- Fifth repair seventh plan-intake review:
+  - Subagent review `019e7f25-bc96-7450-af84-baaed5fac19f` rejected the first
+    compact-selector plan because computing a selector from five CFF locals at
+    every callsite would still require the same five caller-side loads plus
+    extra mixing, the selector equation was under-specified, and the completion
+    criteria did not explicitly prove the failing full-profile `test21.jar`
+    path.
+  - Revised plan-intake review `019e7f2b-4c85-70f2-b0b4-3cc99ccf996c`
+    returned PASS after the plan was corrected to pass only live `pcLocal` and
+    `dataLocal` while the outlined helper loads the carrier itself.
+- Fifth repair seventh revised implementation:
+  - Add a compact outlined-indy helper ABI used only for size-pressure outlined
+    sites. The caller will pass only live `pcLocal` and live `dataLocal`; the
+    per-site helper will load the current class-key/material carrier with
+    `GETSTATIC` from the same class-key table field already used by the caller
+    instead of receiving the material carrier as a repeated call argument.
+  - Add a matching compact flow helper descriptor used only by outlined indy
+    helpers. The compact helper will reproduce the existing flow algorithm by
+    consuming the live `pcLocal` and live `dataLocal` from the caller while
+    decoding the stored per-site guard/path/block/static class-word material
+    from the mutable carrier. This preserves the existing expected flow for a
+    correct CFF state, while a wrong live pc/data state changes material
+    selection and downstream protected flow.
+  - Source evidence for the compact live inputs: CFF `emitStorePc` derives
+    `pcLocal` from the target block's guard/path/block key state and method key,
+    and CFF `installPrimitiveDataDigestUpdates` updates `dataLocal` from
+    selected live primitive data observations. Therefore the compact outlined
+    indy ABI remains tied to both live control-flow key state and live dataflow
+    state instead of static descriptors or per-site constants.
+  - Keep non-outlined and loop-cached indy sites on the existing full
+    `FLOW_DESC` path, so smaller methods do not gain a second helper ABI and
+    existing loop-cache behavior remains unchanged.
+  - Preserve independent per-site seeds, mutable carrier-derived site keys,
+    resolver/static-array material, generated-helper key publication, and full
+    invokeDynamic coverage. Do not change CFF block boundaries, skip indy
+    sites, cache raw site keys, introduce descriptor-only key recomputation, or
+    add fallback/original-bytecode behavior.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
-- Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
+- Completion criteria: fresh no-quick full-profile `test21.jar` generation
+  writes an artifact without `MethodTooLargeException`; `javap` inspection of
+  `a/a.main` proves outlined indy calls no longer pass five live CFF ints plus
+  the material carrier; coverage still reports full invokeDynamic application
+  for eligible sites; `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
   fresh artifact; generated material remains runtime-derived and not direct
   plaintext `ldc`; no self-canceling key logic is introduced.
 
