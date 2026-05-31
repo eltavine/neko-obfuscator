@@ -3711,6 +3711,73 @@ This plan will refresh that evidence before changing CFF performance code.
   for eligible sites; `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
   fresh artifact; generated material remains runtime-derived and not direct
   plaintext `ldc`; no self-canceling key logic is introduced.
+- Fifth repair seventh iteration evidence:
+  - The compact outlined-indy implementation compiled and fresh no-quick
+    full-profile `test21.jar` generation kept full coverage
+    (`invokeDynamic appliedFull=63`, `constantObfuscation appliedFull=33`,
+    `stringObfuscation appliedFull=16`) but still failed in the CFF finalizer
+    with `MethodTooLargeException: Method too large: a/a.main
+    ([Ljava/lang/String;)V`.
+  - The finalizer estimate improved from `estimatedCodeBytes=68868` to
+    `estimatedCodeBytes=65440`. This proves the compact outlined-indy ABI
+    removed the intended caller-side material and leaves only a narrow generic
+    method-size overflow, not a coverage failure or a reason to disable a
+    transform.
+  - Source inspection of `JvmConstantObfuscationPass` shows the remaining
+    outlined numeric base-state initializer still passes six live values from
+    the large caller: `data`, `guard`, `path`, `block`, `pc`, and the hidden
+    method key. `ControlFlowFlatteningPass.emitStorePc` writes `pcLocal` from
+    the target block's guard/path/block key state and live method key through
+    `emitEncryptedToken`, while CFF primitive digest updates keep `dataLocal`
+    tied to selected live primitive data observations. Therefore explicit
+    caller-side `pathKeyLocal` transfer is redundant for the outlined constant
+    base path when the helper already receives live `pcLocal`, live
+    `guardLocal`, live `blockKeyLocal`, live `dataLocal`, and the live hidden
+    method key.
+- Fifth repair eighth plan-intake scope:
+  - Replace only the outlined numeric base-state initializer ABI with a compact
+    variant that drops the explicit `pathKeyLocal` argument. The caller will
+    still pass live `dataLocal`, `guardLocal`, `blockKeyLocal`, `pcLocal`, and
+    the hidden method key.
+  - Add a matching outlined-only constant-base derivation that uses live
+    `pcLocal` as the path-carrying CFF token and keeps guard, block, data,
+    method key, per-block state, class-key-table material, and per-site seeds
+    in the runtime derivation. Non-outlined scalar/array constant paths keep
+    the existing full live-base formula.
+  - Update the outlined expected-base calculation used to encrypt outlined
+    numeric constants so it matches the compact outlined runtime formula.
+  - Preserve all numeric/string/invokeDynamic/CFF coverage, independent
+    per-site seeds, hidden method-key propagation, class-key table binding,
+    primitive-array handling, and data-change base refresh semantics. Do not
+    replace live key flow with descriptor/static recomputation, disable
+    constants, change CFF block boundaries, add fallback/original-bytecode
+    paths, or special-case `test21.jar`/`a/a.main`.
+- Fifth repair eighth validation target:
+  - `./gradlew :neko-transforms:compileJava`
+  - `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`,
+    followed by `javap` inspection proving outlined numeric base-state init
+    calls no longer pass `pathKeyLocal` and the full artifact writes without
+    `MethodTooLargeException`.
+  - Execute that same freshly generated no-quick full `test21.jar` artifact
+    with repository-local `java.io.tmpdir`. The run must exit 0, print
+    `=== All tests completed ===`, avoid verifier errors and VM fatal errors,
+    and expose the `Seq`, `Parallel`, and `VThreads` timing rows for the JCP-8
+    threshold gate. This runtime target is required because the repair changes
+    the outlined constant-base formula; generation success alone proves size,
+    not decode correctness.
+- Fifth repair eighth completion criteria:
+  - Fresh no-quick full-profile `test21.jar` generation writes an artifact
+    successfully with the same full transform coverage.
+  - The same fresh full-profile artifact runs successfully and prints the
+    completion marker, proving the changed outlined constant decode path is
+    semantically valid on the large-method pressure path.
+  - The large caller's outlined numeric base-state init callsites pass one
+    fewer wide CFF local while still passing live data, guard, block, pc, and
+    method key material.
+  - Focused constant/string/CFF regression tests pass; generated constants
+    remain protected and runtime-derived; no transform coverage, CFF
+    granularity, key propagation, or data-flow binding is weakened.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
