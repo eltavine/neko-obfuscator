@@ -3391,7 +3391,7 @@ This plan will refresh that evidence before changing CFF performance code.
       reported as `hot method too big` / `too big`. This residual is assigned
       to JCP-7/JCP-8; JCP-6G does not claim final threshold acceptance.
 
-- [ ] JCP-6H implementation subtask: cache small-token selector and reload
+- [x] JCP-6H implementation subtask: cache small-token selector and reload
   dense-result route pc.
   - Dependency/order: this follows the completed JCP-6G validation block and
     the adaptive direct-inline reserve because those subtasks left a fresh
@@ -3451,6 +3451,51 @@ This plan will refresh that evidence before changing CFF performance code.
     is introduced. If fresh validation shows a correctness failure or a
     material performance regression, revise or revert this subtask before
     commit and record the failing evidence here.
+  - Implementation validation:
+    - `CffDispatchEmitter.emitSmallTokenDispatch` now derives the existing
+      data-bound selector once with `emitDispatchSelectorFromEncodedPc`, stores
+      it in a scratch int local, and compares that cached local against the
+      candidate case tokens. The single derivation still consumes the encoded
+      pc, raw-pc scratch, data digest local, guard/path/block locals, and the
+      per-dispatch seed; every real branch still restores raw pc before jumping
+      to the target label.
+    - `CffTransitionOutliner` now uses explicit package-local route policy
+      methods for group and island result routing. Dense-result routing reloads
+      transition-output `pcLocal` even when there is no fake route and no hub
+      result, while the prior sparse hub/fake reload behavior is preserved.
+    - Added
+      `CffTransitionOutlinerPolicyTest.denseResultRoutesReloadTransitionPcBeforeRouteMask`,
+      which asserts the dense/no-fake/no-hub policy returns true for both group
+      and island result routes, and that sparse non-hub/non-fake routes do not
+      add unnecessary pc reloads.
+    - Focused validation passed:
+      `./gradlew :neko-transforms:compileJava :neko-test:test --tests
+      dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest
+      --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest`
+      with repository-local `GRADLE_USER_HOME` and `java.io.tmpdir`.
+    - Fresh no-quick full-profile `test-jars/test21.jar` regeneration wrote
+      `build/test-jvm-full-obf-perf/test21-obf-jcp6h.jar` with full coverage
+      for all enabled JVM transforms (`renamer appliedFull=96`,
+      `keyDispatch appliedFull=96`, `methodParameterObfuscation appliedFull=35
+      appliedSafe=7`, `controlFlowFlattening appliedFull=96`,
+      `validationSinkHardening appliedFull=1`, `invokeDynamic appliedFull=63`,
+      `constantObfuscation appliedFull=33`, `stringObfuscation
+      appliedFull=16`). A direct sequential runtime passed and printed
+      `=== All tests completed ===` with `Seq 532 ms`, `Parallel 24 ms`, and
+      `VThreads 26 ms`.
+    - Fresh no-quick full-profile `test-jars/test.jar` regeneration wrote
+      `build/test-jvm-full-obf-perf/test-obf-jcp6h.jar` with full coverage for
+      all enabled JVM transforms (`renamer appliedFull=84`,
+      `keyDispatch appliedFull=84`, `methodParameterObfuscation appliedFull=74
+      appliedSafe=2`, `controlFlowFlattening appliedFull=85`,
+      `validationSinkHardening appliedFull=2`, `invokeDynamic appliedFull=51`,
+      `constantObfuscation appliedFull=34`, `stringObfuscation
+      appliedFull=26`). The direct runtime exited 0 and reported
+      `Calc: 725ms`; it retained the existing `ReTrace ERROR` and `Sec ERROR`
+      fixture rows.
+    - JCP-6H does not claim final threshold acceptance. `test21` and `test`
+      still exceed the requested `Seq <= 400 ms`, `Parallel/VThreads <= 15 ms`,
+      and `Calc <= 200 ms` gates, so JCP-7/JCP-8 remain open.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

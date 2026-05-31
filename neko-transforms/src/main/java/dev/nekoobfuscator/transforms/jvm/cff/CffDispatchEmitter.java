@@ -2387,27 +2387,7 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             JvmPassBytecode.mix(seed, left.getKey()),
             JvmPassBytecode.mix(seed, right.getKey())
         ));
-        List<LabelNode> matches = new ArrayList<>(ordered.size() - 1);
-        for (int i = 0; i < ordered.size() - 1; i++) {
-            Map.Entry<Integer, LabelNode> entry = ordered.get(i);
-            LabelNode match = new LabelNode();
-            matches.add(match);
-            emitDispatchSelectorFromEncodedPc(
-                insns,
-                pcLocal,
-                rawPcLocal,
-                dataLocal,
-                guardLocal,
-                pathKeyLocal,
-                blockKeyLocal,
-                seed,
-                multiplierLocal,
-                inverseLocal
-            );
-            JvmPassBytecode.pushInt(insns, entry.getKey());
-            insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, match));
-        }
-        Map.Entry<Integer, LabelNode> last = ordered.get(ordered.size() - 1);
+        int selectorLocal = scratchLocal + 3;
         emitDispatchSelectorFromEncodedPc(
             insns,
             pcLocal,
@@ -2420,6 +2400,18 @@ abstract class CffDispatchEmitter extends CffBlockBuilder {
             multiplierLocal,
             inverseLocal
         );
+        insns.add(new VarInsnNode(Opcodes.ISTORE, selectorLocal));
+        List<LabelNode> matches = new ArrayList<>(ordered.size() - 1);
+        for (int i = 0; i < ordered.size() - 1; i++) {
+            Map.Entry<Integer, LabelNode> entry = ordered.get(i);
+            LabelNode match = new LabelNode();
+            matches.add(match);
+            insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
+            JvmPassBytecode.pushInt(insns, entry.getKey());
+            insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, match));
+        }
+        Map.Entry<Integer, LabelNode> last = ordered.get(ordered.size() - 1);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, selectorLocal));
         JvmPassBytecode.pushInt(insns, last.getKey());
         insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, poison));
         emitRestoreRawDispatchPc(insns, pcLocal, rawPcLocal);

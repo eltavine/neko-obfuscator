@@ -107,6 +107,39 @@ final class CffTransitionOutlinerPolicyTest {
     }
 
     @Test
+    void denseResultRoutesReloadTransitionPcBeforeRouteMask() {
+        assertTrue(
+            CffTransitionOutliner.shouldReloadPcForGroupResultRoute(false, true, false),
+            "dense group result routing must reload pc even without a hub result"
+        );
+        assertTrue(
+            CffTransitionOutliner.shouldReloadPcForGroupResultRoute(false, false, true),
+            "hub result routing must keep the previous pc reload behavior"
+        );
+        assertFalse(
+            CffTransitionOutliner.shouldReloadPcForGroupResultRoute(true, true, false),
+            "inlined single-result fallthrough should not emit result routing loads"
+        );
+        assertFalse(
+            CffTransitionOutliner.shouldReloadPcForGroupResultRoute(false, false, false),
+            "sparse non-hub result routing does not consume the pc route mask"
+        );
+
+        assertTrue(
+            CffTransitionOutliner.shouldReloadPcForIslandResultRoute(true, 0),
+            "dense island result routing must reload pc even without fake routes"
+        );
+        assertTrue(
+            CffTransitionOutliner.shouldReloadPcForIslandResultRoute(false, 1),
+            "fake island routes must keep the previous pc reload behavior"
+        );
+        assertFalse(
+            CffTransitionOutliner.shouldReloadPcForIslandResultRoute(false, 0),
+            "sparse island result routing without fake routes does not consume the pc route mask"
+        );
+    }
+
+    @Test
     void adaptiveReserveTracksFuturePostCffSitePressure() {
         MethodNode lowPressure = new MethodNode(
             Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,

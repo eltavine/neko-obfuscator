@@ -68,6 +68,21 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             budgetBytes > 0;
     }
 
+    static boolean shouldReloadPcForGroupResultRoute(
+        boolean inlineSingleResultFallthrough,
+        boolean denseResultRouter,
+        boolean hasHubResult
+    ) {
+        return !inlineSingleResultFallthrough && (denseResultRouter || hasHubResult);
+    }
+
+    static boolean shouldReloadPcForIslandResultRoute(
+        boolean denseResultRouter,
+        int fakeCount
+    ) {
+        return denseResultRouter || fakeCount > 0;
+    }
+
     protected final class TransitionOutliner {
         private static final String DESC = "(JIIIIII[J)J";
         private static final String COMPACT_TRANSITION_DESC = "(JIIII[J)J";
@@ -226,7 +241,11 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
-                !inlineSingleResultFallthrough && routerHasHubResult(router, group.hub()),
+                shouldReloadPcForGroupResultRoute(
+                    inlineSingleResultFallthrough,
+                    router.denseResultRouter,
+                    routerHasHubResult(router, group.hub())
+                ),
                 router.denseResultRouter
             );
             if (inlineSingleResultFallthrough) {
@@ -427,7 +446,7 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 blockKeyLocal,
                 pcLocal,
                 domainLocal,
-                fakeCount > 0,
+                shouldReloadPcForIslandResultRoute(denseResultRouter, fakeCount),
                 denseResultRouter
             );
             emitTransitionOutLowLoad(insns, outLocal, 2, keyTmpLocal);
