@@ -3364,6 +3364,35 @@ This plan will refresh that evidence before changing CFF performance code.
     improvement, but full-profile XOR still takes `31,782.153 ms`, so the next
     repair must target the remaining in-method protected numeric/live-base cost
     or the measured CFF selector helper cost without reducing coverage.
+- Fourth repair evidence before editing:
+  - Fresh post-lazybase `-XX:+PrintCompilation -XX:+PrintInlining` evidence
+    shows `a.ef.te` is 7,472 bytes. The protected numeric helper
+    `a.fk.xb(int, int, int, int, int)` is inlined at the hottest OSR sites,
+    while several non-OSR/full compilations reject `a.fk.xb` and
+    `a.ak.i(int[], int, int, int, int, int, int)` with
+    `size > DesiredMethodLimit`. This proves the remaining protected numeric
+    cost is now in the caller body and method-size budget, not an unoptimized
+    standalone helper call.
+  - Fresh bytecode inspection of the same `a.ef.te` shows each live constant
+    base computation still performs the class-key words load sequence
+    `GETSTATIC <carrier Object[]>`, `AALOAD`, `CHECKCAST [I` before indexing
+    the class-key table. The hot method contains 3 compact base helper calls
+    only in data-change branches, but it still contains repeated live-base
+    table-reference loads in the hot numeric decode groups.
+  - Source-path evidence from `CffMaterialTables.installClassKeyTableInit`
+    shows the class-key words are allocated once as an `int[]`, stored into the
+    class carrier at `CLASS_KEY_WORDS_SLOT` and
+    `CLASS_KEY_WORDS_ALIAS_SLOT`, and then the carrier is stored to the class
+    static object field. Caching the `int[]` reference in a method local does
+    not cache individual key words; any in-place table perturbation remains
+    visible through the same array reference.
+  - The fourth JCP-7 repair will cache only that class-key words `int[]`
+    reference in a generated method local for compact numeric methods and make
+    live constant-base material load the local reference instead of repeating
+    the static carrier lookup. `<clinit>` insertion will occur after the CFF
+    class-key table initialization label so the cached reference cannot observe
+    a null carrier. The repair must not cache decoded words, static keys, table
+    indexes, class-loading state, or constant values.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
