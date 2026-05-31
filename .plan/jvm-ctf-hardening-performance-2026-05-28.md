@@ -3606,6 +3606,39 @@ This plan will refresh that evidence before changing CFF performance code.
     invokeDynamic coverage. Do not remove the site key, skip indy rewriting,
     special-case `test21.jar` or `a/a.main`, expose plaintext bootstrap data,
     or add fallback/original-bytecode behavior.
+- Fifth repair fifth iteration evidence:
+  - The outlined flow-word relocation implementation compiled and kept
+    `invokeDynamic appliedFull=63`, but fresh no-quick `test21.jar`
+    full-profile generation still failed with
+    `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`.
+  - The finalizer estimate improved from `a/a.main estimatedCodeBytes=74859`
+    to `estimatedCodeBytes=72705`, proving the caller-side flow helper call was
+    real size pressure but not the last invokeDynamic caller-side source.
+  - Fresh `test21-no-indy-scalar-narrow.jar` bytecode inspection shows
+    `a/a.main` ending at offset `64060`, leaving roughly 1.4 KB of JVM method
+    budget before the invokeDynamic layer. Therefore the remaining full
+    invokeDynamic replacement must remove almost all per-site caller-side
+    helper glue rather than only one helper call class.
+  - Source inspection of `emitKey` proves the site key is already derived at
+    runtime from the mutable indy material carrier and per-site flow-salt slot;
+    it is not a plaintext static key. The current outlined caller still invokes
+    that helper for every site, stores the decoded key in a caller local, and
+    reloads it solely to pass into the outlined helper.
+- Fifth repair sixth revised implementation:
+  - For outlined invokeDynamic sites in size-pressure callers, move the bound
+    site-key decode into the existing per-site outlined helper before live flow
+    computation. The helper will call the existing key helper with its
+    site-specific flow-salt slot, store the decoded key in a local, call the
+    existing flow helper with live CFF state and that key, then invoke the
+    protected indy with the original operands, decoded key, and flow word.
+  - The caller will pass only original operands, live guard/path/block/pc/data
+    locals, and the indy material carrier. The decoded key remains dynamic
+    runtime material from the mutable carrier and is still published as the
+    generated helper's key local; it is not recomputed from descriptors or
+    static seeds.
+  - Preserve per-site seeds, live CFF data binding, indy resolver/static-array
+    material, and full invokeDynamic coverage. Do not cache or expose raw site
+    keys in bytecode, skip sites, weaken CFF, or add fallback behavior.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
