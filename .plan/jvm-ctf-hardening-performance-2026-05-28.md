@@ -3308,6 +3308,35 @@ This plan will refresh that evidence before changing CFF performance code.
     but full-profile XOR still takes `33,878.232 ms`, so additional generic
     hot-loop numeric/string decode reduction is required before JCP-8 can
     enforce the requested final thresholds.
+- Third repair evidence before editing:
+  - Fresh post-rawcache JFR on the full-profile focused `perf.crypto.xor` run
+    reports `a.ef.te(Object[], long)` with 5,732 samples / 94.37%,
+    `a.ak.i(int[], int, int, int, int, int, int)` with 213 samples / 3.51%,
+    and the compact numeric base helper `a.fk.yb(int, int, int, int, int, int)`
+    with 121 samples / 1.99%. The same focused run reports
+    `PERF perf.crypto.xor measure=34,182.319 ms`.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` evidence for the same
+    artifact shows `a.ef.te` is 7,567 bytes. The compact numeric base helper
+    and protected numeric helper are first rejected as `callee is too large`;
+    later OSR compilations inline only the hottest helper pair while the other
+    pairs remain rejected by `size > DesiredMethodLimit`.
+  - Fresh bytecode inspection of the same raw-cache `a.ef.te` proves three
+    compact numeric decode groups remain in the hot method. Each group executes
+    an unconditional compact base helper call with `refresh=false` at block
+    entry, stores the encoded base, then immediately emits the guarded
+    raw-cache refresh path. The unchanged-data branch correctly reuses the raw
+    base, but the unconditional initialization helper still runs before that
+    branch.
+  - The third JCP-7 repair will keep the same per-site protected numeric
+    helpers, live CFF data binding, and data-change refresh semantics, but will
+    make compact base encoding lazy. Block-entry initialization will store the
+    live raw base, cached live data, and an invalid encoded-base marker without
+    calling the compact base helper. The existing helper will only run when
+    live CFF data changes and an encoded old base is required for refresh; on
+    unchanged data the decode path continues to consume the cached raw base.
+    This removes the measured unconditional helper calls without exposing
+    plaintext constants, disabling string/constant coverage, or changing CFF
+    block coverage.
 - Validation command or runtime target:
   `./gradlew :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmStringObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmFullObfuscationPerfTest`.
 - Completion criteria: `test.jar` full JVM obfuscated `Calc` <= 200 ms on a
