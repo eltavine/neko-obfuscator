@@ -11,6 +11,7 @@ import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
 import dev.nekoobfuscator.core.jar.ClassHierarchy;
 import dev.nekoobfuscator.core.jar.JarOutput;
+import dev.nekoobfuscator.core.pipeline.GeneratedHelperTargetMap;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -2782,6 +2783,15 @@ abstract class CffClassSetup extends CffSharedState {
                         helper.desc
                     );
                     relocatedHelpers.put(clazz.name() + "." + helper.name + helper.desc, relocated);
+                    GeneratedHelperTargetMap.recordMethodRemap(
+                        pctx,
+                        clazz.name(),
+                        helper.name,
+                        helper.desc,
+                        hostName,
+                        helper.name,
+                        helper.desc
+                    );
                 }
                 hosts.add(host);
                 pctx.classMap().put(host.name(), host);

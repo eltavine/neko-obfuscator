@@ -534,6 +534,15 @@ public final class ObfuscationPipeline {
             RuntimeMemberKey key = entry.getKey();
             if (key.method()) {
                 renamedMethods++;
+                GeneratedHelperTargetMap.recordMethodRemap(
+                    ctx,
+                    key.owner(),
+                    key.name(),
+                    key.desc(),
+                    key.owner(),
+                    entry.getValue(),
+                    key.desc()
+                );
                 coverage.safe("renamer", key.owner(), entry.getValue(), key.desc(), "generated-helper-api-renamed");
             } else {
                 renamedFields++;

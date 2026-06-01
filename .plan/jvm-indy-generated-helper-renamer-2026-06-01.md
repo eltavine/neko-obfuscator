@@ -74,7 +74,7 @@ flag{java21_non_linear_keyspace_collapses_to_one_key}
   concrete subtask validation/commit boundaries, a composable final target map,
   generic fixture requirements, and a final plan-completion review.
 
-### [ ] JIR-3: Composable Generated-Helper Final Target Map
+### [x] JIR-3: Composable Generated-Helper Final Target Map
 
 - Scope: add a generic metadata path that records final generated-helper
   owner/name/descriptor changes made after invokedynamic payload creation.
@@ -87,7 +87,7 @@ flag{java21_non_linear_keyspace_collapses_to_one_key}
   generated helper renames and relocations, keyed by old owner/name/descriptor
   and pointing to the final owner/name/descriptor.
 - Validation target:
-  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --no-daemon`.
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.GeneratedHelperTargetMapTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --no-daemon`.
   The new/updated test must build a generic generated-helper remap chain
   using synthetic owner/name/descriptor values and assert lookup from the
   original target returns the final target after both rename and relocation.
@@ -97,6 +97,22 @@ flag{java21_non_linear_keyspace_collapses_to_one_key}
   can both observe the same final target map. After this subtask passes its
   validation target, dispatch implementation review and commit only this
   implementation plus the matching plan update before starting JIR-4.
+- Completion evidence:
+  - Added `GeneratedHelperTargetMap`, a pipeline pass-data table that composes
+    generated-helper method remaps from an original target to the final
+    owner/name/descriptor.
+  - Generated-helper API renaming now records
+    `old owner/name/desc -> same owner/renamed name/desc`, and CFF helper
+    relocation now records `current owner/name/desc -> host owner/name/desc`.
+    The table updates earlier entries so original payload targets resolve to
+    the final relocated target.
+  - Added `GeneratedHelperTargetMapTest`, a generic synthetic
+    owner/name/descriptor regression that proves an original generated-helper
+    target resolves through rename plus relocation without preserving the old
+    helper name.
+  - Focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.GeneratedHelperTargetMapTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --no-daemon`
+    with `BUILD SUCCESSFUL`.
 
 ### [ ] JIR-4: InvokeDynamic Payload Reconciliation
 
