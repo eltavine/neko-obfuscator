@@ -1164,6 +1164,203 @@ the source plan that owns the changed path before it can be considered complete.
   the IMPL_LOOKUP body. No fresh top-level `hs_err` file was produced; the
   newest existing one remained `hs_err_pid3.log` from 2026-05-22 04:11.
 
+### [ ] T4.8c: Remove Unsafe.allocateInstance receiver global object cache
+
+- Scope: continue T4.8 by removing `g_neko_unsafe_instance_global` and the
+  `NewGlobalRef` promotion of `Unsafe.theUnsafe`. This substep is limited to
+  the NJX receiver used by the VM-managed `Unsafe.allocateInstance(Class)`
+  slow paths. It must not change string literal global slots, class global
+  slots, manifest owner storage, icache dispatch, or the existing
+  `allocateInstance` Method*/entry binding contract.
+- Required evidence: source and generated C must show the cache initializer
+  stores only stable metadata (`Unsafe` Klass and `theUnsafe` static-field
+  offset) plus the existing `allocateInstance` Method*/entry pointers. Every
+  `neko_njx_V_L_L` call to `Unsafe.allocateInstance` must obtain its receiver
+  from a helper that rereads the static field and returns a local handle through
+  `neko_fast_get_static_object_field`. The changed path must contain no
+  `g_neko_unsafe_instance_global`, no
+  `g_neko_jni_new_global_ref_fn(env, unsafe_local)`, and no cached raw oop.
+- Validation command or runtime target: focused `CCodeGeneratorTest`, then
+  `R-build`, `R-test`, `R-obfusjack`, `R-native-test`, `R-inspect`, the
+  performance gate, and GC strict TEST/obfusjack runs under G1, Parallel,
+  Serial, ZGC with `ZVerifyViews`, and Shenandoah verification where the local
+  JDK exposes those collectors/options.
+- Completion criteria: fresh TEST and obfusjack native artifacts run green;
+  static inspection confirms the Unsafe receiver path has no global-ref
+  allocation and still calls `neko_njx_V_L_L` with a non-null local receiver;
+  GC strict runs do not crash or skip; no JNI/JVMTI, fallback, original
+  bytecode path, or persistent raw oop is introduced.
+- Evidence recorded before editing 2026-05-22: source grep found
+  `g_neko_unsafe_instance_global` declared in `NativeFastObjectAccessEmitter`
+  and used only by the Unsafe cache initializer plus three
+  `Unsafe.allocateInstance` receiver call paths: raw-disabled string intern,
+  raw String graph slow allocation, and NEW slow allocation. The current
+  initializer already resolves bootstrap `jdk/internal/misc/Unsafe`,
+  initializes it, resolves the static `theUnsafe` field with
+  `neko_resolve_field(..., JNI_TRUE)`, and reads that static value through
+  `neko_fast_get_static_object_field`. The only persistent object-root step is
+  the `g_neko_jni_new_global_ref_fn(env, unsafe_local)` promotion that this
+  substep removes.
+
+### [ ] T4.8d: Resolve GC strict bootstrap barrier capability gate
+
+- Scope: unblock the GC strict portion of the T4.8c acceptance gate by fixing
+  only the generic bootstrap/runtime barrier readiness path for ZGC and
+  Shenandoah. This substep must not skip collectors, skip classes, weaken native
+  coverage, add JNI fallback, or treat TEST/obfusjack as special cases.
+- Required evidence: fresh debug runs must identify the exact failing bootstrap
+  invariant for ZGC and Shenandoah before implementation. For ZGC, evidence must
+  distinguish callable runtime barrier availability from the existing inline
+  dynamic-mask path and prove whether complete live mask pointer publication is
+  sufficient. For Shenandoah, evidence must identify a generic callable barrier
+  source or prove that no safe local implementation exists. Missing required
+  barrier capability must continue to hard abort.
+- Validation command or runtime target: focused `CCodeGeneratorTest`, then fresh
+  `R-build`, `R-test`, `R-obfusjack`, `R-inspect`, and GC strict TEST/obfusjack
+  direct runs under G1, Parallel, Serial, ZGC with `ZVerifyViews`, and
+  Shenandoah verification where those collectors/options are available locally.
+- Completion criteria: ZGC and Shenandoah bootstrap either become ready through a
+  proven generic barrier mechanism and pass the direct native runtime targets, or
+  the plan records a concrete unsupported HotSpot capability with fail-closed
+  evidence. In either case the path must contain no JNI/JVMTI fallback,
+  skip-on-error success, original-bytecode fallback, or collector bypass.
+- Evidence recorded before editing 2026-05-22: T4.8c focused and full
+  performance gates passed, but GC strict ZGC and Shenandoah runs aborted during
+  native layout initialization before translated execution. ZGC detected
+  BarrierSet tag `5` through the JDK 21 fallback, but readiness rejected the
+  collector because `sym_z_load_barrier_on_oop_field_preloaded`,
+  `sym_z_load_barrier_on_oop_array`,
+  `sym_z_store_barrier_on_oop_field_with_healing`, and all sampled
+  ZGlobals mask values were missing/zero. Shenandoah detected BarrierSet tag `4`
+  through the JDK 21 fallback, but readiness rejected it because
+  `sym_shenandoah_load_reference_barrier_strong`,
+  `sym_shenandoah_write_ref_field_pre_entry`, and
+  `sym_shenandoah_arraycopy_barrier_oop_entry` were all missing. Source audit
+  shows ZGC already has inline field/array load and field store paths that still
+  hard-abort if live masks are unavailable or a bad-marked oop requires runtime
+  healing; Shenandoah has no equivalent inline alternative in the current code.
+- Rejected evidence 2026-05-22: a probe change that treated complete ZGlobals
+  live mask pointer publication as ZGC-ready was regenerated and run against
+  `TEST-native.jar`. It moved the failure from bootstrap readiness to the first
+  required ZGC oop load, which hard-aborted with
+  `ZGC oop load masks unavailable addr=0x0 good=0x0`; therefore pointer
+  publication with zero live mask values is not a sufficient capability on this
+  HotSpot build. The same probe extended the stripped `CompilerToVM::Data` scan
+  to search plain Z store and Shenandoah barrier strings. Runtime logs found the
+  strings `store_barrier_on_oop_field_with_healing`,
+  `load_reference_barrier_strong`, and `write_ref_field_pre_entry`, but no
+  executable address slots were bound; Shenandoah still failed readiness with
+  `lrb=(nil) pre=(nil) array=(nil)`. The probe implementation was reverted and
+  is not retained.
+- Additional implementation evidence 2026-05-22: fresh strict ZGC/Shenandoah
+  debug runs after regenerating current source still fail closed at bootstrap,
+  but the CodeCache walk exposes HotSpot-generated C1 barrier CodeBlobs. ZGC
+  publishes `load_barrier_on_oop_field_preloaded_runtime_stub` and
+  `store_barrier_on_oop_field_with_healing`; Shenandoah source publishes
+  `shenandoah_load_reference_barrier_strong_slow` and
+  `shenandoah_pre_barrier_slow`. OpenJDK 21 source shows these stubs load
+  stack arguments with `C1_MacroAssembler::load_parameter`: load stubs take
+  `(oop, oop*)` and return the resolved oop in `rax`; store/pre stubs take one
+  field/pre-value argument. The implementation may therefore harvest exactly
+  those named CodeBlobs and bridge their C1 stack-argument ABI. Missing named
+  stubs remain a hard bootstrap capability failure.
+- Additional implementation evidence 2026-05-22: after the C1 CodeBlob
+  harvesting change, Shenandoah bootstrap readiness becomes true with
+  `sh_c1_load` and `sh_c1_pre`, then aborts before translated execution at
+  `[neko-bind] array klass bits layout unavailable for [Lpack/Main;`. Source
+  inspection shows `NEKO_HOTSPOT_FAST_RAW_HEAP` is intentionally disabled for
+  both ZGC and Shenandoah, but the object-array klass-bits binder and generated
+  array hot guards exempt only ZGC from the raw-heap bit requirement. OpenJDK 21
+  allocation source initializes array memory, length, and Klass header directly
+  before publication; this matches the existing ZGC direct-array path and is
+  collector-generic when strict load/store barriers are ready. A sidecar source
+  audit of OpenJDK 21 x86 barrier stubs also found Shenandoah
+  `shenandoah_pre_barrier_slow` reads `r15_thread`; the C1 one-argument bridge
+  must publish the current JavaThread in `r15` while preserving the caller's
+  register state.
+- Additional implementation evidence 2026-05-22: after allowing Shenandoah
+  direct array metadata and publishing `r15` for the one-argument C1 bridge,
+  `TEST-native.jar` under `-XX:+UseShenandoahGC -XX:+ShenandoahVerify` reaches
+  translated `pack/Main.main` execution and then aborts at
+  `[neko-direct] unresolved virtual dispatch println(Ljava/lang/String;)V`.
+  The dispatch code aborts only when the receiver-key path is unavailable;
+  source inspection shows `neko_receiver_key_supported()` allows non-raw Klass
+  key reads for ZGC but not Shenandoah even though Shenandoah readiness,
+  `klass_offset_bytes`, and compact-header checks are already satisfied. This is
+  the same moving-GC metadata gate class as the object-array layout failure, not
+  a method/site-specific dispatch problem.
+- Additional implementation evidence 2026-05-22: after enabling Shenandoah
+  receiver keys, the strict Shenandoah TEST run reaches
+  `pack/tests/basics/ctrl/Ctrl.runt()` and crashes in native code. Fresh
+  `hs_err_pid3.log` shows `RDI` at the harvested
+  `shenandoah_pre_barrier_slow` CodeBlob, `R15` as the current JavaThread, and
+  `RIP` equal to the JavaThread address. The inline C1 one-argument bridge used
+  register operands directly and then overwrote `r15` before `call *%0`; when
+  the compiler allocated the stub operand in `r15`, the call target became the
+  JavaThread pointer. The bridge must first copy stub, argument, and thread from
+  stable memory operands into scratch registers, then publish `r15`, then call
+  the scratch stub register.
+- Additional implementation evidence 2026-05-22: after the scratch-register C1
+  bridge fix, focused codegen and the full native performance gate passed, and
+  strict Shenandoah TEST progressed past the pre-barrier stub into
+  `pack/tests/basics/ctrl/Ctrl.runt()`. Fresh `hs_err_pid14.log` now crashes at
+  `libneko_2386952722587874045.so+0x472c1`; `objdump` maps that offset to
+  `neko_card_mark_field`'s card-table byte store. Registers show `R11` still
+  holds the harvested `shenandoah_pre_barrier_slow` address and `R15` is the
+  JavaThread, proving the prior bridge target invariant is fixed and the new
+  failing invariant is the selected Shenandoah post-store barrier. Local
+  OpenJDK 21 source audit shows Shenandoah C1 stores run
+  `pre_barrier(...)`, optional IU barrier, then `BarrierSetC1::store_at_resolved`
+  (`tmp/openjdk-jdk21u/src/hotspot/share/gc/shenandoah/c1/shenandoahBarrierSetC1.cpp:188`);
+  C2 stores do the same SATB/IU work and then
+  `BarrierSetC2::store_at_resolved`
+  (`tmp/openjdk-jdk21u/src/hotspot/share/gc/shenandoah/c2/shenandoahBarrierSetC2.cpp:495`).
+  The Shenandoah source tree contains no `write_ref_field_post`, no
+  `CardTableBarrierSet`, and no card-table post barrier implementation. The
+  generated Shenandoah post-store barrier must therefore be a no-op; card-table
+  marking remains only for CardTable/G1 paths.
+- Additional validation evidence 2026-05-22: after making Shenandoah post-store
+  no-op, focused codegen and the full native performance gate passed. Strict
+  Shenandoah TEST then progressed through basics and into
+  `pack/tests/reflects/field/FTest.run()V`, where fresh `hs_err_pid14.log`
+  crashed at `libneko_4390777485134236610.so+0xd75c2` with `si_addr=0x3c`.
+  The loaded library hash maps to fresh generated run
+  `build/neko-native-work/run-61341939442667`; generated C shows
+  `neko_native_impl_32.c:57` invokes `FObject.<init>(I)` through NJX, then
+  line `58` immediately `POP_O()`s the missing result into `AASTORE` before the
+  pending-exception dispatch at line `62`. The crash registers show
+  `_pending_exception` contains a real `java.lang.NoSuchMethodException` for
+  `pack.tests.reflects.field.FObject.<init>(int)`, proving the invoked method
+  threw and the next bytecode consumed invalid native stack state. The failing
+  invariant is generic JVM exception semantics: after any potentially throwing
+  translated bytecode, the next real bytecode must not execute while
+  `_pending_exception` is set, regardless of unchanged try-handler coverage.
+  The deferred-check optimization in
+  `NativeTranslator.needsCheckBefore(...)` must therefore flush before the next
+  real instruction, while labels/handler dispatch and method-exit propagation
+  remain unchanged.
+- Additional implementation evidence 2026-05-22: after the pending-exception
+  fix, focused codegen and the full native performance gate passed, and strict
+  Shenandoah TEST completed with empty stderr and `Calc: 3ms`. Strict
+  Shenandoah obfusjack then failed as a Java exception, not a VM crash:
+  `java.lang.IllegalArgumentException: not primitive: void` during
+  `MethodHandles$Lookup.findStatic` immediately after generated
+  `org/example/Main.main` reads `java/lang/Void.TYPE`, builds
+  `MethodType.methodType(Void.TYPE, String.class)`, and calls `findStatic` for
+  `staticHello`. The original `test-jars/test21.jar` passes under the same
+  Shenandoah verification flags. Fresh debug logs show Shenandoah direct
+  runtime symbols are stripped and only C1 CodeBlobs are available:
+  `sh_c1_load=...`, `sh_c1_pre=...`, while generated `neko_handle_oop` still
+  resolves JNI handle slots by a raw slot load and never applies a Shenandoah
+  native/off-heap load barrier. OpenJDK 21 source proves this is a distinct
+  ABI path: `generate_c1_load_reference_barrier_runtime_stub` uses
+  `ShenandoahRuntime::load_reference_barrier_strong` for `IN_NATIVE` loads and
+  `load_reference_barrier_strong_narrow` only for compressed in-heap loads; the
+  corresponding C1 CodeBlob is named
+  `shenandoah_load_reference_barrier_strong_native_slow`. The generic fix is
+  to harvest that native C1 stub and use it for JNI handle-slot loads under
+  Shenandoah; heap field/array loads keep the existing non-native barrier.
+
 ### [-] NPT-3a: Runtime P10 generic NJX call-parameter packing
 
 - Scope: continue runtime performance work by optimizing only the generic
@@ -5108,3 +5305,2528 @@ the source plan that owns the changed path before it can be considered complete.
   Platform `31 ms`, Virtual `35 ms`, and Seq `11 ms`, meeting the recorded
   thresholds. G1/Serial/Parallel TEST smokes reported Pool PASS and Calc
   `3/3/3 ms`.
+
+### [-] NPT-4: Complete T4.8d strict Shenandoah native handle-slot barrier
+
+- Scope: correct only the generic Shenandoah JNI/native handle-slot load
+  barrier path exposed while validating T4.8c. Heap field and array barriers,
+  MethodType lowering, argument order, and benchmark transforms are out of
+  scope for this row.
+- Required evidence: fresh strict Shenandoah obfusjack failure after
+  `NativeObfuscationPerfTest` regeneration, generated C proving the failing
+  `MethodType.methodType(Class, Class)` call receives `Void.TYPE` then
+  `String.class`, generated support code proving native handle-slot loads still
+  prefer the ordinary heap-field LRB over the dedicated native handle C1 stub,
+  and HotSpot evidence that native/off-heap handle loads use
+  `shenandoah_load_reference_barrier_strong_native_slow`.
+- Validation command or runtime target: focused `CCodeGeneratorTest`, fresh
+  `NativeObfuscationPerfTest --no-parallel` regeneration, strict Shenandoah
+  TEST-native and obfusjack-native direct runs, generated-C forbidden-marker
+  inspection, then the broader GC/perf gate if the focused Shenandoah proof
+  passes.
+- Completion criteria: Shenandoah native handle slots use the native C1 barrier
+  or hard-abort if it is unavailable; heap field/array load semantics remain
+  unchanged; TEST-native and obfusjack-native complete under
+  `-XX:+UseShenandoahGC -XX:+ShenandoahVerify`; no JNI/JVMTI/fallback/original
+  bytecode path is added.
+- Evidence recorded before editing 2026-05-22: fresh generated artifact
+  `build/neko-native-work/run-65283390794103` has the failing
+  `neko_native_impl_39.c` call to `neko_njx_S_L_LL` for
+  `MethodType.methodType(Ljava/lang/Class;Ljava/lang/Class;)`; immediately
+  before the call it reads `java/lang/Void.TYPE` and `java/lang/String.class`.
+  Strict Shenandoah TEST passes with empty stderr, but strict Shenandoah
+  obfusjack exits with `IllegalArgumentException: not primitive: void`.
+  Generated `neko_barrier_load_oop_native_handle_with_thread` chooses
+  `g_neko_barrier_load_oop_field_preloaded` before
+  `g_neko_barrier_load_oop_native_c1_stub`, which violates the already-recorded
+  HotSpot native/off-heap handle barrier split for
+  `shenandoah_load_reference_barrier_strong_native_slow`.
+- Follow-up evidence before editing 2026-05-22: after requiring the native
+  handle C1 stub, focused codegen passed and generated
+  `build/neko-native-work/run-65751179443694/neko_native_support_helpers_1.c`
+  no longer falls back to the ordinary field barrier for native handle slots.
+  Strict Shenandoah TEST still passes, but strict Shenandoah obfusjack still
+  fails at the same `MethodType` call. Generated `neko_njx_S_L_LL` installs a
+  fresh Java handle block, then writes raw object oops to `call_params` without
+  re-rooting those objects in the newly active block; the source handles remain
+  in the previous handle block. The next generic implementation is to re-root
+  every NJX object argument in the active Java handle block before writing the
+  raw oop argument.
+- Follow-up evidence before diagnostic 2026-05-22: after re-rooting every NJX
+  object argument in the active Java handle block, focused `CCodeGeneratorTest`
+  passed and full `NativeObfuscationPerfTest --no-parallel` passed. Strict
+  Shenandoah TEST-native still passes with empty stderr, but strict Shenandoah
+  obfusjack-native generated from `build/neko-native-work/run-66188078455008`
+  still exits at the same Java-level `MethodType.methodType(Class, Class)`
+  path with `IllegalArgumentException: not primitive: void`; stdout reaches
+  `Files.mismatch index=2` before the failure. Generated
+  `neko_njx_S_L_LL` now contains `neko_njx_root_arg_oop`, so handle-block
+  lifetime alone does not explain the surviving invariant violation. The next
+  step is temporary env-gated generic NJX object-argument diagnostics that
+  print the object argument class mirror state for direct Java upcalls; no
+  runtime behavior change is permitted until that evidence identifies the
+  exact mismatched argument state.
+- Diagnostic evidence before field-barrier implementation 2026-05-22:
+  `NEKO_NJX_ARG_DEBUG=1` strict Shenandoah obfusjack on fresh artifact
+  `build/neko-native-work/run-66655040145198` shows the failing
+  `S:L:LL` `MethodType.methodType(Class, Class)` call receives slot 0 as a
+  `java/lang/Class` mirror whose mirror Klass is `NULL` and whose Java string
+  form is `void`, and slot 1 as `java/lang/String`. The Java failure is from
+  `Wrapper.forPrimitiveType` not matching that `void` mirror by identity
+  against `Void.TYPE`, proving a stale/unhealed primitive mirror oop rather
+  than argument-order or handle-block lifetime. Source/generated audit shows
+  the mirror comes from `neko_fast_get_static_object_field_ref` through
+  `neko_barrier_load_oop_field`, and the Shenandoah C1 field-load fallback
+  calls `neko_call_c1_oop2_stub` without the explicit `thread` even though the
+  already-implemented C1 bridge has `neko_call_c1_oop2_stub_thread`; the TLS
+  `g_neko_current_java_thread_for_barrier` is only declared/initialized and is
+  not published on this path. Generic implementation scope: object/static field
+  load helpers that already receive `thread` must call a thread-aware field
+  load barrier so Shenandoah C1 barriers receive a stable JavaThread in `r15`;
+  non-Shenandoah behavior and heap field semantics must remain unchanged.
+- Follow-up evidence before static-base ordering implementation 2026-05-22:
+  fresh `build/neko-native-work/run-67021067423154` contains the
+  thread-aware field barrier call, but strict Shenandoah obfusjack still
+  produces the same stale `void` mirror at `g_static_field_ref_10`
+  (`java/lang/Void.TYPE`). Generated static field metadata contains both a
+  bound class slot and a VM-resolved `static_base_slot`; however
+  `neko_fast_get_static_object_field` computes the field address from the
+  bound class mirror first and only falls back to `staticBase` if the class
+  mirror cannot be resolved. For direct static field access the VM-resolved
+  static base is the concrete field container associated with the recorded
+  offset, so preferring the class mirror can read from a stale mirror copy
+  under a moving collector. Generic implementation scope: object GETSTATIC
+  must compute its field address from `staticBase` first and retain the class
+  mirror only as a fail-closed fallback; no method, owner, descriptor, or
+  benchmark-specific logic is allowed.
+- Corrected root-cause evidence before handle-tag implementation 2026-05-22:
+  sidecar source audit plus the surviving stale mirror after the
+  static-field/base experiments identified the actual remaining NJX marshalling
+  invariant. Re-rooted NJX object arguments are local JNI handles in the active
+  handle block, but `neko_shenandoah_handle_oop_thread` treats tag `0` handles
+  as a raw slot dereference and returns `slot_oop` without
+  `neko_barrier_load_oop_native_handle_with_thread`; only tag `2` handles use
+  the native/off-heap Shenandoah handle barrier. The failing `Void.TYPE` handle
+  in the diagnostic is a tag-0 local handle, so the raw oop handed to
+  `call_stub` can be a stale from-space mirror even after argument re-rooting.
+  Generic implementation scope: every non-direct Shenandoah JNI handle slot,
+  including tag-0 local handles and tag-2 global handles, must resolve through
+  the native handle-slot barrier; unsupported tags still hard-abort.
+- Rejected evidence 2026-05-22: routing tag-0 local handles through the native
+  handle-slot barrier moves past the `Void.TYPE` failure, but corrupts earlier
+  strict Shenandoah Java output and then fails in `BigDecimal.<init>(String)`.
+  Tag-0 local handles are therefore not the same native/global handle-slot
+  class as tag-2 handles. The remaining invariant is the synthetic
+  `JavaCallWrapper`: object arguments are re-rooted in `__njx_java_handles`,
+  while the wrapper's handle-block field is populated with `__njx_old_handles`.
+  Generic implementation scope: keep tag-0 local handle raw-slot behavior and
+  publish the active NJX handle block in the synthetic wrapper so safepoint
+  scanning can see the re-rooted object arguments.
+- Rejected evidence 2026-05-22: publishing `__njx_java_handles` in the
+  synthetic wrapper makes the default `NativeObfuscationPerfTest` obfusjack
+  native run time out after `PT2M`, so the wrapper field is not a safe active
+  handle publication point in its current layout. This experiment is reverted;
+  the remaining fix still requires a generic GC-root proof for NJX object
+  arguments without changing tag-0 local handle semantics or hanging the
+  default collector path.
+- Corrected evidence before primitive-mirror barrier implementation
+  2026-05-22: after removing stale generated jars, rerunning the default full
+  native performance gate passed, and strict Shenandoah obfusjack still failed
+  at `MethodType.methodType(Class, Class)` with `IllegalArgumentException: not
+  primitive: void`. `NEKO_PATCH_DEBUG=1` on that failing artifact proves the
+  active VM exposes only Shenandoah C1 barriers (`sh_lrb=(nil)`,
+  `sh_lrb_narrow=(nil)`, `sh_c1_load!=NULL`, `sh_c1_native!=NULL`). Source
+  audit shows `neko_primitive_mirror_for_char` still reads wrapper
+  `Klass::_java_mirror`'s OopHandle and the wrapper `TYPE` static field by raw
+  slot/field loads, then calls `neko_barrier_load_oop_field` without the
+  JavaThread even though this runtime has no callable preloaded Shenandoah
+  barrier. The prior field/static-base changes do not cover this bind-time
+  primitive mirror path. Generic implementation scope: primitive mirror
+  materialization must derive the current JavaThread before object loads, use
+  the thread-aware native-handle barrier for the wrapper mirror OopHandle, and
+  use the thread-aware Shenandoah field-load bridge for the wrapper `TYPE`
+  static field. Non-Shenandoah behavior remains the existing raw/local-handle
+  path; missing thread/barrier capability still hard-aborts.
+- Follow-up evidence before NJX call-argument materialization correction
+  2026-05-22: the primitive-mirror barrier edit regenerated fresh artifacts and
+  passed the full default native performance gate, but strict Shenandoah
+  obfusjack still failed at the same `MethodType.methodType(Class, Class)`
+  site. Fresh generated C proves the live failing bytecode is a translated
+  `GETSTATIC java/lang/Void.TYPE` (`g_static_field_ref_10`) followed by an NJX
+  `neko_njx_S_L_LL` call. Sidecar HotSpot source audit proves the synthetic
+  `JavaCallWrapper::_handles` field must remain the saved old handle block,
+  `JavaThread::_active_handles` is the temporary active block, and
+  `call_stub` receives raw oop stack words. The rejected global tag-0 handle
+  barrier corrupted unrelated local-handle paths; therefore the next generic
+  implementation is narrower: after `neko_njx_root_arg_oop` re-roots an object
+  argument in the temporary NJX handle block, materialize only that freshly
+  rooted call argument through the Shenandoah native/off-heap handle-slot
+  barrier immediately before writing `call_params`. This preserves global
+  tag-0 local-handle semantics, wrapper `_handles = old_handles`, raw
+  call-stub parameters, and fail-closed missing-barrier behavior.
+- Rejected evidence 2026-05-22: applying the Shenandoah native/off-heap
+  handle-slot barrier only to the freshly re-rooted NJX object-argument slots
+  preserves the default collector full performance gate, but strict
+  Shenandoah still corrupts Java output and fails later in
+  `BigDecimal.<init>(String)` with `ArrayIndexOutOfBoundsException`, matching
+  the earlier global tag-0 barrier corruption. This proves tag-0 local
+  `JNIHandleBlock` slots are not valid inputs to the native/off-heap
+  `IN_NATIVE` barrier, even when used only for NJX call arguments. The change
+  is reverted; the remaining valid evidence still points to `GETSTATIC
+  java/lang/Void.TYPE` producing a stale primitive mirror before the
+  `MethodType.methodType` NJX call.
+- Evidence before primitive-wrapper TYPE intrinsic implementation
+  2026-05-22: fresh generated obfusjack C identifies the surviving failing
+  value as translated `GETSTATIC java/lang/Void.TYPE` via
+  `g_static_field_ref_10`, not an LDC primitive class descriptor. The existing
+  T4.1 primitive mirror table is the generic VM metadata surface for all
+  primitive class mirrors, already covering `Z/B/C/S/I/J/F/D/V`, and the
+  previous edit made that table use thread-aware Shenandoah barriers. Generic
+  implementation scope: object `GETSTATIC` of primitive wrapper `TYPE` fields
+  (`Boolean.TYPE` through `Void.TYPE`) must materialize from the primitive
+  mirror table instead of the ordinary mutable-object static field fast path.
+  The change is table/tag driven for the JVM primitive-wrapper ABI surface and
+  does not alter ordinary static object fields, NJX call semantics, or missing
+  metadata hard-abort behavior.
+- Rejected evidence 2026-05-22: the primitive-wrapper `TYPE` intrinsic
+  regenerated fresh native artifacts and the default full native performance
+  gate passed (`native-performance-baseline.json` captured at
+  `2026-05-22T07:41:53Z`: TEST Calc median `2 ms`, obfusjack Seq median
+  `10 ms`, Platform median `40 ms`, Virtual median `37 ms`, Parallel and
+  VThreads medians `1 ms`). Strict Shenandoah TEST still exited `0`, but
+  strict Shenandoah obfusjack still failed at
+  `MethodType.methodType(Class, Class)` with
+  `IllegalArgumentException: not primitive: void`. Fresh generated C
+  (`run-69524151926358/neko_native_impl_39.c`) proves the artifact already
+  executes `neko_fast_get_static_object_field_ref(&g_static_field_ref_10)`;
+  `neko_native_impl_prelude.h` proves that helper returns
+  `neko_primitive_mirror_for_char(env, 'V')` for `java/lang/Void.TYPE`.
+  The intrinsic is therefore not the root cause and is reverted.
+- Corrected implementation scope 2026-05-22: generated `neko_njx_S_L_LL`
+  currently saves the old `JavaThread::_active_handles`, installs the
+  temporary NJX handle block, and only then resolves object handles into raw
+  `call_params`. That decodes pre-existing local handles after their original
+  JNIHandleBlock is no longer the thread's active handle root block. The
+  generic fix is to resolve incoming jobject handles to raw oop words while
+  the original active handle block is still installed, then install the NJX
+  Java handle block and re-root only those raw oops into the temporary block
+  before invoking `call_stub`. This preserves
+  `JavaCallWrapper::_handles = old_handles`, leaves tag-0 local handle
+  semantics unchanged, keeps raw oop call-stub parameters, and does not add
+  JNI/JVMTI/fallback behavior.
+- Follow-up evidence before HotSpot primitive-class resolver implementation
+  2026-05-22: the NJX handle materialization-order correction regenerated
+  fresh artifacts and the default performance gate passed on retry
+  (`native-performance-baseline.json` captured at `2026-05-22T07:52:47Z`:
+  TEST Calc median `3 ms`, obfusjack Seq median `10 ms`, Platform median
+  `39 ms`, Virtual median `36 ms`, Parallel and VThreads medians `1 ms`), but
+  strict Shenandoah obfusjack still failed at
+  `MethodType.methodType(Class, Class)` with
+  `IllegalArgumentException: not primitive: void`. The failed path proves the
+  wrapper `TYPE`/primitive-mirror-table materialization can still hand
+  `call_stub` a mirror that HotSpot rejects as primitive under Shenandoah.
+  The runtime already resolves and hard-requires the non-JNI HotSpot
+  `JVM_FindPrimitiveClass` symbol for slow primitive-array allocation; that VM
+  entry is the generic primitive Class materialization surface and is not a
+  JNI function-table fallback. Implementation scope: make
+  `neko_primitive_mirror_for_char` call `JVM_FindPrimitiveClass(env,
+  primitive_name)` for `Z/B/C/S/I/J/F/D/V`, hard-abort on missing symbol,
+  NULL, or pending exception, and keep the existing table initialization as
+  bootstrap metadata validation rather than the source of the returned mirror.
+- Follow-up evidence 2026-05-22: the HotSpot primitive-class resolver alone
+  regenerated fresh artifacts and passed the default performance gate, but
+  strict Shenandoah obfusjack still failed at the same
+  `MethodType.methodType(Class, Class)` site because the earlier rejected
+  primitive-wrapper `TYPE` intrinsic had been reverted. Therefore translated
+  `GETSTATIC java/lang/Void.TYPE` again used the ordinary static-field path
+  instead of `neko_primitive_mirror_for_char`. Corrected implementation scope:
+  restore the generic primitive-wrapper `TYPE` dispatch for
+  `Boolean.TYPE` through `Void.TYPE`, now backed by
+  `JVM_FindPrimitiveClass` rather than wrapper `TYPE` field reconstruction.
+- Follow-up evidence before generic class-mirror OopHandle barrier
+  2026-05-22: with primitive-wrapper `TYPE` routed through
+  `JVM_FindPrimitiveClass`, strict Shenandoah obfusjack moved past
+  `Wrapper.forPrimitiveType` and failed later in the generated MethodHandle
+  bridge with `WrongMethodTypeException: handle's method type (String)void but
+  found (String)void`. Fresh generated C shows the MethodType argument list is
+  `Void.TYPE` plus `neko_bound_class_ref(env, &g_class_ref_9)` for
+  `String.class`. Source audit shows the generic
+  `neko_klass_java_mirror_handle` helper still raw-dereferences
+  `Klass::_java_mirror` OopHandles and pushes the raw oop, unlike the
+  primitive-specific fix. Implementation scope: apply the same
+  thread-aware Shenandoah native-handle barrier to every
+  `Klass::_java_mirror` materialization in `neko_klass_java_mirror_handle`,
+  hard-aborting on missing JavaThread/barrier capability and leaving
+  non-Shenandoah behavior unchanged.
+- Rejected evidence 2026-05-22: applying the Shenandoah native-handle barrier
+  to every `Klass::_java_mirror` materialization preserved the default full
+  native performance gate, but strict Shenandoah obfusjack corrupted earlier
+  Java state and failed in `BigDecimal.divide` with
+  `NullPointerException: java.math.BigDecimal.LONG_TEN_POWERS_TABLE is null`.
+  This matches the prior corruption class from over-applying the native handle
+  barrier to tag-0/local slots. The generic class-mirror barrier is reverted;
+  the remaining accepted evidence is that primitive-wrapper `TYPE` backed by
+  `JVM_FindPrimitiveClass` moves the failure from `Wrapper.forPrimitiveType`
+  to MethodHandle exact type checking.
+- Follow-up implementation scope 2026-05-22: the surviving strict Shenandoah
+  failure is inside the generated MethodHandle bridge at the
+  signature-polymorphic `invokeExact` check, after HotSpot prints identical
+  actual and expected types. The native translator already uses this generated
+  Java bridge as the generic no-array/no-JNI MethodHandle invocation surface.
+  Change only the bridge's signature-polymorphic call from
+  `MethodHandle.invokeExact` to `MethodHandle.invoke` while preserving the
+  exact static descriptor, direct call-stub entry, and no object-array fallback.
+  This tests whether routing through HotSpot's adaptable polymorphic entry
+  avoids the strict-GC MethodType identity mismatch without adding a runtime
+  fallback or sample-specific path.
+- Follow-up evidence before primitive Class VM-handle windowing 2026-05-22:
+  changing the generated MethodHandle bridge from `invokeExact` to `invoke`
+  passed focused codegen/translator validation and a fresh full default
+  `NativeObfuscationPerfTest --no-parallel` gate. Strict Shenandoah
+  TEST-native still exits `0`. Strict Shenandoah obfusjack-native now moves
+  past `staticHello: from MethodHandle`, reaches the matrix-multiply section,
+  and aborts in Shenandoah verification with
+  `Before Mark, Roots; Should not be forwarded`. Fresh `hs_err_pid14.log`
+  identifies the root slot as outside the Java heap in anonymous JVM native
+  memory (`0x00007fd8842684c0` within `7fd884000000-7fd8844f7000`) and the
+  rooted object as a forwarded `java.lang.Class` oop. Source audit shows the
+  current primitive Class materializer is the only retained
+  `JVM_FindPrimitiveClass` helper that returns the VM-created local handle
+  directly; the existing slow byte-array and primitive-array helpers bracket
+  the same VM entry in `neko_handle_window_begin/end`, resolve the returned
+  handle to a raw oop, pop the transient VM locals, and push one native-owned
+  local handle for the caller. Generic implementation scope: make
+  `neko_primitive_mirror_for_char` use that existing handle-window pattern for
+  `Z/B/C/S/I/J/F/D/V`, hard-aborting on missing JavaThread, unresolved handle,
+  NULL, pending exception, or missing `JVM_FindPrimitiveClass`. This does not
+  add JNI/JVMTI/fallback behavior and leaves the primitive-wrapper `TYPE`
+  dispatch table-driven.
+- Rejected evidence 2026-05-22: the primitive Class VM-handle window change
+  passed focused codegen/translator validation, the fresh full default native
+  performance gate, and strict Shenandoah TEST-native, but strict Shenandoah
+  obfusjack-native still aborts in matrix multiply with
+  `Before Mark, Roots; Should not be forwarded`. The fresh failing root remains
+  a forwarded `java.lang.Class` oop in an outside-heap anonymous JVM native root
+  slot (`0x00007f5a8c26f410` within `7f5a8c000000-7f5a8c502000`), not a
+  generated `libneko` mapping. OpenJDK `JavaThread::oops_do` and
+  `JNIHandleBlock::oops_do` prove this slot shape is a live JNIHandleBlock root
+  (`active_handles()->oops_do(f)`, scanning `_handles[index]` for
+  `index < _top`), so stale bytes above a restored top are not sufficient
+  evidence. Generic next scope: heal raw oops at the point they are stored into
+  native-owned JNIHandleBlock/local-root slots under Shenandoah, using the
+  existing thread-aware native handle-slot C1 barrier or hard-aborting if that
+  capability is unavailable. This applies to `neko_handle_push`,
+  `neko_direct_oop_to_handle_origin`, and prepared local-root stores; heap
+  field/array load barriers, MethodHandle bridge lowering, argument order, and
+  benchmark-specific paths remain out of scope.
+- Rejected implementation evidence 2026-05-22: applying the dedicated
+  Shenandoah native/off-heap handle C1 barrier to every native-owned
+  local-root store preserved the focused codegen tests and the full default
+  native performance gate, but strict Shenandoah TEST-native failed before the
+  first TEST banner with `java.io.IOException: No such file or directory` from
+  `File.createNewFile`. `NEKO_PATCH_DEBUG=1` shows translated execution has
+  entered `pack/Main.main` and repeatedly materialized `java/lang/String`
+  mirrors before the Java exception, so this has the same corruption class as
+  the prior tag-0 local-handle native-barrier experiments. Corrected generic
+  scope: keep tag-0 local handle reads unchanged and heal raw oops at the
+  native-owned root-store point with the existing thread-aware strong load
+  barrier path, then store the healed value back into the JNIHandleBlock slot.
+  Missing thread or barrier capability remains a hard abort.
+- Rejected implementation evidence 2026-05-22: replacing the native/off-heap
+  root-store barrier with the thread-aware strong field-load barrier fixed the
+  compile-order issue and passed focused codegen plus a fresh full default
+  native performance gate, but strict Shenandoah TEST-native failed in the same
+  pre-banner `File.createNewFile` path. The broad local-root-store healing
+  mechanism is therefore rejected as a class of fix and is reverted from the
+  retained implementation. The next runtime change must identify and patch the
+  specific stale `java.lang.Class` root producer rather than applying a barrier
+  to every local-root publication.
+- Diagnostic scope 2026-05-22: add a temporary env-gated
+  `NEKO_ROOT_SLOT_DEBUG` trace for native-owned JNIHandleBlock/local-root slot
+  creation sites. The trace records the slot address, raw oop, active block,
+  top, and helper/origin for `neko_handle_push`,
+  `neko_direct_oop_to_handle_origin`, and prepared local-root stores. It must
+  not change runtime behavior, add fallback, skip any method/class, or persist
+  outside diagnostics. Completion evidence is a fresh strict Shenandoah
+  obfusjack failure whose `hs_err` root address can be matched to a diagnostic
+  line identifying the exact generic root producer for the next implementation
+  slice.
+- Diagnostic evidence 2026-05-22: the env-gated root-slot run reproduced the
+  strict Shenandoah obfusjack verifier abort. `hs_err_pid14.log` reports root
+  slot `0x00007fcb7825f558` containing forwarded `java.lang.Class` oop
+  `0x000000051d215758`. The diagnostic log records nearby native-owned slots in
+  the same JVM handle-block arena, but no `neko_handle_push`,
+  `neko_direct_oop_to_handle_origin`, or prepared local-root store created that
+  exact slot. Source audit identifies the unlogged producer class:
+  `neko_resolve_class_mirror_with_env` and the tolerant resolver return
+  `JVM_FindClassFromBootLoader` / `JVM_FindClassFromClass` local handles
+  directly, unlike the windowed primitive-array and primitive-Class helpers.
+  Generic implementation scope: bracket those VM class-lookup locals in a
+  handle window, resolve the returned handle to a raw oop, restore the window,
+  and push one native-owned caller handle; the resolved `Klass*` validation and
+  hard-abort behavior stay unchanged.
+- Follow-up scope 2026-05-22: after windowing `JVM_FindClass*` locals,
+  strict Shenandoah TEST-native passes and performance medians meet target, but
+  strict Shenandoah obfusjack still aborts with a forwarded `java.lang.Class`
+  root during matrix execution. The remaining generic Class materializer that
+  still raw-dereferences a VM root is `neko_klass_java_mirror_handle`
+  (`Klass::_java_mirror` OopHandle). The previous native/off-heap handle C1
+  barrier on this path was rejected because it corrupted BigDecimal state.
+  Corrected implementation scope: resolve only `Klass::_java_mirror` through
+  the existing thread-aware strong load barrier under Shenandoah before pushing
+  the caller local handle; tag-0 local handles, object roots, field/array
+  loads, and benchmark paths remain unchanged.
+- Rejected/follow-up evidence 2026-05-22: resolving only
+  `Klass::_java_mirror` through the thread-aware strong load barrier passed
+  focused `CCodeGeneratorTest` / `OpcodeTranslatorUnitTest`, a fresh default
+  `NativeObfuscationPerfTest --no-parallel` gate, static generated-C forbidden
+  JNI inspection, and strict Shenandoah TEST-native with empty stderr and
+  `Calc: 2ms`. Fresh default medians were TEST Calc `2 ms`, obfusjack Platform
+  `37 ms`, Virtual `35 ms`, Seq `10 ms`, Parallel `1 ms`, and VThreads
+  `1 ms`. Strict Shenandoah obfusjack-native then deterministically aborted at
+  `[neko-direct] MONITORENTER null object` after generated
+  `neko_native_impl_39.c` read `g_static_field_ref_6`, which generated metadata
+  maps to `org/example/Main.LOCK` with `g_static_base_20/g_static_off_20`.
+  The current top-level `hs_err_pid14.log` still describes the prior forwarded
+  Class-root verifier failure, so the monitor abort is the fresh actionable
+  invariant. Generic diagnostic scope: add temporary env-gated object
+  `GETSTATIC` tracing in `neko_fast_get_static_object_field_ref` /
+  `neko_fast_get_static_object_field` to record class handle, staticBase
+  handle, unwrapped base oop, offset, field address, raw narrow/wide slot, and
+  post-barrier oop when a static object read returns NULL. The diagnostic must
+  not change semantics, add fallback, skip any method/class, or persist after
+  it identifies the generic static-base/barrier invariant.
+- Diagnostic evidence 2026-05-22: the env-gated GETSTATIC/class-init trace on
+  a freshly regenerated Shenandoah obfusjack artifact proves the failing
+  static read is not a raw field-barrier miss: the raw global slot value, both
+  Shenandoah-resolved class mirrors, and the selected field address all contain
+  NULL at offset `112` for `org/example/Main.LOCK`. The same fresh jar passes
+  under G1 with the GETSTATIC debug env enabled. `NEKO_CLASS_INIT_DEBUG=1`
+  shows `neko_ensure_class_initialized_once` calls the VM init path for
+  `org/example/Main` with `before=0` and sets the slot after return, but
+  `JVM_FindClassFromClass(..., initialize=true, ...)` returns a different
+  initialized local class handle from the cached global class/static-base
+  handle that the later direct static read uses. Generic implementation scope:
+  make class initialization return a caller-owned initialized class handle, and
+  have static field refs use that handle as the immediate static-base mirror
+  when it differs from the cached base. This preserves the existing metadata
+  offset, hard-abort behavior, and no-JNI-fallback rule; the temporary
+  diagnostics must be removed before checkpoint validation.
+- Rejected evidence 2026-05-22: bypassing the per-class initialization cache for
+  Shenandoah/ZGC regenerated and ran, but strict Shenandoah TEST-native reported
+  semantic failures (`Pool FAIL`, `ReTrace FAIL`, `Calc: 13ms`) and strict
+  Shenandoah obfusjack-native returned to the forwarded `java.lang.Class` root
+  verifier abort. The moving-collector no-cache shape is rejected and reverted;
+  class initialization caching must remain intact.
+- Rejected evidence 2026-05-22: refreshing every static-field ref class under
+  Shenandoah by materializing a new local handle from `Klass::_java_mirror`
+  passed focused codegen but failed the default
+  `NativeObfuscationPerfTest --no-parallel` gate when
+  `obfusjack-native.jar` timed out after `PT2M`. The per-static-field local
+  handle refresh shape is rejected; the next generic fix must preserve default
+  collector liveness and avoid hot-path handle growth.
+- Implementation scope before editing 2026-05-22: keep the class-init return
+  handle and class-init cache, but separate static-field data access from local
+  handle materialization. Add a raw `Klass::_java_mirror` oop helper that applies
+  the existing thread-aware Shenandoah barrier and does not push a local handle.
+  Object `GETSTATIC` should use that raw mirror oop as the Shenandoah static
+  field container, then fall back to the VM-bound static base/class handles.
+  This targets the proven `org/example/Main.LOCK`/`ATOMIC` static-base invariant
+  without weakening transforms, adding JNI/JVMTI/fallback, or special-casing
+  any owner, field, descriptor, benchmark, or log string.
+- Rejected/follow-up evidence 2026-05-22: the raw static-base mirror helper
+  preserved the default performance gate (`translated=49/93 rejected=0`, TEST
+  Calc `4 ms`, obfusjack Platform `39 ms`, Virtual `36 ms`, Seq `10 ms`), and
+  strict Shenandoah TEST-native exited `0`, but strict Shenandoah
+  obfusjack-native still aborted at `[neko-direct] MONITORENTER null object`.
+  Same-execution `NEKO_GETSTATIC_DEBUG=1` diagnostics on fresh
+  `build/neko-native-work/run-76286023375730` show
+  `neko_fast_get_static_object_field` selected `base=0x7ffc000d8` and
+  `field=0x7ffc00148` for `org/example/Main.LOCK`, while a later diagnostic
+  reread of the initialized class handle found the real mirror
+  `base_oop=0x51d0a7ba8`, field `0x51d0a7c18`, raw oop `0x51d2b9f70`, and a
+  heap-field barrier result `0x7ffc021e0`. The failing invariant is now
+  concrete: `Klass::_java_mirror` is an off-heap OopHandle slot, but the raw
+  helper was resolving it with the heap-field C1 barrier, which returns a
+  stack-like address. Corrected scope: resolve `Klass::_java_mirror` through the
+  existing thread-aware Shenandoah native handle-slot barrier and hard-abort if
+  the native handle barrier is unavailable; do not add fallback, skip behavior,
+  or owner/field-specific handling.
+- Rejected evidence 2026-05-22: switching `Klass::_java_mirror` OopHandle
+  resolution to the native handle-slot barrier preserved focused codegen and the
+  default performance gate, but strict Shenandoah obfusjack-native exited with
+  `java.lang.NullPointerException: Cannot read the array length because
+  "java.math.BigDecimal.LONG_TEN_POWERS_TABLE" is null`. This reproduces the
+  earlier BigDecimal corruption class for native-barriered class mirrors and is
+  rejected again. Corrected scope: stop using `Klass::_java_mirror` as the object
+  `GETSTATIC` static-base source under Shenandoah. For already-initialized
+  static field refs, reacquire a current class mirror through the existing
+  windowed `JVM_FindClassFromClass(..., initialize=false, ...)` class-resolution
+  path and use that caller-owned local only for the immediate static read.
+- Rejected evidence 2026-05-22: the windowed class re-resolution shape preserved
+  focused codegen and the default performance gate, but strict Shenandoah
+  TEST-native regressed to semantic failures (`Pool FAIL`, `ReTrace FAIL`,
+  `Calc: 27ms`) and strict Shenandoah obfusjack-native aborted in the verifier
+  with `Before Mark, Roots; Should not be forwarded` for a `java.lang.Class`
+  root in outside-heap memory. This recreates the VM-local Class root problem and
+  is rejected. Corrected scope: static field access must use the canonical
+  field-holder `Klass` plus offset, read the VM-owned `Klass::_java_mirror`
+  OopHandle slot as a raw temporary field container, and avoid publishing that
+  mirror as a native-owned local root. Ordinary `jclass` handle materialization
+  remains on the previously validated barriered path.
+- Follow-up evidence 2026-05-22: the canonical field-holder `Klass` plus raw
+  `Klass::_java_mirror` temporary field-container shape preserved focused
+  codegen tests and the full default native performance gate. Fresh artifacts
+  `build/neko-native-work/run-76853375166690` and
+  `build/neko-native-work/run-76857995229630` reported `translated=49/93
+  rejected=0`, TEST Calc median `4 ms`, obfusjack Platform `40 ms`, Virtual
+  `35 ms`, Seq `10 ms`, Parallel/VThreads `1 ms`. Strict Shenandoah TEST-native
+  exited `0` with empty stderr, but strict Shenandoah obfusjack-native aborted
+  during matrix execution in Shenandoah verification with
+  `Before Mark, Roots; Should not be forwarded`; `hs_err_pid4.log` reports an
+  outside-heap root slot `0x00007f32b42cc8e8` containing a forwarded
+  `java.lang.Class` oop. The current change is therefore not accepted. Next
+  diagnostic scope: add temporary env-gated `NEKO_ROOT_SLOT_DEBUG` tracing to
+  native-owned root publication points (`neko_handle_push`,
+  `neko_direct_oop_to_handle_origin`, and prepared local-root stores), recording
+  slot address, raw oop, block/top, and origin without changing behavior. The
+  completion evidence for the diagnostic is a fresh strict Shenandoah
+  obfusjack failure whose `hs_err` root slot either matches a trace line or
+  proves the root is produced by an unlogged VM-owned local/materialization path.
+- Diagnostic evidence 2026-05-22: `NEKO_ROOT_SLOT_DEBUG=1` reproduced the
+  strict Shenandoah obfusjack verifier abort on a freshly regenerated artifact.
+  The new `hs_err_pid4.log` root slot is `0x00007f8aa8328858`, containing
+  forwarded `java.lang.Class` oop `0x00000005375f2a30`. The trace logged
+  native-owned publications in the same JNIHandleBlock arena, for example
+  `handle_push_overflow slot=0x7f8aa8325048` and a run of Class-like
+  `handle_push` slots through `0x7f8aa8325658`, but no trace line created
+  `0x7f8aa8328858`. Later prepared local-root stores were in the separate
+  `0x7f8aa832fda0` range and also did not match. Source audit identifies a
+  generic unscoped bind-time class-local path: `neko_resolve_class_with_env`
+  discards the caller local handle returned by `neko_resolve_class_mirror_with_env`
+  after extracting only `Klass*`; `neko_bind_class_slot_from` and
+  `neko_bind_primitive_class_slot` create global refs from temporary local
+  Class handles but leave those locals in the active JNIHandleBlock. Corrected
+  scope: wrap these bind-time class local lifetimes in the existing
+  `neko_handle_window_begin/end` primitive so metadata/global refs survive but
+  temporary local `java.lang.Class` roots are popped before translated runtime.
+- Follow-up evidence 2026-05-22: after bind-time class-local windowing,
+  focused codegen, the full default performance gate, and strict Shenandoah
+  TEST-native still pass, but strict Shenandoah obfusjack-native still aborts
+  with the same forwarded `java.lang.Class` root class. A second
+  `NEKO_ROOT_SLOT_DEBUG=1` run reports root slot `0x00007f5ff432d328`; the
+  nearest native-owned trace in that same active-handle chain is
+  `handle_push_overflow slot=0x7f5ff432a358 raw=0x7ffc041f8`, after which the
+  failing slot appears about 41 JNIHandleBlock blocks later with no native-owned
+  publication trace. The surrounding trace is inside repeated NJX return/static
+  object handling, and source audit shows NJX replaces
+  `JavaThread::_active_handles` with a stack/calloc synthetic block before
+  `call_stub`, allowing VM-created Class locals during the Java upcall to land
+  in a synthetic active JNIHandleBlock chain. Corrected scope: keep
+  `JavaThread::_active_handles` on the existing HotSpot active block, root NJX
+  object arguments into that block under the already existing
+  `neko_handle_save/restore` window, and restore the window after `call_stub`.
+  The JavaCallWrapper `_handles` field remains the saved old handle block; no
+  JNI fallback, helper layer, or benchmark-specific path is introduced.
+- Rejected evidence 2026-05-22: removing the synthetic NJX active handle block
+  and rooting call arguments in the existing active block passed focused
+  codegen, but failed the default performance/runtime gate before strict GC.
+  `NativeObfuscationPerfTest` aborted TEST at `Test 2.5: Loader` with
+  `[neko-direct] NJX object argument did not resolve handle=...`, proving
+  object handles passed through loader/reflection NJX paths can require the
+  dedicated Java-call handle materialization order. The no-synthetic-block
+  experiment is rejected and reverted; the remaining root fix must preserve
+  default TEST loader semantics while addressing Shenandoah's unlogged
+  VM-created Class locals.
+- Corrected scope after sidecar audit 2026-05-22: preserve the existing NJX
+  synthetic Java-call handle block, but add handle windows around runtime
+  bootstrap/descriptor/lookup helper chains that create temporary
+  `java.lang.Class`, `MethodType`, `Lookup`, `Method`, string, and Object[]
+  handles. `neko_method_type_from_descriptor`,
+  `neko_bootstrap_parameter_array`, `neko_lookup_for_class`,
+  `neko_lookup_for_jclass`, `neko_invoke_bootstrap`, and
+  `neko_resolve_constant_dynamic` must prepare the actual returned oop before
+  ending the window and then push one caller-owned return handle. This keeps
+  default NJX object-argument materialization intact while bounding transient
+  VM-created Class locals.
+- Rejected evidence 2026-05-22: broad runtime bootstrap/descriptor/lookup
+  handle-windowing passed focused codegen and the TEST calc runtime, but failed
+  the default performance gate because `obfusjack-native.jar` timed out after
+  `PT2M` during `nativeObfuscation_captureNativePathPerformanceBaseline`.
+  This shape is too broad for the hot MethodType/bootstrap paths and is
+  reverted. The remaining fix must be narrower and preserve default obfusjack
+  completion time before strict-GC validation.
+- Corrected narrow NJX scope 2026-05-22: preserve the synthetic front
+  JNIHandleBlock for NJX argument roots, but before `call_stub` repoint that
+  front block's `_last` field to the existing HotSpot active-handle chain tail.
+  Current evidence shows unlogged VM-created Class locals appear dozens of
+  blocks after the synthetic block's first overflow; this happens because
+  `neko_njx_install_java_handles` initializes `_last` to the synthetic block
+  and the argument-root writes leave VM handle allocation behind the synthetic
+  block. The narrow fix must keep default NJX object argument semantics,
+  JavaCallWrapper `_handles = old_handles`, and synthetic argument roots, while
+  directing VM-created locals during the upcall to the existing handle-chain
+  tail.
+- Rejected evidence 2026-05-22: the NJX `_last` tail repoint preserved focused
+  codegen, the fresh full default native performance gate, and strict
+  Shenandoah TEST-native with empty stderr and `Calc: 4ms`, but strict
+  Shenandoah obfusjack-native still aborted with `Before Mark, Roots; Should not
+  be forwarded`. The non-debug run reported outside-heap root slot
+  `0x00007f0e80349328` containing forwarded `java.lang.Class` oop
+  `0x00000005374fbf48`; the `NEKO_ROOT_SLOT_DEBUG=1` run reported root slot
+  `0x00007fc4c833cd88` containing forwarded `java.lang.Class` oop
+  `0x00000005375eef50`. The exact root slot and oop did not appear in the
+  native-owned root trace, and the nearest same-chain trace remained
+  `handle_push_overflow slot=0x7fc4c8339cb8 raw=0x7ffc041f8 index=4986`, about
+  41 JNIHandleBlock blocks before the failing slot. The `_last` repoint does
+  not change the failing root producer and is rejected unless a later diagnostic
+  proves it is needed for a separate invariant. Next scope: add targeted
+  NJX/active-handle diagnostics around install, argument rooting, tail publish,
+  and `call_stub` entry/return to prove whether VM-created locals allocate from
+  the synthetic front block, a hidden old-chain tail, or another active-handle
+  publication path before making another runtime change.
+- Diagnostic evidence 2026-05-22: targeted NJX chain tracing on a freshly
+  regenerated artifact reproduced the strict Shenandoah verifier abort with
+  root slot `0x00007ff238325d28` containing forwarded `java.lang.Class` oop
+  `0x00000005378f6418`. Native-owned root tracing still did not create the
+  exact slot; the nearest same-arena native trace is
+  `handle_push_overflow slot=0x7ff238322df8 raw=0x7ffc041f8 index=4986`, and
+  the failing slot is about 41 `JNIHandleBlock` allocations after that native
+  overflow block (`sizeof_JNIHandleBlock=296`, capacity `32`). The NJX trace
+  proves `neko_njx_publish_old_handle_tail` is active at call entry, but the
+  failing root is not produced by the synthetic front block's `_last` field.
+  Source evidence identifies the generic invariant break: native overflow in
+  `neko_handle_push` and `neko_direct_oop_to_handle_origin` makes the new block
+  the JavaThread active head and links `_next` back to the previous block,
+  whereas HotSpot `JNIHandleBlock` allocation uses the active block as the head
+  and appends additional blocks through head `_last` and tail `_next`. The next
+  implementation scope is to make native overflow append to the active head's
+  `_last` chain, matching the existing `neko_prepare_local_oop_roots` pattern,
+  so later VM-created locals and verifier scanning share one forward chain.
+- Rejected evidence 2026-05-22: changing native overflow to append directly to
+  the active head's `_last` chain passed focused codegen but failed the fresh
+  default performance gate before strict GC. `TEST-native.jar` failed in the
+  default collector with `NullPointerException: Cannot invoke
+  "Object.getClass()" because "this" is null` from `PrintStream.println`,
+  proving direct append mutates saved outer handle chains across scoped
+  `neko_handle_save/restore` windows. The corrected scope must preserve the
+  existing scoped prepend behavior for native-owned overflow blocks, but publish
+  the prepended block's `_last` as the previous chain tail so VM-created locals
+  allocated after the native overflow do not grow behind that prepended block.
+- Corrected scope 2026-05-22: keep the HotSpot-compatible append overflow
+  shape, but make `neko_handle_save/restore` tail-aware. A handle scope must
+  record the saved tail block and that tail's `_top`; restore must reset the
+  saved tail `_top`, trim any blocks appended after the saved tail, and restore
+  head `_next`/`_last`. This preserves scoped local lifetime while keeping
+  native overflow and later VM-created locals in the same forward
+  `JNIHandleBlock` chain.
+- Follow-up evidence 2026-05-22: tail-aware append compiled and ran, and it is
+  retained as a HotSpot-compatible `JNIHandleBlock::_last` shape correction, but
+  it is not sufficient for strict Shenandoah. Focused
+  `CCodeGeneratorTest`/`OpcodeTranslatorUnitTest`, the full default
+  `NativeObfuscationPerfTest --no-parallel` gate, and strict Shenandoah
+  TEST-native passed. Fresh default medians were TEST Calc `4 ms`, obfusjack
+  Platform `46 ms`, Virtual `40 ms`, Seq `10 ms`, Parallel/VThreads `1 ms`.
+  Strict Shenandoah obfusjack-native still aborted with `Before Mark, Roots;
+  Should not be forwarded`; the non-debug run reported root slot
+  `0x00007f5b8031f8e8` containing forwarded `java.lang.Class` oop
+  `0x0000000526c77088` with forwardee `0x00000007ffc03e78`. A fresh
+  `NEKO_ROOT_SLOT_DEBUG=1` run reported root slot `0x00007f1d242f7468`
+  containing `0x0000000526cc6378` with forwardee `0x00000007ffa1ed80`. That
+  exact slot was not emitted by native root tracing; the nearest same-arena
+  native publications included `direct_handle_tail slot=0x7f1d242f2858
+  raw=0x526cc62f0 origin=9`, `local_root_store slot=0x7f1d242f2860`, and
+  `handle_push slot=0x7f1d2b5fcd90`, all for a nearby but different oop. The
+  remaining diagnostic scope is to prove whether the unlogged Class root is a
+  VM-created local-root lifetime issue or a native root publication that still
+  escapes current tracing.
+- Diagnostic scope 2026-05-22: add an env-gated active-handle-chain scanner
+  around NJX call-stub entry/return and handle restoration. Local HotSpot 21
+  source proves `JNIHandleBlock::oops_do` scans `_handles[0.._top)` and follows
+  `_next` only while the current block is full; `ShenandoahVerifyNoForwarded`
+  reads root slots with `RawAccess` and fails when a slot's raw oop differs from
+  its forwarding header target. The diagnostic must mirror that scan order,
+  report only slots whose mark word is already forwarded, and must not mutate
+  roots or run unless the env var is set. Completion evidence is a strict
+  Shenandoah obfusjack run that either logs the exact failing slot before the VM
+  verifier or proves the slot is created after our instrumented NJX/native
+  handle boundaries.
+- Follow-up diagnostic scope 2026-05-22: extend the scanner to HotSpot
+  `HandleArea` roots. The NJX active/saved `JNIHandleBlock` scanner reproduced
+  the strict Shenandoah verifier abort without logging a forwarded slot at NJX
+  or safepoint boundaries, while local OpenJDK 21 source shows
+  `Thread::oops_do_no_frames` scans `handle_area()->oops_do(f)` and
+  `JavaCalls::call_helper` brackets the direct `call_stub` with
+  `HandleMark hm(thread)`. The generated synthetic call-stub path has no
+  equivalent VM `HandleMark`. The next diagnostic must prove whether the exact
+  VM verifier root slot is in the current thread `HandleArea`; it remains
+  env-gated, read-only, and must not heal or clear roots.
+- Rejected diagnostic evidence 2026-05-22: the first direct `HandleArea` scanner
+  shape passed focused codegen and a fresh full `NativeObfuscationPerfTest
+  --no-parallel` regeneration, but strict Shenandoah obfusjack-native aborted
+  before application output with SIGSEGV in generated native code
+  (`libneko_13625905931107475994.so+0x49dc9`, `hs_err_pid13.log`). It emitted no
+  `neko-root-area` line before the crash, so the scanner did not provide slot
+  proof and is rejected as an unsafe memory-walk diagnostic. The implementation
+  is removed before further evidence gathering.
+- Corrected implementation scope 2026-05-22: add a synthetic VM HandleArea
+  save/restore boundary around generated NJX `call_stub`. Evidence chain:
+  strict Shenandoah verifier reports an outside-heap root slot in unknown C-heap
+  memory containing a forwarded `java.lang.Class`; the active/saved
+  `JNIHandleBlock` scanner reproduced the abort without finding that slot;
+  `Thread::oops_do_no_frames` scans `handle_area()->oops_do(f)`; and
+  `JavaCalls::call_helper` wraps the exact direct `call_stub` region with
+  `HandleMark hm(thread)`. The implementation must use VMStructs-provided
+  `Thread::_resource_area` plus local product HotSpot layout to reach
+  `Thread::_handle_area`, validate the derived Arena fields before use, restore
+  `_chunk/_hwm/_max/_size_in_bytes` after the upcall, and hard-abort if the
+  layout is incoherent. It must not scan arbitrary memory, call JNI/JVMTI, fall
+  back to Java helpers, skip collectors/classes, or change NJX argument/result
+  ABI.
+- Rejected implementation evidence 2026-05-22: the synthetic VM HandleArea
+  save/restore boundary passed focused codegen/translator tests and a rerun of
+  the full default `NativeObfuscationPerfTest --no-parallel` gate, but it is not
+  accepted. The first full gate attempt timed out running obfusjack-native after
+  `PT2M`; direct reruns of both generated obfusjack jars then completed under 30
+  seconds, and the second full gate passed. Fresh default medians were TEST Calc
+  `4 ms`, obfusjack Platform `60 ms`, Virtual `83 ms`, Seq `10 ms`,
+  Parallel/VThreads `1 ms`, still over the Platform/Virtual targets. Strict
+  Shenandoah obfusjack-native still aborted with `Before Mark, Roots; Should not
+  be forwarded`; `hs_err_pid3.log` reported outside-heap root slot
+  `0x00007f124037a708` containing forwarded `java.lang.Class` oop
+  `0x00000005374f85d8` with forwardee `0x00000007fe9e3380`. The direct
+  HandleArea boundary is removed as insufficient and too expensive.
+- Corrected diagnostic scope 2026-05-22: add only an env-gated, read-only
+  derived `HandleArea` scanner to the existing `NEKO_ROOT_SCAN_DEBUG` path.
+  The previous direct scanner is rejected because it walked unsafe candidate
+  memory and crashed before producing evidence. The corrected diagnostic must
+  use VMStructs `Thread::_resource_area`, the local product HotSpot field order
+  (`_resource_area` followed by `_handle_area`), and OpenJDK 21 `Arena` /
+  `Chunk` layout evidence to scan only the current thread's validated
+  `HandleArea`. It must validate candidate addresses against readable process
+  mappings and Arena chunk bounds before reading slots, report only forwarded
+  oop slots with site/thread/slot/chunk/raw/forwardee, never mutate roots, and
+  stay inactive unless `NEKO_ROOT_SCAN_DEBUG` is set. Completion evidence is a
+  fresh strict Shenandoah obfusjack run whose `hs_err` root slot either appears
+  in the derived `HandleArea` trace or is proven to be outside the current
+  thread's `JNIHandleBlock` and `HandleArea` scans.
+- Diagnostic overhead evidence 2026-05-23: the first derived `HandleArea`
+  scanner with per-slot `/proc/self/maps` readability checks passed focused
+  generator/translator validation and regenerated a fresh default artifact once,
+  but the `NEKO_ROOT_SCAN_DEBUG=1` strict Shenandoah obfusjack diagnostic timed
+  out after `120s` at the microbench section with no `hs_err`, stderr, or
+  forwarded-slot output. After caching process maps, a fresh full
+  `NativeObfuscationPerfTest --rerun-tasks --no-parallel` run still failed
+  with `Timed out running jar .../obfusjack-native.jar after PT2M`. The
+  diagnostic is therefore narrowed again: validate the current `HandleArea`
+  chunk bounds against cached maps, then scan the validated oop-slot range
+  directly, matching HotSpot `HandleArea::oops_do` and avoiding per-slot map
+  probes.
+- Diagnostic evidence 2026-05-23: the narrowed derived `HandleArea` scan
+  regenerated and passed the default full native performance gate. Fresh
+  medians were TEST Calc `4 ms`, obfusjack Platform `59 ms`, Virtual `89 ms`,
+  Seq `10 ms`, Parallel/VThreads `1 ms`, so the strict performance target
+  remains open. A strict Shenandoah obfusjack diagnostic with
+  `NEKO_ROOT_SCAN_DEBUG=1` reproduced the verifier abort in matrix execution at
+  outside-heap slot `0x00007f7a1c307778`, containing forwarded
+  `java.lang.Class` oop `0x0000000526cc8880` with forwardee
+  `0x00000007ffa1ed80`, but still emitted no `neko-root-area`,
+  `neko-root-scan`, or native publisher line for that slot. The slot is in the
+  same anonymous C-heap mapping as worker JavaThreads and about `0x6108` bytes
+  before `ForkJoinPool.commonPool-worker-1`'s `JavaThread`. Next diagnostic is
+  an env-gated, capped `NEKO_ROOT_AREA_SUMMARY` range trace for validated
+  current-thread `HandleArea` chunks, to classify the next failing slot as
+  inside or outside a scanned HandleArea range without mutating roots.
+- Method-frame evidence 2026-05-22: generated translated wrappers currently call
+  `neko_native_impl_N_body(...)` and return the body result directly, while
+  handle-exposing bodies emit `neko_prepare_local_oop_roots(...)` and reserve
+  JNIHandleBlock slots without any method-frame restore. Source audit also shows
+  optimized translated-to-translated calls use `_body(...)` directly, so hot
+  loops can allocate helper/class/object local handles repeatedly without a
+  callee lifetime boundary. The generic invariant is that every translated
+  method body that can expose JNI handles must run inside a handle save/restore
+  window on both external dispatch and optimized direct-call entry. Reference
+  returns must be resolved to an oop before restoring the method window, then
+  republished as one caller-owned handle in the outer active handle scope so
+  translated direct callers never carry an unrooted raw oop on their operand
+  stack. Validation target: fresh generated C must show
+  handle-exposing wrappers bracketing `_body(...)` with
+  `neko_handle_save/restore`, reference-return wrappers preserving via
+  `neko_prepare_return_oop` and `neko_direct_oop_to_handle_origin`, no-handle
+  translated bodies staying unwindowed, and direct translated calls selecting
+  the wrapper unless the target was proven no-handle safe. Runtime proof is
+  focused codegen, full default performance, strict Shenandoah TEST, strict
+  Shenandoah obfusjack, and generated-C grep for forbidden JNI wrappers/fallback
+  markers.
+- Validation evidence 2026-05-22: the conservative translated method-frame
+  implementation passed focused `CCodeGeneratorTest`/`OpcodeTranslatorUnitTest`
+  and a fresh full default `NativeObfuscationPerfTest --no-parallel` gate.
+  Fresh medians were TEST Calc `4 ms`, obfusjack Platform `48 ms`, Virtual
+  `52 ms`, Seq `10 ms`, Parallel `1 ms`, and VThreads `1 ms`; the default gate
+  passes but Platform/Virtual remain above the stricter native performance
+  target. Strict Shenandoah TEST-native still exits `0` with empty stderr and
+  `Calc: 3ms`. Strict Shenandoah obfusjack-native still aborts in verifier root
+  scanning with `Before Mark, Roots; Should not be forwarded`; the latest
+  root-debug run reports root slot `0x00007f842431ff28` containing forwarded
+  `java.lang.Class` oop `0x00000005378f25c0`, with nearest same-arena native
+  traces `direct_handle_overflow slot=0x7f842431cbd8` and
+  `handle_push_overflow slot=0x7f8424326c28`, but no native-owned trace for the
+  exact failing slot. The method-frame change is retained as a generic lifetime
+  boundary for translated bodies, but it is not sufficient for T4.8d/T4.15.
+- Follow-up scope 2026-05-22: clear stale oop slots from every native-owned
+  `JNIHandleBlock` before recycle/free and before freeing scoped slab storage.
+  Source evidence shows `neko_recycle_jnih_block` clears blocks only on the
+  retained recycle-list path, while the immediate-free path and scoped slab
+  cleanup can release blocks with nonzero `_top` and old handle words. Restore
+  also unlinks scoped blocks without clearing them when `scope_slabs != NULL`.
+  Sidecar audit also identified `neko_njx_restore_java_handles` as the same
+  class: it saves `_next` before releasing detached Java-call handle blocks, but
+  it frees heap blocks and leaves stack-backed blocks uncleared before restoring
+  `JavaThread::_active_handles`.
+  The generic invariant is that any block removed from `JavaThread::_active_handles`
+  ownership by `neko_handle_restore` must have its top and oop slots cleared
+  before it can be recycled, freed, or returned to scoped slab storage. The
+  implementation must save `_next` before clearing a block, must not clear the
+  still-active saved head before restoring `saved_top`, and must not change
+  ordinary handle semantics or add JNI/JVMTI/fallback behavior. Validation is
+  focused codegen/translator tests, fresh full default performance gate, strict
+  Shenandoah TEST, strict Shenandoah obfusjack, and generated-C forbidden-marker
+  inspection.
+- Rejected/follow-up evidence 2026-05-22: stale-slot clearing passed focused
+  codegen/translator tests, a fresh full default performance gate, and strict
+  Shenandoah TEST-native, but strict Shenandoah obfusjack-native still aborted
+  in matrix execution with `Before Mark, Roots; Should not be forwarded`.
+  Root-debug reported failing slot `0x00007f78503316f8` containing forwarded
+  `java.lang.Class` oop `0x0000000526c74400`. The exact slot was not created
+  by native root tracing; the nearest same-arena native publication was
+  `direct_handle_overflow slot=0x7f7850334438 raw=0x526c744b8 origin=9`, where
+  origin `9` is `NEKO_HANDLE_ORIGIN_NJX_RETURN`. The stale-clearing change does
+  not remove the failing root class by itself. Corrected generic scope: heal
+  raw object oops returned from HotSpot `call_stub` before publishing them into
+  a native local handle in `neko_njx_oop_to_handle`. This is limited to NJX
+  return publication and must not reapply the previously rejected tag-0 local
+  handle native barrier, broad class-mirror native barrier, no-synthetic-NJX
+  block shape, or broad bootstrap windowing.
+- Rejected evidence 2026-05-22: healing raw NJX object returns through the
+  Shenandoah native-handle barrier passed focused codegen/translator tests but
+  failed the default full performance gate before strict-GC validation:
+  `nativeObfuscation_captureNativePathPerformanceBaseline` timed out after
+  `PT2M` running regenerated `obfusjack-native.jar`. This shape is rejected and
+  reverted. The remaining fix must not barrier every NJX object return through
+  the native-handle C1 stub on the default path.
+- Corrected scope 2026-05-22: apply a cheap generic root-publication heal before
+  generated native code writes a raw oop into any native-owned
+  `JNIHandleBlock` or translated local-root slot. OpenJDK 21 `markWord.hpp`
+  defines `marked_value = 3`, `is_marked()` as the low lock bits equal to
+  `11`, and `decode_pointer()` as `clear_lock_bits().value()`, matching the
+  observed Shenandoah verifier reports where a mark such as
+  `marked(0x00000007ffc03df3)` has forwardee `0x00000007ffc03df0`. The generic
+  invariant is that under Shenandoah a raw oop with a marked forwarding header
+  must be decoded to its forwardee before native code publishes it as a root.
+  Apply this only at root publication (`neko_handle_push`,
+  `neko_direct_oop_to_handle_origin`, and `neko_store_local_oop_raw`), not on
+  every NJX return or tag-0 handle read.
+- Follow-up evidence 2026-05-22: the cheap root-publication heal passed focused
+  codegen/translator validation, the fresh full default native performance
+  gate, and strict Shenandoah TEST-native with empty stderr and `Calc: 4ms`.
+  Strict Shenandoah obfusjack-native still aborted during matrix execution with
+  `Before Mark, Roots; Should not be forwarded`; fresh `hs_err_pid4.log`
+  reports outside-heap root slot `0x00007f6c1832db98` containing forwarded
+  `java.lang.Class` oop `0x00000005379f07c8` with forwardee
+  `0x00000007fe99ab80`. Sidecar HotSpot-source audit proves `call_stub` takes
+  raw oop argument words and entry-frame scanning treats those words as roots,
+  while `JavaCallWrapper::_handles` remains the saved previous active handle
+  block. Generated `neko_njx_*` support still writes object args by re-rooting
+  them, unwrapping the temporary local back to a raw oop, and storing that raw
+  oop directly into `call_params` before `call_stub`; those raw words are not
+  covered by the JNIHandleBlock/local-root publication hook. Corrected generic
+  scope: apply the same cheap Shenandoah marked-forwarding decode to raw NJX
+  object oops immediately before publishing them to `call_params`/entry-frame
+  roots, preserving the existing synthetic Java-call handle block and avoiding
+  the rejected tag-0/native-handle C1 barrier path.
+- Rejected/follow-up evidence 2026-05-22: applying the cheap forwarding decode
+  to raw NJX object arguments passed focused codegen/translator validation and
+  the fresh full default native performance gate (`TEST` Calc median `4 ms`;
+  obfusjack medians Platform `50 ms`, Virtual `50 ms`, Seq `10 ms`,
+  Parallel/VThreads `1 ms`). Strict Shenandoah TEST-native still exited `0`,
+  but strict Shenandoah obfusjack-native again aborted during matrix execution
+  with `Before Mark, Roots; Should not be forwarded`; fresh `hs_err_pid4.log`
+  reports outside-heap root slot `0x00007f268c3255e8` containing forwarded
+  `java.lang.Class` oop `0x00000005375ea388` with forwardee
+  `0x00000007fe9fb780`. The `call_params` root-publication hook is retained as
+  a generic root hygiene fix, but it is not the remaining producer. The next
+  diagnostic scope is to rerun the same artifact with `NEKO_ROOT_SLOT_DEBUG=1`
+  and compare the exact failing root slot against native-owned
+  `JNIHandleBlock`, local-root, and NJX publication traces before changing
+  another runtime path.
+- Diagnostic evidence 2026-05-22: `NEKO_ROOT_SLOT_DEBUG=1` on the same fresh
+  artifact reproduced the strict Shenandoah verifier abort with root slot
+  `0x00007f859c3277f8` containing forwarded `java.lang.Class` oop
+  `0x00000005374f2478`. The exact slot is not emitted by native root
+  publishers; nearest same-arena trace entries are `direct_handle_overflow`
+  at `0x7f859c3248e8` and later `handle_push_overflow` at
+  `0x7f859c32e938`, again placing the failing root inside VM-created
+  `JNIHandleBlock` storage during the Java upcall. Local HotSpot 21 source
+  shows `JavaCallWrapper` allocates a fresh `JNIHandleBlock` whose `_next` is
+  initialized to `NULL`, stores the old active block only in
+  `JavaCallWrapper::_handles`, then installs the fresh block as
+  `JavaThread::_active_handles`. Current generated NJX install instead links
+  the synthetic fresh block's `_next` to the old active chain. Corrected
+  generic scope: make `neko_njx_install_java_handles` match the HotSpot
+  JavaCallWrapper block shape by setting the fresh active block `_next` to
+  `NULL` and keeping the old active block only in the synthetic wrapper
+  `_handles`/restore state. Do not change argument order, wrapper `_handles`,
+  or the rejected tag-0/native-handle barrier path.
+- Follow-up evidence 2026-05-22: the HotSpot-compatible NJX fresh-block
+  `_next = NULL` shape passed focused `CCodeGeneratorTest` /
+  `OpcodeTranslatorUnitTest` validation and a fresh full default
+  `NativeObfuscationPerfTest --no-parallel` gate. Fresh medians were TEST Calc
+  `4 ms`, obfusjack Platform `49 ms`, Virtual `53 ms`, Seq `10 ms`,
+  Parallel/VThreads `1 ms`. Strict Shenandoah TEST-native still exited `0`
+  with empty stderr and `Calc: 4ms`, but strict Shenandoah obfusjack-native
+  still aborted during matrix execution with `Before Mark, Roots; Should not be
+  forwarded`; the verifier reported outside-heap root slot
+  `0x00007f64d82ff3f8` containing forwarded `java.lang.Class` oop
+  `0x0000000526cc8f90` with forwardee `0x00000007ffc04370`. The block-shape
+  correction is retained as a generic HotSpot JavaCallWrapper parity fix, but it
+  is not sufficient for T4.8d/T4.15. Next evidence must come from a fresh
+  `NEKO_ROOT_SLOT_DEBUG=1` run on the retained shape before another runtime
+  path changes.
+- Diagnostic evidence 2026-05-22: the fresh `NEKO_ROOT_SLOT_DEBUG=1`
+  retained-shape run reproduced strict Shenandoah obfusjack abort with root
+  slot `0x00007f08dc2fdfd8` containing forwarded `java.lang.Class` oop
+  `0x00000005270c6008` and forwardee `0x00000007ffa1ed80`. The exact slot is
+  not emitted by native root publishers; nearest same-arena native overflow
+  slots include `0x7f08dc2f6d68` / `0x7f08dc2f6e90` and later native
+  publications, so the failing slot remains VM-created local storage during
+  Java upcall. OpenJDK 21 `JavaCalls::call_helper` creates
+  `JavaCallWrapper`, then calls `JavaCallArguments::parameters()` to resolve
+  object arguments into raw oop words; it does not re-root those object
+  arguments into the fresh active `JNIHandleBlock`. The old argument handles
+  remain reachable because `JavaCallWrapper::oops_do()` scans the saved
+  previous handle block. Current NJX code decodes arguments before installing
+  the synthetic wrapper but then pushes each raw object argument into the fresh
+  active Java-call block before writing `call_params`, which makes the new
+  block top nonzero and duplicates argument roots in a block HotSpot expects to
+  start empty for Java-call locals. Corrected generic scope: keep decoding
+  incoming object handles before installing the synthetic block, keep applying
+  `neko_gc_root_publish_oop` before writing raw `call_params`, but stop
+  re-rooting object arguments into the fresh NJX Java-call handle block. The
+  saved old handles must remain in wrapper `_handles`, the fresh block remains
+  `JavaThread::_active_handles`, and missing object handle resolution still
+  hard-aborts.
+- Follow-up evidence 2026-05-22: removing the redundant NJX object-argument
+  re-root into the fresh Java-call handle block passed focused
+  `CCodeGeneratorTest` / `OpcodeTranslatorUnitTest` validation and the fresh
+  full default `NativeObfuscationPerfTest --no-parallel` gate. Fresh medians
+  were TEST Calc `4 ms`, obfusjack Platform `46 ms`, Virtual `38 ms`, Seq
+  `10 ms`, Parallel/VThreads `1 ms`. Strict Shenandoah TEST-native exited `0`
+  with empty stderr and `Calc: 4ms`, but strict Shenandoah obfusjack-native
+  still aborted during matrix execution with `Before Mark, Roots; Should not be
+  forwarded`; the verifier reported outside-heap root slot
+  `0x00007f6d6032c608` containing forwarded `java.lang.Class` oop
+  `0x00000005379eb6c0` with forwardee `0x00000007fea33e80`. The HotSpot
+  JavaCallArguments parity change is retained as generic shape correction but
+  is not sufficient for T4.8d/T4.15. Next diagnostic must compare this exact
+  retained shape under `NEKO_ROOT_SLOT_DEBUG=1` before a further runtime change.
+- Diagnostic evidence 2026-05-22: the retained no-argument-reroot
+  `NEKO_ROOT_SLOT_DEBUG=1` run reproduced the strict Shenandoah verifier abort
+  at root slot `0x00007f4764327708` with forwarded `java.lang.Class` oop
+  `0x00000005375e4a88` and forwardee `0x00000007fea03880`. The exact slot is
+  still unlogged, but the same arena shows native `direct_handle_overflow`
+  origin `9` at block `0x7f4764324248`, followed by VM-created local storage
+  before later native overflow at `0x7f476432e298`. This proves the remaining
+  producer is behind the native-prepended overflow head, not NJX argument
+  re-rooting. OpenJDK 21 `JNIHandleBlock::allocate_handle` appends through the
+  active head's `_last` and `_next` chain; current `neko_handle_push` /
+  `neko_direct_oop_to_handle_origin` overflow instead allocate a new block,
+  set its `_next` to the previous active block, and publish it as
+  `JavaThread::_active_handles`. Corrected generic scope: make native overflow
+  append through the current active head's `_last` chain, and make
+  `neko_handle_save/restore` tail-aware by recording the saved tail block and
+  tail top so scoped restore can trim blocks appended inside the window without
+  mutating older outer chains.
+- Follow-up diagnostic evidence 2026-05-23: the tail-aware append shape and
+  subsequent global-ref slot diagnostic passed focused codegen/translator
+  validation and the full default `NativeObfuscationPerfTest --rerun-tasks
+  --no-parallel` gate, but strict Shenandoah obfusjack still aborted with
+  `Before Mark, Roots; Should not be forwarded`. The latest
+  `NEKO_ROOT_SLOT_DEBUG=1` / global-ref run reported verifier root slot
+  `0x00007f886832caa8`, raw oop `0x00000005379097a0`, and forwardee
+  `0x00000007fe9d3180`. Exact grep found no `neko-global-ref` or native root
+  publisher line for that slot; the nearest logged native slot was
+  `handle_push_tail slot=0x7f8868329a00` in block `0x7f88683299e8`. The
+  failing slot is `12480` bytes after that block; with the fresh runtime
+  `sizeof_JNIHandleBlock=296`, this is scoped block index `42` plus handle-slot
+  offset `48`. `hs_err` thread events place the same address range next to
+  short-lived JavaThread allocations that had exited before the verifier crash.
+  This proves the global-ref cache is not the exact producer and gives a
+  concrete next diagnostic invariant: classify whether the verifier slot is
+  inside a native-owned scoped `JNIHandleBlock` slab whose later blocks can be
+  populated by VM local-handle allocation during Java upcalls.
+- Corrected diagnostic scope 2026-05-23: add a low-overhead, env-gated scoped
+  `JNIHandleBlock` slab range trace and cache root-debug env checks once per
+  generated library. The range trace must log only slab start/end/block-size
+  metadata on slab allocation, not every slot, and must be inactive unless
+  `NEKO_ROOT_SLAB_DEBUG` is set. Existing root/HandleArea diagnostics must stop
+  paying repeated hot-path `getenv` calls when their env vars are unset. The
+  next completion evidence is a fresh strict Shenandoah obfusjack run whose
+  `hs_err` verifier slot is either inside a logged native slab range or proven
+  outside the native slab, global-ref, JNIHandleBlock-publisher, and current
+  thread `HandleArea` diagnostics before any runtime root fix is attempted.
+- Diagnostic completion evidence 2026-05-23: focused
+  `CCodeGeneratorTest`/`OpcodeTranslatorUnitTest` validation and a fresh full
+  `NativeObfuscationPerfTest --rerun-tasks --no-parallel` regeneration passed
+  after the env-cache/slab diagnostic. Fresh medians were TEST Calc `4 ms`,
+  obfusjack Platform `39 ms`, Virtual `36 ms`, Seq `10 ms`, and
+  Parallel/VThreads `1 ms`; Platform recovered but Virtual remains one
+  millisecond above the strict `<=35 ms` gate and Calc remains above the
+  best-known `2-3 ms` target. Strict Shenandoah obfusjack with
+  `NEKO_ROOT_SLAB_DEBUG=1` reproduced the verifier abort. `hs_err_slab_4.log`
+  reports root slot `0x00007f57c8339298` containing forwarded
+  `java.lang.Class` oop `0x00000005371dd728` with forwardee
+  `0x00000007fe9baf80`. The slab log contains
+  `scope=0x7f57cfdfd850 slab=0x7f57c8335eb0 start=0x7f57c8335ec8
+  end=0x7f57c833a8c8 block_size=296 blocks=64 index=28`; the failing slot is
+  inside that native-owned scoped `JNIHandleBlock` slab at offset `13264`,
+  block index `44`, remainder `240`. This proves the remaining forwarded root
+  is in a native scoped JNIHandleBlock chain visible to HotSpot root scanning,
+  not in a global ref, generated library mapping, current-thread HandleArea, or
+  unlogged exact publisher.
+- Corrected implementation scope 2026-05-23: before a generated NJX Java upcall
+  allows HotSpot `JavaCallWrapper` to scan the saved old active-handle chain,
+  refresh the current active `JNIHandleBlock` chain under Shenandoah by decoding
+  marked-forwarding oops in slots below each block top and writing the forwardee
+  back to the same root slot. Traverse the HotSpot-compatible `_last`/`_next`
+  chain only through active blocks, hard-abort on malformed block metadata or
+  missing layout, and do not add JNI/JVMTI/fallback paths. Required evidence:
+  generated C must show the refresh happens before `neko_njx_install_java_handles`
+  and before `call_stub`; focused codegen/translator validation must pass; a
+  fresh strict Shenandoah obfusjack run must no longer report a forwarded root
+  from the native scoped slab, or must provide a new exact invariant before any
+  further runtime change. Performance validation must preserve the already
+  recorded best-known Calc `2-3 ms` target and Virtual `<=35 ms` gate before
+  final acceptance.
+- Follow-up evidence 2026-05-23: the first refresh implementation rejected a
+  valid `JNIHandleBlock::_top` offset `0` and hard-aborted before translated
+  output; after correcting the offset guard, focused validation and fresh full
+  regeneration passed. The strict Shenandoah run still aborted during matrix
+  execution with a forwarded `java.lang.Class` root. `NEKO_ROOT_SLAB_DEBUG=1`
+  after the full-chain refresh still matched the verifier slot
+  `0x00007fb3b03327e8` to a native scoped slab
+  `start=0x7fb3b032f4f8 end=0x7fb3b0333ef8`, offset `13760`, block index
+  `46`, remainder `144`. Because this slot is allocated after the pre-call
+  refresh inside the same outer NJX handle scope, the remaining invariant is
+  allocator lifetime: `g_neko_current_handle_scope` stays set to `__njx_hsave`
+  while `call_stub` executes Java and can reenter translated native code, so
+  reentrant native handle allocations are owned by the outer NJX scope and can
+  become visible to HotSpot root scanning after Shenandoah moves them.
+  Corrected scope: detach the TLS scoped JNIHandleBlock allocator to the
+  previous scope for the duration of `call_stub`, then restore the NJX scope
+  immediately after return before normal `neko_njx_restore_java_handles` and
+  `neko_handle_restore`. Nested translated native calls must create and restore
+  their own scopes; no JNI/JVMTI/fallback or collector skipping is allowed.
+- Rejected/follow-up evidence 2026-05-23: detaching the TLS scope around
+  `call_stub` passed focused validation and fresh full regeneration, but strict
+  Shenandoah obfusjack still aborted with a forwarded `java.lang.Class` root.
+  The latest slab diagnostic moved the failing slot to a different active scope
+  while still matching scoped slab storage:
+  `slot=0x00007f3c14317da8`, slab
+  `start=0x7f3c14316a78 end=0x7f3c1431b478`, offset `4928`, block index
+  `16`, remainder `192` for that slab range. This proves the remaining
+  invariant is not only the outer NJX scope: VM-visible `JNIHandleBlock`
+  overflow blocks allocated from batch scoped slabs can outlive or be exposed
+  independently of the native scope owner that frees/reuses the slab memory.
+  Corrected scope: remove scoped batch-slab allocation for VM-visible
+  `JNIHandleBlock` overflow blocks and allocate each block through the existing
+  individual recycled/calloc path with mandatory clear-before-recycle/free.
+  Keep diagnostics env-gated, preserve HotSpot `_last`/`_next` chain shape, and
+  do not introduce JNI/JVMTI/fallback paths.
+- Follow-up evidence 2026-05-23: after removing scoped slab allocation,
+  focused validation and fresh full regeneration passed, but strict Shenandoah
+  obfusjack still aborted with a forwarded `java.lang.Class` root in
+  individually allocated C-heap memory near short-lived worker JavaThread
+  allocations. Exact `NEKO_ROOT_SLOT_DEBUG=1` did not log the verifier slot
+  `0x00007f585c3154f8`; nearby same-arena publisher lines show repeated
+  `handle_push_tail`/`direct_handle_tail` writes of Class roots into
+  `JNIHandleBlock` storage, including already-forwarded Class mirrors and
+  later raw Class mirrors. This proves the remaining issue is not the batch
+  allocator, but stale Class roots in handle blocks that can be inactive during
+  a Shenandoah update phase and later become visible. Corrected scope: refresh
+  the active `JNIHandleBlock` chain at generic `neko_handle_save` entry under
+  Shenandoah, before recording the saved top/tail state, so every translated
+  native method/window heals stale roots before saving or exposing the chain.
+- Rejected evidence 2026-05-23: adding the generic `neko_handle_save` entry
+  refresh passed focused validation, but the fresh full performance gate failed
+  by timing out `obfusjack-native.jar` after `PT2M`. The broad refresh is
+  rejected and removed. The next root fix must be narrower than every
+  translated handle-scope entry, or must identify the exact active-chain owner
+  at the failing safepoint before adding another refresh point.
+- Diagnostic scope 2026-05-23: with scoped slabs removed, extend the existing
+  env-gated range diagnostic to individual recycled/calloc `JNIHandleBlock`
+  allocations. The trace must log block start/end, scope pointer, and block
+  size only under `NEKO_ROOT_SLAB_DEBUG`, so the next strict Shenandoah
+  verifier slot can be matched to the exact individual block owner before
+  another runtime fix is attempted.
+- Rejected evidence 2026-05-23: the individual-block diagnostic artifact
+  failed the full performance gate by timing out `obfusjack-native.jar` after
+  `PT2M`. The strict Shenandoah diagnostic still reproduced the verifier abort,
+  but the failing slot `0x00007f7a20301a08` did not match any logged native
+  individual block range; the first nearby logged native block was
+  `0x7f7a20302a20..0x7f7a20302b48`. This rejects the no-slab allocator change
+  as both insufficient and too slow. Restore scoped batch allocation and pursue
+  the remaining root as a VM-created local/root owner issue rather than a native
+  block allocation issue.
+- Fresh evidence 2026-05-23: after restoring scoped allocation and removing the
+  broad refresh/block-range probes, a clean `NativeObfuscationPerfTest` focused
+  baseline regenerated TEST `build/neko-native-work/run-45681875164044` and
+  obfusjack `build/neko-native-work/run-45689393440171`. The default medians
+  were TEST Calc `4 ms`, obfusjack Platform `42 ms`, Virtual `36 ms`, Seq
+  `10 ms`, Parallel/VThreads `1 ms`; the user-stated best Calc `2-3 ms` is not
+  restored and strict Shenandoah remains open. A fresh strict Shenandoah run
+  with `NEKO_ROOT_SLAB_DEBUG=1` failed at verifier root slot
+  `0x00007fd2b832c278`, raw `0x00000005375daa70`, forwardee
+  `0x00000007fe9a2c80`. The slot is inside scoped slab
+  `start=0x7fd2b83291a8 end=0x7fd2b832dba8`, offset `12496`, block index
+  `42`, remainder `64`. A second run with `NEKO_ROOT_SLOT_DEBUG=1` failed at
+  slot `0x00007fb244326b98` in scoped slab
+  `start=0x7fb244322c38 end=0x7fb244327638`, offset `16224`, block index
+  `54`, remainder `240`; the trace shows this long-lived scope already held
+  repeated Class roots before the later microbench/matrix safepoint. The
+  invariant is therefore that roots in the saved native chain can become
+  forwarded during an NJX Java upcall and then survive into a later Shenandoah
+  mark cycle. Corrected scope: after each generated NJX `call_stub` returns and
+  before restoring the temporary Java handle block, refresh the saved native
+  `JNIHandleBlock` chain under Shenandoah by decoding marked-forwarding slots.
+  This is narrower than the rejected `neko_handle_save` refresh, preserves
+  HotSpot chain shape, and adds no JNI/JVMTI/fallback or collector skip.
+- Rejected evidence 2026-05-23: adding that post-`call_stub` saved-chain
+  refresh passed focused `CCodeGeneratorTest` / `OpcodeTranslatorUnitTest`, but
+  the fresh full default `NativeObfuscationPerfTest` gate failed by timing out
+  `obfusjack-native.jar` after `PT2M` on the obfusjack baseline run. The first
+  obfusjack run completed green (`Platform 40 ms`, `Virtual 31 ms`, `Seq
+  10 ms`), but the gate as a whole exceeded the timeout. The post-call refresh
+  is therefore too broad/expensive for hot NJX paths and is removed. The next
+  fix must avoid whole-chain scans on every NJX call and instead reduce
+  long-lived Class-root publication or refresh only at a proven low-frequency
+  owner.
+- Implementation scope 2026-05-23: shorten local-root lifetime in the
+  low-frequency MethodType/bootstrap/ConstantDynamic support surface instead of
+  scanning hot NJX chains. Source evidence: `neko_lookup_for_class`,
+  `neko_lookup_for_jclass`, `neko_method_type_from_descriptor`,
+  `neko_bootstrap_parameter_array`, `neko_invoke_bootstrap`, and
+  `neko_resolve_constant_dynamic` publish Class mirrors, method-name strings,
+  MethodType/parameter arrays, reflective Method objects, Lookup receivers, and
+  bootstrap results into the caller's active translated-method handle scope.
+  Those temporaries are used within the helper operation and only the helper's
+  return value needs to escape. Generic fix: add helper-local
+  `neko_handle_window_begin/end` windows and re-push only the returned raw oop
+  after `neko_prepare_return_oop`; null bootstrap/condy results remain null.
+  This preserves ABI/JVM semantics, avoids JNI/JVMTI/fallback, and avoids the
+  rejected per-NJX whole-chain scan.
+- Rejected evidence 2026-05-23: the helper-local window implementation passed
+  focused generator/translator tests, but the fresh full default performance
+  gate timed out on obfusjack. A direct run of the same generated
+  `obfusjack-native.jar` printed `=== All tests completed ===` with Platform
+  `44 ms`, Virtual `35 ms`, Seq `11 ms`, then failed to terminate until
+  `timeout 120s` killed the process with exit `124`. The helper-window shape is
+  therefore rejected and removed because it introduces a JVM lifecycle/handle
+  restoration regression even though application output completes.
+- Implementation scope 2026-05-23: reduce long-lived `java.lang.Class` local
+  roots on the generated static-field path. Source evidence: every
+  `neko_static_field_ref_class` calls `neko_ensure_class_initialized_once` and
+  then uses the returned class only as the same static field holder; the once
+  wrapper currently calls `neko_ensure_class_initialized`, which performs a
+  windowed `JVM_FindClassFromClass(init=true)` and then pushes a new local
+  Class root into the caller scope. The initialization side effect and init-slot
+  publication are required, but the caller-visible new Class local is not.
+  Generic fix: after successful initialization, set the slot and return the
+  original bound class handle `cls`; do not re-publish the initialized local in
+  the once path. Also keep `NEKO_CLASS_INIT_DEBUG` behind the initialized-slot
+  fast return so the hot initialized path performs no env lookup. Direct callers
+  of `neko_ensure_class_initialized` keep the existing API.
+- Fresh evidence 2026-05-23T04:40:37Z: after the static-field once change,
+  focused validation and the default full native perf gate passed. TEST Calc
+  returned to the user-stated best range with runs `3/2/3/3/2 ms` (median `3`),
+  obfusjack reported Platform `44/40/43/41/42 ms` (median `42`), Virtual
+  `32/36/31/31/30 ms` (median `31`), and Seq `11/11/10/10/12 ms` (median
+  `11`). Strict Shenandoah still aborts in matrix multiply with a forwarded
+  `java.lang.Class` root in scoped `JNIHandleBlock` slab storage. The current
+  `NEKO_ROOT_SLOT_DEBUG=1` run reports verifier slot `0x00007f78fc3382b8`,
+  raw `0x00000005379dc2c8`, forwardee `0x00000007fea33e80`, inside slab
+  `start=0x7f78fc335568 end=0x7f78fc339f68`, offset `11600`, block index
+  `39`, remainder `56`. A second `NEKO_ROOT_SCAN_DEBUG=1` run reproduced the
+  same invariant at slot `0x00007fcb44335908`, raw `0x00000005378f4cf8`,
+  forwardee `0x00000007fe9aac80`. Source evidence for the next narrow producer:
+  `neko_unsafe_instance_handle` materializes `Unsafe.class` through
+  `neko_klass_java_mirror_handle` only to read the static `theUnsafe` field,
+  but the `java.lang.Class` mirror handle then remains in the caller's active
+  translated scope across later NJX allocation calls. Generic fix: bracket only
+  that helper-local mirror/read in a handle window, resolve the returned
+  `Unsafe` object to a raw oop with `neko_prepare_return_oop`, close the window,
+  and push a caller-owned handle for the returned `Unsafe` object. This removes
+  an unnecessary long-lived Class local without changing object allocation ABI,
+  JNI/JVMTI usage, fallback behavior, or collector selection.
+- Fresh evidence 2026-05-23: after the Unsafe helper-local window change,
+  focused generator/translator validation and fresh full default regeneration
+  passed. The generated performance baseline preserved the user-stated best
+  Calc range at median `3 ms`, with obfusjack medians Platform `40 ms`,
+  Virtual `32 ms`, Seq `10 ms`, and Parallel/VThreads `1 ms`. Strict
+  Shenandoah obfusjack still aborts in matrix multiply with a forwarded
+  `java.lang.Class` root. `NEKO_ROOT_SLOT_DEBUG=1` reports verifier slot
+  `0x00007f645c326298`, raw `0x0000000527074380`, forwardee
+  `0x00000007ffc03e78`; the exact slot is not emitted by native root-slot
+  logging, and a temporary `NEKO_RETURN_OOP_DEBUG=1` probe later reproduced the
+  same invariant at slot `0x00007f1fa0323b98`, raw `0x00000005374f6918`,
+  forwardee `0x00000007fe992980`, without any `neko_prepare_return_oop` line
+  for that stale raw value. Read-only subagent audit identifies the narrowest
+  remaining producer as the VM lookup branch in
+  `neko_resolve_class_mirror_with_env`: `JVM_FindClassFromBootLoader` /
+  `JVM_FindClassFromClass` can create the returned `jclass` local directly in
+  HotSpot's active handle block, bypassing native publication logging, before
+  the helper decodes and re-pushes the mirror. Diagnostic scope: add only
+  env-gated `NEKO_CLASS_LOCAL_DEBUG` logging around that VM call and re-push
+  point, recording class name, returned local slot, raw oop, active handle block
+  and top before/after. The diagnostic must not alter runtime behavior and must
+  be removed or converted into a proven generic fix before a checkpoint commit.
+- Rejected evidence 2026-05-23: the class-local diagnostic artifact passed
+  focused validation and fresh full default regeneration, but the diagnostic
+  artifact regressed Virtual median to `36 ms`, so it cannot be retained.
+  Strict Shenandoah reproduced the verifier abort with slot
+  `0x00007f7f1031bc38`, raw `0x00000005378fe7d0`, forwardee
+  `0x00000007fe9a2b80`. Neither the exact slot nor raw appeared in
+  `NEKO_CLASS_LOCAL_DEBUG`; nearby slab diagnostics place the slot inside
+  scoped slab `start=0x7f7f10318ae8 end=0x7f7f1031d4e8`, offset `12624`,
+  block index `42`, remainder `192`. This rejects the exact VM-result branch
+  of `neko_resolve_class_mirror_with_env` as the current root source. The
+  temporary class-local diagnostic is removed; the next substep must identify a
+  different low-frequency producer/owner for unlogged Class roots in the same
+  scoped handle slab.
+- Implementation scope 2026-05-23: shorten the raw-String managed allocation
+  fallback's `Unsafe.allocateInstance(Class)` root lifetime. Source evidence:
+  the latest strict Shenandoah class-local diagnostic rejects the exact
+  `neko_resolve_class_mirror_with_env` VM-result slot, while nearby native
+  root-slot logs show the failing slab populated by static-object roots
+  (`NEKO_HANDLE_ORIGIN_STATIC_OBJECT_FIELD`) and NJX object returns
+  (`NEKO_HANDLE_ORIGIN_NJX_RETURN`) immediately around the raw String fallback.
+  The source owner is `neko_build_raw_string_graph_store_local`: when direct
+  String TLAB allocation fails, it resolves `java/lang/String`, reads the
+  scoped `Unsafe.theUnsafe` receiver, passes the String `Class` local through
+  generated `neko_njx_V_L_L`, and only needs the allocated String object to
+  escape. Generic fix: bracket that managed-allocation branch with a helper
+  handle window, decode the NJX result with `neko_prepare_return_oop`, close the
+  window, and publish only the allocated String object back to the caller's
+  scope. This does not special-case a benchmark or class, does not skip a
+  collector, and does not add JNI/JVMTI/fallback behavior. Completion evidence
+  must include focused codegen/translator validation, fresh default full native
+  performance regeneration preserving Calc `2-3 ms` and obfusjack thresholds,
+  and a fresh strict Shenandoah obfusjack run proving the forwarded Class-root
+  verifier abort is gone or providing a new exact producer.
+- Implementation scope 2026-05-23: shorten the helper-local Class argument
+  lifetime in the generic raw String managed-allocation fallback. Evidence:
+  the latest strict Shenandoah verifier slot is inside the same scoped slab
+  that immediately receives `NEKO_HANDLE_ORIGIN_STATIC_OBJECT_FIELD` and
+  `NEKO_HANDLE_ORIGIN_NJX_RETURN` roots during the raw String fallback; source
+  shows `neko_raw_string_graph` resolves `java/lang/String`, passes that
+  `jclass` as the sole object argument to `Unsafe.allocateInstance(Class)`,
+  and then keeps the Class mirror and Unsafe receiver in the enclosing
+  translated-method handle scope even though only the newly allocated String
+  object needs to escape. Generic fix: wrap only that managed allocation
+  subpath in a handle window, prepare the returned String oop before closing
+  the window, close the window to pop `String.class`/Unsafe temporaries, then
+  push a caller-owned handle for the returned String object before storing its
+  fields. This must not change raw-TLAB allocation, byte-array rooting, NJX ABI
+  shape, JNI/JVMTI usage, fallback behavior, or collector selection.
+- Follow-up evidence 2026-05-23: the raw String managed-allocation window
+  passed focused validation and fresh full default regeneration while
+  preserving performance: TEST Calc `3/2/2/3/2 ms`, obfusjack Platform median
+  `41 ms`, Virtual median `32 ms`, Seq median `10 ms`. Strict Shenandoah still
+  aborts in matrix multiply, and the debug repro reports verifier slot
+  `0x00007fdf4c32b838`, raw `0x00000005379e6318`, forwardee
+  `0x00000007fea13a80` inside scoped slab
+  `start=0x7fdf4c3289a8 end=0x7fdf4c32d3a8`, offset `11920`, block index
+  `40`, remainder `80`. The root-slot trace again reaches the same active
+  slab and then hits the diagnostic cap before the exact slot, so reducing one
+  producer is not sufficient. Corrected generic scope: refresh the active
+  `JNIHandleBlock` chain only when a translated thread observes a real
+  safepoint request in `neko_safepoint_poll_thread`, before it waits in
+  `_thread_in_native_trans`. This targets the verifier invariant at the GC
+  boundary, avoids the rejected per-handle-save and per-NJX whole-chain scans,
+  and must remain Shenandoah-only with hard abort on missing handle layout.
+- Rejected evidence 2026-05-23: the safepoint-request refresh passed focused
+  validation and fresh full default regeneration while preserving performance:
+  TEST Calc `3/3/2/3/3 ms`, obfusjack Platform median `43 ms`, Virtual median
+  `34 ms`, Seq median `10 ms`, Parallel median `1 ms`, VThreads median `1 ms`.
+  Strict Shenandoah still aborted in matrix multiply with verifier slot
+  `0x00007f65e834fe28`, raw `0x00000005374f3020`, forwardee
+  `0x00000007fe9eb480`. A follow-up `NEKO_ROOT_SCAN_DEBUG=1` run failed again
+  at slot `0x00007f3c58346968`, raw `0x00000005379080e0`, forwardee
+  `0x00000007fe9aac80`, and emitted no `safepoint_poll_request`,
+  `safepoint_poll_entry`, or root-scan lines. This rejects
+  `neko_safepoint_poll_thread` as the current failing boundary; the refresh is
+  removed before the next diagnostic.
+- Diagnostic scope 2026-05-23: identify the active scoped handle owner for the
+  remaining forwarded Class root. Previous strict runs prove the verifier slot
+  is inside a scoped JNIHandleBlock slab, but the native root-slot diagnostic
+  reaches the same active slab and hits the cap before the exact slot, and the
+  class-local VM-result diagnostic did not match the failing slot/raw value.
+  Add a temporary diagnostic-only `scope_site` tag to `neko_handle_save_t`, set
+  it from generated translated method frames and from handle-window callers,
+  and include it in `NEKO_ROOT_SLAB_DEBUG` slab-range output. Validation is a
+  focused codegen/translator regeneration followed by a fresh strict
+  Shenandoah obfusjack run with `NEKO_ROOT_SLAB_DEBUG=1` and
+  `NEKO_ROOT_SLOT_DEBUG=1`. Completion criteria: the diagnostic identifies the
+  concrete owner function/scope for the failing slab, or the run passes; the
+  temporary tag must be removed or converted into a proven generic fix before a
+  checkpoint commit.
+- Diagnostic completion 2026-05-23: focused codegen/translator validation
+  passed with the `scope_site` tag. The full default diagnostic artifact timed
+  out in obfusjack after `PT2M`, so the tag is diagnostic-only and cannot be
+  retained. The strict diagnostic run failed at verifier slot
+  `0x00007f6904323948`, raw `0x00000005375d5e20`, forwardee
+  `0x00000007fe9eb580`; the slot is inside slab
+  `0x7f6904320898..0x7f6904325298`, block index `42`, owned by
+  `site=neko_native_impl_47_frame`. The generated manifest maps
+  `neko_native_impl_47` to `org/example/Main.demoRandomApi()V`. This completes
+  the owner diagnostic and proves the remaining root is in a later block of a
+  translated method-frame handle chain, not in the rejected class-local
+  resolver branch.
+- Implementation scope 2026-05-23: refresh the full verifier-visible
+  JNIHandleBlock chain for Shenandoah. Source evidence: current
+  `neko_refresh_jnih_chain_for_shenandoah` stops at cached `_last`, while the
+  env-gated debug scanner also truncates on `top < capacity`. The strict owner
+  diagnostic proves the verifier-visible stale Class root sits in a later
+  `_next` block of a method-frame chain. Generic fix: remove the temporary
+  `scope_site` tag and make the Shenandoah refresh traverse every
+  `_next`-reachable block up to the hard chain cap; align the diagnostic scanner
+  to the same full-chain traversal. This changes refresh coverage only, does
+  not add JNI/JVMTI/fallback/collector skipping, and keeps missing/malformed
+  chain layout as a hard abort. Completion evidence must include focused
+  codegen/translator validation, fresh full default performance preserving Calc
+  `2-3 ms`, and strict Shenandoah obfusjack.
+- Follow-up evidence 2026-05-23: the full-chain refresh passed focused
+  validation and fresh full default performance: TEST Calc `2/3/3/3/2 ms`,
+  obfusjack medians Platform `41 ms`, Virtual `32 ms`, Seq `11 ms`,
+  Parallel/VThreads `1 ms`. Strict Shenandoah still aborted at verifier slot
+  `0x00007fce3c328f28`, raw `0x0000000526c75ee8`, forwardee
+  `0x00000007ffc03e78`; a `NEKO_ROOT_SCAN_DEBUG=1` strict run aborted at slot
+  `0x00007f15bc32e148`, raw `0x00000005370ecc80`, forwardee
+  `0x00000007fe99aa80`, and emitted no root-scan lines before the verifier
+  failure. This proves the remaining stale Class mirror is exposed at a
+  boundary not covered by the NJX pre-call refresh/debug scans. The full-chain
+  traversal remains a coverage correction but is not sufficient alone.
+- Implementation scope 2026-05-23: avoid method-frame local publication for
+  Klass mirror handles under moving collectors. Source evidence:
+  `neko_klass_java_mirror_handle` is the generic publisher for Class
+  LDC/current-owner/icache exact mirrors; it loads `Klass::_java_mirror`, then
+  pushes a duplicate local handle into the current translated method frame.
+  The latest strict failures are stale `java.lang.Class` roots in translated
+  method-frame slabs. Generic fix: for moving collectors, load-barrier the
+  mirror oop through the existing `Klass::_java_mirror` OopHandle slot and
+  return that VM-owned slot as the generated `jobject`/`jclass` operand instead
+  of pushing a duplicate local into the method frame. The VM mirror OopHandle is
+  the owning root; missing mirror offset/slot remains a hard abort or NULL as
+  before. No JNI/JVMTI/fallback/collector skip is introduced. Completion
+  evidence must include focused validation, fresh full default performance
+  preserving Calc `2-3 ms`, and strict Shenandoah obfusjack.
+- Rejected evidence 2026-05-23: the direct Klass mirror OopHandle operand
+  change passed focused validation and full default performance with TEST Calc
+  `3/3/2/3/2 ms`, obfusjack medians Platform `41 ms`, Virtual `35 ms`, Seq
+  `11 ms`, Parallel/VThreads `1 ms`, but strict Shenandoah still aborted at
+  verifier slot `0x00007f4df432cbc8`, raw `0x00000005378f2118`, forwardee
+  `0x00000007fea23b80`. The attempted OopHandle operand change is removed
+  because it does not resolve the failing invariant.
+- Implementation scope 2026-05-23: clear the synthetic JavaCallWrapper
+  saved-handle pointer after `call_stub` returns. Source evidence: generated
+  NJX stores `__njx_old_handles` into the stack-local JavaCallWrapper mirror at
+  `__jcw_buf + 8` before `call_stub` and currently leaves that pointer live
+  while `neko_njx_restore_java_handles`, frame-anchor restoration, and
+  `neko_handle_restore` can trim/free/reuse scoped JNIHandleBlock slabs. The
+  strict failures continue to report stale Class roots in outside-heap
+  JNIHandleBlock-like memory, and `NEKO_ROOT_SCAN_DEBUG=1` emitted no
+  active/old-handle scan lines before the verifier failure, leaving the
+  synthetic wrapper saved-handle slot as the unclosed root exposure. Generic
+  fix: write NULL to the synthetic wrapper `_handles` slot immediately after
+  `neko_call_stub_guarded` returns, before any handle restoration or slab
+  teardown. This changes only synthetic wrapper teardown lifetime and adds no
+  JNI/JVMTI/fallback/collector skip. Completion evidence must include focused
+  validation, fresh full default performance preserving Calc `2-3 ms`, strict
+  Shenandoah obfusjack, and generated-C inspection showing the clear precedes
+  handle restore.
+- Rejected evidence 2026-05-23: the JavaCallWrapper `_handles` clear passed
+  focused codegen/translator validation and generated-C inspection proved the
+  clear occurs immediately after `neko_call_stub_guarded(&__stub_args)` and
+  before `g_neko_current_handle_scope` restore,
+  `neko_njx_restore_java_handles`, frame-anchor restoration, and
+  `neko_handle_restore(&__njx_hsave)`. The partial fresh default performance
+  run preserved TEST Calc in the best-known range (`3/3/2/3/2 ms`) before the
+  obfusjack baseline timed out on a later iteration. Strict Shenandoah still
+  aborted with a forwarded `java.lang.Class` root; `NEKO_ROOT_SLAB_DEBUG=1`
+  matched the verifier slot `0x00007f956832c668` to scoped slab
+  `start=0x7f9568329308 end=0x7f956832dd08`, block index `44`, slot offset
+  `128`. A follow-up `NEKO_ROOT_SCAN_DEBUG=1` run again emitted no
+  active-chain scan lines before abort and matched slot `0x00007f836833a098`
+  to scoped slab `start=0x7f8368336c18 end=0x7f836833b618`, block index `45`,
+  slot offset `120`. This rejects the wrapper-clear lifetime as sufficient;
+  the remaining invariant is an exact stale Class publisher inside the
+  translated method-frame JNIHandleBlock chain.
+- Diagnostic scope 2026-05-23: capture the exact publisher/origin for the
+  remaining stale `java.lang.Class` root. Source evidence: the existing
+  `NEKO_ROOT_SLOT_DEBUG` stream reaches the same active slab but hits its
+  hard-coded diagnostic cap before the verifier slot, while previous
+  `scope_site` diagnostics already mapped the owner to
+  `org/example/Main.demoRandomApi()V`. Temporarily raise only the env-gated
+  root-slot diagnostic cap high enough for a strict Shenandoah obfusjack run,
+  preserving default behavior when the env var is absent. Validation is
+  focused codegen/translator regeneration followed by strict Shenandoah
+  obfusjack with `NEKO_ROOT_SLOT_DEBUG=1` and `NEKO_ROOT_SLAB_DEBUG=1`.
+  Completion criteria: the exact verifier slot or raw forwarded Class oop must
+  be tied to a generic publisher/origin, or the diagnostic must explain why the
+  slot is VM-created and unlogged; the raised cap must be removed before any
+  checkpoint commit unless converted into an accepted env-only diagnostic.
+- Diagnostic completion and implementation scope 2026-05-23: the raised
+  root-slot diagnostic cap produced over two million env-gated publisher lines.
+  Strict Shenandoah still aborted at verifier slot `0x00007f0c7031e2b0` with
+  stale raw Class oop `0x0000000527026790` and forwardee
+  `0x00000007ffc03ee8`. The exact verifier slot and stale raw oop do not appear
+  in native publisher logs, but the forwardee appears later as a normal
+  `handle_push_tail` root (`slot=0x7f0c70329380 raw=0x7ffc03ee8`). The verifier
+  slot matches historical scoped slab ranges, proving the bad slot is not a
+  current native publisher store and is consistent with VM-created locals being
+  appended through stale JNIHandleBlock chain metadata. Generic fix: repair the
+  active JNIHandleBlock head `_last` field to the actually `_next`-reachable
+  tail at handle-scope save/restore and NJX restore boundaries. This traverses
+  only block metadata, does not scan or mutate object root slots, and hard
+  aborts on malformed chains; it must not add JNI/JVMTI/fallback/collector
+  skipping. Completion evidence must include focused validation, generated-C
+  inspection, fresh default performance preserving Calc `2-3 ms`, and strict
+  Shenandoah obfusjack.
+- Rejected evidence 2026-05-23: the `_last` metadata repair passed focused
+  codegen/translator validation, but the fresh default performance gate timed
+  out on the first obfusjack baseline run after the application had printed
+  completion. That run reported Platform `34 ms`, Virtual `321 ms`, Seq
+  `11 ms`, Parallel/VThreads `1 ms`, while TEST Calc stayed in range
+  (`3/3/3/2/3 ms`). The repair changes VM local-handle lifecycle enough to
+  reintroduce the completed-output/non-terminating obfusjack failure class, so
+  the `_last` repair and temporary high diagnostic cap are removed before the
+  next substep.
+- Implementation scope 2026-05-23: refresh the saved translated method-frame
+  JNIHandleBlock chain after each NJX Java upcall returns under Shenandoah.
+  Source evidence: current generated NJX refreshes `__njx_old_handles` before
+  installing the Java-call active handle block, then stores the same old handle
+  chain into the synthetic `JavaCallWrapper` `_handles` field for
+  `call_stub`; after `call_stub` returns it restores TLS/active handles without
+  refreshing that old chain again. The strict failures are stale
+  `java.lang.Class` roots in the saved method-frame slab, the exact stale slot
+  is absent from native publisher logs, and prior root-scan diagnostics emitted
+  no active-chain scan before the verifier abort. Generic fix: add a
+  Shenandoah-only `neko_refresh_jnih_chain_for_shenandoah(__njx_old_handles,
+  "njx_old_refresh_after_call_*")` immediately after `call_stub` returns and
+  before `neko_njx_restore_java_handles` / method-scope restore. This does not
+  mutate metadata, does not scan under non-Shenandoah collectors, adds no
+  JNI/JVMTI/fallback/collector skip, and avoids the rejected `_last` repair and
+  broad bootstrap-windowing shapes. Completion evidence must include focused
+  codegen/translator validation, generated-C inspection showing the post-call
+  refresh before handle restoration, fresh default performance preserving Calc
+  `2-3 ms`, and strict Shenandoah obfusjack.
+- Rejected evidence 2026-05-23: the NJX post-call old-handle refresh passed
+  focused codegen/translator validation. A fresh obfusjack artifact was
+  regenerated despite the JUnit XML report writer failing after execution; the
+  artifact log reports `translated=93 rejected=0`, and generated
+  `run-51992814092166/neko_native_support.c` shows
+  `neko_refresh_jnih_chain_for_shenandoah(__njx_old_handles,
+  "njx_old_refresh_after_call_*")` immediately after
+  `neko_call_stub_guarded(&__stub_args)` and before TLS scope restoration,
+  `neko_njx_restore_java_handles`, and `neko_handle_restore`. Strict
+  Shenandoah obfusjack still aborted during matrix execution with
+  `Before Mark, Roots; Should not be forwarded`; the verifier slot was
+  `0x00007f9c44325e38`, stale raw Class oop `0x00000005375e1ac0`, forwardee
+  `0x00000007fe9f3680`. This rejects the post-call NJX refresh as sufficient;
+  the line is removed before the next substep.
+- Implementation scope 2026-05-23: make inline-cache miss resolution try
+  HotSpot metadata before calling VM member materialization. Source evidence:
+  generated `neko_icache_dispatch` currently opens `icache_window`, publishes
+  the receiver `Klass::_java_mirror` as a local handle, calls
+  `neko_link_class_methods(env, exactMirror, ...)`, and only then calls
+  `neko_resolve_method(receiverKlass, ...)`. `neko_link_class_methods` enters
+  `JVM_GetClassDeclaredMethods` / `JVM_GetClassDeclaredConstructors`, creating
+  unlogged VM locals under the same method-frame handle chain; this boundary is
+  not an NJX call-stub boundary and matches the sidecar audit plus the absent
+  native publisher logs. Generic fix: split the existing resolver into a
+  nullable metadata-only `neko_try_resolve_method` and an aborting wrapper, then
+  make `neko_icache_dispatch` call the nullable resolver first; only if it
+  returns NULL should it publish the exact mirror and call
+  `neko_link_class_methods`, then re-resolve with the existing aborting path.
+  This avoids VM member materialization when metadata is already available,
+  keeps the existing hard abort for true unresolved methods, and adds no
+  JNI/JVMTI/fallback/collector skip. Completion evidence must include focused
+  codegen/translator validation, generated-C inspection proving the metadata
+  attempt precedes `neko_link_class_methods`, fresh default performance
+  preserving Calc `2-3 ms`, and strict Shenandoah obfusjack.
+- Rejected evidence 2026-05-23: the metadata-first icache miss change passed
+  focused codegen/translator validation and the fresh generated artifact showed
+  `void *exactMethod = neko_try_resolve_method(...)` before the conditional
+  `neko_link_class_methods(...)` call. However, the direct default
+  `obfusjack-native.jar` run timed out after `30s` before printing the Platform
+  thread timing, with stdout stopping immediately after the microbench header.
+  This is an unacceptable default runtime/completion regression before strict
+  GC validation, so the nullable resolver prototype/body and icache change are
+  removed before the next substep.
+- Implementation scope 2026-05-23: refresh the active JNIHandleBlock chain
+  immediately after VM member materialization in the inline-cache miss path.
+  Source evidence: `neko_icache_dispatch` enters `neko_link_class_methods`,
+  which calls `JVM_GetClassDeclaredMethods` / `JVM_GetClassDeclaredConstructors`
+  inside the active translated method-frame handle chain and is not covered by
+  NJX call-stub refresh points. The metadata-first attempt proved changing
+  link order can regress default completion, so the order must stay intact.
+  Generic fix: keep the existing exact-mirror window and
+  `neko_link_class_methods` call, then call
+  `neko_refresh_active_handles_for_shenandoah(thread, "icache_link_after")`
+  before resolving/storing the direct target. This is a narrow Shenandoah-only
+  refresh at a VM boundary, adds no JNI/JVMTI/fallback/collector skip, and does
+  not change non-Shenandoah hot paths. Completion evidence must include
+  focused validation, generated-C inspection showing the refresh immediately
+  after `neko_link_class_methods`, fresh default obfusjack completion and Calc
+  `2-3 ms`, and strict Shenandoah obfusjack.
+- Rejected evidence 2026-05-23: the icache post-link active-handle refresh
+  passed focused `CCodeGeneratorTest` / `OpcodeTranslatorUnitTest`, regenerated
+  fresh obfusjack native artifacts with `translated=93 rejected=0`, and direct
+  default obfusjack completed with Platform `42 ms`, Virtual `51 ms`, Seq
+  `10 ms`, Parallel/VThreads `1 ms`. The fresh generated C showed
+  `neko_refresh_active_handles_for_shenandoah(thread, "icache_link_after")`
+  immediately after `neko_link_class_methods`, but strict Shenandoah still
+  aborted during matrix execution with verifier slot `0x00007f8cd4330618`,
+  stale raw Class oop `0x00000005378f6ca8`, and forwardee
+  `0x00000007fea0b880`. This rejects icache post-link refresh as sufficient;
+  the call and temporary declaration are removed before the next substep.
+- Implementation scope 2026-05-23: refresh active JNIHandleBlock roots after a
+  translated native safepoint wait under Shenandoah. Evidence: on the clean
+  regenerated artifact `build/neko-native-work/run-52712906915051`, strict
+  Shenandoah root-slot diagnostics still abort during matrix execution with
+  outside-heap `java.lang.Class` roots. `NEKO_ROOT_SLOT_DEBUG=1` reports
+  verifier slot `0x00007f26b83240b8`, raw `0x00000005379dfd00`, forwardee
+  `0x00000007fe9aad80`; the exact slot is not emitted by native root publishers.
+  `NEKO_ROOT_SLAB_DEBUG=1` reports verifier slot `0x00007f47cc328250`, raw
+  `0x00000005270180a8`, forwardee `0x00000007ffc03c28`; the slot is between
+  logged scoped-slab payload ranges, not inside one. `NEKO_ROOT_SCAN_DEBUG=1`
+  and `NEKO_ROOT_AREA_SUMMARY=1` report verifier slot `0x00007fbd9032fd98`,
+  raw `0x00000005378f7b28`, forwardee `0x00000007fe9db280`; no forwarded
+  active-handle or HandleArea slot is seen at method save/restore scan points.
+  Source evidence: `neko_safepoint_poll_thread` waits on HotSpot's polling word
+  and only calls `neko_debug_scan_active_handles(thread, "safepoint_poll_wait")`
+  when diagnostics are enabled; it does not refresh native-owned active
+  `JNIHandleBlock` roots after the safepoint completes. Generic fix scope:
+  after a real safepoint wait (`spins > 0`), call the existing Shenandoah-only
+  active-handle refresh before returning to translated execution. Required
+  evidence: focused validation, generated-C inspection showing the refresh is
+  only after a nonzero safepoint wait, default obfusjack completion preserving
+  the best Calc `2-3 ms` target, and strict Shenandoah obfusjack.
+- Rejected evidence 2026-05-23: the safepoint post-wait active-handle refresh
+  passed focused `CCodeGeneratorTest` / `OpcodeTranslatorUnitTest`, regenerated
+  obfusjack with `translated=93 rejected=0`, and generated C showed
+  `neko_refresh_active_handles_for_shenandoah(thread,
+  "safepoint_poll_after_wait")` only under `if (spins != 0)` after the polling
+  loop. Direct default obfusjack completed with Platform `43 ms`, Virtual
+  `30 ms`, Seq `10 ms`, Parallel/VThreads `1 ms`. Strict Shenandoah still
+  aborted during matrix execution with verifier slot `0x00007f83e02feb38`,
+  stale raw Class oop `0x0000000526cc9aa0`, and forwardee
+  `0x00000007ffc04370`. This rejects safepoint post-wait refresh as sufficient;
+  the runtime line is removed before the next substep.
+- Diagnostic scope 2026-05-23: add an env-gated NJX JavaCallWrapper/call-params
+  range trace around generated `call_stub` setup. Evidence: the clean
+  safepoint-rejected run's failing verifier slot is in the anonymous native
+  arena that also contains JavaThread structures, while exact slots remain
+  absent from native root-publisher, scoped-slab, active-handle, and derived
+  HandleArea diagnostics. Generated NJX code builds a synthetic
+  `JavaCallWrapper` in `__jcw_buf`, writes wrapper fields at fixed offsets
+  `+0/+8/+16/+24`, passes that buffer to `call_stub`, and publishes raw object
+  arguments through stack `call_params`. Required evidence: focused generation
+  validation, generated-C inspection showing the trace logs `__jcw_buf`,
+  `__jcw_buf + 0/+8/+16/+24`, `__jcw_anchor`, and `call_params` ranges under
+  `NEKO_ROOT_SLOT_DEBUG`, then strict Shenandoah obfusjack comparing the
+  verifier `slot=` address to those ranges. Completion criteria: if the slot is
+  inside the logged wrapper or params range, the next implementation must use a
+  generic JavaCallWrapper layout/size correction with hard abort on missing
+  VMStruct data; if it is outside, this candidate is rejected and the next
+  target is HotSpot-owned transition/call-stub frame roots.
+- Rejected diagnostic evidence 2026-05-23: focused `CCodeGeneratorTest` /
+  `OpcodeTranslatorUnitTest` passed, fresh obfusjack regeneration produced
+  `build/neko-native-work/run-53519574884651`, and generated
+  `neko_native_support.c` emitted `neko_debug_njx_call_stub_roots(...)` for
+  every NJX dispatcher. Strict Shenandoah with `NEKO_ROOT_SLOT_DEBUG=1`
+  reproduced the verifier abort with slot `0x00007fdcc83241c8`, stale raw
+  Class oop `0x00000005379b7ce0`, and forwardee `0x00000007fe98a980`.
+  The logged wrapper/argument ranges were stack addresses around
+  `0x7fdcccffb3b0..0x7fdcccffb6c0`, while the verifier slot was in the native
+  C-heap arena, was absent from `neko-njx-jcw` and native root-publisher logs,
+  and was `0x178` bytes before a JavaThread allocation reported in `hs_err`.
+  This rejects the synthetic JavaCallWrapper/call-params range as the remaining
+  root location; the temporary trace is removed before the next substep.
+- Diagnostic scope 2026-05-23: extend the existing `NEKO_ROOT_SLOT_DEBUG`
+  native root-publisher trace with the owning `JavaThread*`. Evidence: the
+  JavaCallWrapper diagnostic rejected stack wrapper/argument ranges, while the
+  same run showed native-owned root publications in the same C-heap arena around
+  `0x7fdcc8320e98..0x7fdcc8320ec8`; the verifier slot
+  `0x00007fdcc83241c8` is absent from those logs and is adjacent to an exited
+  JavaThread allocation (`0x00007fdcc8324340`) in `hs_err` thread events. The
+  current native publisher trace records slot/block/top/origin but not the
+  `JavaThread*`, so it cannot distinguish main-thread, worker-thread, and
+  exited-thread handle ownership. Required evidence: focused validation,
+  generated-C inspection showing `[neko-root]` includes `thread=`, and strict
+  Shenandoah obfusjack with `NEKO_ROOT_SLOT_DEBUG=1` that correlates nearby
+  same-arena native blocks to a concrete thread or proves the remaining slot is
+  outside all native-published thread-owned roots.
+- Diagnostic evidence 2026-05-23: focused validation passed, fresh obfusjack
+  regeneration produced `build/neko-native-work/run-53921422067847`, and
+  generated `neko_native_support.c` emitted `[neko-root] site=%s thread=%p ...`
+  with thread-aware call sites. Strict Shenandoah with `NEKO_ROOT_SLOT_DEBUG=1`
+  reproduced the verifier abort at slot `0x00007f1fd032c468`, stale raw Class
+  oop `0x00000005379f10d8`, and forwardee `0x00000007fea13a80`. Native root
+  publisher logs showed nearby generated handle storage at
+  `0x7f1fd0329118..0x7f1fd0329148` owned by main `JavaThread`
+  `0x7f1fd00d8650`, but did not publish the verifier slot. `hs_err` thread
+  events show `JavaThread` `0x00007f1fd032c5e0` was added at `4.145`, exited at
+  `4.184`, and the verifier slot is again exactly `0x178` bytes before that
+  JavaThread allocation. This rejects direct native root-publisher ownership as
+  the remaining root source and keeps the next diagnostic on generic
+  object-carrier/root ownership across safepointing native boundaries.
+- Diagnostic scope 2026-05-23: add an env-gated object-carrier/local-root
+  lifetime trace around generated object stores and safepointing call
+  boundaries. Source evidence: generated object locals are prepared by
+  `neko_prepare_local_oop_roots`, object stores write the rooted slot but return
+  `return (jobject)raw_oop`, and `PUSH_O` / `POP_O` carry untyped `jobject`
+  values across later `neko_njx_*`, `neko_icache_dispatch`, safepoint poll, and
+  Java-call boundaries. Required evidence: focused validation, generated-C
+  inspection proving the trace is behind `NEKO_ROOT_SLOT_DEBUG`, and strict
+  Shenandoah obfusjack proving whether the verifier slot maps to a Neko-owned
+  local-root/JNIHandleBlock range or whether a raw object carrier crossed a
+  safepoint and was later re-published stale. Completion criteria: either the
+  exact producer is identified for a generic handle-backed object carrier fix,
+  or this candidate is rejected with a fresh verifier slot and absence from the
+  new object-carrier/local-root trace.
+- Rejected diagnostic evidence 2026-05-23: the object-carrier/local-root trace
+  passed focused codegen/translator validation and fresh obfusjack regeneration
+  produced `build/neko-native-work/run-54388925603133`. Generated
+  `neko_native_support.c` emitted the env-gated `[neko-obj-life]` helper, traced
+  `PUSH_O` / `POP_O`, `local_root_prepare`, `local_root_store_return`, and
+  generated NJX argument decode/parameter publication sites. Strict Shenandoah
+  with `NEKO_ROOT_SLOT_DEBUG=1` reproduced the verifier abort at slot
+  `0x00007f7e20323728`, stale raw Class oop `0x00000005379e5dc0`, and forwardee
+  `0x00000007fe9c3080`. The exact slot, stale raw oop, and forwardee were absent
+  from `[neko-root]` and `[neko-obj-life]` logs. Nearby same-arena traces showed
+  generated object carriers moving handle slot `0x7f7e20320600`, but the
+  verifier slot is again exactly `0x178` bytes before an exited JavaThread
+  allocation (`0x00007f7e203238a0`) reported by `hs_err` thread events. This
+  rejects raw generated object carriers and Neko local-root publication as the
+  current root owner. Diagnostic limitation: the current readable-range helper
+  caches `/proc/self/maps` once, so later C-heap allocations can be reported as
+  unreadable in debug output; refreshing the map cache on misses is required
+  before relying on carrier decode kind.
+- Diagnostic scope 2026-05-23: add a read-only, env-gated thread-adjacent root
+  window trace for the repeated `JavaThread* - 0x178` invariant. Evidence: the
+  last three strict Shenandoah failures placed the verifier root outside logged
+  native publisher, JavaCallWrapper/call-params, and object-carrier/local-root
+  ranges while `hs_err` thread events placed the slot exactly `0x178` bytes
+  before a short-lived JavaThread allocation. Scope: under `NEKO_ROOT_SLOT_DEBUG`
+  or `NEKO_ROOT_SCAN_DEBUG` only, refresh `/proc/self/maps` on debug
+  readable-range misses, scan a bounded readable window from `thread - 0x200`
+  through `thread`, and extend the existing HotSpot HandleArea scanner to
+  include `slot-thread` relation output at translated safepoint/upcall
+  boundaries. Both traces must log only words whose object header is a
+  Shenandoah forwarding pointer. Required evidence: focused validation,
+  generated-C inspection proving the diagnostic is env-gated and read-only, and
+  a strict Shenandoah obfusjack run whose verifier slot either appears in the
+  thread-adjacent/HandleArea trace or remains absent. Completion criteria: a
+  matching slot identifies the concrete VM-owned
+  transition/thread-adjacent root lifecycle for the next generic fix; absence
+  rejects the `JavaThread* - 0x178` window as the active root owner.
+- Diagnostic refinement 2026-05-23: the first `NEKO_ROOT_SCAN_DEBUG=1`
+  strict Shenandoah run reached obfusjack microbench output but timed out after
+  120s with empty stderr and no `[neko-thread-adjacent]` / `[neko-root-area]`
+  hits, so the broad scan mode is too slow for this reproducer. A same-artifact
+  strict run without diagnostics still aborted quickly at slot
+  `0x00007f6ebc337d28`, stale raw Class oop `0x00000005370ee6b8`, forwardee
+  `0x00000007fe9a2b80`; `hs_err` thread events place a short-lived JavaThread
+  allocation at `0x00007f6ebc337ed0`, exited at `0.998`, leaving the verifier
+  slot in the same pre-JavaThread arena window. Refined diagnostic scope: add
+  `NEKO_THREAD_ADJ_DEBUG`, a lower-overhead gate that scans only the bounded
+  pre-thread window plus HotSpot HandleArea forwarded roots at translated
+  transition/upcall boundaries, without enabling root publisher,
+  object-carrier, or full JNIHandleBlock chain scans.
+- Diagnostic correction 2026-05-23: the first `NEKO_THREAD_ADJ_DEBUG=1`
+  strict Shenandoah run timed out after 120s, reached obfusjack Platform/Virtual
+  microbench output, emitted empty stderr, and produced no
+  `[neko-thread-adjacent]` / `[neko-root-area]` hits or `hs_err` file. Source
+  inspection showed the bounded pre-thread scanner was enabled by
+  `NEKO_THREAD_ADJ_DEBUG`, but the derived HotSpot `HandleArea` scanner still
+  returned unless `NEKO_ROOT_SCAN_DEBUG` or `NEKO_ROOT_SLOT_DEBUG` was set. This
+  invalidates the first narrow run as a HandleArea rejection. Corrected scope:
+  allow `NEKO_THREAD_ADJ_DEBUG` to enter only the existing validated HandleArea
+  scanner while keeping native publisher, object-carrier, and full
+  JNIHandleBlock-chain scans disabled.
+- Rejected diagnostic evidence 2026-05-23: after the corrected
+  `NEKO_THREAD_ADJ_DEBUG` gate, focused codegen/translator validation passed and
+  fresh obfusjack regeneration produced `build/neko-native-work/run-56062264734744`.
+  Generated C showed `NEKO_THREAD_ADJ_DEBUG`, the NJX
+  `neko_debug_thread_adjacent_roots(...)` call sites, and the HandleArea scanner
+  condition accepting the thread-adjacent gate. Strict Shenandoah with
+  `NEKO_THREAD_ADJ_DEBUG=1` still timed out after 120s, reached obfusjack
+  Platform/Virtual microbench output, and emitted no stderr, no `hs_err`, and no
+  `[neko-thread-adjacent]` / `[neko-root-area]` hits. The same fresh artifact
+  without diagnostics aborted during matrix execution at slot
+  `0x00007f7610305c08`, stale raw Class oop `0x000000051d313288`, forwardee
+  `0x00000007ffc01a00`; `hs_err` thread events place that slot in the same
+  native arena before a cluster of short-lived JavaThread allocations, including
+  `0x00007f7610309f10`. The per-slot HandleArea diagnostic is therefore too
+  expensive for this reproducer. Next diagnostic scope: keep the bounded
+  pre-thread forwarding check, but replace `NEKO_THREAD_ADJ_DEBUG`'s derived
+  HandleArea per-slot walk with an opt-in range-only summary of validated
+  HandleArea chunks, so strict runs can compare the verifier slot to
+  `[neko-root-area-range]` without reading every candidate oop slot.
+- Diagnostic volume correction 2026-05-23: the first range-only run passed
+  focused validation and regeneration, then timed out after 120s with no
+  `hs_err` while `threadadj-ranges.err` reached the 20,000-line summary cap.
+  All sampled tail rows repeated the same main JavaThread range
+  `bottom=0x7f76d80084b0 hwm=0x7f76d80084b0 top=0x7f76d8008588`, so duplicate
+  range logging starved later worker-thread evidence. Corrected scope: dedupe
+  `[neko-root-area-range]` by `(thread, chunk, bottom, hwm, top)` and keep the
+  diagnostic read-only/env-gated.
+- Diagnostic overhead correction 2026-05-23: deduped range logging reduced
+  stderr to one range line, but the strict run still timed out after 120s before
+  completing Platform/Virtual output. The remaining enabled work is the bounded
+  pre-thread scanner running from every translated transition hook. Corrected
+  scope: under `NEKO_THREAD_ADJ_DEBUG` alone, inspect only NJX call-boundary
+  sites; keep transition/safepoint coverage available through the broader
+  `NEKO_ROOT_SLOT_DEBUG` / `NEKO_ROOT_SCAN_DEBUG` diagnostics.
+- Diagnostic split 2026-05-23: after narrowing `NEKO_THREAD_ADJ_DEBUG` to NJX
+  call-boundary sites, strict Shenandoah still timed out before Platform
+  completion and emitted one deduped main-thread range. The remaining overhead
+  is the bounded pre-thread forwarding scan on frequent NJX calls. Corrected
+  scope: allow `NEKO_ROOT_AREA_SUMMARY=1` alone to emit deduped NJX HandleArea
+  ranges without the pre-thread forwarding scan; keep `NEKO_THREAD_ADJ_DEBUG`
+  for the bounded pre-thread scan.
+- Diagnostic evidence 2026-05-23: summary-only strict Shenandoah reached matrix
+  execution and reproduced the verifier abort at slot `0x00007f69cc329aa8`,
+  stale raw Class oop `0x00000005378f43f8`, forwardee
+  `0x00000007fe9a2b80`. The exact JavaThread allocation
+  `0x00007f69cc329c50` was logged by `hs_err`; the failing slot is
+  `thread - 0x1a8`. The matching deduped HandleArea summary for that thread was
+  `chunk=0x7f69cc326900 bottom=0x7f69cc326910 hwm=0x7f69cc326918 top=0x7f69cc3269e8`,
+  so the verifier slot is outside the derived HandleArea range. Next diagnostic
+  scope: extend the same low-overhead `NEKO_ROOT_AREA_SUMMARY` NJX path to log
+  active JNIHandleBlock block/handle ranges, proving whether the remaining
+  slot is in active JNI handles or in another JavaThread-adjacent VM allocation.
+- Rejected diagnostic evidence 2026-05-23: after adding the
+  `NEKO_ROOT_AREA_SUMMARY` active JNIHandleBlock range summary, focused
+  codegen/translator validation passed. Fresh obfusjack regeneration produced
+  `build/neko-native-work/run-57408100959121` and a current
+  `neko-test/build/test-native/obfusjack-native.jar`; Gradle failed only while
+  writing the XML test report, and generated C inspection confirmed
+  `neko_debug_summarize_active_jnih` was present in the fresh artifact. Strict
+  Shenandoah summary-only repro reached matrix execution and aborted at verifier
+  slot `0x00007f0e24331fc8`, stale raw Class oop `0x00000005374f2038`,
+  forwardee `0x00000007fe9d3180`. `hs_err` thread events report JavaThread
+  `0x00007f0e24332170`; the verifier slot is exactly `thread - 0x1a8`. The
+  same-thread active JNIHandleBlock summaries showed handle ranges outside that
+  slot, for example `head=0x7f0d2e1fdbe0 handles=0x7f0d2e1fdbe0
+  hwm=0x7f0d2e1fdbe0 cap=0x7f0d2e1fdce0 top=0`, and later summaries for that
+  thread still had `top=0` and distant `0x7f0d...` storage. The same-thread
+  HandleArea ranges were `0x7f0e2432e9c0..0x7f0e2432ea98` and later
+  `0x7f0e24341450..0x7f0e24341528`, neither containing
+  `0x00007f0e24331fc8`. This rejects active JNIHandleBlock and derived
+  HandleArea ownership for the reproduced root. Next diagnostic scope: under
+  summary-only `NEKO_ROOT_AREA_SUMMARY`, add a deduped, read-only raw
+  pre-JavaThread window dump for `thread - 0x200` through `thread`, logging
+  aligned slots and values without dereferencing or mutating them. Required
+  evidence is a fresh strict Shenandoah run showing whether the stale Class oop
+  is already present in the JavaThread-adjacent VM window before HotSpot root
+  verification aborts.
+- Rejected diagnostic evidence 2026-05-23: the pre-JavaThread window dump
+  passed focused codegen/translator validation, and fresh obfusjack native
+  regeneration passed with `build/neko-native-work/run-57792900472522` as the
+  current artifact. The first strict summary-only Shenandoah run aborted at
+  verifier slot `0x00007ffb38331d78`, stale raw Class oop
+  `0x00000005374e3838`, forwardee `0x00000007fe962380`; `hs_err` reports
+  JavaThread `0x00007ffb38331f20`, so the slot is `thread - 0x1a8`. A captured
+  rerun aborted at verifier slot `0x00007efc9032eaf8`, stale raw Class oop
+  `0x000000052f974f30`, forwardee `0x00000007fe90c9f0`; `hs_err` reports
+  JavaThread `0x00007efc9032ec70`, so the slot is `thread - 0x178`. The same
+  captured stderr logged that exact slot for that exact thread at NJX boundary
+  fingerprints `index=7` and `index=80`, and both rows had `raw=(nil)`. No
+  `0x52f974f30` row appeared in the summary log. Same-thread active
+  JNIHandleBlock summaries had `top=0` with distant `0x7efb...` storage, and
+  same-thread HandleArea ranges were distant from `0x00007efc9032eaf8`. This
+  rejects NJX-boundary-only ownership for the stale slot: the slot is null at
+  logged NJX boundaries and contains the stale Class oop at root verification.
+  Next diagnostic scope: keep the summary-only window read-only/env-gated, but
+  also sample translated handle-scope save/restore boundaries
+  (`handle_save`, `handle_restore_before`, `handle_restore_after`) to identify
+  the first native boundary where the JavaThread-adjacent slot changes.
+- Diagnostic volume correction 2026-05-23: the first handle-scope summary run
+  used fresh artifact `build/neko-native-work/run-58309830770410` and timed out
+  after `120s` with no `hs_err`; stdout reached obfusjack Platform
+  `1225 ms`, and stderr grew to `8208929` bytes. Tail rows show
+  `[neko-root-jnih-range]` from `handle_save`, `handle_restore_before`, and
+  `handle_restore_after` consuming the 20,000-line active-JNI summary cap on a
+  long `0x7f4f68204be0..0x7f4f68205770` handle chain. The active-JNI and
+  HandleArea ownership questions were already rejected by NJX summary evidence.
+  Corrected scope: for handle-scope sites under summary-only
+  `NEKO_ROOT_AREA_SUMMARY`, emit only the deduped pre-JavaThread raw window;
+  keep active-JNI and HandleArea summaries on NJX sites.
+- Diagnostic evidence 2026-05-23: after narrowing handle sites to window-only,
+  focused validation and fresh obfusjack regeneration passed with
+  `build/neko-native-work/run-58588744670798`. Strict summary-only Shenandoah
+  aborted during matrix execution. The run reached Platform `397 ms` and
+  Virtual `5058 ms` under diagnostics, then `hs_err_thread_window_scope2_4.log`
+  reported verifier slot `0x00007f063831ea38`, stale raw Class oop
+  `0x0000000527074660`, forwardee `0x00000007ffc03e78`. The nearest matching
+  short-lived JavaThread event in the same allocation cluster is
+  `0x00007f06383247a0`, making the verifier slot `thread - 0x5d68`; this is
+  outside the current `thread - 0x200` raw window. The summary log contains no
+  `[neko-thread-window]` row within `0x2000` bytes of the verifier slot. Next
+  diagnostic scope: at handle-scope summary sites, add a read-only larger
+  pre-thread forwarded-oop scan over `thread - 0x8000` through `thread`, logging
+  only slots whose raw value is an oop with a forwarding mark, capped globally.
+- Diagnostic volume correction 2026-05-23: the first `thread - 0x8000`
+  forwarded scan used fresh artifact `build/neko-native-work/run-58825160045729`
+  and timed out after `120s` with no `hs_err`; stdout reached Platform
+  `396 ms`, stderr reached `8798106` bytes, and the log contained `36994`
+  `[neko-thread-arena-forwarded]` lines. The first and last cap rows repeatedly
+  report the same slot `0x7f79f80d83c8` with raw `0x7f7900000000`, which is
+  not in the zero-based compressed Java heap range previously reported by
+  `hs_err` (`0x000000051d000000..0x0000000800000000`). Corrected scope: filter
+  forwarded-scan candidates through the current compressed-oop heap address
+  range and dedupe logged hits by `(slot, raw)` before consuming the global cap.
+- Diagnostic evidence 2026-05-23: after heap-range filtering and `(slot, raw)`
+  dedupe, focused validation and fresh obfusjack regeneration passed. Strict
+  summary-only Shenandoah still timed out after `120s` with no `hs_err`; stdout
+  reached the Platform/Virtual section header but no Platform timing, and
+  stderr dropped to `993394` bytes. The filtered scan logged two real
+  Java-heap forwarded roots at `handle_save` for thread `0x7f396c3023e0`:
+  slot `0x7f396c2fe058`, raw `0x51d311788`, forwardee `0x7ffc01910`,
+  `thread - 0x4388`; and slot `0x7f396c2fe0d8`, raw `0x51d313680`,
+  forwardee `0x7ffc01a00`, `thread - 0x4308`. Active JNIHandleBlock and
+  HandleArea summaries did not contain these slots. Corrected scope: move the
+  larger forwarded-only pre-thread scan off frequent handle boundaries and run
+  it only from the `safepoint_poll_wait` diagnostic path, where translated code
+  has observed a real safepoint request.
+- Rejected diagnostic evidence 2026-05-23: after moving the larger forwarded
+  scan to `safepoint_poll_wait`, focused codegen/translator validation passed
+  and fresh obfusjack native regeneration passed. Strict summary-only
+  Shenandoah aborted after Platform `390 ms` and Virtual `4674 ms`.
+  `hs_err_safepoint_arena_resume_4.log` reported verifier slot
+  `0x00007f5278323fa8`, stale raw Class oop `0x000000052f480d98`, and
+  forwardee `0x00000007fe958270`. `hs_err` thread events show JavaThread
+  `0x00007f5278324150` added at `1.279`, exited at `1.361`, added again at
+  `1.669`, and exited at `1.752`; the verifier slot is `thread - 0x1a8`.
+  The same stderr captured the exact slot for that exact thread as `raw=(nil)`
+  at `handle_save` lines `6331`, `6396`, and `12931`, and the same window was
+  present at NJX after-call summary line groups before the verifier abort. The
+  run emitted zero `[neko-thread-arena-forwarded]` rows. This rejects
+  safepoint-wait-only wide scanning as a sufficient diagnostic scope for the
+  remaining stale Class root: no translated `safepoint_poll_wait` evidence was
+  emitted before HotSpot root verification failed. Next diagnostic scope:
+  source-map the remaining pre-JavaThread root owner and add a read-only,
+  low-overhead proof point at a generic transition that occurs after the last
+  nil handle/NJX window and before HotSpot root verification.
+- Diagnostic scope 2026-05-23: add a finite, read-only `NEKO_GLOBAL_REF_DEBUG`
+  trace for every Neko bind-time and manifest `NewGlobalRef` result. Source
+  evidence: OpenJDK 21 Shenandoah root verification scans `JNIHandles::oops_do`
+  before `Threads::possibly_parallel_oops_do`, while the current diagnostics
+  cover translated active handles, current HandleArea ranges, object carriers,
+  NJX wrapper ranges, and pre-JavaThread windows but do not log bind-time
+  global JNI handle slots unless the broad `NEKO_ROOT_SLOT_DEBUG` path is
+  enabled. Current source evidence shows remaining `NewGlobalRef` call sites in
+  `neko_bind_owner_class_slot`, `neko_bind_class_slot_from`,
+  `neko_bind_primitive_class_slot`, `neko_bind_string_slot`, and manifest
+  owner/alias preparation. Required evidence: focused codegen/translator
+  validation, generated-C inspection showing the new gate is read-only and
+  limited to global-ref slot logging, fresh obfusjack native regeneration, and
+  strict Shenandoah obfusjack with `NEKO_GLOBAL_REF_DEBUG=1`. Completion
+  criteria: if the verifier slot matches a `[neko-global-ref] slot=...` row,
+  the next generic repair is the existing T4.8 global-ref de-JNI/global-handle
+  surface; if no exact slot match is present, Neko bind-time/manifest global
+  refs are rejected as the owner of the remaining stale Class root for this
+  reproducer.
+- Rejected diagnostic evidence 2026-06-01: the `NEKO_GLOBAL_REF_DEBUG`
+  diagnostic passed focused codegen/translator validation, and fresh obfusjack
+  native regeneration produced current artifact
+  `build/neko-native-work/run-40222423595912` plus
+  `neko-test/build/test-native/obfusjack-native.jar`. The Gradle integration
+  harness regenerated and ran the jar to completion, then failed only while
+  writing the XML result file; runtime stdout ended with
+  `=== All tests completed ===`, stderr was empty, and the obfuscation log
+  reported `Native stage: translated=93 rejected=0`. Strict Shenandoah with
+  `NEKO_GLOBAL_REF_DEBUG=1` exited `134` and wrote
+  `build/native-run-tmp/hs_err_global_ref_4.log`. The verifier reported
+  outside-heap root slot `0x00007fa1a4322bb8`, stale raw Class oop
+  `0x0000000527076440`, and forwardee `0x00000007ffc03e78`. Current-run stderr
+  contained 6,284 `[neko-global-ref]` rows for owner class, class slot,
+  primitive class slot, string slot, and manifest owner global refs, but exact
+  grep found no row with `slot=0x7fa1a4322bb8` and no row with
+  `raw=0x527076440`. This rejects Neko bind-time and manifest global refs as
+  the exact owner of the remaining stale Class root in this reproducer. A
+  follow-up broad `NEKO_ROOT_SLOT_DEBUG=1 NEKO_ROOT_SCAN_DEBUG=1
+  NEKO_THREAD_ADJ_DEBUG=1` run timed out after `120s` with no `hs_err`; stdout
+  reached the Platform/Virtual section and stderr logged native-owned main
+  thread local roots, but the run did not reproduce the verifier abort and does
+  not provide owner proof. Next diagnostic scope: add a lower-overhead,
+  forwarded-only proof point at a generic handle/NJX/transition boundary that
+  occurs before HotSpot root verification, without enabling full root publisher
+  or object-carrier logging.
+- Diagnostic scope 2026-06-01: add a finite, read-only `NEKO_ROOT_AREA_SUMMARY`
+  / `NEKO_THREAD_OOPHANDLE_DEBUG` trace for VMStruct-exposed `JavaThread`
+  OopHandle fields (`_threadObj`, `_vthread`, `_jvmti_vthread`,
+  `_scopedValueCache`) at the same summary handle/NJX boundaries already used
+  for the pre-JavaThread window. Source evidence: the fresh summary-only strict
+  Shenandoah run exited `134` with
+  `build/native-run-tmp/hs_err_summary_current_4.log`; the verifier root slot
+  was `0x00007fc3ac320178`, stale raw Class oop `0x000000052f973ad8`, and
+  forwardee `0x00000007fe904070`. `hs_err` thread events show JavaThread
+  `0x00007fc3ac3202f0` was added and exited twice before the verifier abort,
+  while the live JavaThread list at abort did not contain it. The verifier slot
+  is exactly `thread - 0x178`; current-run stderr logged that exact slot for
+  that exact JavaThread at `handle_save` three times with `raw=(nil)`. Local
+  OpenJDK 21 source evidence maps the failing verifier phase to Shenandoah root
+  scanning through `Threads::possibly_parallel_oops_do` and VM strong
+  `OopStorageSet`, and VMStructs expose the JavaThread OopHandle fields.
+  Required evidence: focused codegen/translator validation, generated-C
+  inspection proving the trace is read-only, bounded, and env-gated, fresh
+  obfusjack native regeneration, and strict Shenandoah obfusjack with the new
+  OopHandle trace. Completion criteria: an exact verifier `slot=` match in
+  `[neko-thread-oophandle]` identifies the remaining owner as a JavaThread
+  OopHandle/OopStorage root; no exact match rejects those OopHandle fields for
+  the reproduced run and redirects the next generic proof point to another
+  HotSpot-owned root family.
+- Rejected diagnostic evidence 2026-06-01: the JavaThread OopHandle diagnostic
+  passed focused codegen/translator validation, generated-C inspection showed
+  `NEKO_THREAD_OOPHANDLE_DEBUG` and `[neko-thread-oophandle]` rows in fresh
+  obfusjack artifact `build/neko-native-work/run-41658063184898`, and fresh
+  obfusjack native regeneration produced `translated=93 rejected=0` with
+  runtime stdout ending in `=== All tests completed ===`. Strict Shenandoah
+  with `NEKO_THREAD_OOPHANDLE_DEBUG=1` exited `134` and wrote
+  `build/native-run-tmp/hs_err_oophandle_4.log`. The verifier reported
+  outside-heap root slot `0x00007f848833dd98`, stale raw Class oop
+  `0x00000005365da448`, and forwardee `0x00000007fe9cb180`. Current-run
+  stderr contained 8,316 `[neko-thread-oophandle]` rows for `_threadObj`,
+  `_vthread`, `_jvmti_vthread`, and `_scopedValueCache`; exact grep found no
+  row containing `0x7f848833dd98`, `0x5365da448`, or `0x7fe9cb180`. This
+  rejects those VMStruct-exposed JavaThread OopHandle fields as the exact owner
+  of the remaining stale Class root in this reproducer.
+- Diagnostic scope 2026-06-01: add a finite, read-only
+  `NEKO_KLASS_MIRROR_DEBUG` trace at `Klass::_java_mirror` OopHandle loads.
+  Source evidence: local OpenJDK 21 exposes `Klass::_java_mirror` as an
+  `OopHandle`; current generated support has `off_klass_java_mirror`,
+  `neko_klass_java_mirror_oop_raw`, and a static-object field path that reads
+  the mirror through the raw helper before static base fallback. The verifier
+  stale object is a `java.lang.Class`, while active JNI, current HandleArea,
+  bind-time/manifest global refs, and JavaThread OopHandle fields have been
+  rejected by exact slot comparison. Required evidence: focused
+  codegen/translator validation, generated-C inspection proving the trace is
+  read-only, bounded, and env-gated, fresh obfusjack native regeneration, and
+  strict Shenandoah obfusjack with `NEKO_KLASS_MIRROR_DEBUG=1`. Completion
+  criteria: an exact verifier `slot=` match in `[neko-klass-mirror]` identifies
+  `Klass::_java_mirror` OopStorage as the owner; no exact match rejects that
+  OopHandle family and redirects the next generic proof point to another
+  HotSpot-owned strong OopStorage family.
+- Implementation repair scope 2026-06-01: route Shenandoah static-object field
+  mirror-base resolution through the existing `neko_klass_java_mirror_oop(thread,
+  klass)` helper instead of `neko_klass_java_mirror_oop_raw(klass)`. Evidence:
+  strict Shenandoah with `NEKO_KLASS_MIRROR_DEBUG=1` matched verifier slot
+  `0x00007f6e00338568` and raw Class oop `0x00000005378f9da0` to
+  `[neko-klass-mirror] site=klass_java_mirror_raw klass=0x7f6d56035da0
+  slot=0x7f6e00338568 raw=0x5378f9da0`; the source audit shows the only
+  executable raw caller outside the barriered helper is
+  `neko_fast_get_static_object_field`. Scope: one generic static-object field
+  fast-path change; retain hard abort behavior for missing Shenandoah thread or
+  barrier capability through `neko_barrier_load_oop_field_thread`. Validation:
+  focused codegen/translator tests, generated-C inspection showing the
+  static-object fast path calls `neko_klass_java_mirror_oop(thread, klass)` and
+  no longer calls the raw helper there, fresh obfusjack regeneration, strict
+  Shenandoah obfusjack, and the normal performance gate follow-up. Completion
+  criteria: strict Shenandoah obfusjack no longer aborts on the matched
+  `Klass::_java_mirror` stale Class root and the fresh artifact reports
+  `translated=93 rejected=0`.
+- Follow-up repair scope 2026-06-01: make Shenandoah class-mirror to `Klass*`
+  resolution thread-aware before class initialization and static-object field
+  mirror-base selection. Evidence: after the static-object mirror-base repair,
+  strict Shenandoah no longer wrote `hs_err`; it hard-aborted in Neko with
+  `[neko-direct] MONITORENTER null object`. `NEKO_GETSTATIC_DEBUG=1` identified
+  the null object as `org/example/Main.LOCK` at static offset `112`, with the
+  helper reading `raw=(nil)` from `field=0x7ffc00148`, `cls=0x7fbc7c2edfc2`,
+  and the class handle slot containing `slot_value=0x7ffc000d8`. The same
+  debug row showed thread-aware Shenandoah handle resolution for that class
+  handle produced distinct mirror oops (`cls_oop=0x7ffc021e0`,
+  `base_oop=0x7ffc02268`), while `NEKO_CLASS_INIT_DEBUG=1` showed
+  `org/example/Main` initialization completed before the null `LOCK` read.
+  Source audit shows `neko_class_mirror_to_klass(jclass)` resolves through
+  `neko_handle_oop` without a JavaThread, and the static-object path calls it
+  under Shenandoah. Scope: introduce a thread-aware
+  `neko_class_mirror_to_klass_thread(thread, mirror)` and use it for
+  Shenandoah class initialization input normalization plus static-object
+  field mirror-base selection. Validation: focused codegen/translator tests,
+  generated-C inspection showing the new thread-aware helper on those paths,
+  fresh obfusjack regeneration, and strict Shenandoah obfusjack.
+- Follow-up repair scope 2026-06-01: make Shenandoah static-object stores use
+  the same thread-aware mirror base as static-object reads. Evidence: after the
+  thread-aware class-mirror repair, focused codegen/translator validation
+  passed and fresh obfusjack native regeneration produced
+  `build/neko-native-work/run-42662168770576` with `translated=93 rejected=0`
+  and runtime stdout ending in `=== All tests completed ===`. Strict
+  Shenandoah still exits with a Java `NullPointerException`, not `hs_err`.
+  `NEKO_CLASS_INIT_DEBUG=1 NEKO_GETSTATIC_DEBUG=1` shows
+  `org/example/Main$Color` class init once `before=0`, class init done,
+  `after=1`, then `GETSTATIC` of `GREEN` at offset `116` reads
+  `raw=(nil)` from the static-object field. Source evidence shows the read path
+  now selects a Shenandoah barriered `Klass::_java_mirror` via
+  `neko_klass_java_mirror_oop(thread, klass)`, while
+  `neko_fast_set_static_object_field` still selects its base with raw
+  `neko_static_base_oop((jobject)cls)` before `staticBase` and resolves the
+  stored object with the threadless `neko_handle_oop(val)`. Scope: one generic
+  T3.4 static-object store repair that uses the same thread-aware,
+  barriered mirror-base selection as the static-object load path under
+  Shenandoah, and resolves the stored object handle through the existing
+  Shenandoah thread-aware handle resolver. Validation: focused
+  codegen/translator tests, generated-C inspection showing both GETSTATIC and
+  PUTSTATIC object paths use the thread-aware/barriered mirror-base logic under
+  Shenandoah, fresh obfusjack regeneration, and strict Shenandoah obfusjack.
+- Follow-up repair scope 2026-06-01: return the initialized class handle from
+  the static-field class-init helper. Evidence: after the static-object store
+  alignment, fresh obfusjack native regeneration still completes normally, but
+  strict Shenandoah exits with a Java `NullPointerException`. Generated method
+  mapping identifies `neko_native_impl_13` as
+  `org/example/Main$Color.$values()[Lorg/example/Main$Color;`; original
+  bytecode writes `RED`, `GREEN`, and `BLUE` before invoking `$values`.
+  Current strict debug shows `neko_ensure_class_initialized` returns a distinct
+  initialized handle for `org/example/Main$Color`
+  (`cls=0x7f5e00305ab2`, `initialized=0x7f5e0030e720`), then
+  `neko_ensure_class_initialized_once` discards that return value, marks the
+  init slot, and returns the old handle; the immediately following GETSTATIC of
+  `GREEN` reads `raw=(nil)`. Source evidence: the helper currently ends with
+  `return cls;`. Scope: one generic static-field helper correction so the
+  caller receives the initialized class mirror returned by the VM initialization
+  path for the current access. Validation: focused codegen/translator tests,
+  fresh obfusjack regeneration, strict Shenandoah obfusjack, and generated-C
+  inspection showing the helper returns the initialized handle.
+- Diagnostic scope 2026-06-01: add a finite, read-only
+  `NEKO_GETSTATIC_DEBUG` static-object candidate trace that preserves the
+  generated `static_base_slot` value before any class-handle substitution.
+  Evidence: after the class-init helper was changed to return the initialized
+  handle, focused codegen/translator validation passed and fresh obfusjack
+  native regeneration produced `build/neko-native-work/run-43489804053650`
+  with `translated=93 rejected=0`; strict Shenandoah no longer wrote `hs_err`,
+  but exited with Java `NullPointerException`. The fresh debug row for
+  `org/example/Main$Color.GREEN` shows `cls=0x7f6f682f6620`,
+  `staticBase=0x7f6f682f6620`, `base=0x7ffc003e0`, `offset=116`,
+  and `raw=(nil)` / `barrier=(nil)`, while the original generated
+  `static_base_slot` value is not retained in the trace. Source evidence shows
+  `neko_fast_get_static_object_field_ref` reads `*(ref->static_base_slot)` and
+  then replaces it with `cls` before invoking the helper. Scope: record, under
+  the existing debug gate only, the original slot handle, original slot oop,
+  class-handle oop, `Klass::_java_mirror` raw and barriered oops, and each
+  candidate field value at the VM field offset. Validation: focused
+  codegen/translator tests, generated-C inspection proving the probe is
+  env-gated and read-only, fresh obfusjack regeneration, and strict Shenandoah
+  obfusjack with `NEKO_CLASS_INIT_DEBUG=1 NEKO_GETSTATIC_DEBUG=1`. Completion
+  criteria: the trace identifies the exact candidate whose field contains the
+  interpreter-written enum singleton, or proves all recorded candidates are
+  null and redirects the next generic proof point to class-initialization
+  ordering or VM static-field metadata.
+- Implementation repair scope 2026-06-01: load `Klass::_java_mirror`
+  OopHandle slots through the existing Shenandoah native-handle load barrier
+  instead of the object-field load barrier. Evidence: the fresh
+  `NEKO_CLASS_INIT_DEBUG=1 NEKO_GETSTATIC_DEBUG=1` strict Shenandoah run on
+  `build/neko-native-work/run-43992599798362` exited with Java
+  `NullPointerException` and no `hs_err`. For `org/example/Main$Color.GREEN`,
+  the candidate trace showed `klass_raw_mirror=0x51d1b4310` at offset `116`
+  containing `narrow=0xfff80265`, raw enum oop `0x7ffc01328`, and barriered
+  enum oop `0x7ffc025e8`; the current `klass-mirror-barrier` candidate was
+  `0x7ffc003e0` and its field at the same offset was null. Source evidence
+  shows `Klass::_java_mirror` is an OopHandle and
+  `neko_klass_java_mirror_oop(thread, klass)` currently calls
+  `neko_barrier_load_oop_field_thread(thread, mirror_handle, mirror_oop)` on
+  that off-heap handle slot. Scope: change only `Klass::_java_mirror`
+  materialization to use `neko_barrier_load_oop_native_handle_with_thread`
+  under Shenandoah, preserving hard abort behavior for missing thread or
+  native-handle barrier and leaving heap object-field barriers unchanged.
+  Validation: focused codegen/translator tests, generated-C inspection showing
+  the helper uses the native-handle barrier and no object-field barrier for
+  `Klass::_java_mirror`, fresh obfusjack regeneration, strict Shenandoah
+  obfusjack, and performance gate follow-up after correctness is restored.
+- Implementation repair scope 2026-06-01: preserve JVM `NEW`
+  class-initialization semantics before direct native object allocation.
+  Evidence: after the `Klass::_java_mirror` native-handle barrier repair,
+  strict Shenandoah obfusjack reached `GREEN`, `42`, `sparse ok`,
+  `Optional=246`, and `ParallelSum=332833500`, then exited with
+  `NullPointerException: Cannot read the array length because
+  java.math.BigDecimal.LONG_TEN_POWERS_TABLE is null` in
+  `java.math.BigDecimal.divide`. The debug run showed no
+  `java/math/BigDecimal` class-init row before `neko_native_impl_39` allocated
+  two `BigDecimal` instances with `neko_fast_alloc_object(thread, env, cls)`
+  and invoked their constructors. Generated source inspection at
+  `neko_native_impl_39.c:480-497` shows translated `NEW java/math/BigDecimal`
+  emits direct allocation from `g_class_ref_17` with no class-init helper,
+  while source inspection shows `OpcodeTranslator.java` maps every
+  `Opcodes.NEW` directly to `neko_fast_alloc_object`. Scope: one generic
+  translator change so JVM `NEW` emits `cls =
+  neko_ensure_class_initialized_once(env, cls, owner, &g_cls_initialized_owner)`
+  before direct native allocation, and so the shared static class-init emission
+  assigns the helper's returned initialized handle back to `cls` instead of
+  discarding it. This applies to every translated allocated class and existing
+  static PUT callsite that already performed class initialization, and does not
+  add JNI fallback, helper-layer fallback, or owner-specific behavior.
+  Validation: focused codegen/translator tests, generated-C inspection showing
+  `NEW java/math/BigDecimal` and other NEW sites initialize the allocation
+  class before direct allocation, fresh obfusjack regeneration, strict
+  Shenandoah obfusjack, and performance gate follow-up because this adds a
+  once-guarded check on allocation paths.
+- Rejected implementation evidence 2026-06-01: assigning the initialized
+  class handle back to `cls` before every translated direct allocation is not
+  accepted. Fresh focused codegen/translator validation passed and fresh
+  obfusjack regeneration produced `build/neko-native-work/run-44589309871258`
+  with `translated=93 rejected=0`, but the default runtime crashed after
+  `anon-sup`. The fresh `hs_err_pid942698.log` reports `SIGSEGV` in
+  `libneko_2031857248429656656.so+0x29d5a5`; objdump maps that offset to
+  `neko_fast_alloc_object` dereferencing the `Klass*` resolved from the class
+  mirror supplied to allocation. A debug rerun with `NEKO_CLASS_INIT_DEBUG=1`
+  wrote `build/native-run-tmp/hs_err_g1_new_debug_4.log`; stderr last completed
+  `org/example/Main$Rectangle` class init with
+  `cls=0x7fdbb029b15a` and `initialized=0x7fdbb02a4158`, then crashed before
+  the next translated label. Generated C at
+  `build/neko-native-work/run-44589309871258/neko_native_impl_39.c:1027`
+  used that returned initialized handle as the input to
+  `neko_fast_alloc_object`. Corrected scope: translated `NEW` must call
+  `neko_ensure_class_initialized_once` to preserve JVM class-initialization
+  order, but direct allocation must keep using the stable bound class mirror.
+  Shared static class-init emission is restored to side-effect-only for
+  translated allocation and static PUT callsites; returned-handle use remains
+  limited to runtime paths that explicitly resolve static field mirror bases.
+- Diagnostic scope 2026-06-01: add a finite, read-only
+  `NEKO_GLOBAL_REF_NEIGHBOR_DEBUG` scan around decoded generated global-ref
+  slots. Evidence: after restoring translated `NEW` to side-effect-only class
+  initialization before stable-class allocation, focused validation passed,
+  fresh obfusjack regeneration produced `build/neko-native-work/run-45088067716859`
+  with `translated=93 rejected=0`, and generated C shows
+  `NEW java/math/BigDecimal` calls `neko_ensure_class_initialized_once(...)`
+  before `neko_fast_alloc_object(thread, env, cls)`. Strict Shenandoah then
+  progressed into matrix execution and aborted with
+  `Before Mark, Roots; Double forwarding`. The fresh
+  `NEKO_GLOBAL_REF_DEBUG=1` run wrote
+  `build/native-run-tmp/hs_err_shen_global_only_4.log`: verifier slot
+  `0x00007f5498181380` held stale Class oop `0x000000051d000c90` with forwardee
+  `0x00000007ffc7d6b8`. Current-run global-ref stderr emitted 6,284
+  `[neko-global-ref]` rows and no exact verifier-slot row; its first decoded
+  generated global-ref slot in the same address area was `0x7f5498181420`,
+  placing the verifier slot `0xa0` before that logged generated slot. Scope:
+  under the new env gate only, scan a small aligned readable window around each
+  decoded generated global-ref slot, print forwarded neighbor roots plus their
+  nearest generated ref site/owner, and do not mutate slots or alter normal
+  global-ref binding. Validation: focused codegen/translator tests, generated-C
+  inspection proving the scan is bounded, env-gated, and read-only, fresh
+  obfusjack regeneration, and strict Shenandoah obfusjack with
+  `NEKO_GLOBAL_REF_NEIGHBOR_DEBUG=1`. Completion criteria: if the verifier slot
+  appears in a `[neko-global-ref-neighbor]` row, use that row's nearest
+  generated site/owner and relative offset as the next exact evidence target;
+  if no exact row appears, reject generated global-ref OopStorage neighborhood
+  ownership for this reproducer and redirect to the next HotSpot-owned root
+  family.
+- Follow-up diagnostic scope 2026-06-01: retain the decoded generated
+  global-ref origin slots under `NEKO_GLOBAL_REF_NEIGHBOR_DEBUG` and rescan
+  those same small windows at existing handle/NJX/safepoint debug boundaries.
+  Evidence: the first neighbor-only strict Shenandoah run wrote
+  `build/native-run-tmp/hs_err_shen_global_neighbor_4.log` with verifier slot
+  `0x00007f8370181468`, stale Class oop `0x000000051d001608`, and forwardee
+  `0x00000007ffc7aa08`; current-run stderr had no exact
+  `[neko-global-ref-neighbor]` row for that slot or oop. The both-env run wrote
+  `build/native-run-tmp/hs_err_shen_global_both_4.log` with verifier slot
+  `0x00007f1b9c181380`, stale Class oop `0x000000051d000c90`, and forwardee
+  `0x00000007ffc7d6b8`; current-run stderr had no exact verifier slot row, and
+  its first generated global-ref row was `slot=0x7f1b9c181420`. These runs
+  prove the bind-time neighbor scan executes before the verifier slot becomes a
+  forwarded root. Scope: record a bounded list of generated global-ref origin
+  slots only while the env gate is enabled, and call a read-only checkpoint
+  scanner from existing diagnostic boundary sites without enabling broad root
+  publisher scans or mutating any root. Validation: focused codegen/translator
+  tests, generated-C inspection showing the retained origin list and checkpoint
+  scan are env-gated and read-only, fresh obfusjack regeneration, and strict
+  Shenandoah obfusjack with `NEKO_GLOBAL_REF_NEIGHBOR_DEBUG=1`. Completion
+  criteria: an exact checkpoint row for the verifier slot identifies the root
+  area relative to a generated global-ref origin; if no exact row appears, the
+  current generated global-ref neighborhood diagnostic is rejected and the next
+  proof point must target another HotSpot-owned root family.
+- Implementation repair scope 2026-06-01: refresh recorded generated
+  global-handle-area windows at real Shenandoah safepoint waits using the
+  existing Shenandoah native-handle load barrier. Evidence: the late
+  `NEKO_GLOBAL_REF_NEIGHBOR_DEBUG=1` run timed out before verifier abort but
+  produced the exact stale-root row before timeout:
+  `[neko-global-ref-neighbor] checkpoint=handle_save site=owner_class
+  owner=org/example/Main$1 origin_slot=0x7f3d3c181420 slot=0x7f3d3c181380
+  raw=0x51d000c90 forwardee=0x7ffc7d6b8 rel=-160 origin_index=0 index=209`.
+  Earlier `hs_err_shen_global_both_4.log` reported the same slot shape
+  (`0xa0` before the first generated global-ref origin), same stale
+  `java.lang.Class` raw oop, and same forwardee at verifier abort. Source
+  inspection shows no Neko write to that exact slot; Neko only creates
+  persistent global refs with `g_neko_jni_new_global_ref_fn`, stores the
+  returned handle in generated caches, and later resolves handles through
+  native-handle barriers under Shenandoah. Scope: under Shenandoah only, record
+  unique generated global-ref origin windows during binding, and when a
+  translated safepoint poll observes an armed polling word, scan those recorded
+  windows for marked forwarded roots that pass the native-handle root-shape
+  checks, then heal them through `neko_barrier_load_oop_native_handle_with_thread`.
+  This must not run under non-Shenandoah collectors, must not scan unrecorded
+  memory, must not add JNI/JVMTI/fallback paths, and must not change generated
+  global-ref creation semantics. Validation: focused codegen/translator tests,
+  generated-C inspection showing safepoint-only Shenandoah refresh and no
+  default hot-path call, fresh obfusjack regeneration, strict Shenandoah
+  obfusjack, and performance gate follow-up preserving Calc `2-3 ms`.
+- Rejected evidence 2026-06-01: the safepoint-wait-only global-handle-window
+  refresh passed focused validation, fresh obfusjack regeneration, and
+  generated-C inspection, but strict Shenandoah still aborted. The no-debug run
+  wrote `build/native-run-tmp/hs_err_shen_refresh_4.log` with verifier slot
+  `0x00007f88a8181308`, stale `sun.nio.cs.UTF_8` raw oop `0x000000051d00d368`,
+  and forwardee `0x00000007ffc80728`. The matching debug run timed out after
+  reaching obfusjack Platform output, emitted zero `checkpoint=safepoint_poll_wait`
+  and zero `[neko-global-ref-refresh]` rows, then logged the same stale
+  raw/forwardee at the recorded global-handle neighborhood during `handle_save`:
+  `[neko-global-ref-neighbor] checkpoint=handle_save site=owner_class
+  owner=org/example/Main$1 origin_slot=0x7f11801813e0 slot=0x7f1180181348
+  raw=0x51d00d368 forwardee=0x7ffc80728 rel=-152 origin_index=0 index=227`.
+  This rejects the safepoint-only placement for the current failing root.
+  Corrected scope: run the same Shenandoah-only bounded refresh at
+  `handle_save`, the only current boundary with an exact stale-root row. Keep
+  `handle_restore_*`, NJX, non-Shenandoah collectors, global-ref creation
+  semantics, and unrecorded memory untouched. Retain hard abort behavior for
+  missing Shenandoah handle-barrier support. Validation: focused
+  codegen/translator tests, generated-C inspection showing handle-save-only
+  Shenandoah refresh and no non-Shenandoah hot-path call, fresh obfusjack
+  regeneration, strict Shenandoah obfusjack, then the performance gate
+  preserving Calc `2-3 ms`.
+- Rejected evidence 2026-06-01: the handle-save full-window refresh passed
+  focused validation, fresh obfusjack regeneration, and generated-C inspection
+  proving the only call site was `neko_handle_save`, but strict Shenandoah
+  obfusjack timed out after `120s`. The run wrote no `hs_err` and no stderr,
+  reached the Platform/Virtual microbench, and printed
+  `Platform threads: 29080 ms (50000 tasks)`, proving the full sweep at every
+  `handle_save` is too broad for the current handle frequency even though it
+  suppresses the previous verifier abort. Corrected scope: keep the repair at
+  `handle_save` only, but make it incremental and bounded by scanning a small
+  rotating batch of recorded global-handle origin windows per call, with a
+  single readability check per window before slot iteration. This preserves
+  progress across all recorded windows without full-set scanning on every method
+  frame, keeps `handle_restore_*`, NJX, non-Shenandoah collectors, global-ref
+  creation semantics, and unrecorded memory untouched, and retains hard abort
+  behavior for missing Shenandoah handle-barrier support. Validation: focused
+  codegen/translator tests, generated-C inspection showing handle-save-only
+  incremental refresh, fresh obfusjack regeneration, strict Shenandoah
+  obfusjack, then the performance gate preserving Calc `2-3 ms`.
+- Follow-up evidence 2026-06-01: handle-save incremental batch `4` passed
+  focused validation, fresh obfusjack regeneration, and generated-C inspection,
+  but strict Shenandoah still aborted during matrix execution. The no-debug run
+  reached `Platform threads: 551 ms` and `Virtual threads: 3622 ms`, then
+  `build/native-run-tmp/hs_err_shen_incr_4.log` reported verifier slot
+  `0x00007fe958247450`, stale raw oop `0x000000051d001608`, and forwardee
+  `0x00000007ffc7aa08`. A current-artifact
+  `NEKO_GLOBAL_REF_NEIGHBOR_DEBUG=1` run timed out before the Platform timing
+  line and wrote no `hs_err`, but it logged the same raw/forwardee in the
+  recorded origin-0 owner-class window at `handle_restore_before`:
+  `[neko-global-ref-neighbor] checkpoint=handle_restore_before site=owner_class
+  owner=org/example/Main$1 origin_slot=0x7fa710181420 slot=0x7fa710181428
+  raw=0x51d001608 forwardee=0x7ffc7aa08 rel=8 origin_index=0 index=2669`;
+  subsequent `checkpoint=handle_save` refresh rows healed that same raw, proving
+  handle-save-only leaves a stale-root interval after restore and before the
+  next save. Corrected scope: keep handle-save incremental batch `4`, and add
+  a Shenandoah-only refresh of only recorded origin index `0` at
+  `handle_restore_before`. Keep `handle_restore_after`, NJX, non-Shenandoah
+  collectors, global-ref creation semantics, and unrecorded memory untouched.
+  Validation: focused codegen/translator tests, generated-C inspection showing
+  handle-save incremental refresh plus handle-restore-before origin-0 refresh,
+  fresh obfusjack regeneration, strict Shenandoah obfusjack, then the
+  performance gate preserving Calc `2-3 ms`.
+- Validation correction evidence 2026-06-01: the first origin-0
+  `handle_restore_before` implementation passed focused tests but failed fresh
+  default obfusjack native regeneration/runtime validation. The Gradle
+  integration test timed out after `2s` inside `runJar`; stdout reached only
+  `--- Microbench: Platform vs Virtual Threads ---`, stderr was empty, and
+  generated C showed an unconditional call to
+  `neko_refresh_first_global_ref_area_for_shenandoah(save->thread,
+  "handle_restore_before")`. This violates the recorded no-non-Shen-hot-path
+  requirement even though the helper returns internally for non-Shenandoah.
+  Corrected implementation detail: guard both handle-save and restore-before
+  refresh calls with `neko_const_use_shenandoah()` at the call site so default
+  collectors do not pay a helper call.
+- Follow-up evidence 2026-06-01: after the guarded origin-0
+  `handle_restore_before` refresh, focused tests, fresh obfusjack regeneration,
+  and generated-C inspection passed, but strict Shenandoah still aborted during
+  matrix execution. The no-debug run reached `Platform threads: 757 ms` and
+  `Virtual threads: 3502 ms`, then
+  `build/native-run-tmp/hs_err_shen_restore0_4.log` reported verifier slot
+  `0x00007f97cc254820`, stale `java.lang.Class` raw oop
+  `0x00000007ffc281d0`, and forwardee `0x00000007ffc60230`. Existing
+  current-artifact debug evidence from
+  `build/native-run-tmp/shen-incr-dbg.err` contains the same raw/forwardee pair
+  at `handle_restore_before` in a recorded generated global-handle window:
+  `[neko-global-ref-neighbor] checkpoint=handle_restore_before
+  site=manifest_owner owner=org/example/Main$2
+  origin_slot=0x7fa71024ec80 slot=0x7fa71024ecf8 raw=0x7ffc281d0
+  forwardee=0x7ffc60230 rel=120 origin_index=1 index=95`; subsequent
+  `checkpoint=handle_save` rows healed the same raw/forwardee for origin index
+  `1`. This proves the remaining stale interval is not limited to origin index
+  `0`. Corrected scope: replace the origin-0-only restore-before refresh with
+  the existing Shenandoah-only bounded rotating global-ref window refresh at
+  `handle_restore_before`, preserving the call-site `neko_const_use_shenandoah()`
+  guard, handle-save batch `4`, non-Shenandoah no-call behavior, global-ref
+  creation semantics, and unrecorded-memory exclusion. Validation: focused
+  codegen/translator tests, generated-C inspection showing both handle-save and
+  restore-before use the bounded rotating refresh only under Shenandoah, fresh
+  obfusjack regeneration, strict Shenandoah obfusjack, then the performance gate
+  preserving Calc `2-3 ms`.
+- Rejected evidence 2026-06-01: replacing the origin-0-only restore-before
+  refresh with the bounded rotating refresh at `handle_restore_before` passed
+  focused validation, fresh obfusjack regeneration, and generated-C inspection.
+  Fresh generated artifact `build/neko-native-work/run-49260220606423` shows
+  `neko_const_use_shenandoah()` guarded calls to
+  `neko_refresh_global_ref_area_for_shenandoah` at `handle_save` and
+  `handle_restore_before`, contains `const uint64_t batch = 4u`, and contains
+  no `neko_refresh_first_global_ref_area_for_shenandoah`. Strict Shenandoah
+  still aborted during matrix execution after `Platform threads: 1099 ms` and
+  `Virtual threads: 4134 ms`. The fresh
+  `build/native-run-tmp/hs_err_shen_restore_batch_4.log` reports verifier slot
+  `0x00007f4e182701b0`, stale `java.lang.Class` raw oop
+  `0x00000007ffc7eef8`, and forwardee `0x00000007ffc7f1d8`. Existing
+  current debug logs contain no row for raw `0x7ffc7eef8` or forwardee
+  `0x7ffc7f1d8`, so the next change must gather lower-overhead current-artifact
+  correlation before another repair changes refresh coverage or batch size.
+  Diagnostic scope: add a diagnostic-only `NEKO_GLOBAL_REF_REFRESH_DEBUG` gate
+  that prints only `[neko-global-ref-refresh]` rows from the existing
+  Shenandoah global-ref window refresh and does not enable the read-only
+  neighbor checkpoint scanner. Keep `NEKO_GLOBAL_REF_NEIGHBOR_DEBUG` behavior
+  unchanged, keep normal behavior unchanged when both env gates are absent, and
+  do not mutate any additional slots. Validation: focused codegen/translator
+  tests, generated-C inspection proving the refresh-only env gate is separate
+  from neighbor scanning and no origin-only helper returns, fresh obfusjack
+  regeneration, and strict Shenandoah obfusjack with
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG=1` to determine whether the fresh verifier raw
+  is ever healed by the bounded refresh path before abort.
+- Rejected diagnostic evidence 2026-06-01: the first refresh-only diagnostic
+  passed focused validation, fresh obfusjack regeneration, and generated-C
+  inspection. Fresh generated artifact `build/neko-native-work/run-49536621283100`
+  shows `NEKO_GLOBAL_REF_REFRESH_DEBUG` only in
+  `neko_global_ref_refresh_debug_enabled`, while the checkpoint neighbor scanner
+  remains gated only by `NEKO_GLOBAL_REF_NEIGHBOR_DEBUG`; the artifact still has
+  `const uint64_t batch = 4u`, guarded `handle_save` and
+  `handle_restore_before` refresh calls, and no
+  `neko_refresh_first_global_ref_area_for_shenandoah`. Strict Shenandoah with
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG=1` timed out after `120s`, wrote no `hs_err`,
+  emitted `5,550,991` refresh rows (`1.2G`) to
+  `build/native-run-tmp/shen-refresh-only.err`, and stdout reached only
+  `--- Microbench: Platform vs Virtual Threads ---`. This diagnostic volume
+  prevents reaching the verifier failure. Corrected diagnostic scope: keep the
+  refresh-only gate and add env-gated skip/cap controls
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG_SKIP` and
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG_LIMIT` around refresh-row printing only. The
+  controls must not affect refresh mutation, batch selection, origin recording,
+  neighbor scanning, non-Shenandoah behavior, or default execution when the
+  refresh debug gate is absent. Validation: focused codegen/translator tests,
+  generated-C inspection proving skip/cap apply only to diagnostic printing,
+  fresh obfusjack regeneration, and strict Shenandoah obfusjack with
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG=1`, skip `5500000`, and a bounded limit to
+  capture late refresh rows near the matrix failure without another unbounded
+  log.
+- Rejected diagnostic evidence 2026-06-01: the bounded skip/cap refresh-only
+  diagnostic passed focused validation, fresh obfusjack regeneration, and
+  generated-C inspection. Fresh artifact `build/neko-native-work/run-49907188076132`
+  contains `NEKO_GLOBAL_REF_REFRESH_DEBUG_SKIP`,
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG_LIMIT`, guarded
+  `neko_refresh_global_ref_area_for_shenandoah` calls at `handle_save` and
+  `handle_restore_before`, and no
+  `neko_refresh_first_global_ref_area_for_shenandoah`. Strict Shenandoah with
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG=1`,
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG_SKIP=5500000`, and
+  `NEKO_GLOBAL_REF_REFRESH_DEBUG_LIMIT=20000` aborted after reaching
+  `Platform threads: 1137 ms`, `Virtual threads: 4258 ms`, and matrix startup.
+  The run emitted `20001` stderr lines (`4.5M`) and wrote
+  `build/native-run-tmp/hs_err_shen_refresh_cap_4.log`. That `hs_err` reports
+  verifier slot `0x00007f2d44257770`, stale `java.lang.Class` raw oop
+  `0x00000007ffc7eef8`, and forwardee `0x00000007ffc7f1d8`. Exact grep over
+  `build/native-run-tmp/shen-refresh-cap.err`, `.out`, and the `hs_err` finds
+  those slot/raw/forwardee values only in the `hs_err` and copied VM stdout,
+  not in any `[neko-global-ref-refresh]` row. The captured refresh windows are
+  rooted around generated global-ref origins such as `0x7f2d442df7b8`
+  (`org/example/Main$1`), `0x7f2d442e1200` (`java/lang/StringBuilder`),
+  `0x7f2d442e25c0` (`java/util/concurrent/TimeUnit`), and `0x7f2d442e2748`
+  (`org/example/Main$Greeter$NekoLambda$1`), while the verifier slot is
+  `0x00007f2d44257770`. This rejects the current global-ref origin-window
+  refresh as the failing root family for this artifact. Next diagnostic scope:
+  use existing root-owner diagnostics, starting with summary-only
+  `NEKO_ROOT_AREA_SUMMARY=1`, to map the fresh verifier slot against active
+  `JNIHandleBlock`, HandleArea, thread-window, and JavaThread OopHandle ranges
+  before another runtime repair changes refresh coverage.
+- Rejected diagnostic evidence 2026-06-01: the existing summary-only root-owner
+  diagnostic reproduced the strict Shenandoah verifier abort without new code.
+  `NEKO_ROOT_AREA_SUMMARY=1` exited `134` after `21.812260s`, reached
+  `Platform threads: 2089 ms`, `Virtual threads: 6083 ms`, and matrix startup,
+  emitted `27808` stderr lines (`4.4M`), and wrote
+  `build/native-run-tmp/hs_err_shen_area_summary_4.log`. The verifier reported
+  slot `0x00007fc1a8267ea0`, stale `java.lang.Class` raw oop
+  `0x00000007ffc7eef8`, and forwardee `0x00000007ffc7f1d8`. Exact grep over
+  `build/native-run-tmp/shen-area-summary.err`, `.out`, and the `hs_err` found
+  those values only in the `hs_err` and copied VM stdout, not in any
+  diagnostic row. Interval matching over `[neko-root-jnih-range]`
+  `handles..cap`, `[neko-root-area-range]` `bottom..top`,
+  `[neko-thread-window]` `slot`, and `[neko-thread-oophandle]` `slot` emitted
+  no range containing `0x00007fc1a8267ea0`. The `hs_err` memory map places that
+  slot inside anonymous native mapping `0x7fc1a8000000-0x7fc1a8405000`, while
+  the OpenJDK 21 Shenandoah verifier source shows root verification scans
+  CodeCache, ClassLoaderData, every strong `OopStorageSet` storage, then thread
+  roots. Current diagnostics have now rejected generated global-ref windows,
+  active `JNIHandleBlock` chains, HandleArea chunks, JavaThread OopHandle
+  fields, and the near-thread window for the reproduced slot. Next diagnostic
+  scope: add a diagnostic-only OopStorage owner mapper for Shenandoah root
+  verification, resolving `JNIHandles::_global_handles` and
+  `_weak_global_handles` from VMStructs static-field addresses and printing only
+  bounded ranges/forwarded slots needed to determine whether the verifier slot
+  belongs to JNI Global or JNI Weak OopStorage. This must be env-gated,
+  read-only, absent from default execution, and must not alter root contents or
+  refresh behavior.
+- Diagnostic implementation scope 2026-06-01: add only
+  `NEKO_OOPSTORAGE_DEBUG` support for JNI Global/JNI Weak OopStorage owner
+  mapping. Scope: capture VMStruct static-field addresses for
+  `JNIHandles::_global_handles` and `JNIHandles::_weak_global_handles`; derive
+  only the JDK 21 `OopStorage`/`ActiveArray`/`Block` offsets needed for
+  read-only range/match diagnostics; guard every private-layout read with
+  readable-range, owner-address, count, and alignment checks; emit bounded
+  `[neko-oopstorage-range]`/`[neko-oopstorage-forwarded]` rows only when the
+  env gate is set. Required evidence: OpenJDK 21 source lines show
+  `JNIHandles` static OopStorage fields are exposed by VMStructs, OopStorage
+  nonstatic internals are not VMStruct-exposed, `ActiveArray` block pointers
+  start at aligned `sizeof(ActiveArray)`, `Block::_data` is first, and
+  `Block::_owner_address` is the owner validation field. Validation: focused
+  codegen tests, generated-C inspection proving the diagnostic is env-gated
+  and read-only, fresh obfusjack native regeneration, then strict Shenandoah
+  obfusjack with `NEKO_OOPSTORAGE_DEBUG=1` and refresh logging capped off.
+  Completion criteria: the diagnostic either maps the verifier slot/raw to JNI
+  Global or JNI Weak OopStorage, rejects both with concrete range evidence, or
+  hard-aborts only on malformed private layout; no JNI/JVMTI/fallback/original
+  bytecode path, collector skip, root mutation, or default hot-path work is
+  introduced.
+- Diagnostic refinement scope 2026-06-01: the first OopStorage diagnostic
+  passed focused codegen tests, regenerated fresh obfusjack native artifact
+  `build/neko-native-work/run-51193904437796` with `translated=93 rejected=0`,
+  and generated C shows `NEKO_OOPSTORAGE_DEBUG` is env-gated and read-only.
+  Standalone default obfusjack completed green, while the JUnit wrapper timed
+  out on its two-second `runJar` wait. Strict Shenandoah with
+  `NEKO_OOPSTORAGE_DEBUG=1` and refresh logging disabled reached the Platform
+  thread benchmark header, timed out at `120s`, wrote no `hs_err`, emitted
+  `233918` stderr rows (`57M`), including `8340`
+  `[neko-oopstorage-range]` rows and `225578`
+  `[neko-oopstorage-forwarded]` rows. The rows identify JNI Global OopStorage
+  as carrying forwarded roots under Shenandoah, with one JNI Weak empty-range
+  row and no JNI Weak forwarded row. This diagnostic volume prevents reaching
+  the verifier failure. Corrected diagnostic scope: keep the same read-only
+  JNI Global/JNI Weak OopStorage mapper, but add env-configured scan and print
+  caps for OopStorage diagnostics only. The caps must not mutate roots, affect
+  default execution, change refresh behavior, change non-Shenandoah behavior,
+  or alter the mapped OopStorage layout checks. Validation: focused codegen
+  tests, generated-C inspection proving caps guard only diagnostic scanning and
+  row printing, fresh obfusjack regeneration, then strict Shenandoah obfusjack
+  with `NEKO_OOPSTORAGE_DEBUG=1` and bounded caps to obtain either a verifier
+  `hs_err` with OopStorage correlation or a concrete rejection of JNI Global
+  and JNI Weak OopStorage ownership.
+- Rejected diagnostic evidence 2026-06-01: the bounded range-only OopStorage
+  diagnostic passed focused codegen tests, regenerated fresh obfusjack native
+  artifact `build/neko-native-work/run-51787101937391`, passed the JUnit
+  obfusjack wrapper, and generated C shows the scan skip/limit, row limits,
+  and `NEKO_OOPSTORAGE_FORWARDED_LIMIT=0` fast path guard only diagnostics.
+  Strict Shenandoah with `NEKO_OOPSTORAGE_DEBUG=1`,
+  `NEKO_OOPSTORAGE_FORWARDED_LIMIT=0`,
+  `NEKO_OOPSTORAGE_RANGE_LIMIT=20000`, and refresh logging disabled exited
+  `134`, reached `Platform threads: 16322 ms`, `Virtual threads: 32446 ms`,
+  and matrix startup, emitted `8348` stderr lines (`2.1M`), and wrote
+  `build/native-run-tmp/hs_err_shen_oopstorage_bounded_4.log`. The verifier
+  reported slot `0x00007f9f90268980`, stale `java.lang.Class` raw oop
+  `0x00000007ffc7eef8`, and forwardee `0x00000007ffc7f1d8`. The stderr
+  contains `8347` `[neko-oopstorage-range]` rows, zero forwarded rows, zero
+  cap rows, `8340` JNI Global rows, and `7` JNI Weak rows. Interval matching
+  found no JNI Global or JNI Weak `slot_start..slot_end` row containing
+  `0x00007f9f90268980`; the nearest JNI Global data range was
+  `0x7f9f902684c0..0x7f9f902686c0` at block index `8`, with the verifier slot
+  `705` bytes after that range, and the next logged JNI Global active-array
+  block was `0x7f9f9026bd00`. This rejects JNI Global/JNI Weak active-array
+  data-window ownership for the exact verifier slot, but it does not reject
+  another strong OopStorage in the same native arena.
+- Diagnostic implementation scope 2026-06-01: add an env-gated OopStorage
+  candidate-owner mapper using OpenJDK 21 `OopStorage::Block::block_for_ptr`
+  rules. Source evidence: OpenJDK 21 `OopStorage` defines blocks as
+  `BitsPerWord` oop entries split into `BytesPerWord` sections of
+  `BitsPerByte` entries, aligned to `sizeof(oop) * BitsPerByte`, and
+  `block_for_ptr` maps a candidate root slot by walking those section-aligned
+  block starts and validating the candidate `_owner_address`. Scope: under a
+  new diagnostic env gate only, scan a bounded neighborhood around already
+  observed OopStorage block allocations for forwarded oop values, derive the
+  candidate block and owner from the slot address using the same section-walk
+  owner validation, read the owner `_name` string when readable, and print a
+  bounded `[neko-oopstorage-candidate]` row. Required evidence: generated C
+  must show the candidate mapper is read-only, env-gated, cap-bounded, and
+  independent from refresh mutation; strict Shenandoah must either map the
+  verifier slot/raw to a named OopStorage owner, or reject the candidate-owner
+  path with no cap exhaustion covering the relevant neighborhood. No JNI,
+  JVMTI, fallback/original-bytecode path, collector skip, root mutation, or
+  default hot-path work is allowed.
+- Diagnostic overhead correction 2026-06-01: the first candidate-owner mapper
+  implementation passed focused codegen tests and regenerated fresh obfusjack
+  native artifact `build/neko-native-work/run-52918493735546` with
+  `translated=93 rejected=0`. Generated C showed
+  `NEKO_OOPSTORAGE_CANDIDATE_DEBUG`, candidate caps, and read-only candidate
+  rows. Strict Shenandoah with `NEKO_OOPSTORAGE_DEBUG=1`,
+  `NEKO_OOPSTORAGE_CANDIDATE_DEBUG=1`,
+  `NEKO_OOPSTORAGE_FORWARDED_LIMIT=0`, `NEKO_OOPSTORAGE_RANGE_LIMIT=20000`,
+  `NEKO_OOPSTORAGE_CANDIDATE_LIMIT=60000`, and
+  `NEKO_OOPSTORAGE_CANDIDATE_SCAN_BYTES=1536` timed out after `120s`, wrote no
+  stdout and no `hs_err`, and emitted `11609` stderr rows (`4.4M`). The log
+  contains candidate rows for validated JNI Global blocks, but also contains
+  rows with one-character `candidate_owner_name=t`, proving `_owner_address`
+  plus readable name/active slots is not sufficient owner validation and the
+  resulting scan volume prevents reaching the verifier failure. Corrected
+  implementation scope: require sane owner `ActiveArray` metadata and a
+  readable block-pointer array, require owner names of at least three printable
+  characters, require candidate block membership in the owner active-array for
+  non-source owners, and skip exact forwarded scanning for the source block's
+  own data window because the previous range-only diagnostic already rejected
+  that window for the verifier slot. The correction remains env-gated,
+  read-only, cap-bounded, and inactive by default; the timed-out run is
+  overhead evidence only and does not reject any OopStorage owner.
+- Diagnostic evidence 2026-06-01 after owner-validation tightening: focused
+  codegen validation passed, fresh obfusjack regeneration produced
+  `build/neko-native-work/run-53281903491567` with `translated=93 rejected=0`,
+  and generated-C inspection showed the candidate mapper remained env-gated,
+  read-only, and absent from default execution. Strict Shenandoah with
+  `NEKO_OOPSTORAGE_CANDIDATE_DEBUG=1`, skip `54000`, limit `5000`,
+  candidate limit `60000`, and scan bytes `1536` exited `134`; the verifier
+  slot was `0x00007fa3bc260ac0`, raw `0x00000007ffc7eef8`, and forwardee
+  `0x00000007ffc7f1d8`. The nearest valid candidate row was JNI Global block
+  `0x7fa3bc260600..0x7fa3bc260800`, placing the verifier slot `704` bytes
+  after the data window, and the diagnostic hit `scan_limit` at index `59000`.
+  The same fresh artifact with skip `59000` and limit `5000` exited `134`;
+  the verifier slot was `0x00007f3d44268770`, raw
+  `0x00000007ffc7eef8`, and forwardee `0x00000007ffc7f1d8`. The nearest valid
+  candidate row was JNI Global block `0x7f3d442682c0..0x7f3d442684c0`,
+  placing the verifier slot `688` bytes after the data window, and the
+  diagnostic hit `scan_limit` at index `64000`. Exact greps found each run's
+  verifier slot/raw/forwardee only in stdout and `hs_err`, not in candidate
+  rows. These runs prove the current candidate mapper does not emit enough
+  failed-section evidence to accept or reject the `block_for_ptr` candidate
+  set for the verifier slot.
+- Corrected diagnostic scope 2026-06-01: extend the env-gated OopStorage
+  candidate-owner mapper with a capped reject trace for every section-aligned
+  candidate block considered by the OpenJDK `block_for_ptr` walk. Each reject
+  row must include the source storage/block, candidate block address, reject
+  reason, and the candidate owner address when readable; successful candidate
+  rows remain unchanged. The trace must be deduped, cap-bounded, read-only,
+  inactive unless `NEKO_OOPSTORAGE_CANDIDATE_DEBUG` is set, and must not scan,
+  refresh, mutate, or publish any root. Validation: focused codegen tests,
+  generated-C inspection proving the reject trace is env-gated/read-only, fresh
+  obfusjack regeneration, and strict Shenandoah with a bounded skip window.
+  Completion criteria: for the fresh verifier slot, either a valid
+  `[neko-oopstorage-candidate]` row maps the slot to a named owner, or the
+  eight section-walk candidate starts for that slot have concrete reject rows
+  without relevant cap exhaustion.
