@@ -3979,6 +3979,73 @@ This plan will refresh that evidence before changing CFF performance code.
     the repeated token/material helper calls and large relocated CFF dispatch
     methods before final no-quick jar output.
 
+### [ ] JCP-6M: Split Token-Material Object Epoch Helper
+
+- Dependency/order: this follows committed JCP-6L because transition material
+  and key-transfer runtime-source helpers are now split and freshly validated,
+  but the same no-quick CFF/MPO-only evidence still misses the requested
+  `test21.jar` gates. It remains before full constant/string optimization
+  because the base CFF/MPO-only profile still exceeds the `Seq <= 400 ms`,
+  `Parallel <= 15 ms`, and `VThreads <= 15 ms` targets without any
+  constant/string decode overhead.
+- Scope: factor the object-epoch portion of the encrypted token material
+  helper out of the monolithic `__neko_cff_tok` generated helper into a
+  generated object-mask helper. The new helper may receive the live token
+  material carrier, packed row words, row base, guard/path/block state, and
+  scratch locals needed to preserve the existing `AtomicLong.getPlain` /
+  `setPlain` object-cell update. The outer token helper must continue to bind
+  class-key material, object material, control material, guard/path/block, and
+  row words before returning the final token mask. The repair must not remove
+  object-cell mutation, must not replace it with a static key, and must not
+  change CFF block boundaries, dispatch coverage, helper relocation semantics,
+  or token row encoding.
+- Required evidence before editing:
+  - Fresh JCP-6L CFF/MPO-only runtime logs
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6l-run1.log`
+    through `test21-cff-mpo-only-jcp6l-run5.log` complete but miss the user
+    gates with Seq `479/483/476/433/485 ms`, Parallel
+    `19/19/19/20/19 ms`, and VThreads `20/39/18/22/23 ms`.
+  - Fresh JCP-6L `PrintInlining` log
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6l-printcomp.log`
+    shows `a.pa::za (296 bytes)` repeatedly reported as `callee is too large`
+    and later as `size > DesiredMethodLimit` inside hot relocated dispatch
+    methods. The map identifies `a.pa::za` as the generic encrypted token
+    material helper descriptor `([Ljava/lang/Object;IIII)I`, not a fixture
+    method.
+  - Source inspection of
+    `CffMaterialTables.installEncryptedTokenMaterialHelper` shows the token
+    helper embeds class mask, object epoch-cell lookup/update, control mask,
+    row-word decoding, and final XOR in one generated method. The object mask
+    region consumes live `guard`, `path`, `block`, packed row words, and the
+    token material carrier's `AtomicLong` cells. This is a generic CFF helper
+    path shared by all transformed classes and not tied to `test21.jar`,
+    `test.jar`, an owner/name/descriptor, a benchmark string, or a generated
+    obfuscated name.
+- Validation command or runtime target:
+  - `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffMaterialHelperHotPathTest --no-daemon`
+  - Focused generated-bytecode regression proving the token material helper
+    calls the new object-mask helper, the object-mask helper descriptor is
+    generated and targeted by descriptor callsites, the token helper size falls
+    below the previous monolithic helper budget, and the object helper still
+    performs one `AtomicLong.getPlain` and one `AtomicLong.setPlain` operation.
+  - Fresh no-quick CFF/MPO-only regeneration and direct runtime of
+    `test-jars/test21.jar`, with persisted obfuscation/runtime logs.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` for that artifact proving
+    `__neko_cff_tok` is smaller or no longer the same repeated hot-call
+    inlining blocker, or recording a negative result with the next exact
+    blocker.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar` and `test-jars/test.jar`, with persisted logs and
+    explicit recording of any rows still unrepaired.
+- Completion criteria: focused tests pass; fresh regenerated artifacts run
+  without verifier errors, VM crashes, fallback/original-bytecode behavior, or
+  transform coverage weakening; token object material remains dynamically
+  derived from live guard/path/block and mutable object-cell state; the change
+  is generic and does not special-case jar names, class names, descriptors,
+  benchmark rows, or generated obfuscated names. JCP-6M does not by itself
+  claim final threshold acceptance unless fresh runtime logs meet the requested
+  gates.
+
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
 - Scope: optimize protected numeric/string decode runtime and size overhead
