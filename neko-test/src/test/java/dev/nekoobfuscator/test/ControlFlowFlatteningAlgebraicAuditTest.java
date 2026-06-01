@@ -94,6 +94,8 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         "([Ljava/lang/Object;[JIIII)I";
     private static final String CFF_LEGACY_INT_TOKEN_HELPER_DESC =
         "([I[Ljava/lang/Object;IIIIIIIIIIIIIIII)I";
+    private static final String CFF_DISPATCH_HELPER_DESC = "(JIIIIII[J)J";
+    private static final String CFF_COMPACT_DISPATCH_HELPER_DESC = "(JIIIIII[I)J";
 
     @Test
     void symbolicAuditRecognizesSelfCancelingAndLinearKeyShapes() {
@@ -1063,7 +1065,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         );
         for (MethodNode method : clazz.asmNode().methods) {
             if (!method.name.startsWith("__neko_cff$")) continue;
-            if (!"(JIIIIII[J)J".equals(method.desc)) continue;
+            if (!isCffDispatchHelperDesc(method.desc)) continue;
             checkedDispatchBranches += countDispatchSelectorBranches(method, 0, 5, 7);
         }
         assertTrue(
@@ -1202,12 +1204,17 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (!(insn instanceof MethodInsnNode call)) continue;
             if (!call.name.startsWith("__neko_cff")) continue;
-            if ("(JIIIIII[J)J".equals(call.desc)) return true;
+            if (isCffDispatchHelperDesc(call.desc)) return true;
             if ("(JIII[Ljava/lang/Object;II[J)J".equals(call.desc)) return true;
             if ("(JIIII[J)J".equals(call.desc)) return true;
             if ("(JIIII[J[I)J".equals(call.desc)) return true;
         }
         return false;
+    }
+
+    private static boolean isCffDispatchHelperDesc(String desc) {
+        return CFF_DISPATCH_HELPER_DESC.equals(desc)
+            || CFF_COMPACT_DISPATCH_HELPER_DESC.equals(desc);
     }
 
     private static CffEntryDigestProof cffEntryDigestProof(MethodNode value) {

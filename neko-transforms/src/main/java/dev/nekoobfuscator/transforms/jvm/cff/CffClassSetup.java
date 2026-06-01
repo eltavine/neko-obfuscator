@@ -2995,7 +2995,8 @@ abstract class CffClassSetup extends CffSharedState {
             "(JIIII[J)J".equals(method.desc) ||
                 "(JIIII[J[I)J".equals(method.desc) ||
                 "(JIIIII[J)J".equals(method.desc) ||
-                "(JIIIIII[J)J".equals(method.desc)
+                "(JIIIIII[J)J".equals(method.desc) ||
+                "(JIIIIII[I)J".equals(method.desc)
         ) {
             return true;
         }

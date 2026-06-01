@@ -47,6 +47,7 @@ import org.objectweb.asm.tree.MethodNode;
 
 final class CffTransitionOutlinerPolicyTest {
     private static final String CFF_SHARED_GROUP_DISPATCH_DESC = "(JIIIIII[J)J";
+    private static final String CFF_COMPACT_GROUP_DISPATCH_DESC = "(JIIIIII[I)J";
     private static final String CFF_TRANSITION_MATERIAL_DESC =
         "(JIII[Ljava/lang/Object;II[J)J";
     private static final String CFF_COMPACT_STATE_TRANSITION_DESC =
@@ -270,10 +271,15 @@ final class CffTransitionOutlinerPolicyTest {
             "budgeted direct inline removed all outlined helper routes"
         );
         assertTrue(
+            compactGroupDispatchCallCount(hot) > 0,
+            "JIT-budget CFF method did not route dispatch helpers through compact state ABI"
+        );
+        assertTrue(
             compactStateTransitionCallCount(hot) > 0,
             "JIT-budget CFF method did not route direct transitions through compact state wrappers"
         );
         assertIslandDispatchMissUsesColdHelper(outputJar, "CffBudgetedDirectInlineShape");
+        assertCompactDispatchHelpersUseIntState(outputJar, "CffBudgetedDirectInlineShape");
         assertCompactTransitionWrappersPreserveMaterialCalls(
             outputJar,
             "CffBudgetedDirectInlineShape"
@@ -316,11 +322,24 @@ final class CffTransitionOutlinerPolicyTest {
             if (!(insn instanceof MethodInsnNode call)) continue;
             if (CFF_SHARED_GROUP_DISPATCH_DESC.equals(call.desc)) {
                 calls++;
+            } else if (CFF_COMPACT_GROUP_DISPATCH_DESC.equals(call.desc)) {
+                calls++;
             } else if (CFF_TRANSITION_MATERIAL_DESC.equals(call.desc)) {
                 calls++;
             } else if ("(JIIII[J)J".equals(call.desc)) {
                 calls++;
             } else if (CFF_COMPACT_STATE_TRANSITION_DESC.equals(call.desc)) {
+                calls++;
+            }
+        }
+        return calls;
+    }
+
+    private static int compactGroupDispatchCallCount(MethodNode method) {
+        int calls = 0;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && CFF_COMPACT_GROUP_DISPATCH_DESC.equals(call.desc)) {
                 calls++;
             }
         }
@@ -371,6 +390,36 @@ final class CffTransitionOutlinerPolicyTest {
         return calls;
     }
 
+    private static void assertCompactDispatchHelpersUseIntState(Path jar, String owner)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get(owner);
+        assertTrue(clazz != null, "missing class " + owner);
+        int helpers = 0;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!CFF_COMPACT_GROUP_DISPATCH_DESC.equals(method.desc)
+                || method.instructions == null
+                || method.instructions.size() == 0) {
+                continue;
+            }
+            helpers++;
+            assertTrue(
+                storesIntState(method),
+                "compact dispatch helper did not store state through int[] carrier"
+            );
+        }
+        assertTrue(helpers > 0, "no compact dispatch helpers were generated");
+    }
+
+    private static boolean storesIntState(MethodNode method) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn.getOpcode() == Opcodes.IASTORE) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static void assertIslandDispatchMissUsesColdHelper(Path jar, String owner)
         throws Exception {
         JarInput input = new JarInput(jar);
@@ -378,13 +427,13 @@ final class CffTransitionOutlinerPolicyTest {
         assertTrue(clazz != null, "missing class " + owner);
         Set<String> sharedHelpers = new HashSet<>();
         for (MethodNode method : clazz.asmNode().methods) {
-            if (CFF_SHARED_GROUP_DISPATCH_DESC.equals(method.desc)) {
+            if (isCffDispatchHelperDesc(method.desc)) {
                 sharedHelpers.add(method.name);
             }
         }
 
         for (MethodNode method : clazz.asmNode().methods) {
-            if (!CFF_SHARED_GROUP_DISPATCH_DESC.equals(method.desc)
+            if (!isCffDispatchHelperDesc(method.desc)
                 || method.instructions == null
                 || method.instructions.size() == 0) {
                 continue;
@@ -407,7 +456,7 @@ final class CffTransitionOutlinerPolicyTest {
                     decodesRealResult = true;
                     continue;
                 }
-                if (!CFF_SHARED_GROUP_DISPATCH_DESC.equals(call.desc)
+                if (!isCffDispatchHelperDesc(call.desc)
                     || !owner.equals(call.owner)
                     || !sharedHelpers.contains(call.name)
                     || call.name.equals(method.name)) {
@@ -425,6 +474,11 @@ final class CffTransitionOutlinerPolicyTest {
         throw new AssertionError(
             "missing island dispatch helper with hot real-result returns and cold miss helper call"
         );
+    }
+
+    private static boolean isCffDispatchHelperDesc(String desc) {
+        return CFF_SHARED_GROUP_DISPATCH_DESC.equals(desc)
+            || CFF_COMPACT_GROUP_DISPATCH_DESC.equals(desc);
     }
 
     private static AbstractInsnNode nextOpcodeInsn(AbstractInsnNode insn) {

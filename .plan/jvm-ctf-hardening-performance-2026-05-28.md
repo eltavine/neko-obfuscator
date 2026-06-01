@@ -5298,6 +5298,45 @@ This plan will refresh that evidence before changing CFF performance code.
     material.
   - The repair does not claim final threshold acceptance unless fresh runtime
     logs meet the requested gates.
+- Eleventh repair validation evidence:
+  - Implemented compact outlined dispatch state in
+    `CffTransitionOutliner`: generic JIT-budget / compact-wrapper methods now
+    pass an `int[]` state carrier to outlined group/island dispatch helpers,
+    store guard/path/block/pc/domain/result-token in separate state cells, and
+    reload those cells directly at the caller. Cold miss fake/poison material
+    continues to use the existing `long[]` transition material scratch path,
+    and compact island runtime-source mixing uses the compact state carrier
+    instead of reading a packed `long[]`.
+  - Updated the generated-helper relocation descriptor set and focused CFF
+    policy/audit tests so compact dispatch helpers are covered rather than
+    ignored.
+  - Focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test21-obf-compact-dispatch.jar`. Direct
+    execution exited 0 and printed `=== All tests completed ===`; observed
+    rows were Platform `135 ms`, Virtual `159 ms`, Seq `454 ms`, Parallel
+    `22 ms`, and VThreads `23 ms`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test-obf-compact-dispatch.jar`. Direct
+    execution exited 0 and reported `Calc: 717ms`; the existing ReTrace/Sec
+    error rows remain present.
+  - Fresh mapping inspection of the `test21` artifact found 1005 compact
+    dispatch helpers with descriptor `(JIIIIII[I)J` and no old packed
+    dispatch helpers with descriptor `(JIIIIII[J)J`; compact transition-wrapper
+    helpers with descriptor `(JIIII[J[I)J` remain present for transition
+    edges.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the same `test21`
+    artifact shows hot `a.a::y` compiling at 6252 bytes, below the HotSpot
+    huge-method limit. Remaining blockers include compact dispatch helpers in
+    the 77-111 byte range and result-router helpers rejected as
+    `callee is too large` or `size > DesiredMethodLimit`, plus protected
+    numeric decode helper `__neko_num_ip(IIIII)I` rejected in the same hot
+    method. Therefore JCP-7 remains open and the next repair must target the
+    remaining generic helper-call surface or protected numeric hot path without
+    weakening CFF, constant, string, or invokedynamic coverage.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
