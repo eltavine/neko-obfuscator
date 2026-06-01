@@ -86,6 +86,14 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         "(IJJ[Ljava/lang/Object;)J";
     private static final String CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC =
         "(JJ[Ljava/lang/Object;)J";
+    private static final String CFF_SIDECAR_HELPER_DESC =
+        "([Ljava/lang/Object;IIIIIIIII)I";
+    private static final String CFF_TOKEN_MATERIAL_HELPER_DESC =
+        "([Ljava/lang/Object;IIII)I";
+    private static final String CFF_TOKEN_MATERIAL_OBJECT_HELPER_DESC =
+        "([Ljava/lang/Object;[JIIII)I";
+    private static final String CFF_LEGACY_INT_TOKEN_HELPER_DESC =
+        "([I[Ljava/lang/Object;IIIIIIIIIIIIIIII)I";
 
     @Test
     void symbolicAuditRecognizesSelfCancelingAndLinearKeyShapes() {
@@ -831,13 +839,14 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
                     if (insn instanceof MethodInsnNode call
                         && call.getOpcode() == Opcodes.INVOKESTATIC
                         && call.owner.equals(clazz.asmNode().name)
-                        && "([Ljava/lang/Object;IIIIIIIII)I".equals(call.desc)) {
+                        && (CFF_SIDECAR_HELPER_DESC.equals(call.desc)
+                            || CFF_TOKEN_MATERIAL_OBJECT_HELPER_DESC.equals(call.desc))) {
                         sawRuntimeSidecarHelperCall = true;
                     }
                     if (insn instanceof MethodInsnNode call
                         && call.getOpcode() == Opcodes.INVOKESTATIC
                         && call.owner.equals(clazz.asmNode().name)
-                        && "([I[Ljava/lang/Object;IIIIIIIIIIIIIIII)I".equals(call.desc)) {
+                        && CFF_LEGACY_INT_TOKEN_HELPER_DESC.equals(call.desc)) {
                         sawRuntimeIntTableLoad = true;
                     }
                 }
@@ -1452,7 +1461,8 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         ) {
             if (scan instanceof MethodInsnNode call
                 && call.getOpcode() == Opcodes.INVOKESTATIC
-                && "([Ljava/lang/Object;IIIIIIIII)I".equals(call.desc)) {
+                && (CFF_SIDECAR_HELPER_DESC.equals(call.desc)
+                    || CFF_TOKEN_MATERIAL_OBJECT_HELPER_DESC.equals(call.desc))) {
                 return true;
             }
         }
@@ -1468,8 +1478,9 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         ) {
             if (scan instanceof MethodInsnNode call
                 && call.getOpcode() == Opcodes.INVOKESTATIC
-                && ("([I[Ljava/lang/Object;IIIIIIIIIIIIIIII)I".equals(call.desc)
-                    || "([Ljava/lang/Object;IIII)I".equals(call.desc)
+                && (CFF_LEGACY_INT_TOKEN_HELPER_DESC.equals(call.desc)
+                    || CFF_TOKEN_MATERIAL_HELPER_DESC.equals(call.desc)
+                    || CFF_TOKEN_MATERIAL_OBJECT_HELPER_DESC.equals(call.desc)
                     || "(IIII)I".equals(call.desc))) {
                 return true;
             }
@@ -1478,8 +1489,9 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     }
 
     private static boolean updatesSidecarCell(MethodNode method) {
-        if (!("([Ljava/lang/Object;IIIIIIIII)I".equals(method.desc)
-            || "([Ljava/lang/Object;IIII)I".equals(method.desc))
+        if (!(CFF_SIDECAR_HELPER_DESC.equals(method.desc)
+            || CFF_TOKEN_MATERIAL_HELPER_DESC.equals(method.desc)
+            || CFF_TOKEN_MATERIAL_OBJECT_HELPER_DESC.equals(method.desc))
             || method.instructions == null) {
             return false;
         }

@@ -312,6 +312,12 @@ abstract class CffMaterialTables extends CffClassSetup {
         String tokenMaterialHelperName,
         int access
     ) {
+        String objectHelperName = uniqueMethodName(
+            clazz,
+            tokenMaterialHelperName + "$obj",
+            TOKEN_MATERIAL_OBJECT_HELPER_DESC
+        );
+        installEncryptedTokenMaterialObjectHelper(pctx, clazz, objectHelperName, access);
         MethodNode helper = new MethodNode(
             access,
             tokenMaterialHelperName,
@@ -326,13 +332,6 @@ abstract class CffMaterialTables extends CffClassSetup {
         int blockLocal = 4;
         int rowLocal = 5;
         int accumulatorLocal = 6;
-        int objectIndexLocal = 7;
-        int packedLocal = 8;
-        int epochLocal = 10;
-        int objectResultLocal = 11;
-        int nextEpochLocal = 12;
-        int objectCellLocal = 13;
-        int currentMaskLocal = 14;
         InsnList insns = helper.instructions;
         insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
         JvmPassBytecode.pushInt(insns, TOKEN_MATERIAL_WORDS_SLOT);
@@ -357,7 +356,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         );
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ISTORE, accumulatorLocal));
-        wordOffset = emitAlignedTokenMaterialObjectMask(
+        emitAlignedTokenMaterialObjectMaskCall(
             insns,
             materialLocal,
             rowLocal,
@@ -365,15 +364,11 @@ abstract class CffMaterialTables extends CffClassSetup {
             guardLocal,
             pathLocal,
             blockLocal,
-            objectIndexLocal,
-            packedLocal,
-            epochLocal,
-            objectResultLocal,
-            nextEpochLocal,
-            objectCellLocal,
-            currentMaskLocal,
-            wordOffset
+            clazz.name(),
+            objectHelperName,
+            clazz.isInterface()
         );
+        wordOffset += TOKEN_MATERIAL_OBJECT_WORDS;
         insns.add(new VarInsnNode(Opcodes.ILOAD, accumulatorLocal));
         insns.add(new InsnNode(Opcodes.IXOR));
         wordOffset = emitAlignedTokenMaterialControlMask(
@@ -390,10 +385,93 @@ abstract class CffMaterialTables extends CffClassSetup {
         }
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new InsnNode(Opcodes.IRETURN));
-        helper.maxLocals = 15;
+        helper.maxLocals = 7;
         helper.maxStack = 24;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
+    }
+
+    protected void installEncryptedTokenMaterialObjectHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access
+    ) {
+        MethodNode helper = new MethodNode(
+            access,
+            helperName,
+            TOKEN_MATERIAL_OBJECT_HELPER_DESC,
+            null,
+            null
+        );
+        int materialLocal = 0;
+        int rowLocal = 1;
+        int rowBaseLongLocal = 2;
+        int guardLocal = 3;
+        int pathLocal = 4;
+        int blockLocal = 5;
+        int objectIndexLocal = 6;
+        int packedLocal = 7;
+        int epochLocal = 9;
+        int objectResultLocal = 10;
+        int nextEpochLocal = 11;
+        int objectCellLocal = 12;
+        int currentMaskLocal = 13;
+        int wordOffset = TOKEN_MATERIAL_OBJECT_WORD_OFFSET;
+        wordOffset = emitAlignedTokenMaterialObjectMask(
+            helper.instructions,
+            materialLocal,
+            rowLocal,
+            rowBaseLongLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            objectIndexLocal,
+            packedLocal,
+            epochLocal,
+            objectResultLocal,
+            nextEpochLocal,
+            objectCellLocal,
+            currentMaskLocal,
+            wordOffset
+        );
+        if (wordOffset != TOKEN_MATERIAL_OBJECT_WORD_OFFSET + TOKEN_MATERIAL_OBJECT_WORDS) {
+            throw new IllegalStateException(
+                "CFF token material object helper consumed " + wordOffset + " words"
+            );
+        }
+        helper.instructions.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 14;
+        helper.maxStack = 24;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+    }
+
+    protected void emitAlignedTokenMaterialObjectMaskCall(
+        InsnList insns,
+        int materialLocal,
+        int rowLocal,
+        int rowBaseLongLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        String helperOwner,
+        String helperName,
+        boolean helperInterfaceOwner
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rowLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rowBaseLongLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            helperOwner,
+            helperName,
+            TOKEN_MATERIAL_OBJECT_HELPER_DESC,
+            helperInterfaceOwner
+        ));
     }
 
     private void emitAlignedTokenMaterialWordLoad(

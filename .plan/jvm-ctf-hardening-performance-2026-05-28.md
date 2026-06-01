@@ -3979,7 +3979,7 @@ This plan will refresh that evidence before changing CFF performance code.
     the repeated token/material helper calls and large relocated CFF dispatch
     methods before final no-quick jar output.
 
-### [ ] JCP-6M: Split Token-Material Object Epoch Helper
+### [x] JCP-6M: Split Token-Material Object Epoch Helper
 
 - Dependency/order: this follows committed JCP-6L because transition material
   and key-transfer runtime-source helpers are now split and freshly validated,
@@ -4045,6 +4045,51 @@ This plan will refresh that evidence before changing CFF performance code.
   benchmark rows, or generated obfuscated names. JCP-6M does not by itself
   claim final threshold acceptance unless fresh runtime logs meet the requested
   gates.
+- Completion evidence (2026-06-01):
+  - Implementation factored the generated token object epoch-cell path into the
+    descriptor `([Ljava/lang/Object;[JIIII)I`, called from the encrypted token
+    helper descriptor `([Ljava/lang/Object;IIII)I`. The object helper receives
+    the live material carrier, packed row words, row base, and live
+    guard/path/block values; it still performs one `AtomicLong.getPlain()` and
+    one `AtomicLong.setPlain(J)` update, so object-cell mutation was preserved
+    rather than replaced by a static key or descriptor-only recomputation.
+  - Focused generated-bytecode regression
+    `CffMaterialHelperHotPathTest` passes and proves every generated token
+    helper calls exactly one generated object helper, token helpers no longer
+    embed direct `AtomicLong` get/set calls, token helper bytecode size is under
+    the recorded budget, object helpers stay under the inlining budget, and
+    descriptor callsites target the new helper descriptor.
+  - Focused validation passed with:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffMaterialHelperHotPathTest --no-daemon`.
+    The algebraic audit was updated only to recognize the new generated object
+    helper as the sidecar mutation site; no CFF block construction, coverage,
+    dispatcher algebra, or key-transfer rule was weakened.
+  - Fresh no-quick CFF/MPO-only artifact
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6m.jar` ran five
+    times with Seq `439/475/428/420/417 ms`, Parallel
+    `19/19/19/19/19 ms`, and VThreads `19/20/19/20/20 ms`. The artifact runs
+    without verifier errors or VM crashes, but it still misses the final
+    requested `Seq <= 400 ms`, `Parallel <= 15 ms`, and `VThreads <= 15 ms`
+    gates.
+  - Fresh `PrintInlining` log
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6m-printcomp.log`
+    maps the split helpers to `a.pa::ab (131 bytes)` for the token helper and
+    `a.pa::za (174 bytes)` for the object helper, replacing the previous
+    monolithic token helper `a.pa::za (296 bytes)` blocker. The remaining exact
+    blockers are large relocated application dispatch methods such as
+    `a.a::s (1678 bytes)` and `a.a::e (5088 bytes)`, repeated
+    `size > DesiredMethodLimit` reports inside those large callers, and the
+    still-large generic island material helper `a.pa::kb (128 bytes)` at hot
+    callsites.
+  - Fresh full-profile artifacts
+    `build/test-jvm-full-obf-perf/test21-obf-jcp6m.jar` and
+    `build/test-jvm-full-obf-perf/test-obf-jcp6m.jar` were regenerated and run.
+    `test21` still reports Platform `136 ms`, Virtual `180 ms`, Seq `523 ms`,
+    Parallel `23 ms`, and VThreads `25 ms`. The first `test` full-profile run
+    reported the timing-sensitive Pool row as `FAIL` with Calc `816 ms`;
+    immediate reruns pass the Pool row and continue to show the existing
+    ReTrace/Sec errors, with Calc `746/730/712 ms`. This confirms JCP-6M is a
+    generic helper split improvement, not final threshold acceptance.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

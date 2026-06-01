@@ -44,6 +44,8 @@ public class CffMaterialHelperHotPathTest {
         "([IIII)I";
     private static final String TOKEN_MATERIAL_HELPER_DESC =
         "([Ljava/lang/Object;IIII)I";
+    private static final String TOKEN_MATERIAL_OBJECT_HELPER_DESC =
+        "([Ljava/lang/Object;[JIIII)I";
 
     @Test
     void keyTransferRuntimeMaterialHelperSharesRuntimeBucketForLongWords()
@@ -129,6 +131,7 @@ public class CffMaterialHelperHotPathTest {
             runtimeBucketHelpers,
             "key-transfer runtime bucket"
         );
+        assertTokenMaterialHelperUsesSplitObjectMask(input);
         assertTransitionMaterialHelperUsesSplitWordDecoder(input);
     }
 
@@ -161,6 +164,7 @@ public class CffMaterialHelperHotPathTest {
         JarInput input = new JarInput(outputJar);
         Set<MethodRef> transitionHelpers = helpers(input, TRANSITION_MATERIAL_HELPER_DESC);
         Set<MethodRef> transitionBaseHelpers = helpers(input, TRANSITION_MATERIAL_BASE_HELPER_DESC);
+        assertTokenMaterialHelperUsesSplitObjectMask(input);
         assertTransitionMaterialHelperUsesSplitWordDecoder(input);
         assertDescriptorCallsitesTargetHelpers(
             input,
@@ -347,6 +351,79 @@ public class CffMaterialHelperHotPathTest {
             }
         }
         assertFalse(transitionHelpers.isEmpty(), "transition-material helper was not generated");
+    }
+
+    private static void assertTokenMaterialHelperUsesSplitObjectMask(JarInput input) {
+        Set<MethodRef> tokenHelpers = helpers(input, TOKEN_MATERIAL_HELPER_DESC);
+        Set<MethodRef> tokenObjectHelpers = helpers(input, TOKEN_MATERIAL_OBJECT_HELPER_DESC);
+        assertFalse(tokenHelpers.isEmpty(), "token-material helper was not generated");
+        assertGeneratedHelpersBelow(
+            input,
+            tokenObjectHelpers,
+            260,
+            "token-material object helper stayed above the split size budget"
+        );
+        assertDescriptorCallsitesTargetHelpers(
+            input,
+            TOKEN_MATERIAL_OBJECT_HELPER_DESC,
+            tokenObjectHelpers,
+            "token-material object"
+        );
+        for (MethodRef helper : tokenHelpers) {
+            MethodNode method = method(input, helper);
+            assertEquals(
+                1,
+                methodCallCount(method, TOKEN_MATERIAL_OBJECT_HELPER_DESC),
+                "token-material helper did not route object epoch through split helper"
+            );
+            assertEquals(
+                0,
+                methodCallCount(
+                    method,
+                    "java/util/concurrent/atomic/AtomicLong",
+                    "getPlain",
+                    "()J"
+                ),
+                "token-material helper still embeds object cell read"
+            );
+            assertEquals(
+                0,
+                methodCallCount(
+                    method,
+                    "java/util/concurrent/atomic/AtomicLong",
+                    "setPlain",
+                    "(J)V"
+                ),
+                "token-material helper still embeds object cell write"
+            );
+            assertTrue(
+                JvmCodeSizeEstimator.estimateMethodBytes(method) < 240,
+                "token-material helper stayed above the split hot-path size budget"
+            );
+        }
+        for (MethodRef helper : tokenObjectHelpers) {
+            MethodNode method = method(input, helper);
+            assertEquals(
+                1,
+                methodCallCount(
+                    method,
+                    "java/util/concurrent/atomic/AtomicLong",
+                    "getPlain",
+                    "()J"
+                ),
+                "token-material object helper lost object cell read"
+            );
+            assertEquals(
+                1,
+                methodCallCount(
+                    method,
+                    "java/util/concurrent/atomic/AtomicLong",
+                    "setPlain",
+                    "(J)V"
+                ),
+                "token-material object helper lost object cell write"
+            );
+        }
     }
 
     private static int transitionWordHelperCallCount(MethodNode method) {

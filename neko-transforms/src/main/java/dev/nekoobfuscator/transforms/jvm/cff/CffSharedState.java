@@ -89,6 +89,10 @@ abstract class CffSharedState {
     protected static final int TOKEN_MATERIAL_TABLE_SIZE = 16_384;
     protected static final int TOKEN_MATERIAL_ROW_WORDS = 13;
     protected static final int TOKEN_MATERIAL_ROW_LONGS = (TOKEN_MATERIAL_ROW_WORDS + 1) / 2;
+    protected static final int TOKEN_MATERIAL_OBJECT_WORDS = 6;
+    protected static final int TOKEN_MATERIAL_CONTROL_WORDS = 3;
+    protected static final int TOKEN_MATERIAL_OBJECT_WORD_OFFSET =
+        TOKEN_MATERIAL_ROW_WORDS - TOKEN_MATERIAL_OBJECT_WORDS - TOKEN_MATERIAL_CONTROL_WORDS;
     protected static final int TRANSITION_MATERIAL_TABLE_SIZE = 16_384;
     protected static final int TRANSITION_MATERIAL_ROW_WORDS = 57;
     protected static final int TRANSITION_MATERIAL_ROW_LONGS = (TRANSITION_MATERIAL_ROW_WORDS + 1) / 2;
@@ -116,6 +120,8 @@ abstract class CffSharedState {
     protected static final int STEP_MATERIAL_INIT_CHUNK_LONGS = 512;
     protected static final int CFF_ISLAND_MATERIAL_TABLE_SIZE = 16_384;
     protected static final int CFF_ISLAND_MATERIAL_INIT_CHUNK_SIZE = 128;
+    protected static final String TOKEN_MATERIAL_OBJECT_HELPER_DESC =
+        "([Ljava/lang/Object;[JIIII)I";
     protected static final String TRANSITION_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;II[J)J";
     protected static final String TRANSITION_MATERIAL_BASE_HELPER_DESC =
