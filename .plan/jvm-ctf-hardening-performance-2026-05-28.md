@@ -4091,6 +4091,72 @@ This plan will refresh that evidence before changing CFF performance code.
     ReTrace/Sec errors, with Calc `746/730/712 ms`. This confirms JCP-6M is a
     generic helper split improvement, not final threshold acceptance.
 
+### [ ] JCP-6N: Split Transition PC/Data Digest Helper
+
+- Dependency/order: this follows committed JCP-6M because the token material
+  helper is now split and freshly validated, but the same no-quick CFF/MPO-only
+  evidence still misses the requested `test21.jar` gates. It remains before
+  JCP-7 full constant/string work because the CFF/MPO-only profile still
+  exceeds `Seq <= 400 ms`, `Parallel <= 15 ms`, and `VThreads <= 15 ms`
+  without constant/string decode overhead.
+- Scope: factor the transition material helper's PC/data digest computation
+  out of the main generated transition material helper descriptor
+  `(JIII[Ljava/lang/Object;II[J)J` into a generated PC digest helper. The new
+  helper may receive the transition material row, row base, live decoded base,
+  current `pc`, live `data`, and scratch multiplier state, then return the
+  data-bound PC value. The main transition material helper must still decode
+  guard/path/block/pc/method-key/domain from live row material, must still bind
+  the final PC update to `dataLocal`, and must still write the transition
+  output array with the same semantics. The repair must not remove data
+  binding, must not replace row words with static constants, and must not
+  change CFF block boundaries, transition row encoding, helper relocation
+  semantics, or key-transfer rules.
+- Required evidence before editing:
+  - Fresh JCP-6M CFF/MPO-only runtime logs
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6m-run1.log`
+    through `test21-cff-mpo-only-jcp6m-run5.log` complete but still miss the
+    user gates with Seq `439/475/428/420/417 ms`, Parallel
+    `19/19/19/19/19 ms`, and VThreads `19/20/19/20/20 ms`.
+  - Fresh JCP-6M `PrintInlining` log
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6m-printcomp.log`
+    shows the generated transition material helper `a.pa::db (249 bytes)`
+    repeatedly reported as `size > DesiredMethodLimit` inside large relocated
+    dispatch callers, including the same regions that report large application
+    dispatch methods such as `a.a::e (5088 bytes)`. The descriptor map
+    identifies `a.pa::db` as the generic transition material helper
+    `(JIII[Ljava/lang/Object;II[J)J`, not a fixture method.
+  - Source inspection of
+    `CffMaterialTables.installTransitionMaterialHelper` shows the main helper
+    embeds row setup, base material derivation, seven decoded transition words,
+    and `emitBindTransitionMaterialPcToDataDigest`, which performs five
+    additional decoded word loads and updates `pc` from live `dataLocal`. This
+    is a generic CFF transition-material path shared by transformed classes and
+    not tied to `test21.jar`, `test.jar`, an owner/name/descriptor, a
+    benchmark string, or a generated obfuscated name.
+- Validation command or runtime target:
+  - `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffMaterialHelperHotPathTest --no-daemon`
+  - Focused generated-bytecode regression proving the transition material
+    helper calls the new PC digest helper, descriptor callsites target the new
+    helper descriptor, the main transition material helper size falls below the
+    previous helper budget, and the new helper still consumes live `data` and
+    decoded transition row words rather than static constants.
+  - Fresh no-quick CFF/MPO-only regeneration and direct runtime of
+    `test-jars/test21.jar`, with persisted obfuscation/runtime logs.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` for that artifact proving
+    the transition material helper is smaller or no longer the same repeated
+    hot-call `DesiredMethodLimit` blocker, or recording a negative result with
+    the next exact blocker.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar` and `test-jars/test.jar`, with persisted logs and
+    explicit recording of any rows still unrepaired.
+- Completion criteria: focused tests pass; fresh regenerated artifacts run
+  without verifier errors, VM crashes, fallback/original-bytecode behavior, or
+  transform coverage weakening; PC state remains dynamically derived from live
+  transition row words and `dataLocal`; the change is generic and does not
+  special-case jar names, class names, descriptors, benchmark rows, or
+  generated obfuscated names. JCP-6N does not by itself claim final threshold
+  acceptance unless fresh runtime logs meet the requested gates.
+
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
 - Scope: optimize protected numeric/string decode runtime and size overhead
