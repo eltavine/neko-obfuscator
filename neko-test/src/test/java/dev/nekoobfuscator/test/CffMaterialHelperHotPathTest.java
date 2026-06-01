@@ -8,9 +8,11 @@ import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -42,6 +44,8 @@ public class CffMaterialHelperHotPathTest {
         "(JI[Ljava/lang/Object;[IIII)I";
     private static final String TRANSITION_MATERIAL_WORD_HELPER_DESC =
         "([IIII)I";
+    private static final String TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC =
+        "([IIIII)I";
     private static final String TOKEN_MATERIAL_HELPER_DESC =
         "([Ljava/lang/Object;IIII)I";
     private static final String TOKEN_MATERIAL_OBJECT_HELPER_DESC =
@@ -164,6 +168,10 @@ public class CffMaterialHelperHotPathTest {
         JarInput input = new JarInput(outputJar);
         Set<MethodRef> transitionHelpers = helpers(input, TRANSITION_MATERIAL_HELPER_DESC);
         Set<MethodRef> transitionBaseHelpers = helpers(input, TRANSITION_MATERIAL_BASE_HELPER_DESC);
+        Set<MethodRef> transitionPcDigestHelpers = helpers(
+            input,
+            TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC
+        );
         assertTokenMaterialHelperUsesSplitObjectMask(input);
         assertTransitionMaterialHelperUsesSplitWordDecoder(input);
         assertDescriptorCallsitesTargetHelpers(
@@ -178,11 +186,23 @@ public class CffMaterialHelperHotPathTest {
             transitionBaseHelpers,
             "transition material base"
         );
+        assertDescriptorCallsitesTargetHelpers(
+            input,
+            TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC,
+            transitionPcDigestHelpers,
+            "transition material pc digest"
+        );
         assertGeneratedHelpersBelow(
             input,
             transitionBaseHelpers,
             320,
             "transition material base helper stayed above the split size budget"
+        );
+        assertGeneratedHelpersBelow(
+            input,
+            transitionPcDigestHelpers,
+            220,
+            "transition material PC digest helper stayed above the split size budget"
         );
     }
 
@@ -332,23 +352,48 @@ public class CffMaterialHelperHotPathTest {
 
     private static void assertTransitionMaterialHelperUsesSplitWordDecoder(JarInput input) {
         List<MethodRef> transitionHelpers = new ArrayList<>();
+        Set<MethodRef> transitionPcDigestHelpers = helpers(
+            input,
+            TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC
+        );
+        assertFalse(
+            transitionPcDigestHelpers.isEmpty(),
+            "transition-material PC digest helper was not generated"
+        );
         for (var clazz : input.classes()) {
             for (MethodNode method : clazz.asmNode().methods) {
                 if (!TRANSITION_MATERIAL_HELPER_DESC.equals(method.desc)) continue;
                 transitionHelpers.add(new MethodRef(clazz.name(), method.name, method.desc));
                 assertTrue(
-                    transitionWordHelperCallCount(method) >= 12,
+                    transitionWordHelperCallCount(method) >= 7,
                     "transition-material helper did not route decoded words through split helper"
                 );
                 assertTrue(
                     methodCallCount(method, TRANSITION_MATERIAL_BASE_HELPER_DESC) == 1,
                     "transition-material helper did not route base through split helper"
                 );
+                assertEquals(
+                    1,
+                    methodCallCount(method, TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC),
+                    "transition-material helper did not route PC/data digest through split helper"
+                );
                 assertTrue(
-                    JvmCodeSizeEstimator.estimateMethodBytes(method) < 340,
+                    JvmCodeSizeEstimator.estimateMethodBytes(method) < 260,
                     "transition-material helper stayed above the split hot-path size budget"
                 );
             }
+        }
+        for (MethodRef helper : transitionPcDigestHelpers) {
+            MethodNode method = method(input, helper);
+            assertEquals(
+                5,
+                transitionWordHelperCallCount(method),
+                "transition-material PC digest helper must decode the data-bound PC words"
+            );
+            assertTrue(
+                varLoadCount(method, Opcodes.ILOAD, 4) > 0,
+                "transition-material PC digest helper no longer consumes live data"
+            );
         }
         assertFalse(transitionHelpers.isEmpty(), "transition-material helper was not generated");
     }
@@ -435,6 +480,22 @@ public class CffMaterialHelperHotPathTest {
         ) {
             if (insn instanceof MethodInsnNode call
                 && TRANSITION_MATERIAL_WORD_HELPER_DESC.equals(call.desc)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static int varLoadCount(MethodNode method, int opcode, int var) {
+        int count = 0;
+        for (
+            AbstractInsnNode insn = method.instructions.getFirst();
+            insn != null;
+            insn = insn.getNext()
+        ) {
+            if (insn instanceof VarInsnNode load
+                && load.getOpcode() == opcode
+                && load.var == var) {
                 count++;
             }
         }

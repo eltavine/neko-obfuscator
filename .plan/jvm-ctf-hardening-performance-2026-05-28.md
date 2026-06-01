@@ -4091,7 +4091,7 @@ This plan will refresh that evidence before changing CFF performance code.
     ReTrace/Sec errors, with Calc `746/730/712 ms`. This confirms JCP-6M is a
     generic helper split improvement, not final threshold acceptance.
 
-### [ ] JCP-6N: Split Transition PC/Data Digest Helper
+### [x] JCP-6N: Split Transition PC/Data Digest Helper
 
 - Dependency/order: this follows committed JCP-6M because the token material
   helper is now split and freshly validated, but the same no-quick CFF/MPO-only
@@ -4156,6 +4156,52 @@ This plan will refresh that evidence before changing CFF performance code.
   special-case jar names, class names, descriptors, benchmark rows, or
   generated obfuscated names. JCP-6N does not by itself claim final threshold
   acceptance unless fresh runtime logs meet the requested gates.
+- Completion evidence (2026-06-01):
+  - Implementation added generated PC digest helper descriptor `([IIIII)I`
+    and routes the transition material helper descriptor
+    `(JIII[Ljava/lang/Object;II[J)J` through it. The new helper receives the
+    live transition material row, row base, decoded base, current `pc`, and
+    live `data`, decodes the five PC/data digest row words through the existing
+    transition word helper, and returns the data-bound PC. The main helper
+    still writes guard/path/block/pc/domain output and returns the decoded
+    method key. No CFF block construction, transition row encoding, coverage,
+    fallback, or key-transfer rule was changed.
+  - Focused generated-bytecode regression
+    `CffMaterialHelperHotPathTest` passes after forced recompilation with
+    `--rerun-tasks`. It proves generated transition helpers call exactly one
+    PC digest helper, descriptor callsites target the new helper descriptor,
+    the main transition material helper falls under the recorded split budget,
+    the PC digest helper calls the transition word helper five times, and the
+    PC digest helper still consumes live `data` from local 4.
+  - Required focused validation suite passed with:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffMaterialHelperHotPathTest --no-daemon`.
+  - Fresh no-quick CFF/MPO-only artifact
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6n.jar` ran five
+    times with Seq `427/432/473/473/436 ms`, Parallel
+    `19/37/19/18/53 ms`, and VThreads `19/19/19/20/19 ms`. The artifact runs
+    without verifier errors or VM crashes, but it still misses the final
+    requested `Seq <= 400 ms`, `Parallel <= 15 ms`, and `VThreads <= 15 ms`
+    gates.
+  - Fresh `PrintInlining` log
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6n-printcomp.log`
+    maps the PC digest helper to `a.pa::db (62 bytes)` and the transition
+    material helper to `a.pa::eb (187 bytes)`, replacing the previous
+    monolithic transition helper `a.pa::db (249 bytes)`. The result is a
+    negative threshold result: the new 62-byte helper inlines when hot, but the
+    remaining 187-byte transition helper is still repeatedly reported as
+    `callee is too large` and `size > DesiredMethodLimit` inside large
+    relocated dispatch callers. The island material helper also remains
+    `a.pa::lb (128 bytes)` at hot callsites.
+  - Fresh full-profile artifacts
+    `build/test-jvm-full-obf-perf/test21-obf-jcp6n.jar` and
+    `build/test-jvm-full-obf-perf/test-obf-jcp6n.jar` were regenerated and run.
+    `test21` still reports Platform `134 ms`, Virtual `155 ms`, Seq `522 ms`,
+    Parallel `60 ms`, and VThreads `66 ms`. The first `test` full-profile run
+    reported the timing-sensitive Pool row as `FAIL` with Calc `806 ms`;
+    immediate reruns pass the Pool row and continue to show the existing
+    ReTrace/Sec errors, with Calc `711/711/710 ms`. This confirms JCP-6N
+    reduced a generic helper size but did not deliver final performance
+    acceptance.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

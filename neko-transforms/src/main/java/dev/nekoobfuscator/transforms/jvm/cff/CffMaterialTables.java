@@ -1289,6 +1289,11 @@ abstract class CffMaterialTables extends CffClassSetup {
             helperName + "$word",
             TRANSITION_MATERIAL_WORD_HELPER_DESC
         );
+        String pcDigestHelperName = uniqueMethodName(
+            clazz,
+            helperName + "$pc",
+            TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC
+        );
         installTransitionMaterialBaseHelper(
             pctx,
             clazz,
@@ -1299,6 +1304,15 @@ abstract class CffMaterialTables extends CffClassSetup {
             intHelperInterfaceOwner
         );
         installTransitionMaterialWordHelper(pctx, clazz, wordHelperName, access);
+        installTransitionMaterialPcDigestHelper(
+            pctx,
+            clazz,
+            pcDigestHelperName,
+            access,
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
+        );
         MethodNode helper = new MethodNode(
             access,
             helperName,
@@ -1318,8 +1332,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         int materialLocal = 10;
         int baseLocal = 11;
         int domainLocal = 12;
-        int multiplierLocal = 13;
-        int rowBaseLocal = 14;
+        int rowBaseLocal = 13;
         InsnList insns = helper.instructions;
         insns.add(new VarInsnNode(Opcodes.ALOAD, objectMaterialLocal));
         JvmPassBytecode.pushInt(insns, TRANSITION_MATERIAL_SLOT);
@@ -1429,16 +1442,15 @@ abstract class CffMaterialTables extends CffClassSetup {
             clazz.isInterface()
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, domainLocal));
-        emitBindTransitionMaterialPcToDataDigest(
+        emitBindTransitionMaterialPcToDataDigestCall(
             insns,
             materialLocal,
             rowBaseLocal,
             baseLocal,
             pcLocal,
             dataLocal,
-            multiplierLocal,
             clazz.name(),
-            wordHelperName,
+            pcDigestHelperName,
             clazz.isInterface()
         );
         emitTransitionOutStores(
@@ -1453,7 +1465,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         );
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 15;
+        helper.maxLocals = 14;
         helper.maxStack = 32;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
@@ -1464,6 +1476,74 @@ abstract class CffMaterialTables extends CffClassSetup {
             TRANSITION_MATERIAL_HELPER_DESC,
             keyLocal
         );
+    }
+
+    protected void installTransitionMaterialPcDigestHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access,
+        String wordHelperOwner,
+        String wordHelperName,
+        boolean wordHelperInterfaceOwner
+    ) {
+        MethodNode helper = new MethodNode(
+            access,
+            helperName,
+            TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC,
+            null,
+            null
+        );
+        int materialLocal = 0;
+        int rowLocal = 1;
+        int baseLocal = 2;
+        int pcLocal = 3;
+        int dataLocal = 4;
+        int multiplierLocal = 5;
+        emitBindTransitionMaterialPcToDataDigest(
+            helper.instructions,
+            materialLocal,
+            rowLocal,
+            baseLocal,
+            pcLocal,
+            dataLocal,
+            multiplierLocal,
+            wordHelperOwner,
+            wordHelperName,
+            wordHelperInterfaceOwner
+        );
+        helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        helper.instructions.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 6;
+        helper.maxStack = 12;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+    }
+
+    protected void emitBindTransitionMaterialPcToDataDigestCall(
+        InsnList insns,
+        int materialLocal,
+        int rowLocal,
+        int baseLocal,
+        int pcLocal,
+        int dataLocal,
+        String pcDigestHelperOwner,
+        String pcDigestHelperName,
+        boolean pcDigestHelperInterfaceOwner
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rowLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pcLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            pcDigestHelperOwner,
+            pcDigestHelperName,
+            TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC,
+            pcDigestHelperInterfaceOwner
+        ));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
     }
 
     protected void installTransitionMaterialBaseHelper(

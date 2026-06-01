@@ -128,6 +128,8 @@ abstract class CffSharedState {
         "(JI[Ljava/lang/Object;[IIII)I";
     protected static final String TRANSITION_MATERIAL_WORD_HELPER_DESC =
         "([IIII)I";
+    protected static final String TRANSITION_MATERIAL_PC_DIGEST_HELPER_DESC =
+        "([IIIII)I";
     protected static final String STEP_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;I[J)J";
     protected static final String KEY_TRANSFER_MATERIAL_HELPER_DESC =
