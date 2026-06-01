@@ -5904,6 +5904,68 @@ This plan will refresh that evidence before changing CFF performance code.
   - The repair does not claim final threshold acceptance unless fresh runtime
     logs meet the requested gates; otherwise the plan records the next concrete
     generic blocker from fresh evidence.
+- Sixteenth repair validation evidence:
+  - Focused validation passed after the unsigned-fragment implementation:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`
+    completed with `BUILD SUCCESSFUL`.
+  - A narrower caller-side signed-fragment probe that kept helper-side
+    semantics by inserting caller-side `I2C` was rejected before commit: fresh
+    no-quick `test21.jar` generation failed with
+    `MethodTooLargeException: a/a.main ([Ljava/lang/String;)V estimatedCodeBytes=64678`.
+    That proved the accepted repair must avoid moving extra masking into large
+    transformed callers.
+  - Fresh no-quick full-profile generation of
+    `build/test-jvm-full-obf-perf/test21-obf-unsigned-fragments.jar`
+    completed with coverage still enabled across the requested surfaces:
+    renamer `appliedFull=96 appliedSafe=2368`, key dispatch `appliedFull=96`,
+    method parameter obfuscation `appliedFull=35 appliedSafe=7`, CFF
+    `appliedFull=96`, validation sink hardening `appliedFull=1`, invokedynamic
+    `appliedFull=63`, constant obfuscation `appliedFull=33`, and string
+    obfuscation `appliedFull=16`. Fresh direct runtime exited 0 and reported
+    `Platform 148 ms`, `Virtual 169 ms`, `Seq 466 ms`, `Parallel 27 ms`, and
+    `VThreads 24 ms`.
+  - Fresh same-session direct runtime of the immediately preceding accepted
+    `test21-obf-small-domain-branches.jar` reported `Platform 136 ms`,
+    `Virtual 174 ms`, `Seq 462 ms`, `Parallel 26 ms`, and `VThreads 24 ms`.
+    The unsigned-fragment artifact remains in the same performance band, but
+    does not meet the requested `Seq <= 400 ms` or `Parallel/VThreads <= 15 ms`
+    gates.
+  - Fresh no-quick full-profile generation of
+    `build/test-jvm-full-obf-perf/test-obf-unsigned-fragments.jar` completed
+    with renamer `appliedFull=84 appliedSafe=3338`, key dispatch
+    `appliedFull=84`, method parameter obfuscation
+    `appliedFull=74 appliedSafe=2`, CFF `appliedFull=85`, validation sink
+    hardening `appliedFull=2`, invokedynamic `appliedFull=51`, constant
+    obfuscation `appliedFull=34`, and string obfuscation `appliedFull=26`.
+    Fresh direct runtime exited 0 and reported `Calc 724 ms`; the known
+    existing non-performance ReTrace/Sec rows remained. This improves the
+    previous `test` small-domain-branch artifact (`Calc 756 ms`) but does not
+    meet the requested `Calc <= 200 ms` gate.
+  - Fresh no-quick full-profile generation of
+    `build/test-jvm-full-obf-perf/full-obf-unsigned-fragments.jar` completed
+    with renamer `appliedFull=1035 appliedSafe=14031`, key dispatch
+    `appliedFull=1035`, method parameter obfuscation
+    `appliedFull=687 appliedSafe=47`, CFF `appliedFull=1037`, validation sink
+    hardening `appliedFull=8`, invokedynamic `appliedFull=657`, constant
+    obfuscation `appliedFull=316`, and string obfuscation `appliedFull=425`.
+    Fresh direct runtime exited 0 with
+    `Feature summary: passed=61 failed=0 skipped=0 nameSensitiveFailed=0` and
+    `Perf summary: passed=31 failed=0 skipped=0`.
+  - Fresh `javap` of the protected numeric wrapper in
+    `test21-obf-unsigned-fragments.jar` shows the accepted body is now
+    18 bytes: it loads raw base, shifts the two unsigned high fragments by 16,
+    ORs in the low fragments, calls the protected finalizer, and returns. The
+    wrapper body has no helper-side `i2c` or `iand`.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` for
+    `test21-obf-unsigned-fragments.jar` confirms the old 20-byte wrapper shape
+    is gone and the generated `a.ta::pqb (18 bytes)` wrapper plus
+    `a.ta::oqb (85 bytes)` finalizer inline on multiple hot paths. The same log
+    records the remaining generic blockers in larger hot callers:
+    `a.ta::pqb (18 bytes)`, `a.ra::ya (30 bytes)`, and multiple 42/43-byte
+    `a.pa::*` / `a.qa::*` wrappers still hit `size > DesiredMethodLimit`.
+    Therefore the unsigned-fragment repair is accepted as a generic bytecode
+    and local performance improvement, while JCP-7 remains open for the next
+    generic hot-path blocker.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 

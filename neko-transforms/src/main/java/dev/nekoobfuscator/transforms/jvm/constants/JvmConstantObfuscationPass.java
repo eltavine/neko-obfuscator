@@ -2992,8 +2992,8 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     }
 
     private void emitIntFragments(InsnList insns, int value) {
-        JvmPassBytecode.pushInt(insns, (short) (value >>> 16));
-        JvmPassBytecode.pushInt(insns, (short) value);
+        JvmPassBytecode.pushInt(insns, (value >>> 16) & 0xFFFF);
+        JvmPassBytecode.pushInt(insns, value & 0xFFFF);
     }
 
     private void emitHelperIntFromFragments(InsnList insns, int highLocal, int lowLocal) {
@@ -3001,7 +3001,6 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, 16);
         insns.add(new InsnNode(Opcodes.ISHL));
         insns.add(new VarInsnNode(Opcodes.ILOAD, lowLocal));
-        insns.add(new InsnNode(Opcodes.I2C));
         insns.add(new InsnNode(Opcodes.IOR));
     }
 

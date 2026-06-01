@@ -736,11 +736,8 @@ public class JvmConstantObfuscationIntegrationTest {
                 "protected numeric wrapper did not consume raw base"
             );
             assertTrue(hasOpcode(insns, Opcodes.ISHL, 0, insns.length), "protected numeric wrapper lacked fragment high-word assembly");
-            assertTrue(
-                hasOpcode(insns, Opcodes.I2C, 0, insns.length) ||
-                    hasOpcode(insns, Opcodes.IAND, 0, insns.length),
-                "protected numeric wrapper lacked fragment low-word zero extension"
-            );
+            assertFalse(hasOpcode(insns, Opcodes.I2C, 0, insns.length), "protected numeric wrapper retained helper-side I2C low-word masking");
+            assertFalse(hasOpcode(insns, Opcodes.IAND, 0, insns.length), "protected numeric wrapper retained helper-side IAND low-word masking");
             assertTrue(hasOpcode(insns, Opcodes.IOR, 0, insns.length), "protected numeric wrapper lacked fragment rejoin");
             MethodInsnNode finalizerCall = protectedNumericFinalizerCall(insns);
             assertTrue(finalizerCall != null, "protected numeric wrapper did not call finalizer");
@@ -1102,9 +1099,60 @@ public class JvmConstantObfuscationIntegrationTest {
         if (proof == null) return false;
         if (!isProtectedIntHelperCall(insns[callIndex])) return false;
         return varLoadCount(insns, proof.rawBaseLocal, proof.rawStoreIndex + 1, callIndex) >= 1
-            && !containsLargeNumericLdc(insns, proof.rawStoreIndex + 1, callIndex)
+            && !containsLargeNumericLdcOutsideProtectedUnsignedFragments(
+                insns,
+                proof.rawStoreIndex + 1,
+                callIndex
+            )
             && intLiteralCount(insns, proof.rawStoreIndex + 1, callIndex) >= 4
             && selfCancelingNumericMaterialIndex(insns, proof.rawStoreIndex + 1, callIndex) < 0;
+    }
+
+    private boolean containsLargeNumericLdcOutsideProtectedUnsignedFragments(
+        AbstractInsnNode[] insns,
+        int startInclusive,
+        int callIndex
+    ) {
+        for (int i = startInclusive; i < callIndex && i < insns.length; i++) {
+            if (!(insns[i] instanceof LdcInsnNode) || !isLargeNumericLiteral(insns[i])) {
+                continue;
+            }
+            if (!isProtectedUnsignedFragmentLiteralInWindow(insns, i, i + 1, callIndex + 1)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isProtectedUnsignedFragmentLiteralInWindow(
+        AbstractInsnNode[] insns,
+        int literalIndex,
+        int startInclusive,
+        int limitExclusive
+    ) {
+        for (int i = startInclusive; i < limitExclusive && i < insns.length; i++) {
+            if (isProtectedIntHelperCall(insns[i])
+                && isProtectedUnsignedFragmentLiteral(insns, literalIndex, i)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isProtectedUnsignedFragmentLiteral(
+        AbstractInsnNode[] insns,
+        int literalIndex,
+        int callIndex
+    ) {
+        int cursor = callIndex;
+        for (int argument = 0; argument < 5; argument++) {
+            cursor = previousRealIndex(insns, cursor);
+            if (cursor < 0) return false;
+            if (cursor != literalIndex) continue;
+            Long value = numericLiteralBits(insns[cursor]);
+            return argument < 4 && value != null && value >= 0L && value <= 0xFFFFL;
+        }
+        return false;
     }
 
     private boolean noUncoveredLargeNumericLdc(
