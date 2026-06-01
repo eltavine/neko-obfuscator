@@ -5814,6 +5814,96 @@ This plan will refresh that evidence before changing CFF performance code.
   - The repair does not claim final threshold acceptance unless fresh runtime
     logs meet the requested gates; otherwise the plan records the next concrete
     generic blocker from fresh evidence.
+- Fifteenth repair validation evidence:
+  - The method-local class-key words cache implementation was built and
+    validated, but rejected before commit because it regressed the fresh
+    no-quick runtime gates. Focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick runtime of
+    `build/test-jvm-full-obf-perf/test21-obf-class-key-local-cache.jar`
+    exited 0 and reported `Platform 157 ms`, `Virtual 163 ms`, `Seq 438 ms`,
+    `Parallel 21 ms`, and `VThreads 23 ms`. Fresh no-quick runtime of
+    `build/test-jvm-full-obf-perf/test-obf-class-key-local-cache.jar`
+    reported `Calc 817 ms`. These are worse than the immediately preceding
+    small-domain-branch artifacts (`test21` around `Platform 125 ms`,
+    `Virtual 150 ms`, `Seq 434 ms`, `Parallel 21-22 ms`, `VThreads 23 ms`,
+    and `test` `Calc 756 ms`), so the implementation is not accepted.
+  - Fresh `javap` confirmed the local-cache shape was generated, and fresh
+    `-XX:+PrintCompilation -XX:+PrintInlining` showed the hot `a.a::y` body
+    shrank from about `6348` to `6235` bytes. The same inlining blockers
+    remained (`a.ra::ya` at 30 bytes, compact branch helpers at 43 bytes,
+    protected numeric wrapper/finalizer calls, and `a.qa::*cb` wrappers at
+    42 bytes). This proves the repeated sidecar load was not the controlling
+    runtime blocker, and the uncommitted implementation was reverted.
+
+- Sixteenth repair evidence before editing:
+  - The rejected fifteenth repair proves that reducing caller-side class-key
+    sidecar loads alone does not move the runtime gate. Fresh
+    `test21-obf-small-domain-branches.printcomp.log` and
+    `test21-obf-class-key-local-cache.printcomp.log` still reject protected
+    numeric compact wrappers at 20 bytes (`a.ta::kqb` / equivalent obfuscated
+    names) with `size > DesiredMethodLimit`.
+  - Fresh `javap` of
+    `build/test-jvm-full-obf-perf/test21-obf-small-domain-branches.jar`
+    shows the compact protected numeric wrapper currently has bytecode offsets
+    `0..19`: it loads raw base, rejoins two 16-bit encrypted-material
+    fragments, rejoins two 16-bit site-seed fragments, calls the protected
+    finalizer, and returns. The two rejoin sequences include `I2C` because
+    `emitIntFragments` emits both high and low fragments as signed shorts.
+  - Source evidence: `JvmConstantObfuscationPass.emitIntFragments` currently
+    emits `(short) (value >>> 16)` and `(short) value`, while
+    `emitHelperIntFromFragments` masks the low half with `I2C` before `IOR`.
+    The caller-side fragments are already split material for the same
+    protected compact helper; emitting the two halves as unsigned 16-bit
+    integers preserves the exact reconstructed 32-bit word and makes the
+    helper-side low-half `I2C` redundant.
+- Sixteenth repair plan-intake scope:
+  - Change protected numeric fragment emission generically so both helper
+    fragments are pushed as unsigned 16-bit values (`(value >>> 16) & 0xffff`
+    and `value & 0xffff`) and remove the helper-side `I2C` from
+    `emitHelperIntFromFragments`.
+  - Preserve the protected numeric helper descriptor, the two-fragment material
+    split, per-site seed material, raw-base input, finalizer call, CFF-bound
+    constant base, constant/string/indy coverage, and all CFF block/transition
+    semantics. The change only moves the zero-extension responsibility from the
+    helper body to the generated fragment values, which are already runtime
+    material inputs to that helper.
+  - Add/update focused assertions so generated protected numeric wrappers still
+    consume raw base, rejoin high/low fragments, call the finalizer, and no
+    longer need `I2C` / `IAND` low-half masking in the wrapper body. The test
+    must keep proving runtime-derived protected material reaches the helper.
+  - Do not special-case `test.jar`, `test21.jar`, `full.jar`, benchmark rows,
+    class names, method names, obfuscated helper names, or constants. Do not
+    replace protected numeric decoding with static constants, direct original
+    bytecode, cached plaintext values, or a fallback path.
+- Sixteenth repair validation target:
+  - Focused validation:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, recording Platform, Virtual, Seq, Parallel, and
+    VThreads rows.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`, recording `Calc`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/full.jar`, recording feature/perf summaries.
+  - Fresh `javap` / `-XX:+PrintCompilation -XX:+PrintInlining` inspection for
+    `test21` proving the protected numeric wrapper shrank below the previous
+    20-byte body and recording the next blocker if requested thresholds still
+    fail.
+- Sixteenth repair completion criteria:
+  - Focused tests pass; fresh regenerated artifacts run without verifier
+    errors, VM crashes, fallback/original-bytecode behavior, skipped transform
+    coverage, or CFF coverage weakening.
+  - Protected compact numeric helper bodies no longer contain helper-side
+    `I2C` / `IAND` low-half masking, yet reconstruct the same high/low
+    fragment words and still call the protected finalizer with raw-base-bound
+    material.
+  - The repair reduces the compact protected wrapper body from the prior
+    20-byte shape and does not add plaintext constants, cache decoded values,
+    weaken per-site seed material, or change runtime constant semantics.
+  - The repair does not claim final threshold acceptance unless fresh runtime
+    logs meet the requested gates; otherwise the plan records the next concrete
+    generic blocker from fresh evidence.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
