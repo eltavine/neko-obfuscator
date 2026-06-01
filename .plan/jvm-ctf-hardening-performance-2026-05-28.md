@@ -5967,6 +5967,86 @@ This plan will refresh that evidence before changing CFF performance code.
     and local performance improvement, while JCP-7 remains open for the next
     generic hot-path blocker.
 
+- Seventeenth repair evidence before editing:
+  - Fresh `test21-obf-unsigned-fragments.printcomp.log` shows multiple
+    42/43-byte compact CFF group dispatch helpers still rejected with
+    `size > DesiredMethodLimit`, including obfuscated methods such as
+    `a.qa::bdb`, `a.qa::hdb`, `a.qa::zdb`, `a.qa::ceb`, and corresponding
+    `a.pa::*` helpers. The mapping file identifies these as generated
+    `__neko_cff$... (JIIIIII[I)J` helpers, not original application methods.
+  - Fresh `javap` of representative helpers shows the repeated shape:
+    compare `domainLocal` against one or two island-domain tokens, call the
+    island helper on match, and on miss write the compact result cell
+    `stateOut[5] = poisonToken` before returning the unchanged live key. The
+    miss body is emitted by `finishCompactSparseResultOnlyReturn`.
+  - Source evidence: `prepareGroupDispatchHelper` emits the compact sparse
+    group-helper poison path with `finishCompactSparseResultOnlyReturn`, while
+    `emitGroupDispatchCall` immediately loads compact state cell 5 after the
+    helper returns and branches to poison before reloading the rest of the
+    state. Therefore the poison result cell can be initialized at the caller
+    immediately before the helper call and still remain on the same live compact
+    state dataflow consumed by the result-first branch.
+  - Source and `javap` evidence also show a domain-router inefficiency when two
+    domain tokens target the same island helper, for example the normal island
+    token plus the direct-island entry token. `emitSmallDomainRouterBranches`
+    currently emits two `IF_ICMPEQ` checks followed by an unconditional
+    `GOTO poison` even when both labels are the same; the generated helper then
+    falls through to the shared call target. A same-target two-token router can
+    instead branch to the shared target on the first match, branch to poison on
+    the second mismatch, and fall through to the same target on the second
+    match, preserving dispatch semantics without the extra `GOTO`.
+- Seventeenth repair plan-intake scope:
+  - For compact sparse result-first group dispatch only, pre-store the group's
+    poison result token into compact state slot 5 at the caller before invoking
+    the group helper. The group helper's compact sparse poison case will then
+    return the live key without performing its own result-cell store. Island
+    helpers continue to overwrite slot 5 with live result tokens on successful
+    dispatch.
+  - Record the compact sparse poison token in the existing per-group router
+    state during `prepareGroupDispatchHelper`, so the caller does not recompute
+    it from descriptors, obfuscated names, or sample-specific data.
+  - Add a generic same-target two-key fast path to the small domain router
+    emitter. The fast path applies only when `keys.length == 2` and
+    `labels[0] == labels[1]`; distinct two-target routers keep the existing
+    branch shape, and routers with more than two keys keep lookup-switch
+    dispatch.
+  - Preserve compact sparse result-first semantics, dense-result routers,
+    packed `long[]` state routers, island helper material decoding, hidden-key
+    propagation, CFF block boundaries/count, full transform coverage, and the
+    existing helper descriptors. Do not special-case `test.jar`, `test21.jar`,
+    `full.jar`, obfuscated helper names, benchmark rows, or any source sample.
+- Seventeenth repair validation target:
+  - Focused validation:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, recording Platform, Virtual, Seq, Parallel, and
+    VThreads rows.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`, recording `Calc`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/full.jar`, recording feature/perf summaries.
+  - Fresh `javap` / `-XX:+PrintCompilation -XX:+PrintInlining` inspection for
+    `test21` proving compact sparse group helper miss paths no longer store
+    result cell 5, duplicate-label two-key routers no longer emit the extra
+    `GOTO poison`, callers pre-store the poison result cell before the helper
+    call, and recording the next blocker if requested thresholds still fail.
+- Seventeenth repair completion criteria:
+  - Focused tests pass; fresh regenerated artifacts run without verifier
+    errors, VM crashes, fallback/original-bytecode behavior, skipped transform
+    coverage, or CFF coverage weakening.
+  - Compact sparse poison semantics are preserved: before every compact sparse
+    group helper call, the caller initializes compact state result slot 5 to
+    the group's poison token, successful helper paths still overwrite slot 5
+    with the live result token, and the caller still branches on slot 5 before
+    full state reload.
+  - Generated compact sparse group helper miss paths return the live key
+    without helper-local result-cell stores; same-target two-key domain routers
+    do not emit the extra unconditional `GOTO poison`; distinct two-target and
+    larger routers retain their previous dispatch semantics.
+  - The repair does not claim final threshold acceptance unless fresh runtime
+    logs meet the requested gates; otherwise the plan records the next concrete
+    generic blocker from fresh evidence.
+
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
 - Scope: convert the measurement harness from JCP-4 into an enforcing gate for
