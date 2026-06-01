@@ -154,7 +154,7 @@ flag{java21_non_linear_keyspace_collapses_to_one_key}
     `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.invoke.JvmInvokeDynamicPayloadReconciliationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --no-daemon`
     with `BUILD SUCCESSFUL`.
 
-### [ ] JIR-5: Full Runtime Validation And Output Refresh
+### [x] JIR-5: Full Runtime Validation And Output Refresh
 
 - Scope: rebuild the CLI, regenerate `test-jars/phase-shift21.jar` with the
   full JVM profile and no quick mode, write
@@ -173,6 +173,37 @@ flag{java21_non_linear_keyspace_collapses_to_one_key}
   After this validation passes, dispatch implementation review for the output
   refresh evidence and commit only the matching plan update if no source code
   changes remain in this subtask.
+- Completion evidence:
+  - Rebuilt the CLI with the same focused validation target used by JIR-4, then
+    regenerated `test-jars/phase-shift21.jar` with
+    `test-jars/full-jvm-obf.yml` and no quick mode to
+    `/mnt/d/Code/Reverse/NekoOBF/phase-shift21-obf.jar`.
+  - Fresh generation kept the expected full JVM surfaces enabled:
+    `renamer appliedFull=27 appliedSafe=656 notApplicable=0 failClosed=0`,
+    `keyDispatch appliedFull=27`,
+    `methodParameterObfuscation appliedFull=22 appliedSafe=1`,
+    `controlFlowFlattening appliedFull=27`,
+    `validationSinkHardening appliedFull=1`,
+    `invokeDynamic appliedFull=20`,
+    `constantObfuscation appliedFull=19`, and
+    `stringObfuscation appliedFull=8`.
+  - Fresh generation logged
+    `Relocated large CFF helper sets: hosts=10 methods=484`,
+    `Relaxed cross-class CFF carrier field access: fields=5`, and
+    `Reconciled generated helper invokedynamic payload targets: sites=1`
+    before class-code integrity finalization.
+  - `jar tf /mnt/d/Code/Reverse/NekoOBF/phase-shift21-obf.jar` reads the
+    regenerated output and lists `META-INF/MANIFEST.MF` plus obfuscated
+    classes `a/a.class` through `a/p.class`.
+  - Direct runtime validation passed:
+    `env JAVA_TOOL_OPTIONS='-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t -XX:-UsePerfData' java -jar /mnt/d/Code/Reverse/NekoOBF/phase-shift21-obf.jar`
+    with input `K5J9-R2QX-7M4D-8V2P-C6ZA-H3TN` printed
+    `accepted: K5J9-R2QX-7M4D-8V2P-C6ZA-H3TN` and
+    `flag{java21_non_linear_keyspace_collapses_to_one_key}` with exit code 0.
+  - Static inspection showed `a.b` no longer contains
+    `__neko_vsx0$18(IIJ)I`; `rg '__neko_vsx0\$18'` over the refreshed mapping
+    returned no matches, while `javap -p -s a.l` shows the active validation
+    primitive helper target is present under a relocated generated-helper host.
 
 ### [ ] JIR-6: Final Plan Completion Review
 
