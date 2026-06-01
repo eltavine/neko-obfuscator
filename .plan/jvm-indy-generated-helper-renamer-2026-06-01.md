@@ -114,7 +114,7 @@ flag{java21_non_linear_keyspace_collapses_to_one_key}
     `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.GeneratedHelperTargetMapTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --no-daemon`
     with `BUILD SUCCESSFUL`.
 
-### [ ] JIR-4: InvokeDynamic Payload Reconciliation
+### [x] JIR-4: InvokeDynamic Payload Reconciliation
 
 - Scope: before writing output, rewrite encrypted invokedynamic payloads whose
   decoded target matches a recorded generated-helper remap, then re-encrypt
@@ -124,7 +124,7 @@ flag{java21_non_linear_keyspace_collapses_to_one_key}
   bootstrap descriptor/hidden-key flow, and updates only targets proven by the
   final generated-helper remap.
 - Validation target:
-  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --no-daemon`.
+  `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.invoke.JvmInvokeDynamicPayloadReconciliationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --no-daemon`.
   The generic regression must exercise an invokedynamic payload targeting a
   generated helper whose final target changes through the composed remap, then
   assert decoded/reconciled payload resolution uses the final
@@ -135,6 +135,24 @@ flag{java21_non_linear_keyspace_collapses_to_one_key}
   class/method/key checks. After this subtask passes its validation target,
   dispatch implementation review and commit only this implementation plus the
   matching plan update before starting JIR-5.
+- Completion evidence:
+  - `JvmInvokeDynamicObfuscationPass` now records each generated indy site's
+    payload target and encryption context when the site is created.
+  - `CffClassSetup.finalizeClassCodeIntegrity` now invokes payload
+    reconciliation after generated-helper relocation/name repair and before
+    class-code integrity material is finalized, so rewritten payload bytes are
+    included in the final integrity hash.
+  - Reconciliation resolves the recorded original target through
+    `GeneratedHelperTargetMap` and re-encrypts only payloads whose target has a
+    recorded final owner/name/descriptor. It does not preserve old helper names,
+    skip renaming/relocation, or add runtime fallback behavior.
+  - Added `JvmInvokeDynamicPayloadReconciliationTest`, a generic synthetic
+    regression proving an encrypted payload for an original generated-helper
+    target is rewritten to the composed relocated target while staying
+    encrypted.
+  - Focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.invoke.JvmInvokeDynamicPayloadReconciliationTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.JvmRenamerIntegrationTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --no-daemon`
+    with `BUILD SUCCESSFUL`.
 
 ### [ ] JIR-5: Full Runtime Validation And Output Refresh
 

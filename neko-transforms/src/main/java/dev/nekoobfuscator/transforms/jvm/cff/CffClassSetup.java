@@ -17,6 +17,7 @@ import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmPassBytecode;
+import dev.nekoobfuscator.transforms.jvm.invoke.JvmInvokeDynamicObfuscationPass;
 import dev.nekoobfuscator.transforms.jvm.key.JvmKeyDispatchPass;
 import dev.nekoobfuscator.transforms.jvm.strings.JvmStringObfuscationPass;
 import dev.nekoobfuscator.transforms.jvm.constants.JvmConstantObfuscationPass;
@@ -2725,6 +2726,12 @@ abstract class CffClassSetup extends CffSharedState {
         restoreClassIntegrityHelperNames(pctx, classes);
         restoreCffCarrierFieldNames(pctx, classes);
         relaxReferencedCffCarrierFieldAccess(pctx, classes);
+        if (pctx.config().isTransformEnabled(JvmInvokeDynamicObfuscationPass.ID)) {
+            int reconciled = JvmInvokeDynamicObfuscationPass.reconcileGeneratedHelperPayloads(pctx, classes);
+            if (reconciled > 0) {
+                log.info("Reconciled generated helper invokedynamic payload targets: sites={}", reconciled);
+            }
+        }
         int installed = finalizeClassIntegrityCodeMaterial(pctx, tables, hierarchy);
         restoreCffCarrierFieldNames(pctx, classes);
         relaxReferencedCffCarrierFieldAccess(pctx, classes);

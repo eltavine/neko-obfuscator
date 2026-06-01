@@ -6,6 +6,7 @@ import dev.nekoobfuscator.api.transform.TransformPass;
 import dev.nekoobfuscator.api.transform.TransformPhase;
 import dev.nekoobfuscator.core.ir.l1.L1Class;
 import dev.nekoobfuscator.core.ir.l1.L1Method;
+import dev.nekoobfuscator.core.pipeline.GeneratedHelperTargetMap;
 import dev.nekoobfuscator.core.pipeline.PipelineContext;
 import dev.nekoobfuscator.transforms.util.JvmObfuscationCoverage;
 import dev.nekoobfuscator.transforms.util.TransformGuards;
@@ -19,6 +20,7 @@ import dev.nekoobfuscator.transforms.jvm.validation.JvmValidationSinkHardeningPa
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -96,6 +98,7 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private static final String HELPERS_KEY = "invokeDynamic.classHelpers";
     private static final String SHARED_HELPERS_KEY = "invokeDynamic.sharedHelpers";
     private static final String FLOW_TABLES_KEY = "invokeDynamic.flowSaltTables";
+    private static final String PAYLOAD_SITES_KEY = "invokeDynamic.payloadSites";
     private static final int OUTLINED_SITE_SIZE_PRESSURE = 55_000;
     private static final int INDY_INIT_INLINE_CELL_LIMIT = 64;
     private static final int INDY_INIT_CHUNK_MAX_CELLS = 48;
@@ -278,6 +281,18 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
                     interfaceOwner
                 )
             );
+            recordPayloadSite(
+                pctx,
+                indy,
+                spec.kind(),
+                spec.owner(),
+                spec.name(),
+                spec.desc(),
+                siteSeed ^ salt ^ OWNER_SEED,
+                token,
+                flow,
+                resolverSeedCell.descriptor()
+            );
 
             InsnList replacement = new InsnList();
             if (outlineSites) {
@@ -390,6 +405,92 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
 
     private boolean useOutlinedIndySites(MethodNode mn) {
         return JvmCodeSizeEstimator.estimateMethodBytes(mn) >= OUTLINED_SITE_SIZE_PRESSURE;
+    }
+
+    public static int reconcileGeneratedHelperPayloads(
+        PipelineContext pctx,
+        List<L1Class> classes
+    ) {
+        Map<IndyPayloadKey, IndyPayloadSite> sites = payloadSites(pctx, false);
+        if (sites == null || sites.isEmpty()) return 0;
+        int rewritten = 0;
+        for (L1Class clazz : classes) {
+            boolean changed = false;
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof InvokeDynamicInsnNode indy)) continue;
+                    IndyPayloadSite site = sites.get(payloadKey(indy));
+                    if (site == null) continue;
+                    GeneratedHelperTargetMap.MethodTarget target =
+                        GeneratedHelperTargetMap.resolveMethod(pctx, site.owner(), site.name(), site.desc());
+                    if (site.owner().equals(target.owner())
+                        && site.name().equals(target.name())
+                        && site.desc().equals(target.desc())) {
+                        continue;
+                    }
+                    indy.bsmArgs[0] = encryptedPayload(
+                        site.kind(),
+                        target.owner(),
+                        target.name(),
+                        target.desc(),
+                        site.decodeSeed(),
+                        site.token(),
+                        site.flow(),
+                        site.resolverDescriptor()
+                    );
+                    changed = true;
+                    rewritten++;
+                }
+            }
+            if (changed) {
+                clazz.markDirty();
+            }
+        }
+        return rewritten;
+    }
+
+    static void recordPayloadSite(
+        PipelineContext pctx,
+        InvokeDynamicInsnNode indy,
+        int kind,
+        String owner,
+        String name,
+        String desc,
+        long decodeSeed,
+        long token,
+        long flow,
+        long resolverDescriptor
+    ) {
+        Map<IndyPayloadKey, IndyPayloadSite> sites = payloadSites(pctx, true);
+        sites.put(
+            payloadKey(indy),
+            new IndyPayloadSite(kind, owner, name, desc, decodeSeed, token, flow, resolverDescriptor)
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<IndyPayloadKey, IndyPayloadSite> payloadSites(
+        PipelineContext pctx,
+        boolean create
+    ) {
+        Map<IndyPayloadKey, IndyPayloadSite> sites = pctx.getPassData(PAYLOAD_SITES_KEY);
+        if (sites == null && create) {
+            sites = new LinkedHashMap<>();
+            pctx.putPassData(PAYLOAD_SITES_KEY, sites);
+        }
+        return sites;
+    }
+
+    private static IndyPayloadKey payloadKey(InvokeDynamicInsnNode indy) {
+        Object payload = indy.bsmArgs.length > 0 ? indy.bsmArgs[0] : null;
+        Object resolverSlot = indy.bsmArgs.length > 1 ? indy.bsmArgs[1] : null;
+        return new IndyPayloadKey(
+            indy.name,
+            indy.desc,
+            payload instanceof String value ? value : "",
+            resolverSlot instanceof Integer value ? value : Integer.MIN_VALUE
+        );
     }
 
     private String addOutlinedIndySiteHelper(
@@ -545,7 +646,11 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     }
 
     private String payload(SiteSpec spec) {
-        return spec.kind() + "\n" + spec.owner() + "\n" + spec.name() + "\n" + spec.desc();
+        return payload(spec.kind(), spec.owner(), spec.name(), spec.desc());
+    }
+
+    static String payload(int kind, String owner, String name, String desc) {
+        return kind + "\n" + owner + "\n" + name + "\n" + desc;
     }
 
     private SiteSpec siteSpec(PipelineContext pctx, L1Class caller, AbstractInsnNode insn) {
@@ -5399,6 +5504,25 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
         return new String(chars);
     }
 
+    static String encryptedPayload(
+        int kind,
+        String owner,
+        String name,
+        String desc,
+        long decodeSeed,
+        long token,
+        long flow,
+        long resolverDescriptor
+    ) {
+        return new JvmInvokeDynamicObfuscationPass().encrypt(
+            payload(kind, owner, name, desc),
+            decodeSeed,
+            token,
+            flow,
+            resolverDescriptor
+        );
+    }
+
     private int charMask(long seed, long token, long flow, long descriptor, int index) {
         long mixed = JvmPassBytecode.mix(
             flow ^ seed ^ indyMaterialFingerprint(descriptor),
@@ -5528,6 +5652,19 @@ public final class JvmInvokeDynamicObfuscationPass implements TransformPass {
     private record IndyResolverMaterialCell(long descriptor, long[] encoded) {}
 
     private record IndyStaticArrayMaterialCell(long[] encoded) {}
+
+    private record IndyPayloadKey(String indyName, String indyDesc, String payload, int resolverSlot) {}
+
+    private record IndyPayloadSite(
+        int kind,
+        String owner,
+        String name,
+        String desc,
+        long decodeSeed,
+        long token,
+        long flow,
+        long resolverDescriptor
+    ) {}
 
     private record SiteSpec(
         int kind,
