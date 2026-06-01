@@ -5230,6 +5230,75 @@ This plan will refresh that evidence before changing CFF performance code.
     JIT blockers still include relocated CFF helpers in the 566-920 byte range
     rejected as `hot method too big`, so final threshold work remains open.
 
+- Eleventh repair evidence before editing:
+  - Fresh no-quick full-profile final regeneration for the requested output set
+    wrote `build/final-jvm-full-obf/test21-obf.jar`; direct execution exited 0
+    but still reported Platform `123 ms`, Virtual `168 ms`, Seq `515 ms`,
+    Parallel `22 ms`, and VThreads `23 ms`.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on that artifact
+    (`build/final-jvm-full-obf/test21-obf.printcomp.log`) shows the hot
+    `a.a::y` method compiles at `6343 bytes`, below the HotSpot huge-method
+    limit, but repeatedly rejects generated dispatch helpers: `a.ta::pqb
+    (111 bytes)` is rejected 101 times as `callee is too large` and 63 times
+    as `size > DesiredMethodLimit`, many `98 byte` generated group/island
+    helpers are rejected, and result-router helper `a.ra::ya (30 bytes)` is
+    rejected 105 times as `size > DesiredMethodLimit`.
+  - Fresh `javap` inspection of
+    `build/final-jvm-full-obf/test21-obf-a-a-javap.txt` shows the hot class
+    still contains many outlined group/island dispatch helper callsites with
+    descriptor `(JIIIIII[J)J`, while compact transition wrappers already use
+    `(JIIII[J[I)J` for transition edges.
+  - Source inspection of `CffTransitionOutliner.emitGroupDispatchCall`,
+    `emitIslandDispatchCall`, `prepareGroupDispatchHelper`, and
+    `createIslandDispatchHelper` shows outlined dispatch helpers return
+    guard/path/block/pc/domain/result through packed `long[]` state slots and
+    caller-side unpacking, even when JIT-budget compact transition wrappers
+    have already allocated the compact `int[]` state local. This is generic
+    helper/caller packing overhead in the CFF transition-outliner ABI, not a
+    sample-specific benchmark branch.
+- Eleventh repair plan-intake scope:
+  - Add a compact state ABI for outlined group/island dispatch helpers in
+    JIT-budget methods that already allocate the compact transition state
+    array. The compact dispatch helper descriptor will keep the same live
+    method key, guard, path, block, pc, domain, and data inputs but replace
+    the packed `long[]` out carrier with the existing compact `int[]` state
+    carrier.
+  - Store returned guard, path, block, pc, domain, and result token into
+    separate `int[]` cells; have the caller reload those cells directly instead
+    of unpacking `long[]` pairs. Preserve result-route masking, dense/sparse
+    routers, cold-miss helpers, fake/poison routes, direct-island domain
+    entries, and live key/data/domain flow.
+  - Do not change CFF block boundaries, island grouping, row material,
+    transition material helpers, dispatch token formulas, fake/poison coverage,
+    helper relocation coverage, or compact transition wrapper semantics. Do
+    not special-case `test21.jar`, generated obfuscated names, benchmark rows,
+    classes, methods, descriptors, or timing strings.
+- Eleventh repair validation target:
+  - `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`
+  - Focused generated-bytecode regression proving a JIT-budget CFF fixture
+    emits compact dispatch helper callsites using the compact `int[]` state
+    ABI, while non-JIT-budget or non-compact paths keep the existing packed
+    ABI.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, recording Platform, Virtual, Seq, Parallel, and
+    VThreads rows.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`, recording `Calc`.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` for `test21` showing
+    whether the repeated `(JIIIIII[J)J` helper rejections move to compact
+    dispatch helper callsites or decrease, and recording the next blocker if
+    thresholds remain unmet.
+- Eleventh repair completion criteria:
+  - Focused tests pass; fresh regenerated artifacts run without verifier
+    errors, VM crashes, fallback/original-bytecode behavior, transform coverage
+    weakening, or CFF block/row weakening.
+  - The compact dispatch helper ABI is selected only by generic JIT-budget /
+    compact-wrapper state, and all dispatch state remains dynamically derived
+    from live method key, live CFF state, live domain/data, and protected row
+    material.
+  - The repair does not claim final threshold acceptance unless fresh runtime
+    logs meet the requested gates.
+
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
 - Scope: convert the measurement harness from JCP-4 into an enforcing gate for
@@ -5285,3 +5354,24 @@ This plan will refresh that evidence before changing CFF performance code.
   performance thresholds are met; `full-obf.jar` completes its runnable smoke
   target or records a generic evidence-backed blocker for repair; final plan
   review returns PASS.
+
+- Partial evidence (2026-06-01):
+  - Fresh CLI rebuild completed with repository-local `GRADLE_USER_HOME` and
+    `java.io.tmpdir`, then no-quick full JVM obfuscation generated the six
+    originally requested jars plus `test-jars/full.jar` using
+    `test-jars/full-jvm-obf.yml`.
+  - Output jars were copied to `/mnt/d/Code/Reverse/NekoOBF/m` with the
+    requested names: `crackme-obf.jar`, `ctf-obf.jar`, `evaluator-obf.jar`,
+    `snake-obf.jar`, `test-obf.jar`, `test21-obf.jar`, and `full-obf.jar`.
+    `jar tf` succeeded on every copied output.
+  - Direct runtime smoke completed for the fresh final artifacts:
+    `test-obf.jar` exited 0 and reported `Calc: 737ms` with the existing
+    Pool/ReTrace/Sec non-performance rows still present; `test21-obf.jar`
+    exited 0 and reported Platform `123 ms`, Virtual `168 ms`, Seq `515 ms`,
+    Parallel `22 ms`, and VThreads `23 ms`; `full-obf.jar` exited 0 after the
+    full Java 21 runner with `Feature summary: passed=61 failed=0 skipped=0
+    nameSensitiveFailed=0` and `Perf summary: passed=31 failed=0 skipped=0`.
+  - JCP-10 remains open because the requested `test.jar` Calc <= 200 ms,
+    `test21.jar` Seq <= 400 ms, and Parallel/VThreads <= 15 ms thresholds are
+    still not met. The next repair is recorded under the JCP-7 eleventh repair
+    scope.
