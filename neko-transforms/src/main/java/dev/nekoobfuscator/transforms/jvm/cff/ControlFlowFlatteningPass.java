@@ -278,8 +278,12 @@ public final class ControlFlowFlatteningPass extends CffTransitionOutliner imple
             blocks,
             handlerBridges
         );
-        boolean compactTransitionWrappers =
-            outlinerCodePressure >= COMPACT_TRANSITION_WRAPPER_CODE_PRESSURE;
+        boolean compactTransitionWrappers = useCompactTransitionWrappers(
+            outlinerCodePressure,
+            mn,
+            blocks,
+            handlerBridges
+        );
         boolean outlineDispatchers = outlineTransitions;
         int transitionOutLocal = outlineDispatchers ? mn.maxLocals++ : -1;
         int compactTransitionStateLocal = outlineDispatchers && compactTransitionWrappers

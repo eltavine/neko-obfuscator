@@ -4203,7 +4203,7 @@ This plan will refresh that evidence before changing CFF performance code.
     reduced a generic helper size but did not deliver final performance
     acceptance.
 
-### [ ] JCP-6O: Use Compact Transition Wrappers For JIT-Budget Methods
+### [x] JCP-6O: Use Compact Transition Wrappers For JIT-Budget Methods
 
 - Dependency/order: this follows committed JCP-6N because the transition
   material PC/data digest is now split and freshly validated, but the same
@@ -4268,6 +4268,40 @@ This plan will refresh that evidence before changing CFF performance code.
   change does not special-case jar names, class names, descriptors, benchmark
   rows, or generated obfuscated names. JCP-6O does not by itself claim final
   threshold acceptance unless fresh runtime logs meet the requested gates.
+
+- Completion evidence (2026-06-01):
+  - Implemented a generic `useCompactTransitionWrappers` decision that reuses
+    the existing compact wrapper descriptor for methods already selected by
+    the JIT-budget transition-outliner predicate. The change only affects the
+    wrapper-selection predicate and preserves row material, data digest binding,
+    live state-output reloads, and transition material helper coverage.
+  - Focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffMaterialHelperHotPathTest --no-daemon`.
+  - Fresh CFF/MPO-only `test21.jar` generation produced
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6o.jar`; five direct
+    runtime logs completed with Seq `420/442/438/513/490 ms`, Parallel
+    `59/18/19/18/18 ms`, and VThreads `43/20/19/20/20 ms`.
+  - `javap` inspection of
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6o-a-a-javap.txt`
+    shows the large relocated caller now emits compact wrapper callsites such
+    as `a/pa.sza:(JIIII[J[I)J`; inspection of
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6o-a-pa-javap.txt`
+    shows each compact wrapper still calls transition material helper
+    `a/ra.eb:(JIII[Ljava/lang/Object;II[J)J`.
+  - Fresh `PrintInlining` evidence in
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6o-printcomp.log`
+    records the remaining blocker as 5KB-scale relocated dispatch methods
+    (`a.a::y (5186 bytes)` and related methods) plus the compact-wrapper /
+    material chain (`98 byte` wrappers and `264-265 byte` material helpers)
+    hitting `size > DesiredMethodLimit` or `too big`. This is a negative
+    threshold result and identifies the next generic size/runtime blocker.
+  - Fresh full-profile regeneration and direct runtime completed for
+    `test21.jar` and `test.jar`:
+    `test21` reported Platform `141 ms`, Virtual `168 ms`, Seq `545 ms`,
+    Parallel `22 ms`, and VThreads `23 ms`; `test` reported Pool PASS and
+    Calc `822 ms`, with the existing ReTrace/Sec errors still present. Grep of
+    the fresh logs found no verifier, crash, fallback, skip-on-error, or
+    original-bytecode markers.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

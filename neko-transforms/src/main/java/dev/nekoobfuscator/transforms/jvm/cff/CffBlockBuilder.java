@@ -551,6 +551,16 @@ abstract class CffBlockBuilder extends CffIslandMaterial {
         return SMALL_TOKEN_DISPATCH_CASES;
     }
 
+    protected boolean useCompactTransitionWrappers(
+        int outlinerCodePressure,
+        MethodNode mn,
+        List<Block> blocks,
+        List<HandlerBridge> handlerBridges
+    ) {
+        return outlinerCodePressure >= COMPACT_TRANSITION_WRAPPER_CODE_PRESSURE ||
+            useJitBudgetTokenDispatchEncoding(mn, blocks, handlerBridges);
+    }
+
     protected boolean useJitBudgetTokenDispatchEncoding(
         MethodNode mn,
         List<Block> blocks,

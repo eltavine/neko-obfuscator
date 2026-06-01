@@ -47,6 +47,10 @@ import org.objectweb.asm.tree.MethodNode;
 
 final class CffTransitionOutlinerPolicyTest {
     private static final String CFF_SHARED_GROUP_DISPATCH_DESC = "(JIIIIII[J)J";
+    private static final String CFF_TRANSITION_MATERIAL_DESC =
+        "(JIII[Ljava/lang/Object;II[J)J";
+    private static final String CFF_COMPACT_STATE_TRANSITION_DESC =
+        "(JIIII[J[I)J";
     private static final String CFF_ISLAND_MATERIAL_DESC =
         "(JIII[Ljava/lang/Object;III)I";
 
@@ -265,7 +269,15 @@ final class CffTransitionOutlinerPolicyTest {
             cffOutlinerHelperCallCount(hot) > 0,
             "budgeted direct inline removed all outlined helper routes"
         );
+        assertTrue(
+            compactStateTransitionCallCount(hot) > 0,
+            "JIT-budget CFF method did not route direct transitions through compact state wrappers"
+        );
         assertIslandDispatchMissUsesColdHelper(outputJar, "CffBudgetedDirectInlineShape");
+        assertCompactTransitionWrappersPreserveMaterialCalls(
+            outputJar,
+            "CffBudgetedDirectInlineShape"
+        );
     }
 
     private static void runCffOnlyObfuscation(Path input, Path output)
@@ -304,11 +316,55 @@ final class CffTransitionOutlinerPolicyTest {
             if (!(insn instanceof MethodInsnNode call)) continue;
             if (CFF_SHARED_GROUP_DISPATCH_DESC.equals(call.desc)) {
                 calls++;
-            } else if ("(JIII[Ljava/lang/Object;II[J)J".equals(call.desc)) {
+            } else if (CFF_TRANSITION_MATERIAL_DESC.equals(call.desc)) {
                 calls++;
             } else if ("(JIIII[J)J".equals(call.desc)) {
                 calls++;
-            } else if ("(JIIII[J[I)J".equals(call.desc)) {
+            } else if (CFF_COMPACT_STATE_TRANSITION_DESC.equals(call.desc)) {
+                calls++;
+            }
+        }
+        return calls;
+    }
+
+    private static int compactStateTransitionCallCount(MethodNode method) {
+        int calls = 0;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && CFF_COMPACT_STATE_TRANSITION_DESC.equals(call.desc)) {
+                calls++;
+            }
+        }
+        return calls;
+    }
+
+    private static void assertCompactTransitionWrappersPreserveMaterialCalls(Path jar, String owner)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get(owner);
+        assertTrue(clazz != null, "missing class " + owner);
+        int wrappers = 0;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!CFF_COMPACT_STATE_TRANSITION_DESC.equals(method.desc)
+                || method.instructions == null
+                || method.instructions.size() == 0) {
+                continue;
+            }
+            wrappers++;
+            assertEquals(
+                1,
+                transitionMaterialCallCount(method),
+                "compact transition wrapper lost transition material helper coverage"
+            );
+        }
+        assertTrue(wrappers > 0, "no compact state transition wrappers were generated");
+    }
+
+    private static int transitionMaterialCallCount(MethodNode method) {
+        int calls = 0;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && CFF_TRANSITION_MATERIAL_DESC.equals(call.desc)) {
                 calls++;
             }
         }
