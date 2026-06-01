@@ -5727,6 +5727,94 @@ This plan will refresh that evidence before changing CFF performance code.
     coverage, dynamic key flow, invokedynamic coverage, or protected numeric
     material.
 
+- Fifteenth repair evidence before editing:
+  - Fresh no-quick full-profile regeneration of `test-jars/full.jar` succeeded
+    and wrote
+    `build/test-jvm-full-obf-perf/full-obf-small-domain-branches.jar` with
+    full coverage for all enabled transforms (`renamer appliedFull=1035
+    appliedSafe=14054`, `keyDispatch appliedFull=1035`,
+    `methodParameterObfuscation appliedFull=687 appliedSafe=47`,
+    `controlFlowFlattening appliedFull=1037`, `validationSinkHardening
+    appliedFull=8`, `invokeDynamic appliedFull=657`, `constantObfuscation
+    appliedFull=316`, and `stringObfuscation appliedFull=425`). Direct
+    execution of that fresh artifact exited 0, reported `Feature summary:
+    passed=61 failed=0 skipped=0 nameSensitiveFailed=0`, and `Perf summary:
+    passed=31 failed=0 skipped=0`.
+  - Fresh `javap` inspection of
+    `build/test-jvm-full-obf-perf/test21-obf-small-domain-branches.jar` shows
+    each hot `a.ra::ya([IIIIIII)I` class-key helper callsite reloads the same
+    class-key words through `getstatic a/a.i:[Ljava/lang/Object;`, pushes
+    `CLASS_KEY_WORDS_SLOT`, performs `aaload`, `checkcast [I`, then invokes the
+    helper. In the hot `a.a::y` call chain, the callsite at bytecode offset 524
+    through 549 is representative, and `rg` over the `javap` dump records many
+    repeated `a.ra::ya` invocations in the same transformed methods.
+  - Source evidence in `CffKeyStateEmitter.emitClassKeyWordsLoad(InsnList,
+    CffClassKeyTable)` emits the same `GETSTATIC` + slot push + `AALOAD` +
+    `CHECKCAST [I` sequence for every method-body class-key use. The helper
+    overload that receives an Object[] material local already loads from that
+    local and must remain unchanged for generated helper methods.
+  - Fresh `PrintCompilation` evidence from the same `test21` artifact shows
+    the remaining hot caller budget failures include repeated `a.ra::ya`
+    (`__neko_cff_int`, 30 bytes) and the compact branch wrappers. The repeated
+    sidecar load is not part of the 30-byte helper body, but it is present at
+    every caller site before inlining and contributes directly to the hot
+    method's bytecode budget and runtime memory traffic.
+- Fifteenth repair plan-intake scope:
+  - Add a method-local class-key words cache for transformed application
+    methods that have an active CFF class-key table. The cache initialization
+    will load the existing Object[] sidecar's `CLASS_KEY_WORDS_SLOT`, cast it to
+    `[I`, store it in a new synthetic local before the protected CFF body, and
+    subsequent method-body class-key word loads will use `ALOAD cacheLocal`.
+  - Preserve the existing class-key table, Object[] sidecar storage,
+    `<clinit>` initialization, class-integrity sealing, `__neko_cff_int` helper
+    ABI, transition material, compressed island material, key transfer,
+    invokedynamic/string/constant compatibility, and all CFF block construction
+    and routing semantics. Generated helper methods that receive Object[]
+    material carriers continue to load class-key words from those carriers and
+    do not use the caller's local cache.
+  - Keep pre-protected entry-key transfer initialization on the old direct
+    sidecar load path until the cache has been initialized, so no generated code
+    can read an uninitialized local. Insert the cache before the protected CFF
+    region, then enable the cached load only for the main transformed method
+    body emissions that follow.
+  - Add focused generated-artifact tests proving repeated method-body
+    class-key helper callsites use a local `[I` cache instead of repeated
+    `GETSTATIC`/`AALOAD`/`CHECKCAST`, while generated CFF helpers with Object[]
+    carrier parameters retain their carrier-local class-key loads. Also assert
+    no standalone static int[] class-key field is introduced.
+  - Do not special-case `test.jar`, `test21.jar`, `full.jar`, matrix methods,
+    obfuscated names, timing rows, helper owners, or descriptors. Do not change
+    class-key formulas, CFF block boundaries, CFF block count, transition
+    helpers, compact wrapper semantics, constant/string/indy coverage, or
+    hidden key propagation.
+- Fifteenth repair validation target:
+  - Focused validation:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, recording Platform, Virtual, Seq, Parallel, and
+    VThreads rows.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`, recording `Calc`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/full.jar`, recording feature/perf summaries.
+  - Fresh `javap` / `-XX:+PrintCompilation -XX:+PrintInlining` inspection for
+    `test21` proving class-key sidecar loads are cached in hot method bodies
+    and recording the next blocker if requested thresholds still fail.
+- Fifteenth repair completion criteria:
+  - Focused tests pass; fresh regenerated artifacts run without verifier
+    errors, VM crashes, fallback/original-bytecode behavior, skipped transform
+    coverage, or CFF coverage weakening.
+  - Main transformed method bodies no longer repeat the same class-key
+    `GETSTATIC`/slot/`AALOAD`/`CHECKCAST` sequence at every `__neko_cff_int`
+    callsite; generated helper methods that need carrier-relative material keep
+    their existing Object[] load path.
+  - No new Java helper layer, no new static int[] class-key field, no
+    special-case benchmark path, and no change to key formulas or transition
+    semantics is introduced.
+  - The repair does not claim final threshold acceptance unless fresh runtime
+    logs meet the requested gates; otherwise the plan records the next concrete
+    generic blocker from fresh evidence.
+
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
 - Scope: convert the measurement harness from JCP-4 into an enforcing gate for
