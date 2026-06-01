@@ -3867,7 +3867,7 @@ This plan will refresh that evidence before changing CFF performance code.
     separate generic optimization for the remaining token/material-callsite
     blockers before final no-quick jar output.
 
-### [ ] JCP-6L: Factor CFF Runtime-Source And Transition-Base Helpers
+### [x] JCP-6L: Factor CFF Runtime-Source And Transition-Base Helpers
 
 - Dependency/order: this follows committed JCP-6K because the transition word
   decode and key-transfer high/low runtime bucket sharing are already split and
@@ -3933,6 +3933,51 @@ This plan will refresh that evidence before changing CFF performance code.
   benchmark strings, timing rows, or generated obfuscated names. JCP-6L does
   not by itself claim final threshold acceptance unless fresh runtime logs meet
   the requested gates.
+- Completion evidence 2026-06-01:
+  - Focused `CffMaterialHelperHotPathTest` passed after the generated-bytecode
+    regression was extended to require the new
+    `(JIIII)I` key-transfer runtime-bucket helper and
+    `(JI[Ljava/lang/Object;[IIII)I` transition-base helper descriptors, direct
+    descriptor callsites, no embedded `Thread.currentThread()` call in the
+    key-transfer material helper, and sub-320/340 byte split helper budgets.
+  - The focused JVM CFF/indy regression command listed above passed freshly:
+    `CffTransitionOutlinerPolicyTest`,
+    `ControlFlowFlatteningAlgebraicAuditTest`,
+    `JvmInvokeDynamicObfuscationIntegrationTest`, and
+    `CffMaterialHelperHotPathTest`.
+  - Fresh no-quick CFF/MPO-only artifact
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6l.jar` ran five
+    times without verifier errors or VM crashes. Runtime rows were Seq
+    `479/483/476/433/485 ms`, Parallel `19/19/19/20/19 ms`, and VThreads
+    `20/39/18/22/23 ms`, so JCP-6L still does not satisfy the final user
+    performance gates.
+  - Fresh CFF/MPO-only `PrintInlining` evidence
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6l-printcomp.log`
+    shows the generic material helpers split as intended:
+    `a.pa::cb (249 bytes)` for transition material,
+    `a.pa::ab (111 bytes)` for transition base,
+    `a.pa::bb (40 bytes)` for transition word decode,
+    `a.pa::eb (179 bytes)` for key-transfer material, and
+    `a.pa::db (221 bytes)` for runtime bucket. The JIT hot-inlines these
+    helpers in some sites, but remaining large relocated dispatch helpers and
+    repeated token/material callsites still hit `DesiredMethodLimit`, which is
+    the next blocker.
+  - Fresh full-profile artifacts
+    `build/test-jvm-full-obf-perf/test21-obf-jcp6l.jar` and
+    `build/test-jvm-full-obf-perf/test-obf-jcp6l.jar` regenerated and ran
+    without verifier errors, VM crashes, skip-on-error markers, or
+    original-bytecode fallback. `test21-obf-jcp6l.run.log` reported Seq
+    `542 ms`, Parallel `24 ms`, and VThreads `24 ms`. The first
+    `test-obf-jcp6l.run.log` saw the known timing-sensitive Pool fixture print
+    `Test 1.6: Pool FAIL`, then fresh reruns
+    `test-obf-jcp6l-rerun1.log` through `test-obf-jcp6l-rerun3.log` all
+    reported `Test 1.6: Pool PASS`; the longstanding `Test 2.6: ReTrace ERROR`
+    and `Test 2.8: Sec ERROR` remain outside this subtask.
+  - Static/runtime log inspection of the fresh artifacts found no reduced CFF
+    coverage, helper fallback, skipped original bytecode, or sample-specific
+    branch. The remaining dependency is another generic performance repair for
+    the repeated token/material helper calls and large relocated CFF dispatch
+    methods before final no-quick jar output.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

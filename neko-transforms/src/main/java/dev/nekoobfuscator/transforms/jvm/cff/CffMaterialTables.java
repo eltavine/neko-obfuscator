@@ -1201,10 +1201,24 @@ abstract class CffMaterialTables extends CffClassSetup {
         String intHelperName,
         boolean intHelperInterfaceOwner
     ) {
+        String baseHelperName = uniqueMethodName(
+            clazz,
+            helperName + "$base",
+            TRANSITION_MATERIAL_BASE_HELPER_DESC
+        );
         String wordHelperName = uniqueMethodName(
             clazz,
             helperName + "$word",
             TRANSITION_MATERIAL_WORD_HELPER_DESC
+        );
+        installTransitionMaterialBaseHelper(
+            pctx,
+            clazz,
+            baseHelperName,
+            access,
+            intHelperOwner,
+            intHelperName,
+            intHelperInterfaceOwner
         );
         installTransitionMaterialWordHelper(pctx, clazz, wordHelperName, access);
         MethodNode helper = new MethodNode(
@@ -1240,22 +1254,19 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new InsnNode(Opcodes.DUP));
         insns.add(new VarInsnNode(Opcodes.ISTORE, rowBaseLocal));
         insns.add(new VarInsnNode(Opcodes.ISTORE, rowLocal));
-        TransitionMaterialRowCursor rowCursor =
-            new TransitionMaterialRowCursor(rowLocal);
-        emitTransitionMaterialBase(
+        emitTransitionMaterialBaseCall(
             insns,
-            objectMaterialLocal,
-            intHelperOwner,
-            intHelperName,
-            intHelperInterfaceOwner,
-            materialLocal,
-            rowLocal,
             keyLocal,
+            rowBaseLocal,
+            objectMaterialLocal,
+            materialLocal,
             guardLocal,
             pathLocal,
             blockLocal,
             baseLocal,
-            rowCursor
+            clazz.name(),
+            baseHelperName,
+            clazz.isInterface()
         );
         emitTransitionMaterialDecodedWordCall(
             insns,
@@ -1375,6 +1386,87 @@ abstract class CffMaterialTables extends CffClassSetup {
             TRANSITION_MATERIAL_HELPER_DESC,
             keyLocal
         );
+    }
+
+    protected void installTransitionMaterialBaseHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access,
+        String intHelperOwner,
+        String intHelperName,
+        boolean intHelperInterfaceOwner
+    ) {
+        MethodNode helper = new MethodNode(
+            access,
+            helperName,
+            TRANSITION_MATERIAL_BASE_HELPER_DESC,
+            null,
+            null
+        );
+        int keyLocal = 0;
+        int rowLocal = 2;
+        int objectMaterialLocal = 3;
+        int materialLocal = 4;
+        int guardLocal = 5;
+        int pathLocal = 6;
+        int blockLocal = 7;
+        int baseLocal = 8;
+        InsnList insns = helper.instructions;
+        TransitionMaterialRowCursor rowCursor =
+            new TransitionMaterialRowCursor(rowLocal);
+        emitTransitionMaterialBase(
+            insns,
+            objectMaterialLocal,
+            intHelperOwner,
+            intHelperName,
+            intHelperInterfaceOwner,
+            materialLocal,
+            rowLocal,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            baseLocal,
+            rowCursor
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 9;
+        helper.maxStack = 32;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+    }
+
+    protected void emitTransitionMaterialBaseCall(
+        InsnList insns,
+        int keyLocal,
+        int rowLocal,
+        int objectMaterialLocal,
+        int materialLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int baseLocal,
+        String baseHelperOwner,
+        String baseHelperName,
+        boolean baseHelperInterfaceOwner
+    ) {
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rowLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, objectMaterialLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            baseHelperOwner,
+            baseHelperName,
+            TRANSITION_MATERIAL_BASE_HELPER_DESC,
+            baseHelperInterfaceOwner
+        ));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, baseLocal));
     }
 
     protected void installTransitionMaterialWordHelper(
@@ -1554,6 +1646,20 @@ abstract class CffMaterialTables extends CffClassSetup {
         String stackMixName,
         boolean stackMixInterfaceOwner
     ) {
+        String runtimeBucketHelperName = uniqueMethodName(
+            clazz,
+            helperName + "$src",
+            KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC
+        );
+        installKeyTransferRuntimeBucketHelper(
+            pctx,
+            clazz,
+            runtimeBucketHelperName,
+            access,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
+        );
         MethodNode helper = new MethodNode(
             access,
             helperName,
@@ -1571,14 +1677,10 @@ abstract class CffMaterialTables extends CffClassSetup {
         int highWordLocal = 8;
         int baseCursorLocal = 9;
         int modeLocal = 10;
-        int sourceLocal = 11;
-        int threadLocal = 12;
-        int stackLocal = 13;
-        int stackLengthLocal = 14;
-        int lowBaseCursorLocal = 15;
-        int bucketOffsetLocal = 16;
-        int ticketLocal = 17;
-        int ticketDeferLocal = 19;
+        int lowBaseCursorLocal = 11;
+        int bucketOffsetLocal = 12;
+        int ticketLocal = 13;
+        int ticketDeferLocal = 15;
         InsnList insns = helper.instructions;
         LabelNode threadLocalTicket = new LabelNode();
         LabelNode ticketModeReady = new LabelNode();
@@ -1602,7 +1704,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
         insns.add(new InsnNode(Opcodes.IAND));
         insns.add(new VarInsnNode(Opcodes.ISTORE, lowBaseCursorLocal));
-        emitKeyTransferRuntimeBucketOffset(
+        emitKeyTransferRuntimeBucketCall(
             insns,
             keyLocal,
             guardLocal,
@@ -1610,13 +1712,9 @@ abstract class CffMaterialTables extends CffClassSetup {
             blockLocal,
             modeLocal,
             bucketOffsetLocal,
-            sourceLocal,
-            threadLocal,
-            stackLocal,
-            stackLengthLocal,
-            stackMixOwner,
-            stackMixName,
-            stackMixInterfaceOwner
+            clazz.name(),
+            runtimeBucketHelperName,
+            clazz.isInterface()
         );
         insns.add(new VarInsnNode(Opcodes.ILOAD, baseCursorLocal));
         insns.add(new VarInsnNode(Opcodes.ILOAD, bucketOffsetLocal));
@@ -1688,7 +1786,7 @@ abstract class CffMaterialTables extends CffClassSetup {
             classIntegrityState.interfaceOwner()
         ));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 20;
+        helper.maxLocals = 16;
         helper.maxStack = 24;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
@@ -1699,6 +1797,93 @@ abstract class CffMaterialTables extends CffClassSetup {
             KEY_TRANSFER_MATERIAL_HELPER_DESC,
             keyLocal
         );
+    }
+
+    protected void installKeyTransferRuntimeBucketHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
+    ) {
+        MethodNode helper = new MethodNode(
+            access,
+            helperName,
+            KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC,
+            null,
+            null
+        );
+        int keyLocal = 0;
+        int guardLocal = 2;
+        int pathLocal = 3;
+        int blockLocal = 4;
+        int modeLocal = 5;
+        int offsetLocal = 6;
+        int sourceLocal = 7;
+        int threadLocal = 8;
+        int stackLocal = 9;
+        int stackLengthLocal = 10;
+        emitKeyTransferRuntimeBucketOffset(
+            helper.instructions,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            modeLocal,
+            offsetLocal,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
+        );
+        helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, offsetLocal));
+        helper.instructions.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 11;
+        helper.maxStack = 24;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+    }
+
+    protected void emitKeyTransferRuntimeBucketCall(
+        InsnList insns,
+        int keyLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int modeLocal,
+        int bucketOffsetLocal,
+        String helperOwner,
+        String helperName,
+        boolean helperInterfaceOwner
+    ) {
+        LabelNode computeSource = new LabelNode();
+        LabelNode done = new LabelNode();
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, computeSource));
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, bucketOffsetLocal));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, done));
+
+        insns.add(computeSource);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, guardLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, pathLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, blockLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            helperOwner,
+            helperName,
+            KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC,
+            helperInterfaceOwner
+        ));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, bucketOffsetLocal));
+        insns.add(done);
     }
 
     protected void installKeyTransferNoRuntimeMaterialHelper(

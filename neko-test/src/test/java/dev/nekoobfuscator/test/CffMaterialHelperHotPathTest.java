@@ -8,7 +8,6 @@ import dev.nekoobfuscator.core.pipeline.PassRegistry;
 import dev.nekoobfuscator.transforms.jvm.StandardJvmPasses;
 import dev.nekoobfuscator.transforms.jvm.internal.JvmCodeSizeEstimator;
 import org.junit.jupiter.api.Test;
-import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
@@ -35,8 +34,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class CffMaterialHelperHotPathTest {
     private static final String KEY_TRANSFER_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;II)J";
+    private static final String KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC =
+        "(JIIII)I";
     private static final String TRANSITION_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;II[J)J";
+    private static final String TRANSITION_MATERIAL_BASE_HELPER_DESC =
+        "(JI[Ljava/lang/Object;[IIII)I";
     private static final String TRANSITION_MATERIAL_WORD_HELPER_DESC =
         "([IIII)I";
     private static final String TOKEN_MATERIAL_HELPER_DESC =
@@ -74,23 +77,42 @@ public class CffMaterialHelperHotPathTest {
         for (var clazz : input.classes()) {
             for (MethodNode method : clazz.asmNode().methods) {
                 if (!KEY_TRANSFER_MATERIAL_HELPER_DESC.equals(method.desc)) continue;
-                if (currentThreadCallCount(method) == 0) continue;
+                if (methodCallCount(method, KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC) == 0) continue;
                 runtimeHelpers.add(new MethodRef(clazz.name(), method.name, method.desc));
+                assertEquals(
+                    0,
+                    currentThreadCallCount(method),
+                    "key-transfer material helper still embeds thread/runtime source mixing"
+                );
                 assertTrue(
-                    currentThreadCallCount(method) <= 2,
-                    "key-transfer runtime helper recomputes thread/runtime bucket"
+                    methodCallCount(method, KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC) == 1,
+                    "key-transfer material helper should call one runtime bucket helper"
                 );
                 assertTrue(
                     tokenMaterialCallCount(method) >= 2,
                     "key-transfer runtime helper must decode independent high/low material words"
                 );
                 assertTrue(
-                    JvmCodeSizeEstimator.estimateMethodBytes(method) < 900,
+                    JvmCodeSizeEstimator.estimateMethodBytes(method) < 340,
                     "key-transfer runtime helper stayed above the factored hot-path size budget"
                 );
             }
         }
         assertFalse(runtimeHelpers.isEmpty(), "runtime key-transfer material helper was not generated");
+        Set<MethodRef> runtimeBucketHelpers = helpers(input, KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC);
+        assertGeneratedHelpersBelow(
+            input,
+            runtimeBucketHelpers,
+            320,
+            "key-transfer runtime bucket helper stayed above the split size budget"
+        );
+        for (MethodRef helper : runtimeBucketHelpers) {
+            MethodNode method = method(input, helper);
+            assertTrue(
+                currentThreadCallCount(method) <= 2,
+                "key-transfer runtime bucket helper recomputes thread source"
+            );
+        }
         assertTrue(
             callsAny(input, Set.copyOf(runtimeHelpers)),
             "application key-transfer callsites did not target the runtime material helper"
@@ -100,6 +122,12 @@ public class CffMaterialHelperHotPathTest {
             KEY_TRANSFER_MATERIAL_HELPER_DESC,
             helpers(input, KEY_TRANSFER_MATERIAL_HELPER_DESC),
             "key-transfer material"
+        );
+        assertDescriptorCallsitesTargetHelpers(
+            input,
+            KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC,
+            runtimeBucketHelpers,
+            "key-transfer runtime bucket"
         );
         assertTransitionMaterialHelperUsesSplitWordDecoder(input);
     }
@@ -132,12 +160,25 @@ public class CffMaterialHelperHotPathTest {
 
         JarInput input = new JarInput(outputJar);
         Set<MethodRef> transitionHelpers = helpers(input, TRANSITION_MATERIAL_HELPER_DESC);
+        Set<MethodRef> transitionBaseHelpers = helpers(input, TRANSITION_MATERIAL_BASE_HELPER_DESC);
         assertTransitionMaterialHelperUsesSplitWordDecoder(input);
         assertDescriptorCallsitesTargetHelpers(
             input,
             TRANSITION_MATERIAL_HELPER_DESC,
             transitionHelpers,
             "transition material"
+        );
+        assertDescriptorCallsitesTargetHelpers(
+            input,
+            TRANSITION_MATERIAL_BASE_HELPER_DESC,
+            transitionBaseHelpers,
+            "transition material base"
+        );
+        assertGeneratedHelpersBelow(
+            input,
+            transitionBaseHelpers,
+            320,
+            "transition material base helper stayed above the split size budget"
         );
     }
 
@@ -220,25 +261,55 @@ public class CffMaterialHelperHotPathTest {
         assertTrue(calls > 0, label + " helper was generated but no callsites targeted it");
     }
 
+    private static void assertGeneratedHelpersBelow(
+        JarInput input,
+        Set<MethodRef> helpers,
+        int maxBytes,
+        String message
+    ) {
+        assertFalse(helpers.isEmpty(), message);
+        for (MethodRef helper : helpers) {
+            assertTrue(
+                JvmCodeSizeEstimator.estimateMethodBytes(method(input, helper)) < maxBytes,
+                message
+            );
+        }
+    }
+
+    private static MethodNode method(JarInput input, MethodRef ref) {
+        var clazz = input.classMap().get(ref.owner);
+        assertTrue(clazz != null, "missing helper owner " + ref.owner);
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (ref.name.equals(method.name) && ref.desc.equals(method.desc)) {
+                return method;
+            }
+        }
+        throw new AssertionError("missing helper " + ref);
+    }
+
     private static int currentThreadCallCount(MethodNode method) {
+        return methodCallCount(method, "java/lang/Thread", "currentThread", "()Ljava/lang/Thread;");
+    }
+
+    private static int tokenMaterialCallCount(MethodNode method) {
+        return methodCallCount(method, TOKEN_MATERIAL_HELPER_DESC);
+    }
+
+    private static int methodCallCount(MethodNode method, String desc) {
         int count = 0;
         for (
             AbstractInsnNode insn = method.instructions.getFirst();
             insn != null;
             insn = insn.getNext()
         ) {
-            if (insn instanceof MethodInsnNode call
-                && call.getOpcode() == Opcodes.INVOKESTATIC
-                && "java/lang/Thread".equals(call.owner)
-                && "currentThread".equals(call.name)
-                && "()Ljava/lang/Thread;".equals(call.desc)) {
+            if (insn instanceof MethodInsnNode call && desc.equals(call.desc)) {
                 count++;
             }
         }
         return count;
     }
 
-    private static int tokenMaterialCallCount(MethodNode method) {
+    private static int methodCallCount(MethodNode method, String owner, String name, String desc) {
         int count = 0;
         for (
             AbstractInsnNode insn = method.instructions.getFirst();
@@ -246,7 +317,9 @@ public class CffMaterialHelperHotPathTest {
             insn = insn.getNext()
         ) {
             if (insn instanceof MethodInsnNode call
-                && TOKEN_MATERIAL_HELPER_DESC.equals(call.desc)) {
+                && owner.equals(call.owner)
+                && name.equals(call.name)
+                && desc.equals(call.desc)) {
                 count++;
             }
         }
@@ -264,7 +337,11 @@ public class CffMaterialHelperHotPathTest {
                     "transition-material helper did not route decoded words through split helper"
                 );
                 assertTrue(
-                    JvmCodeSizeEstimator.estimateMethodBytes(method) < 520,
+                    methodCallCount(method, TRANSITION_MATERIAL_BASE_HELPER_DESC) == 1,
+                    "transition-material helper did not route base through split helper"
+                );
+                assertTrue(
+                    JvmCodeSizeEstimator.estimateMethodBytes(method) < 340,
                     "transition-material helper stayed above the split hot-path size budget"
                 );
             }

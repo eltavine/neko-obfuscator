@@ -118,12 +118,16 @@ abstract class CffSharedState {
     protected static final int CFF_ISLAND_MATERIAL_INIT_CHUNK_SIZE = 128;
     protected static final String TRANSITION_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;II[J)J";
+    protected static final String TRANSITION_MATERIAL_BASE_HELPER_DESC =
+        "(JI[Ljava/lang/Object;[IIII)I";
     protected static final String TRANSITION_MATERIAL_WORD_HELPER_DESC =
         "([IIII)I";
     protected static final String STEP_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;I[J)J";
     protected static final String KEY_TRANSFER_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;II)J";
+    protected static final String KEY_TRANSFER_RUNTIME_BUCKET_HELPER_DESC =
+        "(JIIII)I";
     protected static final String CFF_ISLAND_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;III)I";
     protected static final String CFF_ISLAND_RUNTIME_SOURCE_HELPER_DESC =
