@@ -6046,6 +6046,79 @@ This plan will refresh that evidence before changing CFF performance code.
   - The repair does not claim final threshold acceptance unless fresh runtime
     logs meet the requested gates; otherwise the plan records the next concrete
     generic blocker from fresh evidence.
+- Seventeenth repair rejected validation evidence:
+  - Plan-intake review passed, and the caller-prestore implementation plus
+    focused policy assertions compiled and passed the focused validation target:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`
+    with `BUILD SUCCESSFUL`.
+  - Fresh no-quick full-profile generation of
+    `build/test-jvm-full-obf-perf/test21-obf-router-fast-path.jar` failed in
+    the CFF output finalizer before a runnable artifact was produced:
+    `MethodTooLargeException: Method too large: a/a.main ([Ljava/lang/String;)V`,
+    with the finalizer reporting `estimatedCodeBytes=65886`.
+  - Fresh no-quick `test.jar` generation completed, but the accepted proof
+    requires `test21.jar` generation and runtime as well. Because the
+    caller-prestore strategy grows the already-near-limit transformed caller,
+    the implementation is rejected and reverted before commit. The failure
+    proves that the next repair must reduce helper bytecode without adding
+    caller-side instructions on hot large methods.
+
+- Eighteenth repair evidence before editing:
+  - The rejected seventeenth repair proves that moving the compact sparse
+    poison result store to the caller is not viable because it can push large
+    transformed methods over the JVM method-size limit.
+  - The same generated helper shape still contains a local inefficiency that
+    does not require caller growth: `finishCompactSparseResultOnlyReturn`
+    writes only one compact state cell, but currently reuses
+    `emitCompactDispatchStateStoreConst`, which emits `DUP`, `IASTORE`, then
+    a balancing `POP`. For a one-cell terminal miss/default path, the helper
+    can emit `ALOAD stateOut`, constant index 5, constant poison token,
+    `IASTORE`, `LLOAD key`, `LRETURN` directly.
+  - This direct terminal store preserves the same helper-local compact state
+    dataflow consumed by the caller's result-first branch, avoids caller growth,
+    does not change helper descriptors, and reduces every compact sparse group
+    miss/default body by the redundant duplicate/pop pair.
+- Eighteenth repair plan-intake scope:
+  - Change only the compact sparse group helper's terminal poison/default
+    result-cell store to use a direct one-cell `IASTORE` sequence instead of
+    the chained `DUP`/`POP` store helper.
+  - Preserve compact sparse result-first semantics, the helper-local write to
+    compact state slot 5, dense-result routers, packed `long[]` routers,
+    island helper material decoding, hidden-key propagation, CFF block
+    boundaries/count, full transform coverage, existing helper descriptors,
+    and all caller bytecode shape outside the helper body.
+  - Add focused generated-artifact assertions proving compact sparse group
+    defaults still write exactly result slot 5, but the first default-path
+    `IASTORE` is no longer surrounded by the redundant `DUP` / `POP` pair.
+  - Do not special-case `test.jar`, `test21.jar`, `full.jar`, obfuscated
+    helper names, benchmark rows, source methods, or descriptors. Do not move
+    the poison store to the caller or reduce CFF coverage.
+- Eighteenth repair validation target:
+  - Focused validation:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, recording Platform, Virtual, Seq, Parallel, and
+    VThreads rows.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`, recording `Calc`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/full.jar`, recording feature/perf summaries.
+  - Fresh `javap` / `-XX:+PrintCompilation -XX:+PrintInlining` inspection for
+    `test21` proving compact sparse group helper defaults use the direct store
+    shape and recording the next blocker if requested thresholds still fail.
+- Eighteenth repair completion criteria:
+  - Focused tests pass; fresh regenerated artifacts run without verifier
+    errors, VM crashes, fallback/original-bytecode behavior, skipped transform
+    coverage, CFF coverage weakening, or method-size failures.
+  - Compact sparse group helper defaults still write compact state result
+    slot 5 and return the live key; successful helper paths still overwrite
+    slot 5 with live result tokens; the caller still branches on slot 5 before
+    full state reload.
+  - The repair does not add caller instructions, static key exposure, plaintext
+    constants, fallback/original-bytecode behavior, or sample-specific checks.
+  - The repair does not claim final threshold acceptance unless fresh runtime
+    logs meet the requested gates; otherwise the plan records the next concrete
+    generic blocker from fresh evidence.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
