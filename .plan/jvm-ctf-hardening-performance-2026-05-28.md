@@ -5594,6 +5594,78 @@ This plan will refresh that evidence before changing CFF performance code.
     class-token / protected-finalizer caller budget without weakening CFF block
     coverage, key propagation, or constant material protection.
 
+- Fourteenth repair evidence before editing:
+  - Fresh no-quick `test21` evidence from
+    `build/test-jvm-full-obf-perf/test21-obf-protected-helper-split.jar` shows
+    compact group domain dispatch helpers such as `a.pa::fbb` and
+    `a.pa::lbb` are still emitted with `lookupswitch` even when the domain
+    router has only one or two case keys. `javap` shows `a.pa::fbb` is a
+    one-key router that compiles to a 46-byte helper, and `a.pa::lbb` is a
+    two-key router that compiles to a 54-byte helper. Both valid branches call
+    the island helper and the default branch stores only compact state cell 5
+    before returning the live key.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the same artifact
+    records those small group domain helpers as repeated blockers inside hot
+    `a.a::y (6335 bytes)`: `a.pa::lbb (54 bytes) size > DesiredMethodLimit`,
+    `a.pa::obb (54 bytes) size > DesiredMethodLimit`, `a.pa::rbb (54 bytes)
+    size > DesiredMethodLimit`, `a.pa::xbb (54 bytes) size >
+    DesiredMethodLimit`, and related compact wrappers. The rejection is
+    independent of obfuscated names; the names are generated manifestations of
+    `CffTransitionOutliner.prepareGroupDispatchHelper`.
+  - Source evidence in `CffTransitionOutliner.prepareGroupDispatchHelper`
+    shows every group domain helper currently emits `ILOAD helperDomainLocal`
+    followed by a `LookupSwitchInsnNode(poisonCase, keys, labels)` regardless
+    of domain case count. For the observed one/two-key helpers, a branch-chain
+    dispatch can express the same domain-token selection with fewer bytecodes,
+    while preserving the same case labels, poison label, result-token handling,
+    and compact sparse result-first default return.
+  - This repair follows the accepted twelfth repair result-first behavior and
+    the thirteenth protected-helper split evidence: the remaining cost is now
+    generic CFF helper wrapper bytecode/caller budget, not a specific method or
+    benchmark path.
+- Fourteenth repair plan-intake scope:
+  - Add a small-domain router emission policy for group dispatch helpers:
+    one-key domain routers emit a direct `IF_ICMPNE poison` guard followed by
+    the existing island-call block; two-key routers emit two direct comparisons
+    to the existing target labels, using the same poison label for the miss
+    path. Larger routers keep the existing `lookupswitch`.
+  - Preserve all CFF semantic surfaces: island grouping, domain-token values,
+    direct-island alias domain tokens, sparse/dense result routing, poison/default
+    routing, compact sparse result-first state cell 5 handling, live method-key
+    propagation, data/domain binding, and helper relocation. The repair changes
+    only how an already-computed domain token selects the already-existing
+    helper labels for very small routers.
+  - Add focused policy/generation tests proving one-key and two-key compact
+    group helpers no longer contain `LookupSwitchInsnNode`, still contain
+    conditional branch opcodes to the existing case labels, and still retain
+    the compact sparse result-only poison/default state store. Also prove a
+    larger router keeps switch dispatch.
+  - Do not special-case `test21.jar`, matrix methods, obfuscated helper names,
+    timing rows, helper descriptors, or generated class names. Do not change
+    CFF block boundaries, block counts, island selection, numeric/string
+    constant transforms, invokedynamic coverage, or full-profile config.
+- Fourteenth repair validation target:
+  - Focused validation:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, recording Platform, Virtual, Seq, Parallel, and
+    VThreads rows.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`, recording `Calc`.
+  - Fresh `javap` / `-XX:+PrintCompilation -XX:+PrintInlining` inspection for
+    `test21` proving one/two-key group domain helpers shrink and recording the
+    next blocker if requested thresholds still fail.
+- Fourteenth repair completion criteria:
+  - Focused tests pass; fresh regenerated artifacts run without verifier
+    errors, VM crashes, fallback/original-bytecode behavior, skipped transform
+    coverage, or CFF coverage weakening.
+  - Small-router branch chains select exactly the same domain cases and poison
+    path as the previous `lookupswitch` for one/two-key group helpers; larger
+    routers retain switch dispatch.
+  - The repair does not claim final threshold acceptance unless fresh runtime
+    logs meet the requested gates; otherwise the plan records the next concrete
+    generic blocker from fresh evidence.
+
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
 - Scope: convert the measurement harness from JCP-4 into an enforcing gate for
