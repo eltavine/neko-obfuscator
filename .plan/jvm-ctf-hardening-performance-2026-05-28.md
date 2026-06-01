@@ -3867,6 +3867,73 @@ This plan will refresh that evidence before changing CFF performance code.
     separate generic optimization for the remaining token/material-callsite
     blockers before final no-quick jar output.
 
+### [ ] JCP-6L: Factor CFF Runtime-Source And Transition-Base Helpers
+
+- Dependency/order: this follows committed JCP-6K because the transition word
+  decode and key-transfer high/low runtime bucket sharing are already split and
+  freshly validated. It remains before JCP-7 because the no-quick CFF/MPO-only
+  `test21.jar` artifact still exceeds the requested `Seq <= 400 ms`,
+  `Parallel <= 15 ms`, and `VThreads <= 15 ms` gates before full
+  constant/string overhead is considered.
+- Scope: reduce remaining generated CFF material helper hot-call size by
+  factoring live-key subcomputations out of the still-large generic helpers:
+  the key-transfer runtime-source bucket offset currently embedded in
+  `__neko_cff_kxfer`, and the transition material base computation currently
+  embedded in `__neko_cff_xmat`. The repair may introduce generated helper
+  descriptors for these subcomputations and update all generated helper
+  callsites consistently. It must keep runtime-source mixing driven by the live
+  method-entry key, guard/path/block state, cursor mode, thread identity, and
+  stack source when selected; it must keep transition base material bound to
+  live method key, class-key words, guard/path/block, and transition material
+  row data.
+- Required evidence before editing:
+  - Fresh JCP-6K CFF/MPO-only runtime logs
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6k2.run1.log`
+    through `test21-cff-mpo-only-jcp6k2.run5.log` complete but miss the user
+    gates with Seq `474/474/477/479/472 ms`, Parallel
+    `19/18/19/41/18 ms`, and VThreads `19/18/40/21/19 ms`.
+  - Fresh JCP-6K CFF/MPO-only `PrintInlining` log
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6k2-printcomp.log`
+    reports `a.pa::cb (370 bytes)` and `a.pa::bb (347 bytes)` as
+    `callee is too large` or `hot method too big` at many hot callsites after
+    the previous split. The same mapping identifies these as generic generated
+    helpers:
+    `a/a.__neko_cff_kxfer$p3laq6(JIII[Ljava/lang/Object;II)J -> cb`
+    and `a/a.__neko_cff_xmat$880a2n(JIII[Ljava/lang/Object;II[J)J -> bb`.
+  - Source inspection shows `installKeyTransferMaterialHelper` still embeds
+    runtime-source mode branching, thread/stack mixing, live-key bucket
+    derivation, token decode, long packing, and class-integrity ticket routing
+    in one helper. Source inspection of `installTransitionMaterialHelper`
+    shows the generated helper still embeds the transition base computation
+    before calling the split word decoder. These are generic CFF helper paths
+    shared by transformed classes and not tied to a fixture owner, method,
+    descriptor, benchmark row, or generated obfuscated name.
+- Validation command or runtime target:
+  - `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffMaterialHelperHotPathTest --no-daemon`
+  - Focused generated-bytecode regression proving the new runtime-source and
+    transition-base helper descriptors are generated, target the intended
+    generated helpers, remain smaller than the previous monolithic helpers, and
+    preserve key-transfer and transition-material callsite targeting.
+  - Fresh no-quick CFF/MPO-only regeneration and direct runtime of
+    `test-jars/test21.jar`, with persisted obfuscation/runtime logs.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar` and `test-jars/test.jar`, with persisted
+    obfuscation/runtime logs and explicit recording of any non-performance
+    rows still unrepaired.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` for the CFF/MPO-only
+    artifact proving `__neko_cff_kxfer` and `__neko_cff_xmat` are smaller or
+    no longer the same hot-call inlining blockers, or recording a negative
+    result with the next exact blocker.
+- Completion criteria: focused tests pass; fresh regenerated artifacts run
+  without verifier errors, VM crashes, fallback/original-bytecode behavior, or
+  transform coverage weakening; the split helpers remain live-keyed and
+  nonlinear; runtime-source, thread/stack, transition base, pc/data digest, and
+  class-integrity ticket semantics remain intact; the change is generic and
+  does not special-case `test21.jar`, `test.jar`, class names, descriptors,
+  benchmark strings, timing rows, or generated obfuscated names. JCP-6L does
+  not by itself claim final threshold acceptance unless fresh runtime logs meet
+  the requested gates.
+
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 
 - Scope: optimize protected numeric/string decode runtime and size overhead
