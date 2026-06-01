@@ -559,14 +559,52 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         String stackMixName,
         boolean stackMixInterfaceOwner
     ) {
+        emitKeyTransferRuntimeBucketOffset(
+            insns,
+            keyLocal,
+            guardLocal,
+            pathLocal,
+            blockLocal,
+            modeLocal,
+            cursorLocal,
+            sourceLocal,
+            threadLocal,
+            stackLocal,
+            stackLengthLocal,
+            stackMixOwner,
+            stackMixName,
+            stackMixInterfaceOwner
+        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, cursorLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, cursorLocal));
+    }
+
+    protected void emitKeyTransferRuntimeBucketOffset(
+        InsnList insns,
+        int keyLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int modeLocal,
+        int offsetLocal,
+        int sourceLocal,
+        int threadLocal,
+        int stackLocal,
+        int stackLengthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
+    ) {
         LabelNode computeSource = new LabelNode();
         LabelNode threadDone = new LabelNode();
         LabelNode stackDone = new LabelNode();
         LabelNode done = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
         insns.add(new JumpInsnNode(Opcodes.IFNE, computeSource));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, baseCursorLocal));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, cursorLocal));
+        JvmPassBytecode.pushInt(insns, 0);
+        insns.add(new VarInsnNode(Opcodes.ISTORE, offsetLocal));
         insns.add(new JumpInsnNode(Opcodes.GOTO, done));
 
         insns.add(computeSource);
@@ -659,9 +697,7 @@ abstract class CffIslandMaterial extends CffMaterialTables {
         insns.add(new InsnNode(Opcodes.IAND));
         JvmPassBytecode.pushInt(insns, TOKEN_MATERIAL_ROW_LONGS * 2);
         insns.add(new InsnNode(Opcodes.IMUL));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, baseCursorLocal));
-        insns.add(new InsnNode(Opcodes.IADD));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, cursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, offsetLocal));
         insns.add(done);
     }
 

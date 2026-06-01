@@ -1201,6 +1201,12 @@ abstract class CffMaterialTables extends CffClassSetup {
         String intHelperName,
         boolean intHelperInterfaceOwner
     ) {
+        String wordHelperName = uniqueMethodName(
+            clazz,
+            helperName + "$word",
+            TRANSITION_MATERIAL_WORD_HELPER_DESC
+        );
+        installTransitionMaterialWordHelper(pctx, clazz, wordHelperName, access);
         MethodNode helper = new MethodNode(
             access,
             helperName,
@@ -1221,6 +1227,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         int baseLocal = 11;
         int domainLocal = 12;
         int multiplierLocal = 13;
+        int rowBaseLocal = 14;
         InsnList insns = helper.instructions;
         insns.add(new VarInsnNode(Opcodes.ALOAD, objectMaterialLocal));
         JvmPassBytecode.pushInt(insns, TRANSITION_MATERIAL_SLOT);
@@ -1230,6 +1237,8 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new VarInsnNode(Opcodes.ILOAD, rowLocal));
         JvmPassBytecode.pushInt(insns, TRANSITION_MATERIAL_ROW_WORDS);
         insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, rowBaseLocal));
         insns.add(new VarInsnNode(Opcodes.ISTORE, rowLocal));
         TransitionMaterialRowCursor rowCursor =
             new TransitionMaterialRowCursor(rowLocal);
@@ -1248,84 +1257,100 @@ abstract class CffMaterialTables extends CffClassSetup {
             baseLocal,
             rowCursor
         );
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
-            rowLocal,
+            rowBaseLocal,
             baseLocal,
             TRANSITION_MATERIAL_GUARD_WORD,
-            rowCursor
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, guardLocal));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
-            rowLocal,
+            rowBaseLocal,
             baseLocal,
             TRANSITION_MATERIAL_PATH_WORD,
-            rowCursor
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, pathLocal));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
-            rowLocal,
+            rowBaseLocal,
             baseLocal,
             TRANSITION_MATERIAL_BLOCK_WORD,
-            rowCursor
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, blockLocal));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
-            rowLocal,
+            rowBaseLocal,
             baseLocal,
             TRANSITION_MATERIAL_PC_WORD,
-            rowCursor
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, pcLocal));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
-            rowLocal,
+            rowBaseLocal,
             baseLocal,
             TRANSITION_MATERIAL_METHOD_HIGH_WORD,
-            rowCursor
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
         );
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);
         insns.add(new InsnNode(Opcodes.LSHL));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
-            rowLocal,
+            rowBaseLocal,
             baseLocal,
             TRANSITION_MATERIAL_METHOD_LOW_WORD,
-            rowCursor
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
         );
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushLong(insns, 0xFFFFFFFFL);
         insns.add(new InsnNode(Opcodes.LAND));
         insns.add(new InsnNode(Opcodes.LOR));
         insns.add(new VarInsnNode(Opcodes.LSTORE, keyLocal));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
-            rowLocal,
+            rowBaseLocal,
             baseLocal,
             TRANSITION_MATERIAL_DOMAIN_WORD,
-            rowCursor
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, domainLocal));
         emitBindTransitionMaterialPcToDataDigest(
             insns,
             materialLocal,
-            rowLocal,
+            rowBaseLocal,
             baseLocal,
             pcLocal,
             dataLocal,
             multiplierLocal,
-            rowCursor
+            clazz.name(),
+            wordHelperName,
+            clazz.isInterface()
         );
         emitTransitionOutStores(
             insns,
@@ -1339,7 +1364,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         );
         insns.add(new VarInsnNode(Opcodes.LLOAD, keyLocal));
         insns.add(new InsnNode(Opcodes.LRETURN));
-        helper.maxLocals = 14;
+        helper.maxLocals = 15;
         helper.maxStack = 32;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
@@ -1352,6 +1377,90 @@ abstract class CffMaterialTables extends CffClassSetup {
         );
     }
 
+    protected void installTransitionMaterialWordHelper(
+        PipelineContext pctx,
+        L1Class clazz,
+        String helperName,
+        int access
+    ) {
+        MethodNode helper = new MethodNode(
+            access,
+            helperName,
+            TRANSITION_MATERIAL_WORD_HELPER_DESC,
+            null,
+            null
+        );
+        int materialLocal = 0;
+        int rowLocal = 1;
+        int baseLocal = 2;
+        int wordLocal = 3;
+        int cursorLocal = 4;
+        InsnList insns = helper.instructions;
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rowLocal));
+        JvmPassBytecode.pushInt(insns, TRANSITION_MATERIAL_WORDS_BASE);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, wordLocal));
+        JvmPassBytecode.pushInt(insns, TRANSITION_MATERIAL_WORD_STRIDE);
+        insns.add(new InsnNode(Opcodes.IMUL));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, cursorLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, cursorLocal));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
+        emitTransitionMaterialWordHelperLoad(insns, materialLocal, cursorLocal, TRANSITION_MATERIAL_MASK);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        emitTransitionMaterialWordHelperLoad(insns, materialLocal, cursorLocal, TRANSITION_MATERIAL_ADD);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.DUP));
+        emitTransitionMaterialWordHelperLoad(insns, materialLocal, cursorLocal, TRANSITION_MATERIAL_SHIFT);
+        insns.add(new InsnNode(Opcodes.IUSHR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 5;
+        helper.maxStack = 6;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+    }
+
+    private void emitTransitionMaterialWordHelperLoad(
+        InsnList insns,
+        int materialLocal,
+        int cursorLocal,
+        int offset
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, cursorLocal));
+        JvmPassBytecode.pushInt(insns, offset);
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new InsnNode(Opcodes.IALOAD));
+    }
+
+    protected void emitTransitionMaterialDecodedWordCall(
+        InsnList insns,
+        int materialLocal,
+        int rowLocal,
+        int baseLocal,
+        int word,
+        String wordHelperOwner,
+        String wordHelperName,
+        boolean wordHelperInterfaceOwner
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ALOAD, materialLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, rowLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseLocal));
+        JvmPassBytecode.pushInt(insns, word);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            wordHelperOwner,
+            wordHelperName,
+            TRANSITION_MATERIAL_WORD_HELPER_DESC,
+            wordHelperInterfaceOwner
+        ));
+    }
+
     protected void emitBindTransitionMaterialPcToDataDigest(
         InsnList insns,
         int materialLocal,
@@ -1360,56 +1469,68 @@ abstract class CffMaterialTables extends CffClassSetup {
         int pcLocal,
         int dataLocal,
         int multiplierLocal,
-        TransitionMaterialRowCursor rowCursor
+        String wordHelperOwner,
+        String wordHelperName,
+        boolean wordHelperInterfaceOwner
     ) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, dataLocal));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
             rowLocal,
             baseLocal,
             TRANSITION_MATERIAL_DISPATCH_ADD_WORD,
-            rowCursor
+            wordHelperOwner,
+            wordHelperName,
+            wordHelperInterfaceOwner
         );
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.DUP));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
             rowLocal,
             baseLocal,
             TRANSITION_MATERIAL_DISPATCH_SHIFT_A_WORD,
-            rowCursor
+            wordHelperOwner,
+            wordHelperName,
+            wordHelperInterfaceOwner
         );
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
             rowLocal,
             baseLocal,
             TRANSITION_MATERIAL_DISPATCH_MUL_WORD,
-            rowCursor
+            wordHelperOwner,
+            wordHelperName,
+            wordHelperInterfaceOwner
         );
         insns.add(new InsnNode(Opcodes.IMUL));
         insns.add(new InsnNode(Opcodes.DUP));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
             rowLocal,
             baseLocal,
             TRANSITION_MATERIAL_DISPATCH_SHIFT_B_WORD,
-            rowCursor
+            wordHelperOwner,
+            wordHelperName,
+            wordHelperInterfaceOwner
         );
         insns.add(new InsnNode(Opcodes.IUSHR));
         insns.add(new InsnNode(Opcodes.IXOR));
-        emitTransitionMaterialDecodedWord(
+        emitTransitionMaterialDecodedWordCall(
             insns,
             materialLocal,
             rowLocal,
             baseLocal,
             TRANSITION_MATERIAL_DISPATCH_FINAL_ADD_WORD,
-            rowCursor
+            wordHelperOwner,
+            wordHelperName,
+            wordHelperInterfaceOwner
         );
         insns.add(new InsnNode(Opcodes.IADD));
         insns.add(new InsnNode(Opcodes.ICONST_1));
@@ -1455,12 +1576,10 @@ abstract class CffMaterialTables extends CffClassSetup {
         int stackLocal = 13;
         int stackLengthLocal = 14;
         int lowBaseCursorLocal = 15;
-        int lowModeLocal = 16;
+        int bucketOffsetLocal = 16;
         int ticketLocal = 17;
         int ticketDeferLocal = 19;
         InsnList insns = helper.instructions;
-        LabelNode splitRuntimeSource = new LabelNode();
-        LabelNode materialDecoded = new LabelNode();
         LabelNode threadLocalTicket = new LabelNode();
         LabelNode ticketModeReady = new LabelNode();
         insns.add(new VarInsnNode(Opcodes.ILOAD, highCursorLocal));
@@ -1483,22 +1602,14 @@ abstract class CffMaterialTables extends CffClassSetup {
         JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_INDEX_MASK);
         insns.add(new InsnNode(Opcodes.IAND));
         insns.add(new VarInsnNode(Opcodes.ISTORE, lowBaseCursorLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, lowCursorLocal));
-        JvmPassBytecode.pushInt(insns, KEY_TRANSFER_CURSOR_MODE_SHIFT);
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, lowModeLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, lowModeLocal));
-        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, splitRuntimeSource));
-        emitKeyTransferRuntimeSourceCursor(
+        emitKeyTransferRuntimeBucketOffset(
             insns,
             keyLocal,
             guardLocal,
             pathLocal,
             blockLocal,
-            baseCursorLocal,
             modeLocal,
-            highCursorLocal,
+            bucketOffsetLocal,
             sourceLocal,
             threadLocal,
             stackLocal,
@@ -1507,23 +1618,14 @@ abstract class CffMaterialTables extends CffClassSetup {
             stackMixName,
             stackMixInterfaceOwner
         );
-        emitKeyTransferRuntimeSourceCursor(
-            insns,
-            keyLocal,
-            guardLocal,
-            pathLocal,
-            blockLocal,
-            lowBaseCursorLocal,
-            modeLocal,
-            lowCursorLocal,
-            sourceLocal,
-            threadLocal,
-            stackLocal,
-            stackLengthLocal,
-            stackMixOwner,
-            stackMixName,
-            stackMixInterfaceOwner
-        );
+        insns.add(new VarInsnNode(Opcodes.ILOAD, baseCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, bucketOffsetLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, highCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, lowBaseCursorLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, bucketOffsetLocal));
+        insns.add(new InsnNode(Opcodes.IADD));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, lowCursorLocal));
         emitKeyTransferMaterialDecodedWord(
             insns,
             keyLocal,
@@ -1552,53 +1654,6 @@ abstract class CffMaterialTables extends CffClassSetup {
             tokenMaterialHelperInterfaceOwner
         );
         insns.add(new VarInsnNode(Opcodes.ISTORE, materialLocal));
-        insns.add(new JumpInsnNode(Opcodes.GOTO, materialDecoded));
-        insns.add(splitRuntimeSource);
-        insnDecodeKeyTransferWord(
-            insns,
-            keyLocal,
-            guardLocal,
-            pathLocal,
-            blockLocal,
-            materialLocal,
-            highCursorLocal,
-            baseCursorLocal,
-            modeLocal,
-            sourceLocal,
-            threadLocal,
-            stackLocal,
-            stackLengthLocal,
-            tokenMaterialHelperOwner,
-            tokenMaterialHelperName,
-            tokenMaterialHelperInterfaceOwner,
-            stackMixOwner,
-            stackMixName,
-            stackMixInterfaceOwner
-        );
-        insns.add(new VarInsnNode(Opcodes.ISTORE, highWordLocal));
-        insnDecodeKeyTransferWord(
-            insns,
-            keyLocal,
-            guardLocal,
-            pathLocal,
-            blockLocal,
-            materialLocal,
-            lowCursorLocal,
-            baseCursorLocal,
-            modeLocal,
-            sourceLocal,
-            threadLocal,
-            stackLocal,
-            stackLengthLocal,
-            tokenMaterialHelperOwner,
-            tokenMaterialHelperName,
-            tokenMaterialHelperInterfaceOwner,
-            stackMixOwner,
-            stackMixName,
-            stackMixInterfaceOwner
-        );
-        insns.add(new VarInsnNode(Opcodes.ISTORE, materialLocal));
-        insns.add(materialDecoded);
         insns.add(new VarInsnNode(Opcodes.ILOAD, highWordLocal));
         insns.add(new InsnNode(Opcodes.I2L));
         JvmPassBytecode.pushInt(insns, 32);

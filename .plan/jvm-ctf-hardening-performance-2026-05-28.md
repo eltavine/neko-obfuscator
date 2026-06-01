@@ -3734,7 +3734,7 @@ This plan will refresh that evidence before changing CFF performance code.
     `ReTrace ERROR` and `Sec ERROR` lines. These logs confirm the JCP-6J
     repair is runnable but does not claim final threshold acceptance.
 
-### [ ] JCP-6K: Split CFF Material Decode Hot Helpers
+### [x] JCP-6K: Split CFF Material Decode Hot Helpers
 
 - Dependency/order: this follows committed JCP-6J because the class-integrity
   ticket entry is no longer the primary hot-path blocker. It remains inside
@@ -3785,7 +3785,7 @@ This plan will refresh that evidence before changing CFF performance code.
     generic CFF material paths and are not tied to a fixture owner, method,
     descriptor, or benchmark row.
 - Validation command or runtime target:
-  - `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`
+  - `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --tests dev.nekoobfuscator.test.CffMaterialHelperHotPathTest --no-daemon`
   - Focused generated-bytecode regression proving the split/factored material
     helpers are present, all key-transfer and transition-material call sites
     target the intended helper descriptors, and no raw state key, static
@@ -3809,6 +3809,63 @@ This plan will refresh that evidence before changing CFF performance code.
   descriptors, benchmark strings, timing rows, or generated obfuscated names.
   JCP-6K does not by itself claim final threshold acceptance unless fresh
   runtime logs meet the requested gates.
+
+- Implementation evidence:
+  - Key-transfer material helper now computes the live runtime bucket offset
+    once per high/low pair and applies it to both base cursors before decoding
+    the independent material words. The emitted offset is still driven by
+    method-entry key, guard/path/block state, cursor mode, thread identity, or
+    stack source as selected by the original runtime mode.
+  - Transition material helper now routes decoded words through a generated
+    `([IIII)I` word helper. A failed focused validation of the first split
+    attempt proved the required invariant: `emitTransitionMaterialBase`
+    advances the row cursor while building the live base, so the split word
+    helper must receive the immutable material row base, not the advanced row
+    cursor. The implementation stores that immutable row base in a separate
+    local before base generation and passes it to every split word decode and
+    pc/data digest bind.
+  - Focused validation passed with the command above after the row-base fix and
+    the generated-bytecode helper regression:
+    `CffTransitionOutlinerPolicyTest`,
+    `ControlFlowFlatteningAlgebraicAuditTest`,
+    `JvmInvokeDynamicObfuscationIntegrationTest`, and
+    `CffMaterialHelperHotPathTest`. The helper regression now uses an async
+    key-transfer fixture for runtime bucket sharing and a separate high-branch
+    transition fixture that forces transition-material callsites, verifies that
+    every call with descriptor `(JIII[Ljava/lang/Object;II[J)J` targets a
+    generated transition-material helper, and verifies the split word helper
+    descriptor `([IIII)I` is used by those helpers.
+  - Fresh no-quick CFF/MPO-only `test-jars/test21.jar` artifact
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6k2.jar` generated
+    and ran successfully five times. Runtime logs:
+    `test21-cff-mpo-only-jcp6k2.run1.log` through
+    `test21-cff-mpo-only-jcp6k2.run5.log`; Seq measurements were
+    `474/474/477/479/472 ms`, Parallel `19/18/19/41/18 ms`, and VThreads
+    `19/18/40/21/19 ms`.
+  - Fresh `PrintInlining` evidence
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6k2-printcomp.log`
+    shows the original transition word path is split to
+    `a.pa::ab (40 bytes)`, key-transfer material helpers are reduced to
+    `a.pa::cb (370 bytes)`, and the remaining exact blockers are the token
+    material helper `a.pa::za (296 bytes)`, class-integrity ticket/helper
+    calls such as `a.pa::jb (43 bytes)`, relocated material callsites such as
+    `a.na::wua (698 bytes)` and `a.na::ewa (562 bytes)`, and the hot
+    application method `a.a::s (1661 bytes)`.
+  - Fresh no-quick full-profile `test-jars/test21.jar` artifact
+    `build/test-jvm-full-obf-perf/test21-obf-jcp6k2.jar` generated and ran
+    successfully with `Seq 512 ms`, `Parallel 22 ms`, and `VThreads 22 ms`.
+    Fresh no-quick full-profile `test-jars/test.jar` artifact
+    `build/test-jvm-full-obf-perf/test-obf-jcp6k2.jar` generated, exited 0,
+    and reached the performance row with `Calc 782 ms`; the existing
+    JavaObfuscatorTest reflection/security rows still report
+    `Test 2.6: ReTrace ERROR` and `Test 2.8: Sec ERROR`, so this JCP-6K
+    evidence does not claim those non-performance rows are repaired.
+  - Static/runtime log inspection of the fresh JCP-6K artifacts found no
+    verifier error, VM crash, skip-on-error marker, original-bytecode fallback,
+    or reduced transform coverage. JCP-6K improves helper topology but does
+    not satisfy the final user performance gates; the next dependency is a
+    separate generic optimization for the remaining token/material-callsite
+    blockers before final no-quick jar output.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

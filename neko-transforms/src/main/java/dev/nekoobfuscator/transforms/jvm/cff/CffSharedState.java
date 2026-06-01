@@ -118,6 +118,8 @@ abstract class CffSharedState {
     protected static final int CFF_ISLAND_MATERIAL_INIT_CHUNK_SIZE = 128;
     protected static final String TRANSITION_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;II[J)J";
+    protected static final String TRANSITION_MATERIAL_WORD_HELPER_DESC =
+        "([IIII)I";
     protected static final String STEP_MATERIAL_HELPER_DESC =
         "(JIII[Ljava/lang/Object;I[J)J";
     protected static final String KEY_TRANSFER_MATERIAL_HELPER_DESC =
@@ -841,6 +843,22 @@ abstract class CffSharedState {
         int baseCursorLocal,
         int modeLocal,
         int cursorLocal,
+        int sourceLocal,
+        int threadLocal,
+        int stackLocal,
+        int stackLengthLocal,
+        String stackMixOwner,
+        String stackMixName,
+        boolean stackMixInterfaceOwner
+    );
+    protected abstract void emitKeyTransferRuntimeBucketOffset(
+        InsnList insns,
+        int keyLocal,
+        int guardLocal,
+        int pathLocal,
+        int blockLocal,
+        int modeLocal,
+        int offsetLocal,
         int sourceLocal,
         int threadLocal,
         int stackLocal,
