@@ -5464,6 +5464,83 @@ This plan will refresh that evidence before changing CFF performance code.
     numeric-helper hot path or reduce caller growth without weakening CFF,
     constant, string, or invokedynamic coverage.
 
+- Thirteenth repair evidence before editing:
+  - Fresh no-quick `test21` evidence from
+    `build/test-jvm-full-obf-perf/test21-obf-sparse-result-first.jar` shows
+    `__neko_num_ip(IIIII)I` manifests as `a.ta::mqb` and is 111 bytecodes.
+    The helper decodes two fragmented 16-bit words, stores the decoded site
+    seed in a local, runs two compact protected-word mixes, then runs the
+    raw-base/site-seed mask before returning the decoded int.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the same artifact
+    records repeated hot-method rejections for that helper: `a.ta::mqb
+    (111 bytes) callee is too large` and later `a.ta::mqb (111 bytes) size >
+    DesiredMethodLimit` inside hot `a.a::y (6337 bytes)`. The map confirms
+    this is the generic generated protected numeric helper:
+    `METHOD a/a.__neko_num_ip(IIIII)I -> mqb`.
+  - Source evidence in `JvmConstantObfuscationPass` shows
+    `ensureProtectedIntDecodeHelper` emits one per-class
+    `__neko_num_ip(IIIII)I` helper through `emitProtectedHelperDecode`.
+    Every protected int, long, float, double, array, and `iinc` decode path
+    reaches that helper through fragmented callsite material produced by
+    `emitDecodedProtectedInt`, `emitDecodedProtectedIntWithRawBase`, or
+    outlined numeric helpers. Therefore the blocker is a generic helper shape,
+    not a benchmark, class, method, obfuscated name, descriptor artifact, or
+    timing-string special case.
+  - Existing integration coverage already asserts that protected numeric
+    decoding consumes the live raw base, uses fragmented numeric material,
+    keeps multiply/shift/xor mixing, and avoids direct large plaintext numeric
+    constants. The repair must preserve those invariants while changing the
+    helper family shape.
+- Thirteenth repair plan-intake scope:
+  - Split the generated protected-int decode helper into a small fragment
+    wrapper and a per-class protected finalizer helper. The existing
+    `__neko_num_ip(IIIII)I` ABI remains the callsite target and continues to
+    receive live raw-base plus two fragmented material words. It will rejoin
+    the fragments and delegate to a generated finalizer that consumes
+    `rawBase`, encrypted material, and seed material.
+  - Move the compact protected-word and site-mask decode into the finalizer so
+    the live raw base still drives the seed decode, the seed still drives the
+    encrypted-value decode, and the final value remains bound to the raw
+    base/site-seed mask. The finalizer must not use plaintext constants,
+    descriptor-only recomputation, static seeds, fallback paths, or
+    self-canceling inverse pairs.
+  - Replace the fragment low-word mask in generated helper code with an
+    equivalent JVM zero-extension form if this is needed to keep the wrapper
+    compact. The replacement must be generic, must preserve unsigned low
+    16-bit semantics, and must remain covered by integration assertions.
+  - Update focused integration assertions to audit the protected numeric helper
+    family rather than assuming all mix operations remain in the ABI wrapper:
+    the wrapper must still consume raw base and fragmented high/low inputs,
+    and the finalizer must contain the live raw-base, seed-local,
+    multiply/shift/xor protected mix.
+  - Do not change numeric site selection thresholds, CFF block construction,
+    CFF grouping, constant/string coverage, invokedynamic coverage, hidden-key
+    propagation, full-profile configuration, or any benchmark-specific path.
+- Thirteenth repair validation target:
+  - Focused validation:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, recording Platform, Virtual, Seq, Parallel, and
+    VThreads rows.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`, recording `Calc`.
+  - Fresh `javap` / `-XX:+PrintCompilation -XX:+PrintInlining` inspection for
+    `test21` proving the protected-int ABI wrapper is no longer the 111-byte
+    monolith and recording whether the next JIT blocker moves to the finalizer,
+    CFF class-token helper, remaining compact dispatch wrappers, or another
+    generic helper.
+- Thirteenth repair completion criteria:
+  - Focused tests pass; fresh regenerated artifacts run without verifier
+    errors, VM crashes, fallback/original-bytecode behavior, skipped transform
+    coverage, or full-profile weakening.
+  - Generated protected numeric helper bytecode still consumes live raw base,
+    fragmented material, decoded site seed, multiply/shift/xor mixing, and
+    protected site masking; no plaintext constant value, raw key, descriptor-
+    only key, or self-canceling key material is introduced.
+  - The repair does not claim final threshold acceptance unless fresh runtime
+    logs meet the requested gates; otherwise the plan records the next concrete
+    generic blocker from the fresh evidence.
+
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
 - Scope: convert the measurement harness from JCP-4 into an enforcing gate for
@@ -5538,5 +5615,5 @@ This plan will refresh that evidence before changing CFF performance code.
     nameSensitiveFailed=0` and `Perf summary: passed=31 failed=0 skipped=0`.
   - JCP-10 remains open because the requested `test.jar` Calc <= 200 ms,
     `test21.jar` Seq <= 400 ms, and Parallel/VThreads <= 15 ms thresholds are
-    still not met. The next repair is recorded under the JCP-7 eleventh repair
-    scope.
+    still not met. The next repair is recorded under the JCP-7 thirteenth
+    repair scope.
