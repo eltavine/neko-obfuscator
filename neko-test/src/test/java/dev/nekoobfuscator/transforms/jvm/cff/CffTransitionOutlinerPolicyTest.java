@@ -40,6 +40,7 @@ import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.IntInsnNode;
+import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.JumpInsnNode;
@@ -48,6 +49,7 @@ import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.VarInsnNode;
 
 final class CffTransitionOutlinerPolicyTest {
     private static final String CFF_SHARED_GROUP_DISPATCH_DESC = "(JIIIIII[J)J";
@@ -174,6 +176,11 @@ final class CffTransitionOutlinerPolicyTest {
             CffTransitionOutliner.compactSparsePoisonBranchOpcode(false),
             "normal sparse routers must reject the zero poison token"
         );
+
+        assertFalse(CffTransitionOutliner.useSmallDomainRouterBranches(0));
+        assertTrue(CffTransitionOutliner.useSmallDomainRouterBranches(1));
+        assertTrue(CffTransitionOutliner.useSmallDomainRouterBranches(2));
+        assertFalse(CffTransitionOutliner.useSmallDomainRouterBranches(3));
     }
 
     @Test
@@ -189,6 +196,46 @@ final class CffTransitionOutlinerPolicyTest {
         assertFalse((classAccess & Opcodes.ACC_PUBLIC) != 0);
         assertTrue((classAccess & Opcodes.ACC_STATIC) != 0);
         assertTrue((classAccess & Opcodes.ACC_SYNTHETIC) != 0);
+    }
+
+    @Test
+    void smallDomainRouterEmitterUsesBranchesAndLeavesLargeRoutersForSwitch() {
+        LabelNode poison = new LabelNode();
+        LabelNode first = new LabelNode();
+        LabelNode second = new LabelNode();
+
+        InsnList oneKey = new InsnList();
+        assertTrue(CffTransitionOutliner.emitSmallDomainRouterBranches(
+            oneKey,
+            6,
+            poison,
+            new int[] { 0x12345678 },
+            new LabelNode[] { first }
+        ));
+        assertEquals(0, lookupSwitchCount(oneKey));
+        assertEquals(1, jumpOpcodeCount(oneKey, Opcodes.IF_ICMPNE));
+
+        InsnList twoKeys = new InsnList();
+        assertTrue(CffTransitionOutliner.emitSmallDomainRouterBranches(
+            twoKeys,
+            6,
+            poison,
+            new int[] { 0x12345678, 0x3456789A },
+            new LabelNode[] { first, second }
+        ));
+        assertEquals(0, lookupSwitchCount(twoKeys));
+        assertEquals(2, jumpOpcodeCount(twoKeys, Opcodes.IF_ICMPEQ));
+        assertEquals(1, jumpOpcodeCount(twoKeys, Opcodes.GOTO));
+
+        InsnList large = new InsnList();
+        assertFalse(CffTransitionOutliner.emitSmallDomainRouterBranches(
+            large,
+            6,
+            poison,
+            new int[] { 1, 2, 3 },
+            new LabelNode[] { first, second, new LabelNode() }
+        ));
+        assertEquals(0, large.size());
     }
 
     @Test
@@ -311,6 +358,7 @@ final class CffTransitionOutlinerPolicyTest {
             outputJar,
             "CffBudgetedDirectInlineShape"
         );
+        assertLargeDomainGroupRoutersKeepSwitchDispatch(outputJar, "CffBudgetedDirectInlineShape");
         assertCompactSparseGroupCallerBranchesOnResultFirst(hot);
         assertCompactTransitionWrappersPreserveMaterialCalls(
             outputJar,
@@ -458,13 +506,13 @@ final class CffTransitionOutlinerPolicyTest {
                 || method.instructions.size() == 0) {
                 continue;
             }
-            LookupSwitchInsnNode switchInsn = leadingLookupSwitch(method);
-            if (switchInsn == null) {
+            LabelNode defaultLabel = leadingDomainRouterDefault(method);
+            if (defaultLabel == null) {
                 continue;
             }
             groupWrappers++;
-            int stores = iastoreCountUntilReturn(switchInsn.dflt);
-            if (stores == 1 && firstIastoreStoresIndex(switchInsn.dflt, 5)) {
+            int stores = iastoreCountUntilReturn(defaultLabel);
+            if (stores == 1 && firstIastoreStoresIndex(defaultLabel, 5)) {
                 resultOnlyDefaults++;
             }
         }
@@ -473,6 +521,31 @@ final class CffTransitionOutlinerPolicyTest {
             resultOnlyDefaults > 0,
             "compact sparse group dispatch default did not use result-only state return"
         );
+    }
+
+    private static void assertLargeDomainGroupRoutersKeepSwitchDispatch(Path jar, String owner)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get(owner);
+        assertTrue(clazz != null, "missing class " + owner);
+        int switchRouters = 0;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!CFF_COMPACT_GROUP_DISPATCH_DESC.equals(method.desc)
+                || method.instructions == null
+                || method.instructions.size() == 0) {
+                continue;
+            }
+            LookupSwitchInsnNode switchInsn = leadingDomainLookupSwitch(method);
+            if (switchInsn != null) {
+                switchRouters++;
+                assertTrue(
+                    switchInsn.labels.size() > 2,
+                    "small group domain router retained lookup switch dispatch"
+                );
+                continue;
+            }
+        }
+        assertTrue(switchRouters > 0, "no larger compact group router retained switch dispatch");
     }
 
     private static void assertCompactSparseGroupCallerBranchesOnResultFirst(MethodNode method) {
@@ -495,9 +568,9 @@ final class CffTransitionOutlinerPolicyTest {
         );
     }
 
-    private static LookupSwitchInsnNode leadingLookupSwitch(MethodNode method) {
+    private static LookupSwitchInsnNode leadingDomainLookupSwitch(MethodNode method) {
         AbstractInsnNode first = nextOpcodeInsn(method.instructions.getFirst());
-        if (first == null || first.getOpcode() != Opcodes.ILOAD) {
+        if (!isIntLoad(first, 6)) {
             return null;
         }
         AbstractInsnNode second = nextOpcodeInsn(first.getNext());
@@ -505,6 +578,76 @@ final class CffTransitionOutlinerPolicyTest {
             return switchInsn;
         }
         return null;
+    }
+
+    private static LabelNode leadingDomainRouterDefault(MethodNode method) {
+        LookupSwitchInsnNode switchInsn = leadingDomainLookupSwitch(method);
+        if (switchInsn != null) {
+            return switchInsn.dflt;
+        }
+        AbstractInsnNode first = nextOpcodeInsn(method.instructions.getFirst());
+        if (!isIntLoad(first, 6)) {
+            return null;
+        }
+        AbstractInsnNode second = nextOpcodeInsn(first.getNext());
+        if (pushedInt(second) == null) {
+            return null;
+        }
+        AbstractInsnNode third = nextOpcodeInsn(second.getNext());
+        if (!(third instanceof JumpInsnNode firstJump)) {
+            return null;
+        }
+        if (firstJump.getOpcode() == Opcodes.IF_ICMPNE) {
+            return firstJump.label;
+        }
+        if (firstJump.getOpcode() != Opcodes.IF_ICMPEQ) {
+            return null;
+        }
+        AbstractInsnNode fourth = nextOpcodeInsn(firstJump.getNext());
+        if (!isIntLoad(fourth, 6)) {
+            return null;
+        }
+        AbstractInsnNode fifth = nextOpcodeInsn(fourth.getNext());
+        if (pushedInt(fifth) == null) {
+            return null;
+        }
+        AbstractInsnNode sixth = nextOpcodeInsn(fifth.getNext());
+        if (!(sixth instanceof JumpInsnNode secondJump)
+            || secondJump.getOpcode() != Opcodes.IF_ICMPEQ) {
+            return null;
+        }
+        AbstractInsnNode seventh = nextOpcodeInsn(secondJump.getNext());
+        if (seventh instanceof JumpInsnNode miss
+            && miss.getOpcode() == Opcodes.GOTO) {
+            return miss.label;
+        }
+        return null;
+    }
+
+    private static boolean isIntLoad(AbstractInsnNode insn, int local) {
+        return insn instanceof VarInsnNode load
+            && load.getOpcode() == Opcodes.ILOAD
+            && load.var == local;
+    }
+
+    private static int lookupSwitchCount(InsnList insns) {
+        int count = 0;
+        for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof LookupSwitchInsnNode) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static int jumpOpcodeCount(InsnList insns, int opcode) {
+        int count = 0;
+        for (AbstractInsnNode insn = insns.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof JumpInsnNode jump && jump.getOpcode() == opcode) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static int iastoreCountUntilReturn(LabelNode start) {

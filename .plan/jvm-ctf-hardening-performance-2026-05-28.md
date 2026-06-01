@@ -5665,6 +5665,67 @@ This plan will refresh that evidence before changing CFF performance code.
   - The repair does not claim final threshold acceptance unless fresh runtime
     logs meet the requested gates; otherwise the plan records the next concrete
     generic blocker from fresh evidence.
+- Fourteenth repair implementation and validation evidence:
+  - Implemented a generic small-domain group router emission policy in
+    `CffTransitionOutliner`: one-key compact group routers emit a direct
+    domain-token compare and `IF_ICMPNE poison`; two-key compact group routers
+    emit two direct `IF_ICMPEQ` comparisons to the existing island labels and
+    an explicit miss `GOTO poison`; routers with more than two domain cases
+    retain the existing `lookupswitch`. The change does not alter island
+    grouping, domain-token derivation, block construction, sparse/dense result
+    routing, compact state material, or live key propagation.
+  - Added focused policy and generation coverage in
+    `CffTransitionOutlinerPolicyTest`: static policy assertions for 0/1/2/3
+    domain case counts, direct emitter tests proving one-key and two-key
+    routers contain no `LookupSwitchInsnNode` and contain the expected branch
+    opcodes, and generated fixture auditing that larger compact group routers
+    keep switch dispatch while compact sparse defaults still store only state
+    cell 5.
+  - Focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test21-obf-small-domain-branches.jar` with
+    full coverage for all enabled transforms (`renamer appliedFull=96`,
+    `keyDispatch appliedFull=96`, `methodParameterObfuscation appliedFull=35
+    appliedSafe=7`, `controlFlowFlattening appliedFull=96`,
+    `validationSinkHardening appliedFull=1`, `invokeDynamic appliedFull=63`,
+    `constantObfuscation appliedFull=33`, and `stringObfuscation
+    appliedFull=16`). Direct execution of that fresh artifact exited 0 and
+    printed `=== All tests completed ===`; the latest run log records Platform
+    `125 ms`, Virtual `150 ms`, Seq `434 ms`, Parallel `21 ms`, and VThreads
+    `23 ms`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test-obf-small-domain-branches.jar` with
+    full coverage for all enabled transforms (`renamer appliedFull=84`,
+    `keyDispatch appliedFull=84`, `methodParameterObfuscation appliedFull=74
+    appliedSafe=2`, `controlFlowFlattening appliedFull=85`,
+    `validationSinkHardening appliedFull=2`, `invokeDynamic appliedFull=51`,
+    `constantObfuscation appliedFull=34`, and `stringObfuscation
+    appliedFull=26`). Direct execution of that fresh artifact exited 0 and
+    reported `Calc: 756ms`; the existing ReTrace/Sec rows remain non-performance
+    errors.
+  - Fresh `javap` inspection of
+    `build/test-jvm-full-obf-perf/test21-obf-small-domain-branches.jar` proves
+    the small group routers changed shape. `a.pa::bbb` is a one-key router with
+    `ILOAD 6`, one pushed domain token, `IF_ICMPNE poison`, the existing island
+    helper call, and the compact result-only poison store. `a.pa::ebb` is a
+    two-key router with two direct compares, an explicit miss `GOTO poison`,
+    the existing island helper call, and the same compact result-only poison
+    store. `a.pa::pab` still uses `lookupswitch` for a four-case router, proving
+    larger routers retain switch dispatch.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the same `test21`
+    artifact shows hot `a.a::y` at 6348 bytes. The old 54-byte small
+    `lookupswitch` wrappers are gone; the same call paths now show 33-byte
+    one-key branch helpers and 43-byte two-key branch helpers. Remaining
+    blockers are still JIT budget exhaustion in the hot caller: `a.pa::*bb`
+    branch helpers at 43 bytes, `a.ra::ya` at 30 bytes, the protected numeric
+    wrapper `a.ta::kqb` at 20 bytes with finalizer `a.ta::jqb` at 85 bytes, and
+    `a.qa::*cb` wrappers at 42 bytes. Therefore JCP-7 remains open and the next
+    repair must target generic caller-budget pressure without weakening CFF
+    coverage, dynamic key flow, invokedynamic coverage, or protected numeric
+    material.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 

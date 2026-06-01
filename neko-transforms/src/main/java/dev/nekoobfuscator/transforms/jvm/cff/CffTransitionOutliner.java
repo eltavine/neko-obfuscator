@@ -94,6 +94,36 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
         return zeroResultTokenIsValid ? Opcodes.IFNE : Opcodes.IFEQ;
     }
 
+    static boolean useSmallDomainRouterBranches(int domainCaseCount) {
+        return domainCaseCount > 0 && domainCaseCount <= 2;
+    }
+
+    static boolean emitSmallDomainRouterBranches(
+        InsnList insns,
+        int domainLocal,
+        LabelNode poisonCase,
+        int[] keys,
+        LabelNode[] labels
+    ) {
+        if (!useSmallDomainRouterBranches(keys.length)) {
+            return false;
+        }
+        if (keys.length == 1) {
+            insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+            JvmPassBytecode.pushInt(insns, keys[0]);
+            insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, poisonCase));
+            return true;
+        }
+        insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+        JvmPassBytecode.pushInt(insns, keys[0]);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, labels[0]));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+        JvmPassBytecode.pushInt(insns, keys[1]);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, labels[1]));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, poisonCase));
+        return true;
+    }
+
     static int generatedStaticHelperAccess(boolean interfaceOwner) {
         int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         return access | (interfaceOwner ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE);
@@ -787,8 +817,13 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
                 labels[index] = entry.getValue();
                 index++;
             }
-            helper.instructions.add(new VarInsnNode(Opcodes.ILOAD, helperDomainLocal));
-            helper.instructions.add(new LookupSwitchInsnNode(poisonCase, keys, labels));
+            emitGroupDomainRouter(
+                helper.instructions,
+                helperDomainLocal,
+                poisonCase,
+                keys,
+                labels
+            );
             for (int i = 0; i < islandLabels.size(); i++) {
                 helper.instructions.add(islandLabels.get(i));
                 helper.instructions.add(new VarInsnNode(Opcodes.LLOAD, helperKeyLocal));
@@ -845,6 +880,19 @@ abstract class CffTransitionOutliner extends CffKeyTransferRewriter {
             );
             groupDispatchHelpers.put(group, groupHelperName);
             return groupHelperName;
+        }
+
+        private void emitGroupDomainRouter(
+            InsnList insns,
+            int domainLocal,
+            LabelNode poisonCase,
+            int[] keys,
+            LabelNode[] labels
+        ) {
+            if (!emitSmallDomainRouterBranches(insns, domainLocal, poisonCase, keys, labels)) {
+                insns.add(new VarInsnNode(Opcodes.ILOAD, domainLocal));
+                insns.add(new LookupSwitchInsnNode(poisonCase, keys, labels));
+            }
         }
 
         private int directIslandDomainToken(IslandGroup group, int island) {
