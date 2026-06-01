@@ -39,9 +39,13 @@ import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.IntInsnNode;
 import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.LookupSwitchInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 
@@ -146,6 +150,29 @@ final class CffTransitionOutlinerPolicyTest {
         assertFalse(
             CffTransitionOutliner.shouldReloadPcForIslandResultRoute(false, 0),
             "sparse island result routing without fake routes does not consume the pc route mask"
+        );
+
+        assertTrue(
+            CffTransitionOutliner.useCompactSparseResultFirst(true, false),
+            "compact sparse group callers should reject poison before reloading full state"
+        );
+        assertFalse(
+            CffTransitionOutliner.useCompactSparseResultFirst(true, true),
+            "dense group routers must keep full masked state routing"
+        );
+        assertFalse(
+            CffTransitionOutliner.useCompactSparseResultFirst(false, false),
+            "packed long[] dispatch state cannot use compact sparse result-first routing"
+        );
+        assertEquals(
+            Opcodes.IFNE,
+            CffTransitionOutliner.compactSparsePoisonBranchOpcode(true),
+            "single zero-token sparse fallthrough must reject nonzero poison tokens"
+        );
+        assertEquals(
+            Opcodes.IFEQ,
+            CffTransitionOutliner.compactSparsePoisonBranchOpcode(false),
+            "normal sparse routers must reject the zero poison token"
         );
     }
 
@@ -280,6 +307,11 @@ final class CffTransitionOutlinerPolicyTest {
         );
         assertIslandDispatchMissUsesColdHelper(outputJar, "CffBudgetedDirectInlineShape");
         assertCompactDispatchHelpersUseIntState(outputJar, "CffBudgetedDirectInlineShape");
+        assertCompactSparseGroupDispatchUsesResultOnlyDefault(
+            outputJar,
+            "CffBudgetedDirectInlineShape"
+        );
+        assertCompactSparseGroupCallerBranchesOnResultFirst(hot);
         assertCompactTransitionWrappersPreserveMaterialCalls(
             outputJar,
             "CffBudgetedDirectInlineShape"
@@ -411,6 +443,150 @@ final class CffTransitionOutlinerPolicyTest {
         assertTrue(helpers > 0, "no compact dispatch helpers were generated");
     }
 
+    private static void assertCompactSparseGroupDispatchUsesResultOnlyDefault(
+        Path jar,
+        String owner
+    ) throws Exception {
+        JarInput input = new JarInput(jar);
+        L1Class clazz = input.classMap().get(owner);
+        assertTrue(clazz != null, "missing class " + owner);
+        int groupWrappers = 0;
+        int resultOnlyDefaults = 0;
+        for (MethodNode method : clazz.asmNode().methods) {
+            if (!CFF_COMPACT_GROUP_DISPATCH_DESC.equals(method.desc)
+                || method.instructions == null
+                || method.instructions.size() == 0) {
+                continue;
+            }
+            LookupSwitchInsnNode switchInsn = leadingLookupSwitch(method);
+            if (switchInsn == null) {
+                continue;
+            }
+            groupWrappers++;
+            int stores = iastoreCountUntilReturn(switchInsn.dflt);
+            if (stores == 1 && firstIastoreStoresIndex(switchInsn.dflt, 5)) {
+                resultOnlyDefaults++;
+            }
+        }
+        assertTrue(groupWrappers > 0, "no compact group dispatch wrappers were generated");
+        assertTrue(
+            resultOnlyDefaults > 0,
+            "compact sparse group dispatch default did not use result-only state return"
+        );
+    }
+
+    private static void assertCompactSparseGroupCallerBranchesOnResultFirst(MethodNode method) {
+        int compactCalls = 0;
+        int resultFirstCalls = 0;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (!(insn instanceof MethodInsnNode call)
+                || !CFF_COMPACT_GROUP_DISPATCH_DESC.equals(call.desc)) {
+                continue;
+            }
+            compactCalls++;
+            if (loadsResultCellBeforeFullStateReload(call)) {
+                resultFirstCalls++;
+            }
+        }
+        assertTrue(compactCalls > 0, "hot method did not call compact dispatch helpers");
+        assertTrue(
+            resultFirstCalls > 0,
+            "compact sparse group caller did not branch on result before full state reload"
+        );
+    }
+
+    private static LookupSwitchInsnNode leadingLookupSwitch(MethodNode method) {
+        AbstractInsnNode first = nextOpcodeInsn(method.instructions.getFirst());
+        if (first == null || first.getOpcode() != Opcodes.ILOAD) {
+            return null;
+        }
+        AbstractInsnNode second = nextOpcodeInsn(first.getNext());
+        if (second instanceof LookupSwitchInsnNode switchInsn) {
+            return switchInsn;
+        }
+        return null;
+    }
+
+    private static int iastoreCountUntilReturn(LabelNode start) {
+        int stores = 0;
+        for (
+            AbstractInsnNode insn = nextOpcodeInsn(start.getNext());
+            insn != null && insn.getOpcode() != Opcodes.LRETURN;
+            insn = nextOpcodeInsn(insn.getNext())
+        ) {
+            if (insn.getOpcode() == Opcodes.IASTORE) {
+                stores++;
+            }
+        }
+        return stores;
+    }
+
+    private static boolean firstIastoreStoresIndex(LabelNode start, int expectedIndex) {
+        for (
+            AbstractInsnNode insn = nextOpcodeInsn(start.getNext());
+            insn != null && insn.getOpcode() != Opcodes.LRETURN;
+            insn = nextOpcodeInsn(insn.getNext())
+        ) {
+            if (insn.getOpcode() != Opcodes.IASTORE) {
+                continue;
+            }
+            AbstractInsnNode valueInsn = previousOpcodeInsn(insn.getPrevious());
+            AbstractInsnNode indexInsn = valueInsn == null
+                ? null
+                : previousOpcodeInsn(valueInsn.getPrevious());
+            Integer index = pushedInt(indexInsn);
+            return index != null && index == expectedIndex;
+        }
+        return false;
+    }
+
+    private static boolean loadsResultCellBeforeFullStateReload(MethodInsnNode call) {
+        boolean sawCallStore = false;
+        for (
+            AbstractInsnNode insn = nextOpcodeInsn(call.getNext());
+            insn != null;
+            insn = nextOpcodeInsn(insn.getNext())
+        ) {
+            if (!sawCallStore) {
+                if (insn.getOpcode() == Opcodes.LSTORE) {
+                    sawCallStore = true;
+                    continue;
+                }
+                if (insn instanceof MethodInsnNode || insn instanceof JumpInsnNode) {
+                    return false;
+                }
+                continue;
+            }
+            if (insn instanceof JumpInsnNode jump) {
+                return jump.getOpcode() == Opcodes.IFEQ || jump.getOpcode() == Opcodes.IFNE;
+            }
+            if (insn.getOpcode() == Opcodes.IALOAD) {
+                AbstractInsnNode indexInsn = previousOpcodeInsn(insn.getPrevious());
+                Integer index = pushedInt(indexInsn);
+                if (index == null) {
+                    return false;
+                }
+                return index == 5 && branchesOnLoadedResult(insn);
+            }
+            if (insn instanceof MethodInsnNode) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean branchesOnLoadedResult(AbstractInsnNode iaload) {
+        AbstractInsnNode store = nextOpcodeInsn(iaload.getNext());
+        AbstractInsnNode load = store == null ? null : nextOpcodeInsn(store.getNext());
+        AbstractInsnNode branch = load == null ? null : nextOpcodeInsn(load.getNext());
+        return store != null
+            && store.getOpcode() == Opcodes.ISTORE
+            && load != null
+            && load.getOpcode() == Opcodes.ILOAD
+            && branch instanceof JumpInsnNode
+            && (branch.getOpcode() == Opcodes.IFEQ || branch.getOpcode() == Opcodes.IFNE);
+    }
+
     private static boolean storesIntState(MethodNode method) {
         for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (insn.getOpcode() == Opcodes.IASTORE) {
@@ -486,6 +662,31 @@ final class CffTransitionOutlinerPolicyTest {
             insn = insn.getNext();
         }
         return insn;
+    }
+
+    private static AbstractInsnNode previousOpcodeInsn(AbstractInsnNode insn) {
+        while (insn != null && insn.getOpcode() < 0) {
+            insn = insn.getPrevious();
+        }
+        return insn;
+    }
+
+    private static Integer pushedInt(AbstractInsnNode insn) {
+        if (insn == null) {
+            return null;
+        }
+        int opcode = insn.getOpcode();
+        if (opcode >= Opcodes.ICONST_M1 && opcode <= Opcodes.ICONST_5) {
+            return opcode - Opcodes.ICONST_0;
+        }
+        if (insn instanceof IntInsnNode intInsn
+            && (opcode == Opcodes.BIPUSH || opcode == Opcodes.SIPUSH)) {
+            return intInsn.operand;
+        }
+        if (insn instanceof LdcInsnNode ldc && ldc.cst instanceof Integer value) {
+            return value;
+        }
+        return null;
     }
 
     private static InvokeDynamicInsnNode stringConcatIndy() {

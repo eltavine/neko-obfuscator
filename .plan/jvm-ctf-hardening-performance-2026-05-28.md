@@ -5411,6 +5411,58 @@ This plan will refresh that evidence before changing CFF performance code.
     token before consuming other state cells.
   - The repair does not claim final threshold acceptance unless fresh runtime
     logs meet the requested gates.
+- Twelfth repair validation evidence:
+  - Implemented compact sparse result-first dispatch in
+    `CffTransitionOutliner`: compact non-dense group dispatch callers now load
+    compact state cell 5 immediately after the helper returns and branch to
+    poison before reloading guard/path/block/pc/domain. The helper default path
+    for the same compact sparse routers writes only compact state cell 5 and
+    returns the live key; dense routers and island/cold/fake/material paths
+    keep the full state return path.
+  - Added focused CFF policy coverage proving sparse result-first selection is
+    disabled for dense routers, proving zero-token fallthrough and zero-poison
+    branch opcodes, and scanning a generated JIT-budget CFF fixture to verify
+    compact sparse group defaults store only result cell 5 while callers branch
+    on that cell before full state reload.
+  - Focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test21-obf-sparse-result-first.jar` with full
+    coverage for all enabled transforms (`renamer appliedFull=96`,
+    `keyDispatch appliedFull=96`, `methodParameterObfuscation appliedFull=35
+    appliedSafe=7`, `controlFlowFlattening appliedFull=96`,
+    `validationSinkHardening appliedFull=1`, `invokeDynamic appliedFull=63`,
+    `constantObfuscation appliedFull=33`, and `stringObfuscation
+    appliedFull=16`). Direct execution exited 0 and printed
+    `=== All tests completed ===`; observed rows were Platform `136 ms`,
+    Virtual `173 ms`, Seq `452 ms`, Parallel `22 ms`, and VThreads `23 ms`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test-obf-sparse-result-first.jar` with full
+    coverage for all enabled transforms (`renamer appliedFull=84`,
+    `keyDispatch appliedFull=84`, `methodParameterObfuscation appliedFull=74
+    appliedSafe=2`, `controlFlowFlattening appliedFull=85`,
+    `validationSinkHardening appliedFull=2`, `invokeDynamic appliedFull=51`,
+    `constantObfuscation appliedFull=34`, and `stringObfuscation
+    appliedFull=26`). Direct execution exited 0 and reported `Calc: 737ms`;
+    the existing ReTrace/Sec rows remain non-performance errors.
+  - Fresh `javap` inspection of `a.pa` in the `test21` artifact shows compact
+    group wrappers whose default paths now store only `iconst_5` / `iastore`
+    before returning, proving the old full default-state store was removed for
+    compact sparse group defaults.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the same `test21`
+    artifact shows hot `a.a::y` compiling at 6337 bytes. The compact sparse
+    group wrappers that were previously 77-byte callees now appear as
+    54-byte callees and some inline hot, but final thresholds still fail.
+    Remaining blockers include `a.ra::ya` (`__neko_cff_int`) rejected about
+    100 times as `size > DesiredMethodLimit`, `a.ta::mqb`
+    (`__neko_num_ip(IIIII)I`) rejected as both `callee is too large` and
+    `size > DesiredMethodLimit`, and remaining 54-byte compact CFF wrappers
+    rejected once the hot method reaches the JIT size budget. Therefore JCP-7
+    remains open and the next repair must target the generic result-router /
+    numeric-helper hot path or reduce caller growth without weakening CFF,
+    constant, string, or invokedynamic coverage.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
