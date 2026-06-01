@@ -3631,7 +3631,7 @@ This plan will refresh that evidence before changing CFF performance code.
       This residual is assigned to the next performance repair; JCP-6I does
       not claim final threshold acceptance.
 
-### [ ] JCP-6J: Split Class-Integrity Ticket Hot Path
+### [x] JCP-6J: Split Class-Integrity Ticket Hot Path
 
 - Dependency/order: this follows the committed JCP-6I cold island miss split
   because fresh CFF/MPO-only and full-profile artifacts now run correctly, but
@@ -3701,6 +3701,38 @@ This plan will refresh that evidence before changing CFF performance code.
   descriptor-only recomputation, CFF block boundary/count change, or reduced
   transform coverage is introduced. JCP-6J does not by itself claim final
   threshold acceptance unless fresh runtime logs meet the requested gates.
+- Implementation evidence:
+  - The initial JCP-6J implementation split ticket calls from the root helper
+    but still produced a 407-byte generated ticket entry; fresh
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6j-printcomp.log`
+    identified that entry as `hot method too big`. The implementation was
+    refined generically by keeping the public `CLASS_INTEGRITY_HELPER_DESC`
+    ticket entry as a carrier/context resolver and splitting ticket issue,
+    observe, and consume state handling into generated helper methods keyed by
+    the same live `value`, `seed`, and carrier data.
+  - Focused validation passed with
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick CFF/MPO-only regeneration wrote
+    `build/test-jvm-full-obf-perf/test21-cff-mpo-only-jcp6j.jar`, with
+    persisted logs `test21-cff-mpo-only-jcp6j.obf.log` and
+    `test21-cff-mpo-only-jcp6j.run.log`; the direct run completed with
+    `Seq 481 ms`, `Parallel 19 ms`, and `VThreads 18 ms`.
+  - Fresh `PrintInlining` for that artifact shows the ticket entry is now
+    `a.a::xa (140 bytes)`, with split ticket helpers
+    `a.a::ua (79 bytes)`, `a.a::va (126 bytes)`, and `a.a::wa (154 bytes)`;
+    hot issue/observe paths inline, and the original 1733-byte synchronized
+    root helper is no longer the primary ticket-entry hot-path blocker. The
+    remaining blockers are separate large generated CFF/material helpers,
+    including entries such as `a.a::s (1705 bytes)`, `a.a::e (5072 bytes)`,
+    and relocated material helpers reported as `hot method too big`.
+  - Fresh no-quick full-profile `test21.jar` regeneration wrote
+    `build/test-jvm-full-obf-perf/test21-obf-jcp6j.jar`; the direct run
+    completed with `Seq 521 ms`, `Parallel 22 ms`, and `VThreads 23 ms`.
+    Fresh no-quick full-profile `test.jar` regeneration wrote
+    `build/test-jvm-full-obf-perf/test-obf-jcp6j.jar`; the direct run
+    completed and reported `Calc: 739ms` with the pre-existing fixture
+    `ReTrace ERROR` and `Sec ERROR` lines. These logs confirm the JCP-6J
+    repair is runnable but does not claim final threshold acceptance.
 
 ### [ ] JCP-7: Reduce Full Constant/String Hot-Path Runtime Cost
 

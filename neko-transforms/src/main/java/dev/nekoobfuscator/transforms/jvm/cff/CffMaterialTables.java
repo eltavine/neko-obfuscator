@@ -1628,7 +1628,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             classIntegrityState.owner(),
-            classIntegrityState.helperName(),
+            classIntegrityState.ticketHelperName(),
             CLASS_INTEGRITY_HELPER_DESC,
             classIntegrityState.interfaceOwner()
         ));
@@ -1746,7 +1746,7 @@ abstract class CffMaterialTables extends CffClassSetup {
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             classIntegrityState.owner(),
-            classIntegrityState.helperName(),
+            classIntegrityState.ticketHelperName(),
             CLASS_INTEGRITY_HELPER_DESC,
             classIntegrityState.interfaceOwner()
         ));

@@ -967,7 +967,7 @@ abstract class CffKeyTransferRewriter extends CffKeyStateEmitter {
         insns.add(new MethodInsnNode(
             Opcodes.INVOKESTATIC,
             table.classIntegrityState().owner(),
-            table.classIntegrityState().helperName(),
+            table.classIntegrityState().ticketHelperName(),
             CLASS_INTEGRITY_HELPER_DESC,
             table.classIntegrityState().interfaceOwner()
         ));

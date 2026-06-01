@@ -65,6 +65,10 @@ abstract class CffClassSetup extends CffSharedState {
         "controlFlowFlattening.classCodeIntegrityFinalized";
     private static final int RELOCATED_CFF_HELPERS_PER_HOST = 64;
     private static final int RELOCATED_CFF_HELPER_HOST_CODE_BUDGET = 180_000;
+    private static final String CLASS_INTEGRITY_TICKET_ISSUE_HELPER_DESC =
+        "(IJJ[Ljava/lang/Object;)J";
+    private static final String CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC =
+        "(JJ[Ljava/lang/Object;)J";
 
     protected void logIslandDryRunMethodStats(PipelineContext pctx, String methodKey) {
         CffIslandDryRunStats stats = pctx.getPassData(CFF_ISLAND_DRY_RUN_STATS);
@@ -567,6 +571,26 @@ abstract class CffClassSetup extends CffSharedState {
             "__neko_class_integrity$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x47313848454C504CL), 36),
             CLASS_INTEGRITY_HELPER_DESC
         );
+        String ticketHelperName = uniqueMethodName(
+            host,
+            "__neko_class_integrity_ticket$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x4731385449434B48L), 36),
+            CLASS_INTEGRITY_HELPER_DESC
+        );
+        String ticketIssueHelperName = uniqueMethodName(
+            host,
+            "__neko_class_integrity_ticket_issue$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x4731385449535355L), 36),
+            CLASS_INTEGRITY_TICKET_ISSUE_HELPER_DESC
+        );
+        String ticketObserveHelperName = uniqueMethodName(
+            host,
+            "__neko_class_integrity_ticket_observe$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x473138544F425356L), 36),
+            CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC
+        );
+        String ticketConsumeHelperName = uniqueMethodName(
+            host,
+            "__neko_class_integrity_ticket_consume$" + Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x47313854434F4E53L), 36),
+            CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC
+        );
         String codeSuffix = Integer.toUnsignedString((int) JvmPassBytecode.mix(hostSeed, 0x473138434F444531L), 36);
         String u1Name = uniqueMethodName(host, "__neko_class_integrity_u1$" + codeSuffix, "([BI)I");
         String u2Name = uniqueMethodName(host, "__neko_class_integrity_u2$" + codeSuffix, "([BI)I");
@@ -619,12 +643,23 @@ abstract class CffClassSetup extends CffSharedState {
             nodeMutationMask,
             scanName
         );
+        installClassIntegrityTicketHelper(
+            pctx,
+            host,
+            globalFieldName,
+            helperName,
+            ticketHelperName,
+            ticketIssueHelperName,
+            ticketObserveHelperName,
+            ticketConsumeHelperName
+        );
         CffClassIntegrityState created = new CffClassIntegrityState(
             host.name(),
             globalFieldName,
             nodeFieldName,
             ownerRegistryFieldName,
             helperName,
+            ticketHelperName,
             host.isInterface(),
             capacity,
             rootMask,
@@ -740,6 +775,13 @@ abstract class CffClassSetup extends CffSharedState {
             "(I)V",
             false
         ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/util/Collections",
+            "synchronizedMap",
+            "(Ljava/util/Map;)Ljava/util/Map;",
+            false
+        ));
         insns.add(new InsnNode(Opcodes.AASTORE));
         insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
         insns.add(new InsnNode(Opcodes.ICONST_1));
@@ -789,16 +831,16 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
         insns.add(new InsnNode(Opcodes.ICONST_0));
         insns.add(new InsnNode(Opcodes.AALOAD));
-        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/IdentityHashMap"));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/Map"));
         insns.add(new VarInsnNode(Opcodes.ASTORE, contextMapLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, contextMapLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, contextKeyLocal));
         insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/util/IdentityHashMap",
+            Opcodes.INVOKEINTERFACE,
+            "java/util/Map",
             "get",
             "(Ljava/lang/Object;)Ljava/lang/Object;",
-            false
+            true
         ));
         insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
         insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
@@ -915,11 +957,11 @@ abstract class CffClassSetup extends CffSharedState {
         insns.add(new VarInsnNode(Opcodes.ALOAD, contextKeyLocal));
         insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
         insns.add(new MethodInsnNode(
-            Opcodes.INVOKEVIRTUAL,
-            "java/util/IdentityHashMap",
+            Opcodes.INVOKEINTERFACE,
+            "java/util/Map",
             "put",
             "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
-            false
+            true
         ));
         insns.add(new InsnNode(Opcodes.POP));
         insns.add(carrierReady);
@@ -1232,6 +1274,487 @@ abstract class CffClassSetup extends CffSharedState {
         helper.maxStack = 18;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         host.asmNode().methods.add(helper);
+    }
+
+    private void installClassIntegrityTicketHelper(
+        PipelineContext pctx,
+        L1Class host,
+        String globalFieldName,
+        String rootHelperName,
+        String ticketHelperName,
+        String ticketIssueHelperName,
+        String ticketObserveHelperName,
+        String ticketConsumeHelperName
+    ) {
+        installClassIntegrityTicketIssueHelper(pctx, host, ticketIssueHelperName);
+        installClassIntegrityTicketObserveHelper(pctx, host, ticketObserveHelperName);
+        installClassIntegrityTicketConsumeHelper(pctx, host, ticketConsumeHelperName);
+        MethodNode helper = new MethodNode(
+            Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+            ticketHelperName,
+            CLASS_INTEGRITY_HELPER_DESC,
+            null,
+            null
+        );
+        int modeLocal = 0;
+        int valueLocal = 1;
+        int seedLocal = 3;
+        int ownerLocal = 5;
+        int requiredBloomLocal = 6;
+        int expectedClassCodeLocal = 8;
+        int carrierLocal = 10;
+        int rootCarrierLocal = 11;
+        int contextKeyLocal = 12;
+        int contextMapLocal = 13;
+        InsnList insns = helper.instructions;
+        LabelNode ticketMode = new LabelNode();
+        LabelNode slowPath = new LabelNode();
+        LabelNode rootCarrierLoaded = new LabelNode();
+        LabelNode contextBootstrap = new LabelNode();
+        LabelNode contextKeyReady = new LabelNode();
+        LabelNode carrierReady = new LabelNode();
+        LabelNode issueMode = new LabelNode();
+        LabelNode observeMode = new LabelNode();
+        LabelNode consumeMode = new LabelNode();
+
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFLT, ticketMode));
+        emitClassIntegrityRootHelperCall(
+            insns,
+            host.name(),
+            host.isInterface(),
+            rootHelperName,
+            modeLocal,
+            valueLocal,
+            seedLocal,
+            ownerLocal,
+            requiredBloomLocal,
+            expectedClassCodeLocal
+        );
+
+        insns.add(ticketMode);
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            host.name(),
+            globalFieldName,
+            "Ljava/lang/Object;"
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, rootCarrierLoaded));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, slowPath));
+        insns.add(rootCarrierLoaded);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, rootCarrierLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, contextBootstrap));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getClassLoader",
+            "()Ljava/lang/ClassLoader;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, contextKeyReady));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(contextBootstrap);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_1));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(contextKeyReady);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, contextKeyLocal));
+
+        insns.add(new VarInsnNode(Opcodes.ALOAD, rootCarrierLocal));
+        insns.add(new InsnNode(Opcodes.ICONST_0));
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/Map"));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, contextMapLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, contextMapLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, contextKeyLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEINTERFACE,
+            "java/util/Map",
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            true
+        ));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "[Ljava/lang/Object;"));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, carrierReady));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, slowPath));
+        insns.add(carrierReady);
+        insns.add(new VarInsnNode(Opcodes.ASTORE, carrierLocal));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_ISSUE_MODE);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, issueMode));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_DEFER_MODE);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, observeMode));
+        insns.add(issueMode);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            host.name(),
+            ticketIssueHelperName,
+            CLASS_INTEGRITY_TICKET_ISSUE_HELPER_DESC,
+            host.isInterface()
+        ));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+
+        insns.add(observeMode);
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_OBSERVE_MODE);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPNE, consumeMode));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            host.name(),
+            ticketObserveHelperName,
+            CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC,
+            host.isInterface()
+        ));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+
+        insns.add(consumeMode);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            host.name(),
+            ticketConsumeHelperName,
+            CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC,
+            host.isInterface()
+        ));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+
+        insns.add(slowPath);
+        emitClassIntegrityRootHelperCall(
+            insns,
+            host.name(),
+            host.isInterface(),
+            rootHelperName,
+            modeLocal,
+            valueLocal,
+            seedLocal,
+            ownerLocal,
+            requiredBloomLocal,
+            expectedClassCodeLocal
+        );
+        helper.maxLocals = 14;
+        helper.maxStack = 18;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        host.asmNode().methods.add(helper);
+    }
+
+    private void installClassIntegrityTicketIssueHelper(
+        PipelineContext pctx,
+        L1Class host,
+        String helperName
+    ) {
+        MethodNode helper = new MethodNode(
+            CffTransitionOutliner.generatedStaticHelperAccess(host.isInterface()),
+            helperName,
+            CLASS_INTEGRITY_TICKET_ISSUE_HELPER_DESC,
+            null,
+            null
+        );
+        int modeLocal = 0;
+        int valueLocal = 1;
+        int seedLocal = 3;
+        int carrierLocal = 5;
+        int ticketLocal = 6;
+        InsnList insns = helper.instructions;
+        LabelNode issueGlobal = new LabelNode();
+        emitClassIntegrityTicketValue(insns, seedLocal, ticketLocal);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
+            false
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "set",
+            "(Ljava/lang/Object;)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        JvmPassBytecode.pushInt(insns, CLASS_INTEGRITY_TICKET_DEFER_MODE);
+        insns.add(new JumpInsnNode(Opcodes.IF_ICMPEQ, issueGlobal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        insns.add(issueGlobal);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
+            false
+        ));
+        insns.add(new FieldInsnNode(
+            Opcodes.GETSTATIC,
+            "java/lang/Boolean",
+            "TRUE",
+            "Ljava/lang/Boolean;"
+        ));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "put",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        helper.maxLocals = 8;
+        helper.maxStack = 6;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        host.asmNode().methods.add(helper);
+    }
+
+    private void installClassIntegrityTicketObserveHelper(
+        PipelineContext pctx,
+        L1Class host,
+        String helperName
+    ) {
+        MethodNode helper = new MethodNode(
+            CffTransitionOutliner.generatedStaticHelperAccess(host.isInterface()),
+            helperName,
+            CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC,
+            null,
+            null
+        );
+        int valueLocal = 0;
+        int seedLocal = 2;
+        int carrierLocal = 4;
+        int ticketObjectLocal = 5;
+        int ticketLocal = 6;
+        InsnList insns = helper.instructions;
+        LabelNode observeGlobalNull = new LabelNode();
+        LabelNode observeGlobal = new LabelNode();
+        LabelNode consumeOk = new LabelNode();
+        emitClassIntegrityTicketValue(insns, seedLocal, ticketLocal);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, ticketObjectLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "get",
+            "()Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, observeGlobalNull));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Number"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Number",
+            "longValue",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new InsnNode(Opcodes.LCMP));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, consumeOk));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, observeGlobal));
+        insns.add(observeGlobalNull);
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(observeGlobal);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ticketObjectLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "containsKey",
+            "(Ljava/lang/Object;)Z",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFNE, consumeOk));
+        emitClassIntegrityTicketPoison(insns, valueLocal, seedLocal);
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        insns.add(consumeOk);
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        helper.maxLocals = 8;
+        helper.maxStack = 6;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        host.asmNode().methods.add(helper);
+    }
+
+    private void installClassIntegrityTicketConsumeHelper(
+        PipelineContext pctx,
+        L1Class host,
+        String helperName
+    ) {
+        MethodNode helper = new MethodNode(
+            CffTransitionOutliner.generatedStaticHelperAccess(host.isInterface()),
+            helperName,
+            CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC,
+            null,
+            null
+        );
+        int valueLocal = 0;
+        int seedLocal = 2;
+        int carrierLocal = 4;
+        int ticketObjectLocal = 5;
+        int ticketLocal = 6;
+        InsnList insns = helper.instructions;
+        LabelNode consumeGlobalNull = new LabelNode();
+        LabelNode consumeGlobal = new LabelNode();
+        LabelNode consumeThreadOk = new LabelNode();
+        LabelNode consumeOk = new LabelNode();
+        emitClassIntegrityTicketValue(insns, seedLocal, ticketLocal);
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            "java/lang/Long",
+            "valueOf",
+            "(J)Ljava/lang/Long;",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ASTORE, ticketObjectLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "get",
+            "()Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.DUP));
+        insns.add(new JumpInsnNode(Opcodes.IFNULL, consumeGlobalNull));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Number"));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Number",
+            "longValue",
+            "()J",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, ticketLocal));
+        insns.add(new InsnNode(Opcodes.LCMP));
+        insns.add(new JumpInsnNode(Opcodes.IFEQ, consumeThreadOk));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, consumeGlobal));
+        insns.add(consumeThreadOk);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 5);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/lang/ThreadLocal"));
+        insns.add(new InsnNode(Opcodes.ACONST_NULL));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ThreadLocal",
+            "set",
+            "(Ljava/lang/Object;)V",
+            false
+        ));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ticketObjectLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "remove",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(new JumpInsnNode(Opcodes.GOTO, consumeOk));
+        insns.add(consumeGlobalNull);
+        insns.add(new InsnNode(Opcodes.POP));
+        insns.add(consumeGlobal);
+        insns.add(new VarInsnNode(Opcodes.ALOAD, carrierLocal));
+        JvmPassBytecode.pushInt(insns, 6);
+        insns.add(new InsnNode(Opcodes.AALOAD));
+        insns.add(new TypeInsnNode(Opcodes.CHECKCAST, "java/util/concurrent/ConcurrentHashMap"));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ticketObjectLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKEVIRTUAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "remove",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            false
+        ));
+        insns.add(new JumpInsnNode(Opcodes.IFNONNULL, consumeOk));
+        emitClassIntegrityTicketPoison(insns, valueLocal, seedLocal);
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        insns.add(consumeOk);
+        insns.add(new InsnNode(Opcodes.LCONST_0));
+        insns.add(new InsnNode(Opcodes.LRETURN));
+        helper.maxLocals = 8;
+        helper.maxStack = 6;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        host.asmNode().methods.add(helper);
+    }
+
+    private void emitClassIntegrityRootHelperCall(
+        InsnList insns,
+        String ownerName,
+        boolean interfaceOwner,
+        String rootHelperName,
+        int modeLocal,
+        int valueLocal,
+        int seedLocal,
+        int ownerLocal,
+        int requiredBloomLocal,
+        int expectedClassCodeLocal
+    ) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, modeLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, valueLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, seedLocal));
+        insns.add(new VarInsnNode(Opcodes.ALOAD, ownerLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, requiredBloomLocal));
+        insns.add(new VarInsnNode(Opcodes.LLOAD, expectedClassCodeLocal));
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            ownerName,
+            rootHelperName,
+            CLASS_INTEGRITY_HELPER_DESC,
+            interfaceOwner
+        ));
+        insns.add(new InsnNode(Opcodes.LRETURN));
     }
 
     private void emitClassIntegrityTicketMode(
@@ -2955,8 +3478,7 @@ abstract class CffClassSetup extends CffSharedState {
         }
         for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (!(insn instanceof MethodInsnNode call)) continue;
-            if (!table.classIntegrityState().owner().equals(call.owner)) continue;
-            if (!CLASS_INTEGRITY_HELPER_DESC.equals(call.desc)) continue;
+            if (!isClassIntegrityRootHelperCall(table, call)) continue;
             patchPreviousPatchableLong(call, expected);
             clazz.markDirty();
             return;
@@ -2972,8 +3494,7 @@ abstract class CffClassSetup extends CffSharedState {
         MethodInsnNode classIntegrityCall = null;
         for (AbstractInsnNode insn = clinit.instructions.getFirst(); insn != null; insn = insn.getNext()) {
             if (!(insn instanceof MethodInsnNode call)) continue;
-            if (!table.classIntegrityState().owner().equals(call.owner)) continue;
-            if (!CLASS_INTEGRITY_HELPER_DESC.equals(call.desc)) continue;
+            if (!isClassIntegrityRootHelperCall(table, call)) continue;
             classIntegrityCall = call;
             break;
         }
@@ -2995,6 +3516,45 @@ abstract class CffClassSetup extends CffSharedState {
             throw new IllegalStateException("Missing class key word patch bytes for " + clazz.name());
         }
         clazz.markDirty();
+    }
+
+    private boolean isClassIntegrityRootHelperCall(CffClassKeyTable table, MethodInsnNode call) {
+        if (!table.classIntegrityState().owner().equals(call.owner)) return false;
+        if (!CLASS_INTEGRITY_HELPER_DESC.equals(call.desc)) return false;
+        L1Class ownerClass = table.pctx().classMap().get(call.owner);
+        if (ownerClass == null) return false;
+        MethodNode target = findAsmMethodNode(ownerClass, call.name, call.desc);
+        return target != null && methodContainsClassIntegrityClassCodeScan(target);
+    }
+
+    private boolean methodContainsClassIntegrityClassCodeScan(MethodNode method) {
+        if (method.instructions == null) return false;
+        boolean sawClassResource = false;
+        boolean sawReadAllBytes = false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (insn instanceof MethodInsnNode call
+                && "java/lang/Class".equals(call.owner)
+                && "getResourceAsStream".equals(call.name)
+                && "(Ljava/lang/String;)Ljava/io/InputStream;".equals(call.desc)) {
+                sawClassResource = true;
+            }
+            if (insn instanceof MethodInsnNode call
+                && "java/io/InputStream".equals(call.owner)
+                && "readAllBytes".equals(call.name)
+                && "()[B".equals(call.desc)) {
+                sawReadAllBytes = true;
+            }
+        }
+        return sawClassResource && sawReadAllBytes;
+    }
+
+    private MethodNode findAsmMethodNode(L1Class ownerClass, String name, String desc) {
+        for (MethodNode method : ownerClass.asmNode().methods) {
+            if (name.equals(method.name) && desc.equals(method.desc)) {
+                return method;
+            }
+        }
+        return null;
     }
 
     private void patchPreviousPatchableLong(AbstractInsnNode before, long expected) {

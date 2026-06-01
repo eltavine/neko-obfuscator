@@ -337,6 +337,7 @@ abstract class CffSharedState {
         String nodeFieldName,
         String ownerRegistryFieldName,
         String helperName,
+        String ticketHelperName,
         boolean interfaceOwner,
         int capacity,
         long rootMask,

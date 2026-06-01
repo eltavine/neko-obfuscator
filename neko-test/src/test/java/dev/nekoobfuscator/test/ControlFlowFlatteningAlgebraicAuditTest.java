@@ -80,6 +80,12 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     private static final String VALIDATION_PRIMITIVE_GUARD_STAGE_DESC = "(J)J";
     private static final String VALIDATION_PRIMITIVE_DATA_STAGE_DESC = "(J)I";
     private static final String VALIDATION_PRIMITIVE_FINAL_STAGE_DESC = "(JJ)I";
+    private static final String CLASS_INTEGRITY_HELPER_DESC =
+        "(IJJLjava/lang/Class;JJ)J";
+    private static final String CLASS_INTEGRITY_TICKET_ISSUE_HELPER_DESC =
+        "(IJJ[Ljava/lang/Object;)J";
+    private static final String CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC =
+        "(JJ[Ljava/lang/Object;)J";
 
     @Test
     void symbolicAuditRecognizesSelfCancelingAndLinearKeyShapes() {
@@ -122,6 +128,7 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         tamperMainMethodCode(outputJar, tamperedJar);
         assertTamperedJarPoisonsProtectedFlow(tamperedJar);
         assertClassIntegrityCodeRootPoisonsWithoutStandaloneVerifier(outputJar);
+        assertClassIntegrityTicketUsesDedicatedHelper(outputJar);
         assertGeneratedCffPoisonDoesNotThrow(outputJar);
         assertRuntimeTokenDecodingUsesClassKeyTables(outputJar);
         assertStepMaterialHelperUsesLiveKeyTableDispatch(outputJar);
@@ -579,6 +586,86 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
         assertTrue(sawClassIntegrityRootHelper, "class-integrity class-code root helper was not generated");
     }
 
+    private static void assertClassIntegrityTicketUsesDedicatedHelper(Path jar)
+        throws Exception {
+        JarInput input = new JarInput(jar);
+        Set<String> rootHelpers = new LinkedHashSet<>();
+        Set<String> ticketEntryHelpers = new LinkedHashSet<>();
+        Set<String> ticketStateHelpers = new LinkedHashSet<>();
+        for (var clazz : input.classes()) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                String ref = methodRef(clazz.name(), method);
+                if (method.instructions == null) continue;
+                if (CLASS_INTEGRITY_HELPER_DESC.equals(method.desc)
+                    && methodContainsClassResourceRead(method)) {
+                    rootHelpers.add(ref);
+                    continue;
+                }
+                if ((CLASS_INTEGRITY_TICKET_ISSUE_HELPER_DESC.equals(method.desc)
+                    || CLASS_INTEGRITY_TICKET_MODE_HELPER_DESC.equals(method.desc))
+                    && methodContainsTicketState(method)) {
+                    ticketStateHelpers.add(ref);
+                }
+            }
+        }
+        for (var clazz : input.classes()) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (!CLASS_INTEGRITY_HELPER_DESC.equals(method.desc)
+                    || method.instructions == null
+                    || methodContainsClassResourceRead(method)) {
+                    continue;
+                }
+                if (methodCallsAny(method, ticketStateHelpers)) {
+                    ticketEntryHelpers.add(methodRef(clazz.name(), method));
+                }
+            }
+        }
+        assertFalse(rootHelpers.isEmpty(), "class-integrity root helper was not generated");
+        assertFalse(ticketEntryHelpers.isEmpty(), "dedicated class-integrity ticket entry helper was not generated");
+        assertFalse(ticketStateHelpers.isEmpty(), "split class-integrity ticket state helpers were not generated");
+
+        boolean sawTicketCall = false;
+        boolean sawRootInitCall = false;
+        boolean sawTicketStateCall = false;
+        for (var clazz : input.classes()) {
+            for (MethodNode method : clazz.asmNode().methods) {
+                if (method.instructions == null) continue;
+                String caller = methodRef(clazz.name(), method);
+                for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+                    if (!(insn instanceof MethodInsnNode call)) continue;
+                    String callee = methodRef(call.owner, call.name, call.desc);
+                    if (ticketStateHelpers.contains(callee)) {
+                        assertTrue(
+                            ticketEntryHelpers.contains(caller),
+                            "non-entry method calls split class-integrity ticket state helper directly: " +
+                                caller + " -> " + callee
+                        );
+                        sawTicketStateCall = true;
+                    }
+                    if (!CLASS_INTEGRITY_HELPER_DESC.equals(call.desc)) continue;
+                    if (ticketEntryHelpers.contains(callee)) {
+                        sawTicketCall = true;
+                    }
+                    if (!rootHelpers.contains(callee)) {
+                        continue;
+                    }
+                    if ("<clinit>".equals(method.name)) {
+                        sawRootInitCall = true;
+                        continue;
+                    }
+                    assertTrue(
+                        ticketEntryHelpers.contains(caller),
+                        "non-ticket method calls class-integrity root helper directly: " +
+                            caller + " -> " + callee
+                    );
+                }
+            }
+        }
+        assertTrue(sawTicketCall, "ticket issue/consume callsites did not use the dedicated helper");
+        assertTrue(sawTicketStateCall, "ticket entry helper did not route through split state helpers");
+        assertTrue(sawRootInitCall, "class-root initialization did not use the root helper");
+    }
+
     private static void assertGeneratedCffPoisonDoesNotThrow(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
         for (var clazz : input.classes()) {
@@ -615,8 +702,45 @@ public class ControlFlowFlatteningAlgebraicAuditTest {
     }
 
     private static boolean isClassIntegrityCodeRootHelper(MethodNode method) {
-        if (!"(IJJLjava/lang/Class;JJ)J".equals(method.desc) || method.instructions == null) return false;
+        if (!CLASS_INTEGRITY_HELPER_DESC.equals(method.desc) || method.instructions == null) return false;
         return methodContainsClassResourceRead(method);
+    }
+
+    private static boolean methodContainsTicketState(MethodNode method) {
+        boolean sawThreadLocal = false;
+        boolean sawGlobalTicketMap = false;
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (!(insn instanceof MethodInsnNode call)) continue;
+            if ("java/lang/ThreadLocal".equals(call.owner)
+                && ("get".equals(call.name) || "set".equals(call.name))) {
+                sawThreadLocal = true;
+            }
+            if ("java/util/concurrent/ConcurrentHashMap".equals(call.owner)
+                && ("put".equals(call.name) ||
+                    "containsKey".equals(call.name) ||
+                    "remove".equals(call.name))) {
+                sawGlobalTicketMap = true;
+            }
+        }
+        return sawThreadLocal && sawGlobalTicketMap;
+    }
+
+    private static boolean methodCallsAny(MethodNode method, Set<String> callees) {
+        for (AbstractInsnNode insn = method.instructions.getFirst(); insn != null; insn = insn.getNext()) {
+            if (!(insn instanceof MethodInsnNode call)) continue;
+            if (callees.contains(methodRef(call.owner, call.name, call.desc))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String methodRef(String owner, MethodNode method) {
+        return methodRef(owner, method.name, method.desc);
+    }
+
+    private static String methodRef(String owner, String name, String desc) {
+        return owner + "." + name + desc;
     }
 
     private static boolean methodContainsClassResourceRead(MethodNode method) {
