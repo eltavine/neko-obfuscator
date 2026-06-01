@@ -720,29 +720,51 @@ public class JvmConstantObfuscationIntegrationTest {
     private void assertProtectedNumericHelperConsumesRawBase(Path jar) throws Exception {
         JarInput input = new JarInput(jar);
         L1Class clazz = input.classMap().get("ConstantShapes");
-        int checkedHelpers = 0;
+        Map<String, MethodNode> methodsByName = new LinkedHashMap<>();
+        for (MethodNode method : clazz.asmNode().methods) {
+            methodsByName.put(method.name, method);
+        }
+        int checkedWrappers = 0;
+        int checkedFinalizers = 0;
         for (MethodNode method : clazz.asmNode().methods) {
             if (!method.name.startsWith("__neko_num_ip")) continue;
             assertEquals("(IIIII)I", method.desc, "protected numeric helper descriptor drifted");
             assertTrue(method.instructions != null, "protected numeric helper had no instructions");
             AbstractInsnNode[] insns = method.instructions.toArray();
             assertTrue(
-                varLoadCount(insns, 0, 0, insns.length) >= 3,
-                "protected numeric helper did not consume raw base"
+                varLoadCount(insns, 0, 0, insns.length) >= 1,
+                "protected numeric wrapper did not consume raw base"
+            );
+            assertTrue(hasOpcode(insns, Opcodes.ISHL, 0, insns.length), "protected numeric wrapper lacked fragment high-word assembly");
+            assertTrue(
+                hasOpcode(insns, Opcodes.I2C, 0, insns.length) ||
+                    hasOpcode(insns, Opcodes.IAND, 0, insns.length),
+                "protected numeric wrapper lacked fragment low-word zero extension"
+            );
+            assertTrue(hasOpcode(insns, Opcodes.IOR, 0, insns.length), "protected numeric wrapper lacked fragment rejoin");
+            MethodInsnNode finalizerCall = protectedNumericFinalizerCall(insns);
+            assertTrue(finalizerCall != null, "protected numeric wrapper did not call finalizer");
+
+            MethodNode finalizer = methodsByName.get(finalizerCall.name);
+            assertTrue(finalizer != null && finalizer.instructions != null, "protected numeric finalizer was missing");
+            assertEquals("(III)I", finalizer.desc, "protected numeric finalizer descriptor drifted");
+            AbstractInsnNode[] finalizerInsns = finalizer.instructions.toArray();
+            assertTrue(
+                varLoadCount(finalizerInsns, 0, 0, finalizerInsns.length) >= 3,
+                "protected numeric finalizer did not consume raw base"
             );
             assertTrue(
-                hasVarStore(insns, 5, 0, insns.length),
-                "protected numeric helper did not decode seed into a local"
+                hasVarStore(finalizerInsns, 3, 0, finalizerInsns.length),
+                "protected numeric finalizer did not decode seed into a local"
             );
-            assertTrue(hasOpcode(insns, Opcodes.ISHL, 0, insns.length), "protected numeric helper lacked fragment high-word assembly");
-            assertTrue(hasOpcode(insns, Opcodes.IAND, 0, insns.length), "protected numeric helper lacked fragment low-word mask");
-            assertTrue(hasOpcode(insns, Opcodes.IOR, 0, insns.length), "protected numeric helper lacked fragment rejoin");
-            assertTrue(hasOpcode(insns, Opcodes.IMUL, 0, insns.length), "protected numeric helper lacked multiply mix");
-            assertTrue(hasOpcode(insns, Opcodes.IUSHR, 0, insns.length), "protected numeric helper lacked shift mix");
-            assertTrue(hasOpcode(insns, Opcodes.IXOR, 0, insns.length), "protected numeric helper lacked xor mix");
-            checkedHelpers++;
+            assertTrue(hasOpcode(finalizerInsns, Opcodes.IMUL, 0, finalizerInsns.length), "protected numeric finalizer lacked multiply mix");
+            assertTrue(hasOpcode(finalizerInsns, Opcodes.IUSHR, 0, finalizerInsns.length), "protected numeric finalizer lacked shift mix");
+            assertTrue(hasOpcode(finalizerInsns, Opcodes.IXOR, 0, finalizerInsns.length), "protected numeric finalizer lacked xor mix");
+            checkedWrappers++;
+            checkedFinalizers++;
         }
-        assertTrue(checkedHelpers > 0, "constant fixture did not expose protected numeric helpers");
+        assertTrue(checkedWrappers > 0, "constant fixture did not expose protected numeric wrappers");
+        assertTrue(checkedFinalizers > 0, "constant fixture did not expose protected numeric finalizers");
     }
 
     private boolean fixtureArrayPayload(int storeOpcode, long bits) {
@@ -1160,6 +1182,18 @@ public class JvmConstantObfuscationIntegrationTest {
         return insn instanceof MethodInsnNode call
             && call.name.startsWith("__neko_num_ip")
             && "(IIIII)I".equals(call.desc);
+    }
+
+    private MethodInsnNode protectedNumericFinalizerCall(AbstractInsnNode[] insns) {
+        for (AbstractInsnNode insn : insns) {
+            if (insn instanceof MethodInsnNode call
+                && call.getOpcode() == Opcodes.INVOKESTATIC
+                && call.name.startsWith("__neko_num_pf")
+                && "(III)I".equals(call.desc)) {
+                return call;
+            }
+        }
+        return null;
     }
 
     private boolean containsLargeLongLdc(

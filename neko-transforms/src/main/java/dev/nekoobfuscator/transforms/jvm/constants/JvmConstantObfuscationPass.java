@@ -46,6 +46,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
     public static final String ID = "constantObfuscation";
     private static final String NUMERIC_HELPERS = "constantObfuscation.numericHelpers";
     private static final String PROTECTED_NUMERIC_HELPERS = "constantObfuscation.protectedNumericHelpers";
+    private static final String PROTECTED_NUMERIC_FINALIZERS = "constantObfuscation.protectedNumericFinalizers";
     private static final String BASE_REFRESH_HELPERS = "constantObfuscation.baseRefreshHelpers";
     private static final String BASE_REFRESH_DESC = "(IIIIII)J";
     private static final String OUTLINED_BASE_INIT_DESC = "([IIIIIJ)V";
@@ -2579,13 +2580,40 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         String existing = helpers.get(key);
         if (existing != null) return existing;
 
+        String finalizer = ensureProtectedIntFinalizeHelper(pctx, clazz);
         String name = uniqueMethodName(clazz, "__neko_num_ip");
         int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
         access |= (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0 ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
         MethodNode helper = new MethodNode(access, name, "(IIIII)I", null, null);
-        emitProtectedHelperDecode(helper.instructions);
+        emitProtectedHelperDecode(helper.instructions, clazz, finalizer);
         helper.instructions.add(new InsnNode(Opcodes.IRETURN));
-        helper.maxLocals = 6;
+        helper.maxLocals = 5;
+        helper.maxStack = 8;
+        JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
+        clazz.asmNode().methods.add(helper);
+        clazz.markDirty();
+        helpers.put(key, name);
+        return name;
+    }
+
+    @SuppressWarnings("unchecked")
+    private String ensureProtectedIntFinalizeHelper(PipelineContext pctx, L1Class clazz) {
+        Map<String, String> helpers = pctx.getPassData(PROTECTED_NUMERIC_FINALIZERS);
+        if (helpers == null) {
+            helpers = new LinkedHashMap<>();
+            pctx.putPassData(PROTECTED_NUMERIC_FINALIZERS, helpers);
+        }
+        String key = clazz.name();
+        String existing = helpers.get(key);
+        if (existing != null) return existing;
+
+        String name = uniqueMethodName(clazz, "__neko_num_pf");
+        int access = Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC;
+        access |= (clazz.asmNode().access & Opcodes.ACC_INTERFACE) != 0 ? Opcodes.ACC_PUBLIC : Opcodes.ACC_PRIVATE;
+        MethodNode helper = new MethodNode(access, name, "(III)I", null, null);
+        emitProtectedFinalizeDecode(helper.instructions);
+        helper.instructions.add(new InsnNode(Opcodes.IRETURN));
+        helper.maxLocals = 4;
         helper.maxStack = 8;
         JvmKeyDispatchPass.markGenerated(pctx, helper.instructions);
         clazz.asmNode().methods.add(helper);
@@ -2908,20 +2936,33 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
-    private void emitProtectedHelperDecode(InsnList insns) {
-        emitHelperIntFromFragments(insns, 3, 4);
+    private void emitProtectedHelperDecode(InsnList insns, L1Class clazz, String finalizer) {
         insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
-        emitHelperCompactProtectedWordFromTop(insns);
-        insns.add(new InsnNode(Opcodes.IXOR));
-        insns.add(new VarInsnNode(Opcodes.ISTORE, 5));
         emitHelperIntFromFragments(insns, 1, 2);
+        emitHelperIntFromFragments(insns, 3, 4);
+        insns.add(new MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            clazz.name(),
+            finalizer,
+            "(III)I",
+            clazz.isInterface()
+        ));
+    }
+
+    private void emitProtectedFinalizeDecode(InsnList insns) {
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 2));
         insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
-        insns.add(new VarInsnNode(Opcodes.ILOAD, 5));
+        emitHelperCompactProtectedWordFromTop(insns);
+        insns.add(new InsnNode(Opcodes.IXOR));
+        insns.add(new VarInsnNode(Opcodes.ISTORE, 3));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 1));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
+        insns.add(new VarInsnNode(Opcodes.ILOAD, 3));
         insns.add(new InsnNode(Opcodes.IXOR));
         emitHelperCompactProtectedWordFromTop(insns);
         insns.add(new InsnNode(Opcodes.IXOR));
         insns.add(new VarInsnNode(Opcodes.ILOAD, 0));
-        emitHelperSiteMaskFromTop(insns, 5);
+        emitHelperSiteMaskFromTop(insns, 3);
         insns.add(new InsnNode(Opcodes.IXOR));
     }
 
@@ -2960,10 +3001,7 @@ public final class JvmConstantObfuscationPass implements TransformPass {
         JvmPassBytecode.pushInt(insns, 16);
         insns.add(new InsnNode(Opcodes.ISHL));
         insns.add(new VarInsnNode(Opcodes.ILOAD, lowLocal));
-        JvmPassBytecode.pushInt(insns, -1);
-        JvmPassBytecode.pushInt(insns, 16);
-        insns.add(new InsnNode(Opcodes.IUSHR));
-        insns.add(new InsnNode(Opcodes.IAND));
+        insns.add(new InsnNode(Opcodes.I2C));
         insns.add(new InsnNode(Opcodes.IOR));
     }
 

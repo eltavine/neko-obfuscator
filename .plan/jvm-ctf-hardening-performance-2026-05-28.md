@@ -5540,6 +5540,59 @@ This plan will refresh that evidence before changing CFF performance code.
   - The repair does not claim final threshold acceptance unless fresh runtime
     logs meet the requested gates; otherwise the plan records the next concrete
     generic blocker from the fresh evidence.
+- Thirteenth repair validation evidence:
+  - Implemented the protected numeric helper split in
+    `JvmConstantObfuscationPass`: each class now gets a generated
+    `__neko_num_ip(IIIII)I` wrapper that consumes the live raw base and two
+    fragmented high/low words, rejoins them with unsigned low-word semantics,
+    and delegates to a generated `__neko_num_pf(III)I` finalizer. The finalizer
+    decodes the site seed from the live raw base, decodes encrypted material
+    through the raw-base/site-seed protected word, applies the protected
+    raw-base/site-mask, and returns the decoded int.
+  - Updated `JvmConstantObfuscationIntegrationTest` to audit the helper family
+    rather than a single monolithic helper: wrappers must consume raw base,
+    rejoin fragments, and call a finalizer; finalizers must consume raw base,
+    store the decoded seed local, and retain multiply/shift/xor protected mix.
+  - Focused validation passed:
+    `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.test.JvmConstantObfuscationIntegrationTest --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test21.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test21-obf-protected-helper-split.jar` with
+    full coverage for all enabled transforms (`renamer appliedFull=96`,
+    `keyDispatch appliedFull=96`, `methodParameterObfuscation appliedFull=35
+    appliedSafe=7`, `controlFlowFlattening appliedFull=96`,
+    `validationSinkHardening appliedFull=1`, `invokeDynamic appliedFull=63`,
+    `constantObfuscation appliedFull=33`, and `stringObfuscation
+    appliedFull=16`). Direct execution exited 0 and printed
+    `=== All tests completed ===`; observed rows were Platform `125 ms`,
+    Virtual `155 ms`, Seq `445 ms`, Parallel `21 ms`, and VThreads `23 ms`.
+  - Fresh no-quick full-profile regeneration of `test-jars/test.jar`
+    succeeded and wrote
+    `build/test-jvm-full-obf-perf/test-obf-protected-helper-split.jar` with
+    full coverage for all enabled transforms (`renamer appliedFull=84`,
+    `keyDispatch appliedFull=84`, `methodParameterObfuscation appliedFull=74
+    appliedSafe=2`, `controlFlowFlattening appliedFull=85`,
+    `validationSinkHardening appliedFull=2`, `invokeDynamic appliedFull=51`,
+    `constantObfuscation appliedFull=34`, and `stringObfuscation
+    appliedFull=26`). Direct execution exited 0 and reported `Calc: 763ms`;
+    the existing ReTrace/Sec rows remain non-performance errors.
+  - Fresh `javap` inspection of `a.ta` in the `test21` artifact shows the
+    protected numeric helper ABI wrapper `a.ta::oqb` is now 20 bytes and calls
+    the protected finalizer `a.ta::nqb`; `a.ta::nqb` is 85 bytes and contains
+    the live raw-base, decoded seed local, multiply/shift/xor, and protected
+    site-mask operations. The previous 111-byte `__neko_num_ip` monolith is no
+    longer present in the generated artifact.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the same `test21`
+    artifact shows hot `a.a::y` compiling at 6335 bytes. The old
+    `a.ta::mqb (111 bytes)` rejection is removed; the new remaining blockers
+    are `a.ta::oqb (20 bytes)` rejected as `size > DesiredMethodLimit` once the
+    caller is over budget, its callee `a.ta::nqb (85 bytes)` alternating
+    between `callee is too large` and `inline (hot)`, `a.ra::ya`
+    (`__neko_cff_int`, 30 bytes) rejected as `size > DesiredMethodLimit`, and
+    remaining 54-byte compact CFF wrappers rejected after budget exhaustion.
+    Therefore JCP-7 remains open and the next repair must reduce generic CFF /
+    class-token / protected-finalizer caller budget without weakening CFF block
+    coverage, key propagation, or constant material protection.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
