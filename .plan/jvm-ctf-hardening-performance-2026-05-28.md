@@ -5337,6 +5337,80 @@ This plan will refresh that evidence before changing CFF performance code.
     method. Therefore JCP-7 remains open and the next repair must target the
     remaining generic helper-call surface or protected numeric hot path without
     weakening CFF, constant, string, or invokedynamic coverage.
+- Twelfth repair evidence before editing:
+  - Fresh `javap` inspection of
+    `build/test-jvm-full-obf-perf/test21-obf-compact-dispatch-a-pa.javap`
+    shows compact sparse group dispatch wrappers such as `a.pa.hbb` and
+    `a.pa.kbb` consist of a domain/token `lookupswitch`, one live keyed helper
+    call for the valid case, and a poison/default case that writes all compact
+    state cells 0 through 5 before returning the unchanged key. The default
+    case stores guard/path/block/pc/domain even though its only observable
+    routing output is the poison result token.
+  - Fresh `-XX:+PrintCompilation -XX:+PrintInlining` on the same artifact
+    shows those wrapper helpers are still rejected in the hot `a.a::y` method:
+    compact helpers such as `a.pa::hbb`, `a.pa::kbb`, `a.pa::nbb`,
+    `a.pa::qbb`, `a.pa::tbb`, `a.pa::wbb`, `a.pa::zbb`, `a.pa::ccb`,
+    `a.pa::fcb`, `a.qa::icb`, `a.qa::lcb`, `a.qa::ocb`, and `a.qa::scb`
+    appear as 77-byte callees rejected as `callee is too large` or
+    `size > DesiredMethodLimit`.
+  - Source inspection of `emitGroupDispatchCall` shows compact callers reload
+    guard/path/block/pc/domain/result from the `int[]` state carrier before
+    checking the sparse result token. Source inspection of
+    `prepareGroupDispatchHelper` shows the group default/poison case uses
+    `finishOutlinedDispatchReturn`, which writes the full compact state even
+    for non-dense sparse poison routing.
+  - This proves a generic helper ABI inefficiency: compact sparse dispatch
+    poison/default paths carry full state even when the caller only needs the
+    result token to branch to poison. The evidence is independent of
+    obfuscated names; the names above are only the fresh generated artifact's
+    manifestation of the generic wrapper shape.
+- Twelfth repair plan-intake scope:
+  - Add a compact sparse result-first path for group dispatch callers. For
+    compact non-dense group dispatch, load state cell 5 immediately after the
+    helper returns and branch to poison before reloading guard/path/block/pc/
+    domain when the result token represents the sparse poison/default route.
+    Single-sparse fallthrough remains supported by branching on nonzero poison
+    token; normal sparse routers branch on zero only when zero is not a valid
+    router case.
+  - Add a result-only compact sparse poison return for the group dispatch
+    helper's domain/default case. The default path will write only state cell
+    5, preserving the live returned key and leaving valid helper cases
+    unchanged. Valid cases still write the complete guard/path/block/pc/domain/
+    result state before caller reloads it.
+  - Do not apply the result-only return to dense routers, fake/poison material
+    paths, cold-miss helpers, transition material helpers, direct-island
+    wrappers, or any path where caller routing consumes masked result material
+    or full updated state before proving the result route.
+  - Preserve CFF block boundaries, island grouping, result token uniqueness,
+    dense/sparse router semantics, fake/poison coverage, live method-key
+    propagation, data/domain binding, and helper relocation coverage. Do not
+    special-case `test21.jar`, matrix methods, obfuscated helper names,
+    descriptors, benchmark rows, or timing strings.
+- Twelfth repair validation target:
+  - `env GRADLE_USER_HOME=/mnt/d/Code/Security/NekoObfuscator/build/gradle-home JAVA_TOOL_OPTIONS=-Djava.io.tmpdir=/mnt/d/Code/Security/NekoObfuscator/build/t bash ./gradlew :neko-cli:installDist :neko-transforms:compileJava :neko-test:test --tests dev.nekoobfuscator.transforms.jvm.cff.CffTransitionOutlinerPolicyTest --tests dev.nekoobfuscator.test.ControlFlowFlatteningAlgebraicAuditTest --tests dev.nekoobfuscator.test.JvmInvokeDynamicObfuscationIntegrationTest --no-daemon`
+  - Add focused generated-bytecode regression proving compact sparse group
+    dispatch helpers use a result-only state store in the default path and
+    compact callers branch on the result token before loading the rest of the
+    state. The regression must also prove dense dispatch helpers keep the full
+    masked state return.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test21.jar`, recording Platform, Virtual, Seq, Parallel, and
+    VThreads rows.
+  - Fresh no-quick full-profile regeneration and direct runtime of
+    `test-jars/test.jar`, recording `Calc`.
+  - Fresh `javap` / `-XX:+PrintCompilation -XX:+PrintInlining` inspection for
+    `test21` proving compact sparse group wrapper bytecode shrinks and
+    recording whether the repeated 77-byte wrapper rejection is removed or what
+    the next blocker is.
+- Twelfth repair completion criteria:
+  - Focused tests pass; fresh regenerated artifacts run without verifier
+    errors, VM crashes, fallback/original-bytecode behavior, transform coverage
+    weakening, or CFF block/row weakening.
+  - Result-only state writes are limited to compact sparse poison/default
+    routes whose caller has already been rewritten to branch on the result
+    token before consuming other state cells.
+  - The repair does not claim final threshold acceptance unless fresh runtime
+    logs meet the requested gates.
 
 ### [ ] JCP-8: Enforce Final Performance Thresholds
 
