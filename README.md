@@ -177,3 +177,13 @@ Documentation changes do not regenerate native artifacts. Any implementation cha
 ## License
 
 NekoObfuscator is released under the GNU General Public License v3.0. See [LICENSE](./LICENSE).
+
+## Star History
+
+<a href="https://www.star-history.com/?repos=neko-obfuscator%2Fneko-obfuscator%2Cfadouse%2Fneko-obfuscator&type=date&logscale=&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=neko-obfuscator/neko-obfuscator%2Cfadouse/neko-obfuscator&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=neko-obfuscator/neko-obfuscator%2Cfadouse/neko-obfuscator&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=neko-obfuscator/neko-obfuscator%2Cfadouse/neko-obfuscator&type=date&legend=top-left" />
+ </picture>
+</a>
